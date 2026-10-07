@@ -14,7 +14,7 @@
 
 SLPM-65692:
   name: "Biohazard Outbreak File 2 (Japan, English patch)"
-  crcs: [0x70C1FE97, 0xDC0BFB60, 0x6FCA6FBD]
+  crcs: [0x70C1FE97, 0xDC0BFB60, 0x6FCA6FBD, 0x70C0F696, 0x6FCB67BC]
   tier: stereo
   notes: "Fixed/rail cameras over real-time 3D rooms. Head-driven camera needs a lookAt op (not yet implemented)."
   screen: { distance: 2.0, height: 1.4 }
