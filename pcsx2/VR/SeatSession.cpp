@@ -2,6 +2,18 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/SeatSession.h"
+
+#ifdef _WIN32
+// Outbreak VR: extra headsets ("seats") ride on WiVRn's per-seat runtime sockets,
+// which only exist on Linux. On Windows (SteamVR) there is one session, so seats
+// are a no-op.
+namespace VR::SeatSession
+{
+	void Start(int) {}
+	void Stop() {}
+	bool Running() { return false; }
+}
+#else
 #include "VR/SeatCast.h"
 #include "VR/VRManager.h"
 
@@ -814,3 +826,5 @@ namespace VR::SeatSession
 		return s_running.load();
 	}
 }
+
+#endif // _WIN32

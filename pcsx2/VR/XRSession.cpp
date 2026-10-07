@@ -131,18 +131,22 @@ namespace VR::XRSession
 			if (old)
 				m_saved = old;
 			m_had_old = (old != nullptr);
+#ifndef _WIN32
 			setenv("XDG_RUNTIME_DIR", dir.c_str(), 1);
 			m_swapped = true;
+#endif
 			Console.WriteLn("(VR) XR seat %d: binding runtime socket %s/wivrn/comp_ipc", seat, dir.c_str());
 		}
 		~ScopedSeatRuntimeDir()
 		{
 			if (!m_swapped)
 				return;
+#ifndef _WIN32
 			if (m_had_old)
 				setenv("XDG_RUNTIME_DIR", m_saved.c_str(), 1);
 			else
 				unsetenv("XDG_RUNTIME_DIR");
+#endif
 		}
 		bool refused() const { return m_refuse; }
 

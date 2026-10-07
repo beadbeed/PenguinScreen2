@@ -1,0 +1,18 @@
+# Outbreak VR: Windows x64 build of PenguinScreen2 with VR enabled, for streaming
+# PC VR to a Steam Frame through SteamVR. Uses upstream PCSX2's (v2.7.469) Windows
+# recipe in its CMake configuration, because the VR sources live in CMakeLists.
+name: Build Windows (VR)
+
+on:
+  push:
+    branches: [windows-steamvr]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    uses: ./.github/workflows/windows_build_qt.yml
+    with:
+      jobName: "Windows x64 VR"
+      artifactPrefixName: "penguinscreen2-windows-x64-vr"
+      configuration: CMake
+      cmakeFlags: "-DENABLE_VR=ON"

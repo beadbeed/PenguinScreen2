@@ -1522,8 +1522,13 @@ source_group(Resources REGULAR_EXPRESSION ${CMAKE_CURRENT_BINARY_DIR}/*)
 # C++ exceptions on connection loss, and containing a foreign throw requires
 # landing pads in the frames it unwinds through. Everything else stays
 # -fno-exceptions.
+if(MSVC)
+	set(PCSX2_VR_EXCEPTION_FLAGS "/EHsc")
+else()
+	set(PCSX2_VR_EXCEPTION_FLAGS "-fexceptions")
+endif()
 set_source_files_properties(VR/SeatSession.cpp VR/XRSession.cpp PROPERTIES
-	COMPILE_OPTIONS "-fexceptions"
+	COMPILE_OPTIONS "${PCSX2_VR_EXCEPTION_FLAGS}"
 	SKIP_PRECOMPILE_HEADERS ON) # the PCH was built -fno-exceptions and refuses to mix
 # XRSession joins the island for its TEARDOWN paths: destroying a session whose
 # WiVRn connection already died makes the client library THROW mid-shutdown,
