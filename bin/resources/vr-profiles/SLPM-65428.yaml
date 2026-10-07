@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Outbreak VR profile (our own; not one of PenguinScreen2's CC BY-NC profiles).
+#
+# Measured on File #1 (J's Bar) with the ARMSX2 stereo testbed, 2026-10-07:
+#  - Outbreak's screen Z is exactly affine in 1/w (per-frame fit R2 = 1.000000,
+#    100% intercept agreement over 71 draws), so Z-driven depth is safe and
+#    gives every draw a correct depth, including untextured ones.
+#  - 1/w spans about 0.001 (far walls, w ~ 1000) to 0.018 (nearest props, w ~ 55).
+#    Convergence 55 puts the nearest props at the screen plane and everything
+#    else behind it.
+#  - Separation 0.012 per eye keeps distant content within an IPD-sized offset on
+#    a ~2 m wide virtual screen (no eye divergence).
+# File #2 runs the same engine; its values are carried over until measured.
+
+SLPM-65428:
+  name: "Biohazard Outbreak (Japan, English patch)"
+  crcs: [0x32088394, 0x198EFDC1, 0x03C8F393]
+  tier: stereo
+  notes: "Fixed/rail cameras over real-time 3D rooms. Head-driven camera needs a lookAt op (not yet implemented)."
+  screen: { distance: 2.0, height: 1.4 }
+  stereo:
+    separation: 0.012
+    convergence: 55.0
+    zDrivenDepth: true
