@@ -1690,7 +1690,7 @@ static std::optional<VR::ProfileDB::SpatialControlSpec> parseControlEntry(const 
 	if (!def)
 	{
 		return reject(fmt::format("device '{}' is not in the catalogue (Throttle, TwinThrottles, Wheel, Shifter, Stick, "
-								  "LightGun — exact, case-sensitive)",
+								  "LightGun, Gamepad, Zone — exact, case-sensitive)",
 			spec.device));
 	}
 	spec.kind = def->kind;
@@ -1731,7 +1731,7 @@ static std::optional<VR::ProfileDB::SpatialControlSpec> parseControlEntry(const 
 			{"travel", "grabRadius", "release", "springRate", "oneWay", "detented", "power", "engage", "steerFullLock",
 				"steerDeadband", "steerCurve", "steerSign", "outputFloor", "lockToLockDeg", "rimRadius", "gears", "reverse",
 				"neutral", "travelX", "travelY", "twist", "twistRangeDeg", "aim", "aimHand", "preset", "mode", "leverSign",
-				"grabMode", "breakAway", "grabLength", "sweep", "armLength", "upright"});
+				"grabMode", "breakAway", "grabLength", "sweep", "armLength", "upright", "radius", "hand", "grip"});
 		readOptionalFloat(serial, p, "travel", "controls travel", spec.travel);
 		readOptionalFloat(serial, p, "sweep", "controls sweep", spec.sweep_deg);
 		readOptionalFloat(serial, p, "armLength", "controls armLength", spec.arm_length);
@@ -1826,6 +1826,20 @@ static std::optional<VR::ProfileDB::SpatialControlSpec> parseControlEntry(const 
 			else
 				return reject(fmt::format("aimHand '{}' is not one of left, right", v));
 		}
+		readOptionalFloat(serial, p, "radius", "controls radius", spec.zone_radius);
+		readOptionalBool(serial, p, "grip", "controls grip", spec.zone_require_grip);
+		if (p.has_child("hand"))
+		{
+			const std::string_view v = nodeVal(p["hand"]);
+			if (StringUtil::compareNoCase(v, "either"))
+				spec.zone_hand = ZoneHand::Either;
+			else if (StringUtil::compareNoCase(v, "left"))
+				spec.zone_hand = ZoneHand::Left;
+			else if (StringUtil::compareNoCase(v, "right"))
+				spec.zone_hand = ZoneHand::Right;
+			else
+				return reject(fmt::format("hand '{}' is not one of either, left, right", v));
+		}
 		if (p.has_child("preset"))
 		{
 			const std::string_view v = nodeVal(p["preset"]);
@@ -1881,6 +1895,8 @@ static std::optional<VR::ProfileDB::SpatialControlSpec> parseControlEntry(const 
 		return reject(fmt::format("travelX {:g} / travelY {:g} must be > 0 (metres to full deflection)", spec.travel_x, spec.travel_y));
 	if (!finite_pos(spec.twist_range_deg))
 		return reject(fmt::format("twistRangeDeg {:g} must be > 0", spec.twist_range_deg));
+	if (!(std::isfinite(spec.zone_radius) && spec.zone_radius > 0.0f && spec.zone_radius <= 1.0f))
+		return reject(fmt::format("radius {:g} must be in (0, 1] metres (the zone's reach around its placement)", spec.zone_radius));
 
 	if (c.has_child("when"))
 	{

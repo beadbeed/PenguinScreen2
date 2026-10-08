@@ -633,6 +633,10 @@ namespace VR::SpatialControls
 			"Gear1", "Gear2", "Gear3", "Gear4", "Gear5", "Gear6", "GearR", "GearN", "ShiftUp", "ShiftDown",
 			"X", "Y", "Twist", "Trigger",
 			"PointerX", "PointerY", "OnScreen", "A", "B",
+			"ButtonA", "ButtonB", "ButtonX", "ButtonY", "Menu", "LeftStickClick", "RightStickClick",
+			"LeftTrigger", "RightTrigger", "LeftGrip", "RightGrip",
+			"LeftStickX", "LeftStickY", "RightStickX", "RightStickY",
+			"Pressed",
 		};
 
 		constexpr ControlDef kThrottleControls[] = {
@@ -690,6 +694,27 @@ namespace VR::SpatialControls
 			{ControlId::Grabbed, "Grabbed", ControlType::Button},
 		};
 
+		constexpr ControlDef kGamepadControls[] = {
+			{ControlId::ButtonA, "ButtonA", ControlType::Button},
+			{ControlId::ButtonB, "ButtonB", ControlType::Button},
+			{ControlId::ButtonX, "ButtonX", ControlType::Button},
+			{ControlId::ButtonY, "ButtonY", ControlType::Button},
+			{ControlId::Menu, "Menu", ControlType::Button},
+			{ControlId::LeftStickClick, "LeftStickClick", ControlType::Button},
+			{ControlId::RightStickClick, "RightStickClick", ControlType::Button},
+			{ControlId::LeftTrigger, "LeftTrigger", ControlType::UnitAxis},
+			{ControlId::RightTrigger, "RightTrigger", ControlType::UnitAxis},
+			{ControlId::LeftGrip, "LeftGrip", ControlType::UnitAxis},
+			{ControlId::RightGrip, "RightGrip", ControlType::UnitAxis},
+			{ControlId::LeftStickX, "LeftStickX", ControlType::Axis},
+			{ControlId::LeftStickY, "LeftStickY", ControlType::Axis},
+			{ControlId::RightStickX, "RightStickX", ControlType::Axis},
+			{ControlId::RightStickY, "RightStickY", ControlType::Axis},
+		};
+		constexpr ControlDef kZoneControls[] = {
+			{ControlId::Pressed, "Pressed", ControlType::Button},
+		};
+
 		constexpr DeviceDef kCatalogue[] = {
 			{DeviceKind::Throttle, "Throttle", kThrottleControls},
 			{DeviceKind::TwinThrottles, "TwinThrottles", kTwinThrottlesControls},
@@ -697,6 +722,8 @@ namespace VR::SpatialControls
 			{DeviceKind::Shifter, "Shifter", kShifterControls},
 			{DeviceKind::Stick, "Stick", kStickControls},
 			{DeviceKind::LightGun, "LightGun", kLightGunControls},
+			{DeviceKind::Gamepad, "Gamepad", kGamepadControls},
+			{DeviceKind::Zone, "Zone", kZoneControls},
 		};
 		static_assert(std::size(kCatalogue) == static_cast<size_t>(DeviceKind::Count));
 
@@ -970,6 +997,99 @@ namespace VR::SpatialControls
 		At(v, ControlId::Trigger) = (hand.valid && hand.trigger > 0.5f) ? 1.0f : 0.0f;
 		At(v, ControlId::A) = (hand.valid && hand.trigger > 0.5f) ? 0.0f : 0.0f;
 		At(v, ControlId::Grabbed) = hand.valid ? 1.0f : 0.0f;
+		return v;
+	}
+
+	ControlValues ComposeGamepad(const VRInputSnapshot& snapshot)
+	{
+		ControlValues v{};
+		if (snapshot.generation == 0 || !snapshot.actions_active)
+			return v;
+		const VRHandState& l = snapshot.hands[VRInputSnapshot::LEFT];
+		const VRHandState& r = snapshot.hands[VRInputSnapshot::RIGHT];
+		const auto button = [](bool b) { return b ? 1.0f : 0.0f; };
+		const auto axis = [](float f) { return std::clamp(Finite(f), -1.0f, 1.0f); };
+		At(v, ControlId::ButtonA) = button(r.a);
+		At(v, ControlId::ButtonB) = button(r.b);
+		At(v, ControlId::ButtonX) = button(l.x);
+		At(v, ControlId::ButtonY) = button(l.y);
+		At(v, ControlId::Menu) = button(l.menu);
+		At(v, ControlId::LeftStickClick) = button(l.thumbstick_click);
+		At(v, ControlId::RightStickClick) = button(r.thumbstick_click);
+		At(v, ControlId::LeftTrigger) = Clamp01(Finite(l.trigger));
+		At(v, ControlId::RightTrigger) = Clamp01(Finite(r.trigger));
+		At(v, ControlId::LeftGrip) = Clamp01(Finite(l.grip));
+		At(v, ControlId::RightGrip) = Clamp01(Finite(r.grip));
+		At(v, ControlId::LeftStickX) = axis(l.thumbstick_x);
+		At(v, ControlId::LeftStickY) = axis(l.thumbstick_y);
+		At(v, ControlId::RightStickX) = axis(r.thumbstick_x);
+		At(v, ControlId::RightStickY) = axis(r.thumbstick_y);
+		return v;
+	}
+
+	bool HeadAnchor(const VRInputSnapshot& snapshot, ZoneState& st, Anchor* out)
+	{
+		const VRPose& head = snapshot.head_pose;
+		if (snapshot.generation == 0 || !head.valid)
+			return false;
+		const float qx = head.orientation_xyzw[0], qy = head.orientation_xyzw[1];
+		const float qz = head.orientation_xyzw[2], qw = head.orientation_xyzw[3];
+		// The head's forward (-Z) flattened onto the floor, as XRCompositor anchors the screen.
+		const float fx = -2.0f * (qw * qy + qz * qx);
+		const float fz = -(1.0f - 2.0f * (qx * qx + qy * qy));
+		if ((fx * fx + fz * fz) > 1.0e-4f)
+		{
+			st.head_yaw = std::atan2(-fx, -fz);
+			st.have_yaw = true;
+		}
+		if (!st.have_yaw)
+			return false;
+		out->position = {head.position_xyz[0], head.position_xyz[1], head.position_xyz[2]};
+		out->yaw = st.head_yaw;
+		return true;
+	}
+
+	ZoneEvents StepZone(const Anchor& head, const ZoneParams& p, const Hands& hands, ZoneState& st)
+	{
+		ZoneEvents ev;
+		const Placement at{p.offset.side, p.offset.height, p.offset.forward, 0.0f};
+		const Vec3 centre = PlaceControl(head, at).pivot;
+		for (int h = 0; h < 2; ++h)
+		{
+			const bool allowed = p.hand == ZoneHand::Either || (p.hand == ZoneHand::Left && h == VRInputSnapshot::LEFT) ||
+								 (p.hand == ZoneHand::Right && h == VRInputSnapshot::RIGHT);
+			const HandInput& hand = hands.hand[h];
+			if (!allowed || !hand.valid)
+			{
+				st.inside[h] = false;
+				st.squeezed[h] = false;
+				st.pressing[h] = false;
+				continue;
+			}
+
+			const float dist = Length(hand.position - centre);
+			const bool inside = dist <= (st.inside[h] ? p.radius + p.exit_margin : p.radius);
+			const bool squeezed = st.squeezed[h] ? hand.squeeze > p.grip_off : hand.squeeze >= p.grip_on;
+
+			bool pressing;
+			if (p.require_grip)
+				pressing = squeezed && (st.pressing[h] || (inside && !st.squeezed[h]));
+			else
+				pressing = inside;
+
+			ev.entered[h] = inside && !st.inside[h];
+			ev.pressed[h] = pressing && !st.pressing[h];
+			st.inside[h] = inside;
+			st.squeezed[h] = squeezed;
+			st.pressing[h] = pressing;
+		}
+		return ev;
+	}
+
+	ControlValues ComposeZone(const ZoneState& st)
+	{
+		ControlValues v{};
+		At(v, ControlId::Pressed) = (st.pressing[0] || st.pressing[1]) ? 1.0f : 0.0f;
 		return v;
 	}
 }

@@ -319,6 +319,7 @@ void VRInputSource::Instance::ResetState()
 	wheel_state.Reset();
 	shifter_state.Reset();
 	stick_state.Reset();
+	zone_state.Reset();
 	at_stop = {};
 	break_away_flash_s = {};
 }
@@ -497,6 +498,12 @@ void VRInputSource::BuildInstance(Instance& in) const
 			break;
 		case SC::DeviceKind::LightGun:
 			in.gun.aim_hand = s.aim_left ? VR::VRInputSnapshot::LEFT : VR::VRInputSnapshot::RIGHT;
+			break;
+		case SC::DeviceKind::Zone:
+			in.zone.offset = in.placement;
+			in.zone.radius = s.zone_radius;
+			in.zone.hand = s.zone_hand;
+			in.zone.require_grip = s.zone_require_grip;
 			break;
 		default:
 			break;
@@ -782,6 +789,31 @@ void VRInputSource::PollEvents()
 			case SC::DeviceKind::LightGun:
 				values = SC::ComposeLightGun(in.gun, hands);
 				break;
+			case SC::DeviceKind::Gamepad:
+				values = SC::ComposeGamepad(snap);
+				break;
+			case SC::DeviceKind::Zone:
+			{
+				SC::Anchor head;
+				if (SC::HeadAnchor(snap, in.zone_state, &head))
+				{
+					const SC::ZoneEvents ev = SC::StepZone(head, in.zone, hands, in.zone_state);
+					for (int hand = 0; hand < 2; ++hand)
+					{
+						// A light tick on reaching the zone says it is armed; a firmer one when it presses.
+						if (ev.pressed[hand])
+							VR::XRInput::QueuePulse(hand, SC::kHapticGrab.amplitude, SC::kHapticGrab.seconds);
+						else if (ev.entered[hand])
+							VR::XRInput::QueuePulse(hand, SC::kHapticZoneEnter.amplitude, SC::kHapticZoneEnter.seconds);
+					}
+				}
+				else
+				{
+					in.zone_state.Reset();
+				}
+				values = SC::ComposeZone(in.zone_state);
+				break;
+			}
 			default:
 				break;
 		}

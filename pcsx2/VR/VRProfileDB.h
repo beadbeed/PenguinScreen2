@@ -322,6 +322,9 @@ namespace VR::ProfileDB
 		float twist_range_deg = 60.0f;
 		bool rifle = false;
 		bool aim_left = false;
+		float zone_radius = 0.15f;
+		SpatialControls::ZoneHand zone_hand = SpatialControls::ZoneHand::Either;
+		bool zone_require_grip = true;
 		std::string preset;
 		std::vector<CameraGuard> when;
 		struct Bind

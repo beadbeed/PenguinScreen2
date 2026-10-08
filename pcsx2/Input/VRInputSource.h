@@ -80,12 +80,14 @@ private:
 		VR::SpatialControls::ShifterParams shifter;
 		VR::SpatialControls::StickParams stick;
 		VR::SpatialControls::LightGunParams gun;
+		VR::SpatialControls::ZoneParams zone;
 
 		VR::SpatialControls::TwinThrottlesState twin_state;
 		VR::SpatialControls::ThrottleState throttle_state;
 		VR::SpatialControls::WheelState wheel_state;
 		VR::SpatialControls::ShifterState shifter_state;
 		VR::SpatialControls::StickState stick_state;
+		VR::SpatialControls::ZoneState zone_state;
 
 		VR::SpatialControls::ControlValues last{};
 		bool ever_emitted = false;

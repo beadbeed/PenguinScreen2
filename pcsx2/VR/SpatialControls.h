@@ -293,6 +293,7 @@ namespace VR::SpatialControls
 	static constexpr HapticCue kHapticRelease{0.3f, 0.02f};
 	static constexpr HapticCue kHapticRailHit{1.0f, 0.06f};
 	static constexpr HapticCue kHapticBreakAway{0.8f, 0.10f};
+	static constexpr HapticCue kHapticZoneEnter{0.25f, 0.02f};
 
 	enum class DeviceKind : u8
 	{
@@ -302,6 +303,8 @@ namespace VR::SpatialControls
 		Shifter,
 		Stick,
 		LightGun,
+		Gamepad,
+		Zone,
 		Count,
 	};
 
@@ -343,6 +346,22 @@ namespace VR::SpatialControls
 		OnScreen,
 		A,
 		B,
+		ButtonA,
+		ButtonB,
+		ButtonX,
+		ButtonY,
+		Menu,
+		LeftStickClick,
+		RightStickClick,
+		LeftTrigger,
+		RightTrigger,
+		LeftGrip,
+		RightGrip,
+		LeftStickX,
+		LeftStickY,
+		RightStickX,
+		RightStickY,
+		Pressed,
 		Count,
 	};
 	static constexpr u32 kControlCount = static_cast<u32>(ControlId::Count);
@@ -496,4 +515,55 @@ namespace VR::SpatialControls
 		int aim_hand = VRInputSnapshot::RIGHT;
 	};
 	ControlValues ComposeLightGun(const LightGunParams& p, const Hands& hands);
+
+	// Gamepad: the controllers' own buttons, triggers, grips and sticks, passed straight
+	// through so a profile can bind them onto the PS2 pad. Stick Y is +1 pushed forward.
+	ControlValues ComposeGamepad(const VRInputSnapshot& snapshot);
+
+	// Zone: a spot on the body that a hand reaches into, such as a hip holster or over the
+	// shoulder. It is placed from the head and turns with the head's yaw only, so it follows
+	// the player around but stays put when they look down at it. With require_grip the zone
+	// presses its button when the grip is squeezed inside it, and holds it until the grip
+	// opens, wherever the hand goes; a grip already closed on the way in does nothing.
+	// Without it, the zone presses while a hand is inside.
+	enum class ZoneHand : u8
+	{
+		Either,
+		Left,
+		Right,
+	};
+	struct ZoneParams
+	{
+		Placement offset; // from the head: side (+ right), height (+ up), forward (+ ahead)
+		float radius = 0.15f;
+		float exit_margin = 0.03f;
+		ZoneHand hand = ZoneHand::Either;
+		bool require_grip = true;
+		float grip_on = 0.6f;
+		float grip_off = 0.4f;
+	};
+	struct ZoneState
+	{
+		std::array<bool, 2> inside{};
+		std::array<bool, 2> squeezed{};
+		std::array<bool, 2> pressing{};
+		float head_yaw = 0.0f;
+		bool have_yaw = false;
+		void Reset()
+		{
+			inside = {};
+			squeezed = {};
+			pressing = {};
+		}
+	};
+	struct ZoneEvents
+	{
+		std::array<bool, 2> entered{};
+		std::array<bool, 2> pressed{};
+	};
+	// The head's position and yaw (Anchor) from the snapshot's head pose. Looking straight up
+	// or down has no yaw, so the last one is kept in st. False without a usable head pose.
+	bool HeadAnchor(const VRInputSnapshot& snapshot, ZoneState& st, Anchor* out);
+	ZoneEvents StepZone(const Anchor& head, const ZoneParams& p, const Hands& hands, ZoneState& st);
+	ControlValues ComposeZone(const ZoneState& st);
 }

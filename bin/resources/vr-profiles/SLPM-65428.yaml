@@ -22,3 +22,50 @@ SLPM-65428:
     separation: 0.012
     convergence: 55.0
     zDrivenDepth: true
+  # VR controllers (only when launched with --vr; flat play is untouched).
+  # A pad bound in Settings -> Controllers (e.g. a DualSense) keeps working alongside;
+  # when both touch the same button, the latest change wins.
+  #
+  # PROVISIONAL layout: positional, like holding a DualShock split in two. The JP build
+  # confirms with Circle, so A is Circle. The real per-state button functions are being
+  # mapped (docs/game-internals.md); expect this to change.
+  # Gesture zones are placed from the head (metres: side + right, height + up, forward +
+  # ahead) and turn with the head's yaw. Squeeze the grip inside one to press its button.
+  # Their targets are placeholders until the item-menu and map buttons are confirmed.
+  # To tune: copy this file into <data dir>/vrprofiles/ and edit the copy.
+  controls:
+    - device: Gamepad
+      id: controllers
+      pad: 1
+      bind:
+        ButtonA: Circle
+        ButtonB: Cross
+        ButtonX: Square
+        ButtonY: Triangle
+        Menu: Start
+        LeftGrip: L1
+        RightGrip: R1
+        LeftTrigger: L2
+        RightTrigger: R2
+        LeftStickClick: L3
+        RightStickClick: R3
+        LeftStickX: LeftStickX
+        LeftStickY: LeftStickY
+        RightStickX: RightStickX
+        RightStickY: RightStickY
+    - device: Zone
+      id: hip
+      notes: "Right hip: reach down to your right side and squeeze the grip."
+      placement: { side: 0.22, height: -0.62, forward: 0.0 }
+      params: { radius: 0.15, hand: right, grip: true }
+      pad: 1
+      bind:
+        Pressed: Triangle
+    - device: Zone
+      id: shoulder
+      notes: "Over the right shoulder: reach back past your ear and squeeze the grip."
+      placement: { side: 0.15, height: -0.10, forward: -0.15 }
+      params: { radius: 0.13, hand: right, grip: true }
+      pad: 1
+      bind:
+        Pressed: Select
