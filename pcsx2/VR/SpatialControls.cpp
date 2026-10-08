@@ -637,6 +637,7 @@ namespace VR::SpatialControls
 			"LeftTrigger", "RightTrigger", "LeftGrip", "RightGrip",
 			"LeftStickX", "LeftStickY", "RightStickX", "RightStickY",
 			"Pressed",
+			"LeftTriggerPress", "RightTriggerPress", "LeftGripPress", "RightGripPress",
 		};
 
 		constexpr ControlDef kThrottleControls[] = {
@@ -710,6 +711,10 @@ namespace VR::SpatialControls
 			{ControlId::LeftStickY, "LeftStickY", ControlType::Axis},
 			{ControlId::RightStickX, "RightStickX", ControlType::Axis},
 			{ControlId::RightStickY, "RightStickY", ControlType::Axis},
+			{ControlId::LeftTriggerPress, "LeftTriggerPress", ControlType::Button},
+			{ControlId::RightTriggerPress, "RightTriggerPress", ControlType::Button},
+			{ControlId::LeftGripPress, "LeftGripPress", ControlType::Button},
+			{ControlId::RightGripPress, "RightGripPress", ControlType::Button},
 		};
 		constexpr ControlDef kZoneControls[] = {
 			{ControlId::Pressed, "Pressed", ControlType::Button},
@@ -1024,6 +1029,11 @@ namespace VR::SpatialControls
 		At(v, ControlId::LeftStickY) = axis(l.thumbstick_y);
 		At(v, ControlId::RightStickX) = axis(r.thumbstick_x);
 		At(v, ControlId::RightStickY) = axis(r.thumbstick_y);
+		static constexpr float kPressAt = 0.5f;
+		At(v, ControlId::LeftTriggerPress) = button(At(v, ControlId::LeftTrigger) >= kPressAt);
+		At(v, ControlId::RightTriggerPress) = button(At(v, ControlId::RightTrigger) >= kPressAt);
+		At(v, ControlId::LeftGripPress) = button(At(v, ControlId::LeftGrip) >= kPressAt);
+		At(v, ControlId::RightGripPress) = button(At(v, ControlId::RightGrip) >= kPressAt);
 		return v;
 	}
 

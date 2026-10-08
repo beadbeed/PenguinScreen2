@@ -26,46 +26,48 @@ SLPM-65428:
   # A pad bound in Settings -> Controllers (e.g. a DualSense) keeps working alongside;
   # when both touch the same button, the latest change wins.
   #
-  # PROVISIONAL layout: positional, like holding a DualShock split in two. The JP build
-  # confirms with Circle, so A is Circle. The real per-state button functions are being
-  # mapped (docs/game-internals.md); expect this to change.
-  # Gesture zones are placed from the head (metres: side + right, height + up, forward +
-  # ahead) and turn with the head's yaw. Squeeze the grip inside one to press its button.
-  # Their targets are placeholders until the item-menu and map buttons are confirmed.
+  # Layout from the reverse-engineered button map (outbreak-vr docs/game-internals.md,
+  # Controller TYPE A, the default). Circle = OK/attack/fire, Cross = cancel/back
+  # (hold + forward = run), Square = ad-lib, Triangle = map, Start = item screen,
+  # R1 held = weapon ready with lock-on, L1 = reload / next target / tab.
+  # Select (pause/options) stays off the controllers on purpose: online it doesn't pause.
+  #
+  # The right grip is for gestures only, so a squeeze at the hip can't also do something
+  # else. Zones are placed from the head (metres: side + right, height + up, forward +
+  # ahead) and turn with the head's yaw. Squeeze the grip inside one to press its button;
+  # it holds until the grip opens, wherever the hand goes.
   # To tune: copy this file into <data dir>/vrprofiles/ and edit the copy.
   controls:
     - device: Gamepad
       id: controllers
       pad: 1
       bind:
+        RightTriggerPress: Circle
         ButtonA: Circle
         ButtonB: Cross
-        ButtonX: Square
-        ButtonY: Triangle
+        ButtonX: Triangle
+        ButtonY: Square
         Menu: Start
-        LeftGrip: L1
-        RightGrip: R1
-        LeftTrigger: L2
-        RightTrigger: R2
-        LeftStickClick: L3
+        LeftTriggerPress: L1
+        LeftGripPress: L2
         RightStickClick: R3
         LeftStickX: LeftStickX
         LeftStickY: LeftStickY
         RightStickX: RightStickX
         RightStickY: RightStickY
     - device: Zone
-      id: hip
-      notes: "Right hip: reach down to your right side and squeeze the grip."
+      id: holster
+      notes: "Right hip holster: squeeze the grip there to ready the weapon (R1, lock-on); keep squeezing to stay aimed."
       placement: { side: 0.22, height: -0.62, forward: 0.0 }
       params: { radius: 0.15, hand: right, grip: true }
       pad: 1
       bind:
-        Pressed: Triangle
+        Pressed: R1
     - device: Zone
-      id: shoulder
-      notes: "Over the right shoulder: reach back past your ear and squeeze the grip."
+      id: backpack
+      notes: "Over the right shoulder: reach back past your ear and squeeze the grip to open the item screen (Start)."
       placement: { side: 0.15, height: -0.10, forward: -0.15 }
       params: { radius: 0.13, hand: right, grip: true }
       pad: 1
       bind:
-        Pressed: Select
+        Pressed: Start
