@@ -120,9 +120,11 @@ jobs:
           cd bin/resources
           aria2c -Z "${{ inputs.patchesUrl }}/patches.zip"
 
-      - name: Cache Dependencies
+      # Restore and save separately: a plain actions/cache only saves when the whole job
+      # succeeds, so any later failure threw away a ~55 minute dependency build.
+      - name: Restore Dependencies
         id: cache-deps
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: deps
           key: ${{ inputs.os }} ${{ inputs.platform }} deps ${{ hashFiles('.github/workflows/scripts/windows/build-dependencies.bat', '.github/workflows/scripts/common/*.patch') }}
@@ -133,6 +135,13 @@ jobs:
           DEBUG: 0
           BUILD_FFMPEG: 1
         run: .github/workflows/scripts/windows/build-dependencies.bat
+
+      - name: Save Dependencies
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: deps
+          key: ${{ steps.cache-deps.outputs.cache-primary-key }}
 
       - name: Generate CMake
         if: inputs.configuration == 'CMake'
@@ -155,8 +164,9 @@ jobs:
           REM We can use Segoe UI Emoji so we don't need to bundle this
           del bin\resources\fonts\Twemoji*
 
+      # PenguinScreen2 builds without its unit tests unless ENABLE_TESTS is on.
       - name: Run Tests
-        if: inputs.configuration == 'CMake'
+        if: inputs.configuration == 'CMake' && contains(inputs.cmakeFlags, '-DENABLE_TESTS=ON')
         shell: cmd
         run: |
           call "%VCVARSPATH%" || exit /b
