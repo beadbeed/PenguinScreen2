@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -25,11 +26,36 @@ namespace VR
 		std::mutex s_snapshot_mutex;
 		VRInputSnapshot s_snapshot;
 
+		// A publisher that stops (a failed sync, a dead session, a stalled frame loop) must not leave
+		// the last held trigger or stick active while emulation keeps running. Normal publishing is
+		// once per presented frame, so this is far longer than any healthy gap.
+		constexpr std::uint64_t kSnapshotMaxAgeMs = 500;
+
+		std::uint64_t NowMs()
+		{
+			return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count());
+		}
+
 		void PublishSnapshot(VRInputSnapshot snapshot)
 		{
 			std::lock_guard lock{s_snapshot_mutex};
 			snapshot.generation = s_snapshot.generation + 1;
+			snapshot.published_ms = NowMs();
 			s_snapshot = snapshot;
+		}
+
+		// Neutral and inactive: every consumer releases its controls. Only when something was
+		// active, so a session that never had input doesn't appear to come alive.
+		void PublishNeutralIfActive()
+		{
+			bool was_active;
+			{
+				std::lock_guard lock{s_snapshot_mutex};
+				was_active = s_snapshot.generation != 0 && s_snapshot.actions_active;
+			}
+			if (was_active)
+				PublishSnapshot(VRInputSnapshot{});
 		}
 
 		void ResetSnapshot()
@@ -129,7 +155,16 @@ namespace VR
 	VRInputSnapshot GetInputSnapshot()
 	{
 		std::lock_guard lock{s_snapshot_mutex};
-		return s_snapshot;
+		VRInputSnapshot snap = s_snapshot;
+		if (snap.generation != 0 && snap.actions_active && NowMs() - snap.published_ms > kSnapshotMaxAgeMs)
+		{
+			// Producer went quiet: report neutral, keep the generation so "live" is unchanged.
+			const std::uint64_t generation = snap.generation;
+			snap = VRInputSnapshot{};
+			snap.generation = generation;
+			snap.published_ms = s_snapshot.published_ms;
+		}
+		return snap;
 	}
 
 	VRScreenTransform GetScreenTransform()
@@ -475,7 +510,10 @@ namespace VR
 
 		const XrSession session = XRSession::GetSession();
 		if (session == XR_NULL_HANDLE || !XRSession::IsSessionRunning())
+		{
+			PublishNeutralIfActive();
 			return false;
+		}
 
 		XrActiveActionSet active_set = {m_action_set, XR_NULL_PATH};
 		XrActionsSyncInfo sync_info = {XR_TYPE_ACTIONS_SYNC_INFO};
@@ -483,7 +521,10 @@ namespace VR
 		sync_info.activeActionSets = &active_set;
 		const XrResult sync_result = xrSyncActions(session, &sync_info);
 		if (!CheckXR(sync_result, "xrSyncActions"))
+		{
+			PublishNeutralIfActive();
 			return false;
+		}
 		const bool actions_active = sync_result == XR_SUCCESS;
 		if (m_last_actions_active != static_cast<int>(actions_active))
 		{

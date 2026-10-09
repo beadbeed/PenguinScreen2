@@ -48,6 +48,8 @@ struct VRInputSnapshot
   VRPose head_pose;
   bool actions_active = false;
   std::uint64_t generation = 0;
+  // Monotonic time (ms) of the publish; GetInputSnapshot() treats an old one as neutral.
+  std::uint64_t published_ms = 0;
 };
 
 VRInputSnapshot GetInputSnapshot();
