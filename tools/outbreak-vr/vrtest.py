@@ -407,10 +407,19 @@ def sc_pitch(r):
         r.shot("aim-low")
         # Lower the weapon: every word goes back as soon as the stance drops (6 vsyncs at 60 Hz).
         fc.set_hand(RIGHT, aim=aim, grip=pose(pos=HOLSTER), head_relative=True, squeeze=0.0)
-        check(wait_until(lambda: r.stance() != 2, 1.5, 0.005) is not None,
-              "stance still 2 1.5 s after opening the grip")
-        back = wait_until(lambda: not r.servo_words(), 1.0, 0.005)
-        check(back is not None, "servo not restored 1 s after lowering the weapon: %s" % ", ".join(r.servo_words()))
+        # Stance and servo words read in one loop, so the gap between them isn't the sampling itself.
+        dropped_at = restored_at = None
+        t1 = time.time()
+        while time.time() - t1 < 2.5 and restored_at is None:
+            now = time.time()
+            if dropped_at is None and r.stance() != 2:
+                dropped_at = now
+            if dropped_at is not None and not r.servo_words():
+                restored_at = now
+            time.sleep(0.003)
+        check(dropped_at is not None, "stance still 2 2.5 s after opening the grip")
+        check(restored_at is not None, "servo not restored after lowering the weapon: %s" % ", ".join(r.servo_words()))
+        back = restored_at - dropped_at
         check(back <= 6.0 / 60.0 + 0.05, "servo restored %.0f ms after the stance dropped, expected within 6 vsyncs" %
               (back * 1000.0))
         time.sleep(0.5)
