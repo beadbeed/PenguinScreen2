@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/VRManager.h"
+#include "VR/CameraDriver.h"
 #include "VR/StereoState.h"
 #include "VR/VRProfileDB.h"
 #include "VR/SplitState.h"
@@ -414,6 +415,8 @@ namespace VR
 		s_scene_pending_count = 0;
 	}
 
+	static constexpr int kFirstPersonScene = -2;
+
 	void ApplySceneStereo()
 	{
 		const Pcsx2Config::VROptions& cfg = EmuConfig.VR;
@@ -431,7 +434,9 @@ namespace VR
 		const std::string serial = VMManager::GetDiscSerial();
 		const ProfileDB::Profile* profile =
 			serial.empty() ? nullptr : ProfileDB::Lookup(serial, VMManager::GetDiscCRC());
-		if (!profile || !profile->stereo.has_value() || profile->stereo->scenes.empty())
+		const bool has_fp_stereo = profile && profile->stereo.has_value() &&
+		                           (profile->stereo->fp_separation.has_value() || profile->stereo->fp_convergence.has_value());
+		if (!profile || !profile->stereo.has_value() || (profile->stereo->scenes.empty() && !has_fp_stereo))
 		{
 			s_scene_published = -1;
 			s_scene_memo_valid = false;
@@ -442,8 +447,11 @@ namespace VR
 
 		const ProfileDB::StereoParams& base = profile->stereo.value();
 
+		// -2 = first person (camera.lookAt driving the camera), which wins over the scene rules.
 		int match = -1;
-		for (size_t i = 0; i < base.scenes.size(); i++)
+		if (has_fp_stereo && CameraDriver::LookAtActive())
+			match = kFirstPersonScene;
+		for (size_t i = 0; match == -1 && i < base.scenes.size(); i++)
 		{
 			const ProfileDB::StereoSceneRule& rule = base.scenes[i];
 			u32 value = 0;
@@ -497,6 +505,11 @@ namespace VR
 			if (rule.map_override.has_value())
 				CopyResolvedMap(stereo, *rule.map_override);
 		}
+		else if (match == kFirstPersonScene)
+		{
+			stereo.separation = base.fp_separation.value_or(stereo.separation);
+			stereo.convergence = base.fp_convergence.value_or(stereo.convergence);
+		}
 
 		MTGS::RunOnGSThread([stereo]() { StereoState::Publish(stereo); });
 
@@ -513,6 +526,11 @@ namespace VR
 						  scene_map ? "scene map" : "base map");
 			Host::AddKeyedOSDMessage("VRStereoScene",
 				fmt::format("Stereo scene: {} ({})", label.empty() ? "override" : label, body), 3.0f);
+		}
+		else if (match == kFirstPersonScene)
+		{
+			Host::AddKeyedOSDMessage("VRStereoScene",
+				fmt::format("Stereo: first person (sep {:.4f}, conv {:.4g})", stereo.separation, stereo.convergence), 3.0f);
 		}
 		else if (s_scene_memo_valid)
 		{

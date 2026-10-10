@@ -114,6 +114,11 @@ namespace VR::ProfileDB
 
 		std::vector<StereoSceneRule> scenes;
 
+		// stereo.firstPerson: used instead of the base/scene values while camera.lookAt drives the camera
+		// (the head-locked first-person screen needs different separation/convergence than the world one).
+		std::optional<float> fp_separation;
+		std::optional<float> fp_convergence;
+
 		std::optional<HudCollimate> hud_collimate;
 
 		StereoMap map = StereoMap::Linear;

@@ -25,6 +25,10 @@ SLPM-65428:
     separation: 0.012
     convergence: 55.0
     zDrivenDepth: true
+    # Head-locked first-person screen (1.5 m away, 3.36 m wide): about orthostereo, so the screen plane
+    # sits at 1.5 m (convergence = 150 game units at 100 units/m) and far content gets an IPD of
+    # separation (0.063 m / 3.36 m). A starting point to tune in the headset.
+    firstPerson: { separation: 0.0188, convergence: 150 }
   # First-person camera (only with --vr and the VR 'Head-Tracked Camera' setting, on by default).
   # Outbreak builds its view from an eye and a target vector. During normal room play (GAME overlay
   # resident, scenario in game, room camera in normal mode) the room camera's three cut handlers and the
@@ -57,6 +61,8 @@ SLPM-65428:
       eyeHeight: 155
       eyeForward: 30      # in front of the face; at 10 the eye sits inside the head model (PS2 draws back faces)
       distance: 100
+      roll: 0x30638C         # camera roll (s32 holding a 16-bit angle): written level (rollSign 0) so a cut's
+      rollSign: 0          # roll can't stay latched; the first-person screen itself stays roll-level
       unitsPerMeter: 100
       # Outbreak's yaw grows counter-clockwise like the headset's (checked: with the camera held at yaw W,
       # stick left walks toward W+90, right toward W-90), so yawSign stays 1.

@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -792,49 +793,77 @@ namespace VR::CameraDriver
 
 		bool s_silence_applied = false;
 		u32 s_silence_crc = 0;
+		std::vector<u8> s_silence_patched; // per entry: the word holds value_on because of us
+		bool s_silence_repair = false;     // one-shot after a savestate load: undo patches saved in the state
 
 		// Silence patches often sit in code the game reloads from disc (overlays), so they are checked
 		// every armed vsync rather than written once: a word still holding the game's original value
 		// is patched again, and a word holding neither value (other code is resident) is left alone.
-		// An entry with a `when` guard is only touched while that guard passes, both ways.
+		// An entry with a `when` guard is only touched while that guard passes. Only words we patched
+		// are ever restored, except for a one-shot repair of guarded entries after a savestate load.
 		void ApplySilence(const ProfileDB::CameraProfile& cam, u32 crc)
 		{
+			if (s_silence_crc != crc || s_silence_patched.size() != cam.silence.size())
+				s_silence_patched.assign(cam.silence.size(), 0);
 			size_t patched = 0;
-			for (const ProfileDB::CameraSilence& sil : cam.silence)
+			for (size_t i = 0; i < cam.silence.size(); i++)
 			{
+				const ProfileDB::CameraSilence& sil = cam.silence[i];
 				if (!sil.when.empty() && !GuardListPass(sil.when))
+				{
+					s_silence_patched[i] = 0; // the code holding it is gone; a reload brings the original back
 					continue;
-				if (sil.value_on != sil.value_off && static_cast<u32>(memRead32(sil.ee_address)) == sil.value_off)
+				}
+				if (sil.value_on == sil.value_off)
+					continue;
+				const u32 cur = static_cast<u32>(memRead32(sil.ee_address));
+				if (cur == sil.value_off)
 				{
 					memWrite32(sil.ee_address, sil.value_on);
+					s_silence_patched[i] = 1;
 					patched++;
 				}
+				else if (cur == sil.value_on)
+					s_silence_patched[i] = 1;
 			}
 			if (patched > 0)
 				DevCon.WriteLn("(VR) CameraDriver: game camera writer silenced (%zu patch(es)).", patched);
 			s_silence_applied = true;
 			s_silence_crc = crc;
+			s_silence_repair = false;
 		}
 
 		void RestoreSilence(const ProfileDB::CameraProfile& cam, u32 crc)
 		{
-			const bool ours = s_silence_applied && s_silence_crc == crc;
+			if (s_silence_crc != crc || s_silence_patched.size() != cam.silence.size())
+				s_silence_patched.assign(cam.silence.size(), 0);
 			size_t restored = 0;
-			for (const ProfileDB::CameraSilence& sil : cam.silence)
+			bool repair_pending = false;
+			for (size_t i = 0; i < cam.silence.size(); i++)
 			{
-				// Unguarded entries are only restored after we patched them this session; guarded ones
-				// also undo a patch that came back in a savestate.
-				if (sil.when.empty() ? !ours : !GuardListPass(sil.when))
+				const ProfileDB::CameraSilence& sil = cam.silence[i];
+				const bool repair = s_silence_repair && !sil.when.empty();
+				if (!s_silence_patched[i] && !repair)
 					continue;
+				if (!sil.when.empty() && !GuardListPass(sil.when))
+				{
+					if (repair)
+						repair_pending = true; // check again once its code is resident
+					s_silence_patched[i] = 0;
+					continue;
+				}
 				if (sil.value_on != sil.value_off && static_cast<u32>(memRead32(sil.ee_address)) == sil.value_on)
 				{
 					memWrite32(sil.ee_address, sil.value_off);
 					restored++;
 				}
+				s_silence_patched[i] = 0;
 			}
 			if (restored > 0)
 				DevCon.WriteLn("(VR) CameraDriver: game camera writer restored (%zu patch(es)).", restored);
 			s_silence_applied = false;
+			s_silence_crc = crc;
+			s_silence_repair = repair_pending;
 		}
 
 		bool s_hooks_installed = false;
@@ -935,6 +964,8 @@ namespace VR::CameraDriver
 		float s_ref_x = 0.0f, s_ref_y = 0.0f, s_ref_z = 0.0f, s_ref_w = 1.0f;
 		// Head position and yaw at the last recenter, for camera.lookAt head translation.
 		float s_ref_px = 0.0f, s_ref_py = 0.0f, s_ref_pz = 0.0f, s_ref_yaw = 0.0f;
+		bool s_ref_pos_valid = false;
+		float s_last_dx = 0.0f, s_last_dy = 0.0f, s_last_dz = 0.0f; // held while position tracking is lost
 
 		// camera.lookAt yaw anchor (game yaw, radians); retaken from the heading on arm and recenter.
 		bool s_yaw_anchor_valid = false;
@@ -1042,11 +1073,15 @@ namespace VR::CameraDriver
 			const float sp = std::sin(pitch), cp = std::cos(pitch);
 
 			float eye[3] = {p[0] + la.eye_forward * sy, p[1] + la.eye_height, p[2] + la.eye_forward * cy};
-			if (la.units_per_meter != 0.0f)
+			if (la.units_per_meter != 0.0f && s_ref_pos_valid)
 			{
-				const float dx = pose.position_x - s_ref_px;
-				const float dy = pose.position_y - s_ref_py;
-				const float dz = pose.position_z - s_ref_pz;
+				if (pose.position_valid)
+				{
+					s_last_dx = pose.position_x - s_ref_px;
+					s_last_dy = pose.position_y - s_ref_py;
+					s_last_dz = pose.position_z - s_ref_pz;
+				}
+				const float dx = s_last_dx, dy = s_last_dy, dz = s_last_dz;
 				// OpenXR: right +X, up +Y, forward -Z, rotated by the recenter yaw.
 				const float rs = std::sin(s_ref_yaw), rc = std::cos(s_ref_yaw);
 				const float fwd = -dx * rs - dz * rc;
@@ -1094,6 +1129,12 @@ namespace VR::CameraDriver
 			}
 			const float target[3] = {eye[0] + la.distance * sy * cp, eye[1] + la.distance * sp,
 				eye[2] + la.distance * cy * cp};
+			for (int i = 0; i < 3; i++)
+			{
+				if (!std::isfinite(eye[i]) || !std::isfinite(target[i]) || std::abs(eye[i]) > 1e7f ||
+					std::abs(target[i]) > 1e7f)
+					return false;
+			}
 
 			for (u32 i = 0; i < 3; i++)
 			{
@@ -1109,6 +1150,32 @@ namespace VR::CameraDriver
 		}
 
 		std::atomic_bool s_lookat_active{false};
+		std::atomic<u64> s_lookat_stamp_ms{0};
+		bool s_fov_saved = false;
+		u32 s_fov_saved_raw = 0;
+
+		u64 NowMs()
+		{
+			return static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count());
+		}
+
+		void SetLookAtActive(bool active)
+		{
+			if (active)
+				s_lookat_stamp_ms.store(NowMs(), std::memory_order_release);
+			s_lookat_active.store(active, std::memory_order_release);
+		}
+
+		void RestoreFov(const ProfileDB::CameraProfile& cam)
+		{
+			if (!s_fov_saved)
+				return;
+			s_fov_saved = false;
+			if (cam.fov.has_value() && cam.fov->encoding == ProfileDB::CameraEncoding::F32 &&
+				static_cast<u32>(memRead32(cam.fov->ee_address)) == std::bit_cast<u32>(cam.fov->scale))
+				memWrite32(cam.fov->ee_address, s_fov_saved_raw);
+		}
 
 		std::optional<HeadPose::Snapshot> MaybeFakePose()
 		{
@@ -1190,7 +1257,8 @@ namespace VR::CameraDriver
 		const bool vm_live = (vm_state == VMState::Running || vm_state == VMState::Paused);
 		if (!vm_live)
 		{
-			s_lookat_active.store(false, std::memory_order_release);
+			SetLookAtActive(false);
+			s_fov_saved = false;
 			s_armed_logged = false;
 			s_silence_applied = false;
 			s_hooks_installed = false;
@@ -1206,7 +1274,8 @@ namespace VR::CameraDriver
 		const ProfileDB::Profile* profile = ProfileDB::Lookup(VMManager::GetDiscSerial(), crc);
 		if (!profile || !profile->camera.has_value())
 		{
-			s_lookat_active.store(false, std::memory_order_release);
+			SetLookAtActive(false);
+			s_fov_saved = false;
 			s_armed_logged = false;
 			s_silence_applied = false;
 			s_hooks_installed = false;
@@ -1257,7 +1326,8 @@ namespace VR::CameraDriver
 
 		if (!armed)
 		{
-			s_lookat_active.store(false, std::memory_order_release);
+			SetLookAtActive(false);
+			RestoreFov(cam);
 			RestoreSilence(cam, crc);
 			RestoreCodeHooks(cam, crc);
 			if (vm_state == VMState::Running)
@@ -1317,9 +1387,14 @@ namespace VR::CameraDriver
 			s_ref_y = pose.orientation_y;
 			s_ref_z = pose.orientation_z;
 			s_ref_w = pose.orientation_w;
-			s_ref_px = pose.position_x;
-			s_ref_py = pose.position_y;
-			s_ref_pz = pose.position_z;
+			if (pose.position_valid)
+			{
+				s_ref_px = pose.position_x;
+				s_ref_py = pose.position_y;
+				s_ref_pz = pose.position_z;
+				s_ref_pos_valid = true;
+			}
+			s_last_dx = s_last_dy = s_last_dz = 0.0f;
 			s_ref_yaw = QuaternionToEulerYXZ(s_ref_x, s_ref_y, s_ref_z, s_ref_w).yaw;
 			s_yaw_anchor_valid = false;
 			s_has_reference = true;
@@ -1421,13 +1496,34 @@ namespace VR::CameraDriver
 			ApplyMatrixOp(op, i, address, taddress, euler);
 		}
 
-		s_lookat_active.store(cam.look_at.has_value() && ApplyLookAt(cam.look_at.value(), base, euler, pose),
-			std::memory_order_release);
+		// During the disarm grace (guards failing, still armed) nothing is written and the active flag
+		// keeps its value: the game cannot move the camera while its writers are silenced anyway.
+		const bool guards_now = (s_guard_fail_vsyncs == 0);
+		if (!cam.look_at.has_value())
+			SetLookAtActive(false);
+		else if (guards_now)
+		{
+			// lookAt recenters yaw only, so pitch and roll stay level with gravity whatever the head was
+			// doing at the recenter.
+			const EulerAngles head = QuaternionToEulerYXZ(pose.orientation_x, pose.orientation_y,
+				pose.orientation_z, pose.orientation_w);
+			const EulerAngles look{WrapPi(head.yaw - s_ref_yaw), head.pitch, head.roll};
+			SetLookAtActive(ApplyLookAt(cam.look_at.value(), base, look, pose));
+		}
+		else if (s_lookat_active.load(std::memory_order_relaxed))
+			SetLookAtActive(true);
 
 		WriteCodeHookScratch(cam, euler, pose);
 
-		if (cam.fov.has_value())
+		if (cam.fov.has_value() && guards_now)
+		{
+			if (!s_fov_saved)
+			{
+				s_fov_saved_raw = static_cast<u32>(memRead32(cam.fov->ee_address));
+				s_fov_saved = true;
+			}
 			EncodeAndWrite(cam.fov->ee_address, cam.fov->scale, cam.fov->encoding);
+		}
 
 		if (cam.pad_look.has_value())
 		{
@@ -1444,11 +1540,15 @@ namespace VR::CameraDriver
 	void OnStateLoaded()
 	{
 		ResetDeltaState();
+		s_silence_repair = true;
+		s_fov_saved = false;
 	}
 
 	bool LookAtActive()
 	{
-		return s_lookat_active.load(std::memory_order_acquire);
+		// Lapses on its own when Apply stops running (pause, stall), so the screen goes world-locked.
+		return s_lookat_active.load(std::memory_order_acquire) &&
+		       NowMs() - s_lookat_stamp_ms.load(std::memory_order_acquire) < 150;
 	}
 
 	void RequestRecenter()

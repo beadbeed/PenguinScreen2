@@ -18,6 +18,9 @@ namespace VR::HeadPose
 		float position_y = 0.0f;
 		float position_z = 0.0f;
 
+		// Orientation can be tracked while position is not (then position_* is 0).
+		bool position_valid = false;
+
 		bool valid = false;
 
 		u64 frame = 0;

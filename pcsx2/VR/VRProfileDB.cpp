@@ -2200,6 +2200,28 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 		if (snode.has_child("zDrivenDepth"))
 			sp.z_driven_depth = StringUtil::compareNoCase(nodeVal(snode["zDrivenDepth"]), "true");
 
+		if (snode.has_child("firstPerson") && snode["firstPerson"].is_map())
+		{
+			const ryml::ConstNodeRef fp = snode["firstPerson"];
+			warnUnknownKeys(serial, fp, "stereo.firstPerson", {"separation", "convergence"});
+			if (fp.has_child("separation"))
+			{
+				const std::optional<float> v = StringUtil::FromChars<float>(nodeVal(fp["separation"]));
+				if (v.has_value() && std::isfinite(v.value()) && v.value() >= 0.0f)
+					sp.fp_separation = v.value();
+				else
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' has an invalid stereo.firstPerson separation; ignoring it.", serial);
+			}
+			if (fp.has_child("convergence"))
+			{
+				const std::optional<float> v = StringUtil::FromChars<float>(nodeVal(fp["convergence"]));
+				if (v.has_value() && std::isfinite(v.value()) && v.value() >= 0.0f)
+					sp.fp_convergence = v.value();
+				else
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' has an invalid stereo.firstPerson convergence; ignoring it.", serial);
+			}
+		}
+
 		if (snode.has_child("hudCollimate") && snode["hudCollimate"].is_map())
 			sp.hud_collimate = parseHudCollimate(serial, snode["hudCollimate"], kMaxCollimateRules);
 		else if (snode.has_child("hudCollimate"))
