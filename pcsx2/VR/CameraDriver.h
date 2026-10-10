@@ -48,7 +48,9 @@ namespace VR::CameraDriver
 	// when it is shown. False (yaw untouched) when the fake head is off. Any thread.
 	bool FakeHeadYawAt(u64 time_ms, float* yaw);
 
-	void RequestRecenter();
+	// Any thread. The recenter happens on the next armed vsync, which then shows a "Recentered" toast
+	// unless toast is false (for a caller that announces it itself, like the runtime-recenter follow).
+	void RequestRecenter(bool toast = true);
 
 	// CPU thread, after Apply: true while first person is armed (guards holding, head pose valid) and this
 	// vsync resolved camera.base; *base (may be null) is that record, the local character's in Outbreak.

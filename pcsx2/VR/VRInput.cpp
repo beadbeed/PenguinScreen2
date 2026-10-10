@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/VRInput.h"
+#include "VR/HudCards.h"
 #include "VR/XRSession.h"
 
 #include "common/Console.h"
@@ -66,6 +67,10 @@ namespace VR
 		}
 
 		VRInput* s_publisher = nullptr;
+
+		// The controllers have been live at least once this session: only then is a return worth a toast
+		// (a session often starts unfocused until the runtime's dashboard closes).
+		bool s_actions_were_live = false;
 
 		std::atomic<int> s_haptic_request[2] = {-1, -1};
 		int s_haptic_applied[2] = {0, 0};
@@ -560,6 +565,7 @@ namespace VR
 		m_attached = true;
 		m_locate_warned = false;
 		m_last_actions_active = -1;
+		s_actions_were_live = false;
 		s_publisher = this;
 		ResetSnapshot();
 		Console.WriteLn("(VR) Controller action set attached (spatial controls can read the hands).");
@@ -716,6 +722,14 @@ namespace VR
 		const bool actions_active = sync_result == XR_SUCCESS;
 		if (m_last_actions_active != static_cast<int>(actions_active))
 		{
+			// The runtime took or gave back input focus (dashboard, headset off and on): say why the hands
+			// stopped or came back. Not for the first sync of a session.
+			if (m_last_actions_active == 1 && !actions_active)
+				HudCards::Toast("Controllers paused");
+			else if (m_last_actions_active == 0 && actions_active && s_actions_were_live)
+				HudCards::Toast("Controllers back");
+			if (actions_active)
+				s_actions_were_live = true;
 			m_last_actions_active = static_cast<int>(actions_active);
 			Console.WriteLn("(VR) Controller actions %s (session %sfocused).",
 				actions_active ? "active" : "inactive", actions_active ? "" : "not ");

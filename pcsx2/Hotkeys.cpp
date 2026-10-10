@@ -11,6 +11,7 @@
 #include "Recording/InputRecording.h"
 #ifdef ENABLE_VR
 #include "VR/CameraDriver.h"
+#include "VR/HudCards.h"
 #include "VR/XRCompositor.h"
 #endif
 #include "SPU2/spu2.h"
@@ -107,6 +108,8 @@ static void HotkeyAdjustVRBrightness(const float delta)
 	Host::CommitBaseSettingChanges();
 	Host::AddKeyedOSDMessage("VRBrightness",
 		fmt::format(TRANSLATE_FS("Hotkeys", "VR brightness: {:.2f}"), value), Host::OSD_QUICK_DURATION);
+	// The OSD isn't in the headset; the toast is (shown only while a VR session runs).
+	VR::HudCards::Toast(fmt::format("Brightness {:.2f}", value));
 }
 #endif
 

@@ -34,6 +34,12 @@ SLPM-65692:
   # differs from File #1's; not yet checked live) pulses both hands, harder the bigger the hit, and below
   # a quarter of max HP (a placeholder) the left hand feels a heartbeat. No shot counter found yet.
   feedback: { padRumble: true, hurt: { offset: 0x540, max: 0x542, width: 2 }, danger: { below: 0.20 } }
+  # Wrist card (VR only, first person): turn the left wrist to the face to read the character's condition
+  # (FINE / CAUTION below 60% of max HP / DANGER below 20% / BLEED), an HP bar and the virus gauge. Reads
+  # only. Local record offsets: HP u16 +0x540 of max +0x542; virus counter u32 +0xBC4 over the u32 maximum
+  # for the u8 character id at +0xBB0 in the table at 0x728500 (GAME overlay data, read only while first
+  # person is armed); bleeding while u16 +0xC6A is non-zero.
+  hud: { wrist: { hp: { offset: 0x540, max: 0x542, width: 2 }, virus: { offset: 0xBC4, maxTable: 0x728500, charOffset: 0xBB0 }, bleed: { offset: 0xC6A, width: 2 } } }
   stereo:
     separation: 0.012
     convergence: 55.0

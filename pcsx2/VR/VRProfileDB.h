@@ -535,6 +535,34 @@ namespace VR::ProfileDB
 		float danger_below = 0.25f;
 	};
 
+	// hud.wrist: a card on the back of the left wrist while first person is active (VR only), with the
+	// character's condition, an HP bar and the virus gauge. Reads only. Offsets are into the record
+	// camera.base resolves to (the local character's in Outbreak), so it needs camera.base.
+	struct HudWristParams
+	{
+		// HP and max HP, unsigned, hp_width bytes.
+		bool has_hp = false;
+		u32 hp_offset = 0;
+		u32 hp_max_offset = 0;
+		u8 hp_width = 2;
+		// Virus: a u32 counter in the record over a u32 per-character maximum, from a table at an absolute
+		// address indexed by the u8 character id in the record.
+		bool has_virus = false;
+		u32 virus_offset = 0;
+		u32 virus_max_table = 0;
+		u32 virus_char_offset = 0;
+		// Bleeding while the value here is non-zero, bleed_width bytes.
+		bool has_bleed = false;
+		u32 bleed_offset = 0;
+		u8 bleed_width = 2;
+	};
+
+	// hud: in-headset cards drawn by the compositor.
+	struct HudParams
+	{
+		std::optional<HudWristParams> wrist;
+	};
+
 	struct Profile
 	{
 		std::string serial;
@@ -554,6 +582,7 @@ namespace VR::ProfileDB
 		std::optional<float> fp_screen_pose_lag_ms;
 		std::optional<PresentationParams> presentation;
 		std::optional<FeedbackParams> feedback;
+		std::optional<HudParams> hud;
 		std::optional<CameraProfile> camera;
 		std::optional<SplitParams> split;
 		std::vector<SpatialControlSpec> controls;

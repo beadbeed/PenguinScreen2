@@ -1930,6 +1930,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(StereoConvergence);
 	SettingsWrapEntry(HeadCamera);
 	SettingsWrapEntry(SnapTurn);
+	SettingsWrapEntry(ComfortBlink);
 	SettingsWrapEntry(OnlineSafe);
 	SettingsWrapEntry(Brightness);
 	SettingsWrapEntry(GameRumble);
@@ -1952,8 +1953,9 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 
 bool Pcsx2Config::VROptions::operator==(const VROptions& right) const
 {
-	// SnapTurn, OnlineSafe, Brightness, GameRumble and HapticStrength are read from EmuConfig every vsync;
-	// leaving them out keeps a settings tweak from rebuilding (and so re-announcing) every VR control.
+	// SnapTurn, ComfortBlink, OnlineSafe, Brightness, GameRumble and HapticStrength are read from EmuConfig
+	// every vsync; leaving them out keeps a settings tweak from rebuilding (and so re-announcing) every VR
+	// control.
 	return OpEqu(Enable) && OpEqu(ScreenDistance) && OpEqu(ScreenHeight) &&
 	       OpEqu(ScreenVerticalOffset) &&
 	       OpEqu(ScreenArcDeg) && OpEqu(StereoMode) && OpEqu(StereoUseProfile) &&

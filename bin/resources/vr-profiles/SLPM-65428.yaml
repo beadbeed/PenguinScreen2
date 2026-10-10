@@ -36,6 +36,12 @@ SLPM-65428:
   # game's own Danger line is measured) the left hand feels a heartbeat. No shot kick until the shot
   # counter is confirmed.
   feedback: { padRumble: true, hurt: { offset: 0x544, max: 0x546, width: 2 }, danger: { below: 0.20 } }
+  # Wrist card (VR only, first person): turn the left wrist to the face to read the character's condition
+  # (FINE / CAUTION below 60% of max HP / DANGER below 20% / BLEED), an HP bar and the virus gauge. Reads
+  # only. Local record offsets: HP u16 +0x544 of max +0x546; virus counter u32 +0xBAC over the u32 maximum
+  # for the u8 character id at +0xB98 in the table at 0x6E6C70 (GAME overlay data, read only while first
+  # person is armed); bleeding while u16 +0xC5A is non-zero.
+  hud: { wrist: { hp: { offset: 0x544, max: 0x546, width: 2 }, virus: { offset: 0xBAC, maxTable: 0x6E6C70, charOffset: 0xB98 }, bleed: { offset: 0xC5A, width: 2 } } }
   stereo:
     separation: 0.012
     convergence: 55.0

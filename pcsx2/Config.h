@@ -1301,6 +1301,9 @@ struct Pcsx2Config
 		bool HeadCamera = true;
 		// First person: turn the view in steps on the turn stick instead of smoothly.
 		bool SnapTurn = false;
+		// A short fade to black and back over the whole headset view on each snap turn and each change
+		// between the first-person and the world screen, hiding the jump. Only what this player sees.
+		bool ComfortBlink = true;
 		// First person changes only what this player sees (camera, screen, own body), never gameplay
 		// that others see (walking while aiming moves the character). Also on whenever the network
 		// adapter is enabled, so it holds for online play without having to remember it.

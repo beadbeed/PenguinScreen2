@@ -2491,6 +2491,126 @@ static VR::ProfileDB::FeedbackParams parseFeedback(const std::string_view serial
 	return fp;
 }
 
+// hud: in-headset cards. Reads only, like feedback: a bad entry drops that part with a warning and the
+// rest still loads.
+static VR::ProfileDB::HudParams parseHud(const std::string_view serial, const ryml::ConstNodeRef& hnode)
+{
+	VR::ProfileDB::HudParams hp;
+	warnUnknownKeys(serial, hnode, "hud", {"wrist"});
+	if (!hnode.has_child("wrist"))
+		return hp;
+	const ryml::ConstNodeRef wn = hnode["wrist"];
+	if (!wn.is_map())
+	{
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' hud.wrist is not a map; ignoring it.", serial);
+		return hp;
+	}
+	warnUnknownKeys(serial, wn, "hud.wrist", {"hp", "virus", "bleed"});
+
+	const auto read_width = [serial](const ryml::ConstNodeRef& n, const char* what, u8& dst) {
+		if (!n.has_child("width"))
+			return true;
+		const std::optional<u32> w = StringUtil::FromChars<u32>(nodeVal(n["width"]));
+		if (!w.has_value() || (w.value() != 1 && w.value() != 2 && w.value() != 4))
+		{
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' has an invalid {} (1, 2 or 4); ignoring that part.", serial, what);
+			return false;
+		}
+		dst = static_cast<u8>(w.value());
+		return true;
+	};
+	// Offsets into the record camera.base resolves to; a record is a few KB, so 1 MB catches typos.
+	const auto record_offset = [](const ryml::ConstNodeRef& n, const char* key) -> std::optional<u32> {
+		if (!n.has_child(key))
+			return std::nullopt;
+		const std::optional<s64> v = parseSignedOffset(nodeVal(n[key]));
+		if (!v.has_value() || v.value() < 0 || v.value() >= 0x100000)
+			return std::nullopt;
+		return static_cast<u32>(v.value());
+	};
+
+	VR::ProfileDB::HudWristParams wp;
+	if (wn.has_child("hp"))
+	{
+		const ryml::ConstNodeRef h = wn["hp"];
+		if (!h.is_map())
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' hud.wrist.hp is not a map; ignoring it.", serial);
+		else
+		{
+			warnUnknownKeys(serial, h, "hud.wrist.hp", {"offset", "max", "width"});
+			const std::optional<u32> off = record_offset(h, "offset");
+			const std::optional<u32> max = record_offset(h, "max");
+			u8 width = 2;
+			if (read_width(h, "hud.wrist.hp.width", width))
+			{
+				if (!off.has_value() || !max.has_value())
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' hud.wrist.hp needs offset and max (camera.base offsets, 0x0-0xFFFFF); ignoring it.", serial);
+				else
+				{
+					wp.has_hp = true;
+					wp.hp_offset = off.value();
+					wp.hp_max_offset = max.value();
+					wp.hp_width = width;
+				}
+			}
+		}
+	}
+
+	if (wn.has_child("virus"))
+	{
+		const ryml::ConstNodeRef v = wn["virus"];
+		if (!v.is_map())
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' hud.wrist.virus is not a map; ignoring it.", serial);
+		else
+		{
+			warnUnknownKeys(serial, v, "hud.wrist.virus", {"offset", "maxTable", "charOffset"});
+			const std::optional<u32> off = record_offset(v, "offset");
+			const std::optional<u32> chr = record_offset(v, "charOffset");
+			const std::optional<u32> table = v.has_child("maxTable") ? parseAddress(nodeVal(v["maxTable"])) : std::nullopt;
+			if (!off.has_value() || !chr.has_value() || !table.has_value() || !inMainRam(table.value(), 4))
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' hud.wrist.virus needs offset and charOffset (camera.base offsets) "
+								   "and maxTable (an address in main RAM); ignoring it.", serial);
+			else
+			{
+				wp.has_virus = true;
+				wp.virus_offset = off.value();
+				wp.virus_char_offset = chr.value();
+				wp.virus_max_table = table.value();
+			}
+		}
+	}
+
+	if (wn.has_child("bleed"))
+	{
+		const ryml::ConstNodeRef b = wn["bleed"];
+		if (!b.is_map())
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' hud.wrist.bleed is not a map; ignoring it.", serial);
+		else
+		{
+			warnUnknownKeys(serial, b, "hud.wrist.bleed", {"offset", "width"});
+			const std::optional<u32> off = record_offset(b, "offset");
+			u8 width = 2;
+			if (read_width(b, "hud.wrist.bleed.width", width))
+			{
+				if (!off.has_value())
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' hud.wrist.bleed needs an offset (a camera.base offset, 0x0-0xFFFFF); ignoring it.", serial);
+				else
+				{
+					wp.has_bleed = true;
+					wp.bleed_offset = off.value();
+					wp.bleed_width = width;
+				}
+			}
+		}
+	}
+
+	if (wp.has_hp || wp.has_virus || wp.has_bleed)
+		hp.wrist = wp;
+	else
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' hud.wrist has nothing usable (hp, virus or bleed); no wrist card.", serial);
+	return hp;
+}
+
 
 bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::NodeRef& node, Profile& out)
 {
@@ -2788,6 +2908,17 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 	}
 	else if (node.has_child("feedback"))
 		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a feedback that is not a map; ignoring it.", serial);
+
+	if (node.has_child("hud") && node["hud"].is_map())
+	{
+		out.hud = parseHud(serial, node["hud"]);
+		// The wrist card reads through the camera's resolved record, like the feedback cues.
+		if (out.hud->wrist.has_value() && !(out.camera.has_value() && out.camera->base.has_value()))
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' has hud.wrist but no camera.base; the wrist card shows only "
+							   "while first person is armed with that record resolved, so it never will.", serial);
+	}
+	else if (node.has_child("hud"))
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a hud that is not a map; ignoring it.", serial);
 
 	if (node.has_child("split") && node["split"].is_map())
 		out.split = parseSplit(serial, node["split"]);

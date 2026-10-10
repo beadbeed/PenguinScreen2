@@ -6,6 +6,7 @@
 #ifdef ENABLE_VR
 #include "VR/CameraDriver.h"
 #include "VR/GameFeedback.h"
+#include "VR/HudCards.h"
 #include "VR/SplitState.h"
 #include "VR/VRManager.h"
 #endif
@@ -2790,6 +2791,8 @@ void VMManager::Internal::VSyncOnCPUThread()
 	VR::CameraDriver::Apply();
 	// Reads the record Apply just resolved for this vsync.
 	VR::GameFeedback::Poll();
+	// The wrist card's reads, from the same record.
+	VR::HudCards::Poll();
 	{
 		static const char* s_dump_env = std::getenv("PCSX2_VR_GSDUMP_AT_VSYNC");
 		static u64 s_dump_vsyncs = 0;

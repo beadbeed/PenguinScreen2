@@ -31,6 +31,7 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.stereoConvergence, "VR", "StereoConvergence", 20.0f);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.headCamera, "VR", "HeadCamera", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.snapTurn, "VR", "SnapTurn", false);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.comfortBlink, "VR", "ComfortBlink", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.onlineSafe, "VR", "OnlineSafe", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.gameRumble, "VR", "GameRumble", true);
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.hapticStrength, "VR", "HapticStrength", 1.0f);
@@ -82,6 +83,11 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 	dialog()->registerWidgetHelp(m_ui.snapTurn, tr("Snap Turning"), tr("Unchecked"),
 		tr("In first-person profiles, the turn stick turns the view in steps (more comfortable for some people) "
 		   "instead of smoothly. Takes effect immediately."));
+
+	dialog()->registerWidgetHelp(m_ui.comfortBlink, tr("Comfort Blink"), tr("Checked"),
+		tr("Briefly fades the headset view to black and back (under a fifth of a second) on each snap turn and "
+		   "whenever the picture changes between the first-person view and the virtual screen, so the jump is "
+		   "hidden instead of seen. Only changes what you see. Takes effect immediately."));
 
 	dialog()->registerWidgetHelp(m_ui.onlineSafe, tr("Online-Safe First Person"), tr("Unchecked"),
 		tr("First-person profiles change only what you see (camera, screen, your own body) and nothing other players "

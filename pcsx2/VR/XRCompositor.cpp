@@ -6,6 +6,7 @@
 #include "VR/SplitState.h"
 #include "VR/ControlQuads.h"
 #include "VR/HandModel.h"
+#include "VR/HudCards.h"
 #include "VR/SpatialControls.h"
 #include "VR/VRManager.h"
 #include "VR/SeatCast.h"
@@ -150,6 +151,37 @@ namespace VR::XRCompositor
 			bool hand_fence_submitted = false;
 			// Set when creating any of the above fails: hands stay off until the next Initialize().
 			bool hands_disabled = false;
+
+			// HUD cards (HudCards: the wrist card, the toast and the blink): the same CPU-raster upload path once more,
+			// one swapchain per card sharing a staging buffer, command buffer and fence. Created the first
+			// time a card shows and kept until Shutdown; any failure turns the cards off for the session.
+			struct HudChain
+			{
+				XrSwapchain swapchain = XR_NULL_HANDLE;
+				std::vector<XrSwapchainImageVulkan2KHR> images;
+				bool ever_released = false;
+				bool wait_pending = false;
+				uint32_t pending_index = 0;
+				// What the last released image holds: the card's content key and fade step.
+				u64 shown_content = 0;
+				int shown_level = -1;
+			};
+			HudChain hud_chains[HudCards::kCardCount];
+			VkBuffer hud_staging = VK_NULL_HANDLE;
+			VkDeviceMemory hud_staging_memory = VK_NULL_HANDLE;
+			void* hud_staging_map = nullptr;
+			VkCommandBuffer hud_cmd = VK_NULL_HANDLE;
+			VkFence hud_fence = VK_NULL_HANDLE;
+			bool hud_fence_submitted = false;
+			bool hud_disabled = false;
+			// Wrist card: facing the head (with hysteresis), its fade, and the clock the fade steps by.
+			bool hud_wrist_facing = false;
+			float hud_wrist_opacity = 0.0f;
+			u64 hud_last_ms = 0;
+			bool hud_wrist_logged = false;
+			// Comfort blink on a screen-mode change: when (SteadyNowMs) the change waiting for the blink to
+			// go black is made; 0 while none waits.
+			u64 fp_switch_due_ms = 0;
 
 			XrSpace view_space = XR_NULL_HANDLE;
 
@@ -1207,6 +1239,543 @@ namespace VR::XRCompositor
 			return appended;
 		}
 
+		// HUD cards. Each card's image size, and where its pixels sit in the shared staging buffer.
+		struct HudCardSize
+		{
+			u32 width;
+			u32 height;
+		};
+
+		HudCardSize HudSize(int card)
+		{
+			if (card == HudCards::kToast)
+				return {HudCards::kToastWidth, HudCards::kToastHeight};
+			if (card == HudCards::kWrist)
+				return {HudCards::kWristWidth, HudCards::kWristHeight};
+			if (card == HudCards::kBlink)
+				return {HudCards::kBlinkImageSize, HudCards::kBlinkImageSize};
+			return {0, 0};
+		}
+
+		VkDeviceSize HudImageBytes(int card)
+		{
+			const HudCardSize sz = HudSize(card);
+			return static_cast<VkDeviceSize>(sz.width) * sz.height * 4u;
+		}
+
+		VkDeviceSize HudStagingOffset(int card)
+		{
+			VkDeviceSize offset = 0;
+			for (int i = 0; i < card; i++)
+				offset += HudImageBytes(i);
+			return offset;
+		}
+
+		// Opacity is uploaded in this many steps: a card that holds still is never uploaded again, and a
+		// 0.15 s fade costs at most one upload a frame.
+		constexpr int kHudLevels = 32;
+
+		int HudLevel(float opacity)
+		{
+			const float o = std::isfinite(opacity) ? std::clamp(opacity, 0.0f, 1.0f) : 0.0f;
+			return std::clamp(static_cast<int>(std::lround(o * static_cast<float>(kHudLevels))), 0, kHudLevels);
+		}
+
+		// Full-opacity rasters of the cards, redrawn only when a card's content changes; the fades scale
+		// their alpha on the way into the staging buffer.
+		struct HudRaster
+		{
+			std::vector<u32> pixels;
+			u64 content = 0;
+			bool valid = false;
+		};
+		HudRaster s_hud_raster[HudCards::kCardCount];
+
+		void DestroyHudResources()
+		{
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			if (h.IsValid() && s.hud_fence != VK_NULL_HANDLE && s.hud_fence_submitted)
+			{
+				if (vkWaitForFences(h.device, 1, &s.hud_fence, VK_TRUE, ONE_SECOND_NS) == VK_TIMEOUT)
+					Console.Warning("(VR) HUD: upload fence still busy after 1s during teardown.");
+				vkResetFences(h.device, 1, &s.hud_fence);
+			}
+			s.hud_fence_submitted = false;
+			for (auto& hc : s.hud_chains)
+			{
+				if (hc.swapchain != XR_NULL_HANDLE)
+				{
+					xrDestroySwapchain(hc.swapchain);
+					hc.swapchain = XR_NULL_HANDLE;
+				}
+				hc.images.clear();
+				hc.ever_released = false;
+				hc.wait_pending = false;
+				hc.pending_index = 0;
+				hc.shown_content = 0;
+				hc.shown_level = -1;
+			}
+			if (h.IsValid())
+			{
+				if (s.hud_staging_map && s.hud_staging_memory != VK_NULL_HANDLE)
+					vkUnmapMemory(h.device, s.hud_staging_memory);
+				if (s.hud_staging != VK_NULL_HANDLE)
+					vkDestroyBuffer(h.device, s.hud_staging, nullptr);
+				if (s.hud_staging_memory != VK_NULL_HANDLE)
+					vkFreeMemory(h.device, s.hud_staging_memory, nullptr);
+				if (s.hud_fence != VK_NULL_HANDLE)
+					vkDestroyFence(h.device, s.hud_fence, nullptr);
+				if (s.hud_cmd != VK_NULL_HANDLE && s.cmd_pool != VK_NULL_HANDLE)
+					vkFreeCommandBuffers(h.device, s.cmd_pool, 1, &s.hud_cmd);
+			}
+			s.hud_staging_map = nullptr;
+			s.hud_staging = VK_NULL_HANDLE;
+			s.hud_staging_memory = VK_NULL_HANDLE;
+			s.hud_fence = VK_NULL_HANDLE;
+			s.hud_cmd = VK_NULL_HANDLE;
+			for (HudRaster& r : s_hud_raster)
+				r.valid = false;
+		}
+
+		bool EnsureHudResources()
+		{
+			if (s.hud_disabled)
+				return false;
+			bool chains_ok = true;
+			for (const auto& hc : s.hud_chains)
+				chains_ok = chains_ok && (hc.swapchain != XR_NULL_HANDLE);
+			if (chains_ok && s.hud_staging != VK_NULL_HANDLE && s.hud_cmd != VK_NULL_HANDLE && s.hud_fence != VK_NULL_HANDLE)
+				return true;
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			if (!h.IsValid() || s.cmd_pool == VK_NULL_HANDLE)
+				return false;
+			const auto fail = [&](const char* what, int code) {
+				s.hud_disabled = true;
+				Console.Error("(VR) HUD: %s failed (%d); the in-headset cards are off for this session.", what, code);
+				DestroyHudResources();
+				return false;
+			};
+
+			const VkDeviceSize bytes = HudStagingOffset(HudCards::kCardCount);
+			if (s.hud_staging == VK_NULL_HANDLE)
+			{
+				VkBufferCreateInfo bci = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+				bci.size = bytes;
+				bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+				bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+				VkResult vr = vkCreateBuffer(h.device, &bci, nullptr, &s.hud_staging);
+				if (vr != VK_SUCCESS)
+				{
+					s.hud_staging = VK_NULL_HANDLE;
+					return fail("vkCreateBuffer", static_cast<int>(vr));
+				}
+
+				VkMemoryRequirements mr = {};
+				vkGetBufferMemoryRequirements(h.device, s.hud_staging, &mr);
+				VkPhysicalDeviceMemoryProperties mp = {};
+				vkGetPhysicalDeviceMemoryProperties(h.physical_device, &mp);
+				constexpr VkMemoryPropertyFlags kWant = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+				u32 type = UINT32_MAX;
+				for (u32 i = 0; i < mp.memoryTypeCount; i++)
+				{
+					if ((mr.memoryTypeBits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & kWant) == kWant)
+					{
+						type = i;
+						break;
+					}
+				}
+				if (type == UINT32_MAX)
+					return fail("host-visible memory type lookup", 0);
+				VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+				mai.allocationSize = mr.size;
+				mai.memoryTypeIndex = type;
+				vr = vkAllocateMemory(h.device, &mai, nullptr, &s.hud_staging_memory);
+				if (vr != VK_SUCCESS)
+				{
+					s.hud_staging_memory = VK_NULL_HANDLE;
+					return fail("vkAllocateMemory", static_cast<int>(vr));
+				}
+				vr = vkBindBufferMemory(h.device, s.hud_staging, s.hud_staging_memory, 0);
+				if (vr != VK_SUCCESS)
+					return fail("vkBindBufferMemory", static_cast<int>(vr));
+				vr = vkMapMemory(h.device, s.hud_staging_memory, 0, VK_WHOLE_SIZE, 0, &s.hud_staging_map);
+				if (vr != VK_SUCCESS)
+				{
+					s.hud_staging_map = nullptr;
+					return fail("vkMapMemory", static_cast<int>(vr));
+				}
+			}
+
+			if (s.hud_cmd == VK_NULL_HANDLE)
+			{
+				VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+				cai.commandPool = s.cmd_pool;
+				cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+				cai.commandBufferCount = 1;
+				const VkResult vr = vkAllocateCommandBuffers(h.device, &cai, &s.hud_cmd);
+				if (vr != VK_SUCCESS)
+				{
+					s.hud_cmd = VK_NULL_HANDLE;
+					return fail("vkAllocateCommandBuffers", static_cast<int>(vr));
+				}
+			}
+			if (s.hud_fence == VK_NULL_HANDLE)
+			{
+				VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+				const VkResult vr = vkCreateFence(h.device, &fci, nullptr, &s.hud_fence);
+				if (vr != VK_SUCCESS)
+				{
+					s.hud_fence = VK_NULL_HANDLE;
+					return fail("vkCreateFence", static_cast<int>(vr));
+				}
+				s.hud_fence_submitted = false;
+			}
+
+			uint32_t image_count = 0;
+			for (int i = 0; i < HudCards::kCardCount; i++)
+			{
+				auto& hc = s.hud_chains[i];
+				if (hc.swapchain != XR_NULL_HANDLE)
+					continue;
+				// Same format as the screen (sRGB normally): the cards are sRGB-encoded bytes with alpha.
+				const HudCardSize sz = HudSize(i);
+				XrSwapchainCreateInfo ci = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
+				ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+				ci.format = static_cast<int64_t>(s.swapchain_format);
+				ci.sampleCount = 1;
+				ci.width = sz.width;
+				ci.height = sz.height;
+				ci.faceCount = 1;
+				ci.arraySize = 1;
+				ci.mipCount = 1;
+				XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &hc.swapchain);
+				if (XR_FAILED(res))
+				{
+					hc.swapchain = XR_NULL_HANDLE;
+					return fail("xrCreateSwapchain", static_cast<int>(res));
+				}
+				uint32_t count = 0;
+				res = xrEnumerateSwapchainImages(hc.swapchain, 0, &count, nullptr);
+				if (XR_FAILED(res) || count == 0)
+					return fail("xrEnumerateSwapchainImages", static_cast<int>(res));
+				hc.images.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+				res = xrEnumerateSwapchainImages(hc.swapchain, count, &count,
+					reinterpret_cast<XrSwapchainImageBaseHeader*>(hc.images.data()));
+				if (XR_FAILED(res))
+					return fail("xrEnumerateSwapchainImages", static_cast<int>(res));
+				hc.ever_released = false;
+				hc.wait_pending = false;
+				hc.shown_content = 0;
+				hc.shown_level = -1;
+				image_count = count;
+			}
+			Console.WriteLn("(VR) HUD: card swapchains created (%d card(s), %u images, %llu-byte staging).",
+				HudCards::kCardCount, image_count, static_cast<unsigned long long>(bytes));
+			return true;
+		}
+
+		void RecordHudUpload(VkCommandBuffer cmd, int card, VkImage dst)
+		{
+			const HudCardSize sz = HudSize(card);
+			ImageBarrier(cmd, dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+				VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+			VkBufferImageCopy region = {};
+			region.bufferOffset = HudStagingOffset(card);
+			region.bufferRowLength = 0;
+			region.bufferImageHeight = 0;
+			region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+			region.imageOffset = {0, 0, 0};
+			region.imageExtent = {sz.width, sz.height, 1};
+			vkCmdCopyBufferToImage(cmd, s.hud_staging, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+			ImageBarrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+				VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+		}
+
+		// HUD cards, submitted after everything else so they draw on top. A card is rastered at full
+		// opacity when its content changes and uploaded only when its content or fade step does; between
+		// uploads the runtime keeps showing the last released image.
+		u32 BuildHudLayers(XrCompositionLayerQuad* hud_quads, const XrCompositionLayerBaseHeader** layers,
+			u32& layer_count, u32 layer_capacity)
+		{
+			HudCards::MaybeTestToast();
+			HudCards::MaybeTestBlink();
+			if (s.hud_disabled)
+				return 0;
+
+			struct Want
+			{
+				bool on = false;
+				u64 content = 0;
+				int level = 0;
+			};
+			Want want[HudCards::kCardCount];
+
+			// Toast: view-locked, so it needs the VIEW space.
+			HudCards::ToastView toast;
+			if (s.view_space != XR_NULL_HANDLE && HudCards::CurrentToast(&toast))
+			{
+				Want& wt = want[HudCards::kToast];
+				wt.on = true;
+				wt.content = toast.serial;
+				wt.level = HudLevel(toast.opacity);
+			}
+
+			// Comfort blink: view-locked too. One unchanging image; only its fade step is uploaded again.
+			float blink_opacity = 0.0f;
+			if (s.view_space != XR_NULL_HANDLE && HudCards::CurrentBlink(&blink_opacity))
+			{
+				Want& wb = want[HudCards::kBlink];
+				wb.on = true;
+				wb.content = 1;
+				wb.level = HudLevel(blink_opacity);
+			}
+
+			// Wrist card: on the left hand while first person is active and the profile reads hud.wrist,
+			// fading in while its face points at the head. PCSX2_VR_FAKE_HANDS shows it on the fake left
+			// hand whatever the angle (turned to the eye; NO DATA without first person), so it can be
+			// checked on a headset without controllers.
+			static const bool s_fake_hands = (std::getenv("PCSX2_VR_FAKE_HANDS") != nullptr);
+			static const bool s_grip_orient = (std::getenv("PCSX2_VR_HANDS_GRIP_ORIENT") != nullptr);
+			const u64 now_ms = CameraDriver::SteadyNowMs();
+			const float dt = (s.hud_last_ms != 0 && now_ms > s.hud_last_ms) ?
+			                     std::min(static_cast<float>(now_ms - s.hud_last_ms) / 1000.0f, 0.1f) :
+			                     0.0f;
+			s.hud_last_ms = now_ms;
+			HudCards::WristData wrist;
+			const bool wrist_live = HudCards::GetWrist(&wrist) && CameraDriver::LookAtActive();
+			const bool wrist_no_data = !wrist_live;
+			bool wrist_placed = false;
+			float wrist_pos[3] = {0.0f, 0.0f, 0.0f};
+			float wrist_quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+			float wrist_facing = -1.0f;
+			if ((wrist_live || s_fake_hands) && s.head_pose_valid)
+			{
+				const float eye[3] = {s.head_position_valid ? s.head_pose.position.x : 0.0f,
+					s.head_position_valid ? s.head_pose.position.y : 0.0f, s.head_position_valid ? s.head_pose.position.z : 0.0f};
+				if (s_fake_hands)
+				{
+					const float head_quat[4] = {s.head_pose.orientation.x, s.head_pose.orientation.y, s.head_pose.orientation.z,
+						s.head_pose.orientation.w};
+					const HandModel::HandState fake = HandModel::FakeHandState(HandModel::kLeft, eye, head_quat, false);
+					if (fake.valid)
+					{
+						HudCards::PlaceWrist(fake.pos, fake.quat, eye, true, wrist_pos, wrist_quat, &wrist_facing);
+						wrist_placed = true;
+					}
+				}
+				else if (s.head_position_valid)
+				{
+					// The pose the left hand is drawn with (BuildHandLayers): grip position, aim orientation.
+					const VRInputSnapshot snap = GetInputSnapshot();
+					const auto& src = snap.hands[HandModel::kLeft];
+					if (snap.generation != 0 && snap.actions_active && src.grip_pose.valid)
+					{
+						const auto& orient = (!s_grip_orient && src.aim_pose.valid) ? src.aim_pose : src.grip_pose;
+						const float hand_pos[3] = {src.grip_pose.position_xyz[0], src.grip_pose.position_xyz[1],
+							src.grip_pose.position_xyz[2]};
+						const float hand_quat[4] = {orient.orientation_xyzw[0], orient.orientation_xyzw[1],
+							orient.orientation_xyzw[2], orient.orientation_xyzw[3]};
+						HudCards::PlaceWrist(hand_pos, hand_quat, eye, false, wrist_pos, wrist_quat, &wrist_facing);
+						wrist_placed = true;
+					}
+				}
+			}
+			// Facing with hysteresis, then a fade toward it; with no hand to hang it on, the card is gone.
+			if (!wrist_placed)
+				s.hud_wrist_facing = false;
+			else if (s_fake_hands)
+				s.hud_wrist_facing = true;
+			else
+				s.hud_wrist_facing = wrist_facing > (s.hud_wrist_facing ? HudCards::kWristHideCos : HudCards::kWristShowCos);
+			const float fade_step = dt / HudCards::kFadeSeconds;
+			if (!wrist_placed)
+				s.hud_wrist_opacity = 0.0f;
+			else if (s.hud_wrist_facing)
+				s.hud_wrist_opacity = std::min(1.0f, s.hud_wrist_opacity + fade_step);
+			else
+				s.hud_wrist_opacity = std::max(0.0f, s.hud_wrist_opacity - fade_step);
+			if (wrist_placed && s.hud_wrist_opacity > 0.0f)
+			{
+				Want& ww = want[HudCards::kWrist];
+				ww.on = true;
+				ww.content = HudCards::WristKey(wrist, wrist_no_data);
+				ww.level = HudLevel(s.hud_wrist_opacity);
+				if (!s.hud_wrist_logged)
+				{
+					s.hud_wrist_logged = true;
+					Console.WriteLn("(VR) HUD: wrist card shown (%s).",
+						s_fake_hands ? "PCSX2_VR_FAKE_HANDS test hand, any angle" : "left wrist turned to the face");
+				}
+			}
+
+			bool any = false;
+			for (const Want& wv : want)
+				any = any || (wv.on && wv.level > 0);
+			if (!any || !EnsureHudResources())
+				return 0;
+
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			bool recording = false;
+			int pending[HudCards::kCardCount] = {};
+			int pending_count = 0;
+			for (int i = 0; i < HudCards::kCardCount; i++)
+			{
+				const Want& wv = want[i];
+				auto& hc = s.hud_chains[i];
+				if (!wv.on || wv.level <= 0)
+					continue;
+				if (hc.ever_released && hc.shown_content == wv.content && hc.shown_level == wv.level)
+					continue;
+
+				HudRaster& raster = s_hud_raster[i];
+				if (!raster.valid || raster.content != wv.content)
+				{
+					if (i == HudCards::kToast)
+						HudCards::RasterToast(raster.pixels, toast.text);
+					else if (i == HudCards::kWrist)
+						HudCards::RasterWrist(raster.pixels, wrist, wrist_no_data);
+					else if (i == HudCards::kBlink)
+						HudCards::RasterBlink(raster.pixels);
+					raster.content = wv.content;
+					raster.valid = true;
+				}
+				const HudCardSize sz = HudSize(i);
+				const size_t pixel_count = static_cast<size_t>(sz.width) * sz.height;
+				if (raster.pixels.size() != pixel_count)
+					continue;
+
+				uint32_t index = 0;
+				if (hc.wait_pending)
+				{
+					index = hc.pending_index;
+				}
+				else
+				{
+					XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+					if (XR_FAILED(xrAcquireSwapchainImage(hc.swapchain, &ai, &index)))
+						continue;
+					hc.pending_index = index;
+					hc.wait_pending = true;
+				}
+				XrSwapchainImageWaitInfo wi = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+				wi.timeout = kSwapchainWaitNs;
+				// XR_TIMEOUT_EXPIRED is a success code: the image is not ours yet, so wait again next frame.
+				const XrResult wr = xrWaitSwapchainImage(hc.swapchain, &wi);
+				if (wr == XR_TIMEOUT_EXPIRED || XR_FAILED(wr))
+					continue;
+				hc.wait_pending = false;
+
+				if (!recording)
+				{
+					// The staging buffer is shared by the cards: the previous upload must be done with it.
+					if (s.hud_fence_submitted)
+					{
+						if (vkWaitForFences(h.device, 1, &s.hud_fence, VK_TRUE, ONE_SECOND_NS) != VK_SUCCESS)
+						{
+							XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+							xrReleaseSwapchainImage(hc.swapchain, &ri);
+							break;
+						}
+						vkResetFences(h.device, 1, &s.hud_fence);
+						s.hud_fence_submitted = false;
+					}
+					VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+					bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+					if (vkBeginCommandBuffer(s.hud_cmd, &bi) != VK_SUCCESS)
+					{
+						XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+						xrReleaseSwapchainImage(hc.swapchain, &ri);
+						break;
+					}
+					recording = true;
+				}
+				u32* dst = reinterpret_cast<u32*>(static_cast<u8*>(s.hud_staging_map) + HudStagingOffset(i));
+				HudCards::ScaleAlpha(raster.pixels.data(), pixel_count,
+					static_cast<float>(wv.level) / static_cast<float>(kHudLevels), dst);
+				RecordHudUpload(s.hud_cmd, i, hc.images[index].image);
+				pending[pending_count] = i;
+				pending_count++;
+			}
+			if (recording)
+			{
+				bool submitted = false;
+				if (vkEndCommandBuffer(s.hud_cmd) == VK_SUCCESS)
+				{
+					VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+					si.commandBufferCount = 1;
+					si.pCommandBuffers = &s.hud_cmd;
+					submitted = (vkQueueSubmit(h.queue, 1, &si, s.hud_fence) == VK_SUCCESS);
+					s.hud_fence_submitted = submitted;
+				}
+				for (int k = 0; k < pending_count; k++)
+				{
+					const int card = pending[k];
+					auto& hc = s.hud_chains[card];
+					XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+					if (XR_SUCCEEDED(xrReleaseSwapchainImage(hc.swapchain, &ri)) && submitted)
+					{
+						hc.ever_released = true;
+						hc.shown_content = want[card].content;
+						hc.shown_level = want[card].level;
+					}
+				}
+			}
+
+			u32 appended = 0;
+			for (int i = 0; i < HudCards::kCardCount; i++)
+			{
+				const Want& wv = want[i];
+				const auto& hc = s.hud_chains[i];
+				if (!wv.on || wv.level <= 0 || !hc.ever_released || layer_count >= layer_capacity)
+					continue;
+				// The toast's image must hold this toast's text (the previous one's would be wrong); being a
+				// fade step behind is fine.
+				if (i == HudCards::kToast && hc.shown_content != wv.content)
+					continue;
+				const HudCardSize sz = HudSize(i);
+				XrCompositionLayerQuad& quad = hud_quads[i];
+				quad.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
+				quad.next = nullptr;
+				quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+				quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+				quad.subImage = {hc.swapchain, {{0, 0}, {static_cast<s32>(sz.width), static_cast<s32>(sz.height)}}, 0};
+				if (i == HudCards::kToast)
+				{
+					float pos[3];
+					float q[4];
+					HudCards::ToastPose(pos, q);
+					quad.space = s.view_space;
+					quad.pose.orientation = {q[0], q[1], q[2], q[3]};
+					quad.pose.position = {pos[0], pos[1], pos[2]};
+					quad.size = {HudCards::kToastWidthM, HudCards::kToastHeightM};
+				}
+				else if (i == HudCards::kWrist)
+				{
+					// In the base space, where the hands were located for this frame's display time.
+					quad.space = XRSession::GetSpace();
+					quad.pose.orientation = {wrist_quat[0], wrist_quat[1], wrist_quat[2], wrist_quat[3]};
+					quad.pose.position = {wrist_pos[0], wrist_pos[1], wrist_pos[2]};
+					quad.size = {HudCards::kWristWidthM, HudCards::kWristHeightM};
+				}
+				else if (i == HudCards::kBlink)
+				{
+					// Just in front of the eyes and far wider than any field of view, so it covers the whole view.
+					float pos[3];
+					float q[4];
+					HudCards::BlinkPose(pos, q);
+					quad.space = s.view_space;
+					quad.pose.orientation = {q[0], q[1], q[2], q[3]};
+					quad.pose.position = {pos[0], pos[1], pos[2]};
+					quad.size = {HudCards::kBlinkSizeM, HudCards::kBlinkSizeM};
+				}
+				layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+				appended++;
+			}
+			return appended;
+		}
+
 		float ComputeAspect()
 		{
 			switch (GSConfig.AspectRatio)
@@ -1401,6 +1970,12 @@ namespace VR::XRCompositor
 		s.lever_layers_logged = -1;
 		s.lever_screen_logged = 0;
 		s.hands_disabled = false;
+		s.hud_disabled = false;
+		s.hud_wrist_facing = false;
+		s.hud_wrist_opacity = 0.0f;
+		s.hud_last_ms = 0;
+		s.hud_wrist_logged = false;
+		s.fp_switch_due_ms = 0;
 
 		if (!XRSession::HasSession())
 		{
@@ -1759,11 +2334,12 @@ namespace VR::XRCompositor
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}, {XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR},
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}, {XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR},
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}};
-		constexpr u32 kLayerCapacity = 5 + ControlQuads::kSlots + kHandSlots;
+		constexpr u32 kLayerCapacity = 5 + ControlQuads::kSlots + kHandSlots + HudCards::kCardCount;
 		XrCompositionLayerQuad lever_quads[ControlQuads::kSlots] = {
 			{XR_TYPE_COMPOSITION_LAYER_QUAD}, {XR_TYPE_COMPOSITION_LAYER_QUAD}};
 		XrCompositionLayerQuad hand_quads[kHandSlots] = {
 			{XR_TYPE_COMPOSITION_LAYER_QUAD}, {XR_TYPE_COMPOSITION_LAYER_QUAD}};
+		XrCompositionLayerQuad hud_quads[HudCards::kCardCount] = {};
 		const XrCompositionLayerBaseHeader* layers[kLayerCapacity] = {};
 		u32 layer_count = 0;
 		bool cl_split = false;
@@ -1777,10 +2353,39 @@ namespace VR::XRCompositor
 			// First person: head-locked screen sized to the game camera's FOV. Anything else (menus,
 			// item screen, cutscenes, doors) goes back to the world screen, re-anchored in front of the
 			// head each time first person hands over so it never appears behind the player.
-			const bool fp_screen = sp.has_fp && CameraDriver::LookAtActive() && s.head_pose_valid;
-			if (fp_screen != s_fp_screen_was_active)
+			// With the comfort blink on, a change of screen waits until the blink has gone black
+			// (kBlinkRiseMs), so the jump in placement is never seen; the blink then holds black while the
+			// frames from the new camera, about 85-100 ms behind the change, reach the screen.
+			const bool fp_want = sp.has_fp && CameraDriver::LookAtActive() && s.head_pose_valid;
+			bool switch_now = false;
+			if (fp_want == s_fp_screen_was_active)
 			{
-				if (!fp_screen && s.head_pose_valid)
+				// Wanted back before the change was made (a flicker): nothing to change; the blink plays out.
+				s.fp_switch_due_ms = 0;
+			}
+			else if (!s.head_pose_valid)
+			{
+				// Tracking lost: straight to the world screen, which needs no head pose.
+				switch_now = true;
+			}
+			else if (s.fp_switch_due_ms == 0)
+			{
+				// Wait only for a blink that can be drawn: with the HUD cards off for the session (or no VIEW
+				// space) the delay would just show the old placement with the new camera for 40 ms.
+				if (!s.hud_disabled && s.view_space != XR_NULL_HANDLE &&
+					HudCards::Blink(fp_want ? "first-person screen" : "world screen"))
+					s.fp_switch_due_ms = CameraDriver::SteadyNowMs() + HudCards::kBlinkRiseMs;
+				else
+					switch_now = true;
+			}
+			else if (CameraDriver::SteadyNowMs() >= s.fp_switch_due_ms)
+			{
+				switch_now = true;
+			}
+			if (switch_now)
+			{
+				s.fp_switch_due_ms = 0;
+				if (!fp_want && s.head_pose_valid)
 				{
 					const XrQuaternionf& q = s.head_pose.orientation;
 					const float fx = -2.0f * (q.w * q.y + q.z * q.x);
@@ -1794,9 +2399,10 @@ namespace VR::XRCompositor
 						s.world_anchor_z = s.head_pose.position.z;
 					}
 				}
-				Console.WriteLn("(VR) Screen: %s.", fp_screen ? "first person (placed at the render pose, roll-level)" : "world-locked");
-				s_fp_screen_was_active = fp_screen;
+				Console.WriteLn("(VR) Screen: %s.", fp_want ? "first person (placed at the render pose, roll-level)" : "world-locked");
+				s_fp_screen_was_active = fp_want;
 			}
+			const bool fp_screen = s_fp_screen_was_active;
 
 			// First-person screen: placed in the room (base space) in front of the head pose the shown
 			// frame was rendered from (matched through the game's view matrix when the profile names it,
@@ -2091,6 +2697,10 @@ namespace VR::XRCompositor
 		if (!force_zero_layers && fs.shouldRender)
 			BuildHandLayers(hand_quads, layers, layer_count, kLayerCapacity);
 
+		// HUD cards last of all, over the hands and everything else.
+		if (!force_zero_layers && fs.shouldRender)
+			BuildHudLayers(hud_quads, layers, layer_count, kLayerCapacity);
+
 		XrFrameEndInfo ei = {XR_TYPE_FRAME_END_INFO};
 		ei.displayTime = fs.predictedDisplayTime;
 		ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
@@ -2148,6 +2758,7 @@ namespace VR::XRCompositor
 
 		DestroyLeverResources();
 		DestroyHandResources();
+		DestroyHudResources();
 
 		for (auto& chain : s.chains)
 		{
