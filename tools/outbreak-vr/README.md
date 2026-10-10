@@ -31,6 +31,14 @@ the world screen. The screen change itself is made once the blink is black (`(VR
 then `(VR) Screen: world-locked.` about 40 ms later); snap turns log `(VR) HUD blink (snap turn).`.
 `PCSX2_VR_BLINK_TEST=1` blinks every 2 s (with the setting on) for `hmdshot.py` captures on the null headset.
 
+Laser sight (VR setting `LaserSight`, on by default): while the weapon is raised in first person, a 4 mm red
+beam from 2 cm past the impostor pistol's muzzle straight along the right hand's aim, fading out over 6 m. It
+has no depth, so it does not stop at walls or enemies. One quad in the base space turned about the beam to face
+the head, drawn under the hands and over the screen; it fades in over 0.15 s with the weapon and goes at once
+when it is lowered, and a frame looking straight down the beam goes without it. The first one in a session logs
+`(VR) HUD: laser sight shown (weapon raised in first person).`. `PCSX2_VR_FAKE_HANDS=gun` shows it on the fake
+right hand at any time (with the setting on).
+
 Rules when testing: never change emulation speed; never pause, savestate or dump RAM while online
 (obsrv drops clients after ~30 s without packets and bans speed changes); do not run the virtual pad
 while an anti-cheat game is open.

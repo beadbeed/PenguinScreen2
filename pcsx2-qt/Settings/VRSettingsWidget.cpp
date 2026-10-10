@@ -32,6 +32,7 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.headCamera, "VR", "HeadCamera", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.snapTurn, "VR", "SnapTurn", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.comfortBlink, "VR", "ComfortBlink", true);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.laserSight, "VR", "LaserSight", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.onlineSafe, "VR", "OnlineSafe", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.gameRumble, "VR", "GameRumble", true);
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.hapticStrength, "VR", "HapticStrength", 1.0f);
@@ -88,6 +89,12 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 		tr("Briefly fades the headset view to black and back (under a fifth of a second) on each snap turn and "
 		   "whenever the picture changes between the first-person view and the virtual screen, so the jump is "
 		   "hidden instead of seen. Only changes what you see. Takes effect immediately."));
+
+	dialog()->registerWidgetHelp(m_ui.laserSight, tr("Laser Sight"), tr("Checked"),
+		tr("In first-person profiles, while your weapon is raised, draws a thin red beam from the muzzle of the pistol "
+		   "in your hand straight along where it points, fading out over about 6 metres. It is drawn over the picture "
+		   "and does not stop at walls or enemies. Only changes what you see; the game itself is not touched. Takes "
+		   "effect immediately."));
 
 	dialog()->registerWidgetHelp(m_ui.onlineSafe, tr("Online-Safe First Person"), tr("Unchecked"),
 		tr("First-person profiles change only what you see (camera, screen, your own body) and nothing other players "

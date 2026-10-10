@@ -14,17 +14,20 @@
 // placement maths; no XR or Vulkan types, so it stays self-contained. XRCompositor owns the swapchains,
 // uploads the pixels and submits the layers, and only while a VR session runs.
 //
-// Three cards: the toast, a short line of text view-locked below the line of sight (recenters, brightness,
+// Four cards: the toast, a short line of text view-locked below the line of sight (recenters, brightness,
 // controllers paused); the wrist card, on the back of the left wrist in first person, with the
-// character's condition, an HP bar and the virus gauge read from the profile's hud.wrist block; and the
-// comfort blink, a black quad over the whole view for snap turns and screen changes.
+// character's condition, an HP bar and the virus gauge read from the profile's hud.wrist block; the
+// comfort blink, a black quad over the whole view for snap turns and screen changes; and the laser sight,
+// a thin red beam from the pistol's muzzle along the aim while the weapon is raised in first person.
 namespace VR::HudCards
 {
-	// Card slots, in the order the compositor submits them (the blink last, over everything).
-	static constexpr int kWrist = 0;
-	static constexpr int kToast = 1;
-	static constexpr int kBlink = 2;
-	static constexpr int kCardCount = 3;
+	// Card slots, in the order the compositor submits them: the laser first, in under the hands (which are
+	// nearer the eye than the beam), the rest over everything, the blink last.
+	static constexpr int kLaser = 0;
+	static constexpr int kWrist = 1;
+	static constexpr int kToast = 2;
+	static constexpr int kBlink = 3;
+	static constexpr int kCardCount = 4;
 
 	// Toast image and quad: about 1.2 m ahead and 0.25 m below eye level, 0.5 m wide (about 24 deg, so
 	// the image's 1024 pixels give the text 1.1 deg tall letters up to ~23 characters, smaller beyond).
@@ -69,6 +72,18 @@ namespace VR::HudCards
 	static constexpr float kBlinkDistanceM = 0.3f;
 	static constexpr float kBlinkSizeM = 4.0f;
 
+	// Laser sight: one quad 4 mm wide and 6 m long from just ahead of the impostor pistol's muzzle along the
+	// aim, turned about its own length to face the head. No depth, so it fades out toward its far end
+	// instead of stopping on what it points at. The image runs across the beam (soft red edges round a
+	// hotter core) and along it (the fade, top row at the far end); 16 pixels across, the same floor as the
+	// blink's image.
+	static constexpr u32 kLaserImageWidth = 16;
+	static constexpr u32 kLaserImageHeight = 256;
+	static constexpr float kLaserWidthM = 0.004f;
+	static constexpr float kLaserLengthM = 6.0f;
+	// The beam starts this far ahead of the muzzle's face.
+	static constexpr float kLaserMuzzleGapM = 0.02f;
+
 	// Same byte order as the lever cards and hands (ControlQuads::PackRgba): R in the low byte,
 	// unpremultiplied alpha in the high byte, sRGB-encoded colour.
 	constexpr u32 Rgba(u32 r, u32 g, u32 b, u32 a = 255)
@@ -107,6 +122,10 @@ namespace VR::HudCards
 	// Compositor, each frame: with PCSX2_VR_BLINK_TEST=1 a blink every 2 s.
 	void MaybeTestBlink();
 
+	// The VR LaserSight setting as published by Poll (on until the first vsync, as its default is), so the
+	// GS thread never reads EmuConfig. Any thread.
+	bool LaserSightEnabled();
+
 	// The wrist card's data, read each vsync from the local character's record.
 	struct WristData
 	{
@@ -130,7 +149,8 @@ namespace VR::HudCards
 	Condition ConditionOf(const WristData& d);
 
 	// CPU thread, every vsync right after CameraDriver::Apply: reads the record Apply resolved, the same
-	// way GameFeedback does. Reads only, so the same online. Also publishes the ComfortBlink setting.
+	// way GameFeedback does. Reads only, so the same online. Also publishes the ComfortBlink and LaserSight
+	// settings.
 	void Poll();
 
 	// Any thread: true while first person is armed with the record resolved and the profile has a
@@ -145,6 +165,7 @@ namespace VR::HudCards
 	void RasterToast(std::vector<u32>& out, const std::string& text);
 	void RasterWrist(std::vector<u32>& out, const WristData& d, bool no_data);
 	void RasterBlink(std::vector<u32>& out);
+	void RasterLaser(std::vector<u32>& out);
 
 	// dst = src with every pixel's alpha scaled by opacity (0-1), for the fades.
 	void ScaleAlpha(const u32* src, size_t count, float opacity, u32* dst);
@@ -165,7 +186,16 @@ namespace VR::HudCards
 	void PlaceWrist(const float hand_pos[3], const float hand_quat[4], const float eye[3], bool face_eye,
 		float out_pos[3], float out_quat[4], float* facing_cos);
 
-	// Condition thresholds, labels, keys, the font, the fades, the blink and the placement maths. Runs once (the
-	// compositor's first HUD frame or the first Poll) when PCSX2_VR_HUD_SELFTEST is set.
+	// The laser's quad in the XR base space for a right hand given the way HandModel takes it (pos: the
+	// controller's grip position; quat: its pointing frame, -Z along the pistol's barrel): from
+	// kLaserMuzzleGapM ahead of the impostor pistol's muzzle along -Z for kLaserLengthM. out_pos is the
+	// beam's middle; the quad's +Y runs along the beam (so its image's top row is the far end) and its +Z is
+	// turned about the beam toward the eye. False, and the frame goes without the beam, when the eye is on
+	// the beam's line (no side of the quad faces it) or a pose is not usable.
+	bool PlaceLaser(const float hand_pos[3], const float hand_quat[4], const float eye[3], float out_pos[3],
+		float out_quat[4]);
+
+	// Condition thresholds, labels, keys, the font, the fades, the blink, the laser and the placement maths.
+	// Runs once (the compositor's first HUD frame or the first Poll) when PCSX2_VR_HUD_SELFTEST is set.
 	bool SelfTest();
 }

@@ -281,6 +281,13 @@
        </widget>
       </item>
       <item>
+       <widget class="QCheckBox" name="laserSight">
+        <property name="text">
+         <string>Laser Sight (first person, weapon raised)</string>
+        </property>
+       </widget>
+      </item>
+      <item>
        <widget class="QCheckBox" name="onlineSafe">
         <property name="text">
          <string>Online-Safe First Person (camera only; on whenever the network adapter is on)</string>
@@ -378,6 +385,7 @@
   <tabstop>headCamera</tabstop>
   <tabstop>snapTurn</tabstop>
   <tabstop>comfortBlink</tabstop>
+  <tabstop>laserSight</tabstop>
   <tabstop>onlineSafe</tabstop>
   <tabstop>gameRumble</tabstop>
   <tabstop>hapticStrength</tabstop>
