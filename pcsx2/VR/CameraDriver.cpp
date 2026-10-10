@@ -1015,6 +1015,12 @@ namespace VR::CameraDriver
 			w = ow;
 		}
 
+		u64 NowMs()
+		{
+			return static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count());
+		}
+
 		// Seconds since the previous call, for smooth turning; 0 after a gap (pause, disarm, first call).
 		float TurnDt()
 		{
@@ -1062,14 +1068,45 @@ namespace VR::CameraDriver
 		{
 			float dir[3] = {0.0f, 0.0f, 1.0f};
 			float eye[3] = {0.0f, 0.0f, 0.0f};
-			float base_yaw = 0.0f; // game yaw minus yawSign * the head's room yaw (base yaw - yawSign * recenter yaw)
+			float base_yaw = 0.0f; // game yaw minus yawSign * the head's room yaw (base yaw - yawSign * recenter yaw),
+			                       // of the camera as written (ahead of the true one while lookAt.predict leads a turn)
 			float yaw_sign = 1.0f;
+			u64 ms = 0; // when it was written (NowMs)
 		};
 
 		// The base yaw camera.lookAt is using right now, for the compositor: a frame rendered at another
 		// base yaw (stick turning since) is turned by the difference so artificial turns look as smooth as
 		// head turns instead of stepping at the game's frame rate.
 		std::atomic<float> s_base_yaw_now{0.0f};
+
+		// When s_base_yaw_now was last written (NowMs).
+		std::atomic<u64> s_base_yaw_ms{0};
+
+		// Prediction horizons in seconds (< 0 until the first sample), measured on the GS thread in RenderPose
+		// as each frame is about to be shown and smoothed:
+		// - s_predict_h: how long after its head pose was taken (HeadPose publish_ms) a frame is shown. The
+		//   runtime's own lead to display time applies to both ends and cancels out. For head prediction.
+		// - s_predict_stick_h: how long after the frame's lookAt write the latest write is. The compositor turns
+		//   a frame by its base yaw against the latest write's, so this is the lead that leaves a smooth stick
+		//   turn's frames needing no turning. It comes out about one vsync shorter than s_predict_h: the wait
+		//   from a pose's publish to the vsync that uses it and from the latest vsync to the present add up to one.
+		std::atomic<float> s_predict_h{-1.0f};
+		std::atomic<float> s_predict_stick_h{-1.0f};
+		constexpr float kPredictMaxS = 0.12f;
+		float s_prediction_s = 0.0f; // the stick lead this vsync's lookAt write used (telemetry)
+
+		float PredictHorizon(const std::atomic<float>& h)
+		{
+			const float v = h.load(std::memory_order_relaxed);
+			return (v > 0.0f) ? std::min(v, kPredictMaxS) : 0.0f;
+		}
+
+		// GS thread only (one writer), so load + store is enough.
+		void FoldHorizonSample(std::atomic<float>& h, float sample)
+		{
+			const float v = h.load(std::memory_order_relaxed);
+			h.store((v < 0.0f) ? sample : (v + 0.05f * (sample - v)), std::memory_order_relaxed);
+		}
 
 		// camera.lookAt: put the game's eye/target camera at the character's head. Game yaw 0 faces
 		// +Z, forward = (sin y, cos y) on the x/z floor plane, y up. Head yaw (OpenXR, CCW positive) is
@@ -1114,6 +1151,7 @@ namespace VR::CameraDriver
 			if (want_input)
 				input = GetInputSnapshot();
 			const float turn_dt = TurnDt();
+			float stick_rate = 0.0f; // smooth stick turn in progress, game yaw radians per second
 			if (la.yaw_anchor)
 			{
 				if (!s_yaw_anchor_valid)
@@ -1137,6 +1175,7 @@ namespace VR::CameraDriver
 						{
 							const float rate = la.smooth_turn_deg_s * t * (0.5f + 0.5f * t);
 							s_yaw_anchor = WrapPi(s_yaw_anchor - la.yaw_sign * dir * rate * turn_dt * (PI_F / 180.0f));
+							stick_rate = -la.yaw_sign * dir * rate * (PI_F / 180.0f);
 						}
 						s_snap_ready = false;
 					}
@@ -1154,9 +1193,22 @@ namespace VR::CameraDriver
 				base_yaw = s_yaw_anchor;
 			}
 
-			const float yaw = base_yaw + la.yaw_sign * e.yaw;
+			// lookAt.predict: the camera is written where a smooth stick turn will have taken the view by the
+			// time this frame is on screen, so the turn's leading edge shows no black band. Only the camera
+			// leads: the heading, aim and walking below keep the true yaw.
+			float cam_base = base_yaw;
+			if (la.predict > 0.0f)
+			{
+				const float horizon = PredictHorizon(s_predict_stick_h);
+				s_prediction_s = horizon;
+				if (stick_rate != 0.0f && horizon > 0.0f)
+					cam_base = WrapPi(base_yaw + stick_rate * horizon);
+			}
+
+			const float yaw_true = base_yaw + la.yaw_sign * e.yaw;
+			const float yaw_cam = cam_base + la.yaw_sign * e.yaw;
 			const float pitch = std::clamp(la.pitch_sign * e.pitch, -1.45f, 1.45f);
-			const float sy = std::sin(yaw), cy = std::cos(yaw);
+			const float sy = std::sin(yaw_cam), cy = std::cos(yaw_cam);
 			const float sp = std::sin(pitch), cp = std::cos(pitch);
 
 			float eye[3] = {p[0] + la.eye_forward * sy, p[1] + la.eye_height, p[2] + la.eye_forward * cy};
@@ -1173,12 +1225,12 @@ namespace VR::CameraDriver
 				const float rs = std::sin(s_ref_yaw), rc = std::cos(s_ref_yaw);
 				const float fwd = -dx * rs - dz * rc;
 				const float right = dx * rc - dz * rs;
-				// Game: forward at base_yaw; "right" is a quarter turn clockwise, i.e. -yawSign * 90 deg.
-				const float right_yaw = base_yaw - la.yaw_sign * (PI_F * 0.5f);
+				// Game: forward at the camera's base yaw; "right" is a quarter turn clockwise, i.e. -yawSign * 90 deg.
+				const float right_yaw = cam_base - la.yaw_sign * (PI_F * 0.5f);
 				const float u = la.units_per_meter;
-				eye[0] += u * (fwd * std::sin(base_yaw) + right * std::sin(right_yaw));
+				eye[0] += u * (fwd * std::sin(cam_base) + right * std::sin(right_yaw));
 				eye[1] += u * dy;
-				eye[2] += u * (fwd * std::cos(base_yaw) + right * std::cos(right_yaw));
+				eye[2] += u * (fwd * std::cos(cam_base) + right * std::cos(right_yaw));
 			}
 
 			// Point-to-aim: while the stance says the weapon is raised, face where the aim hand points
@@ -1237,9 +1289,9 @@ namespace VR::CameraDriver
 				{
 					const float speed = la.aim_move_speed * std::min((mag - kDeadzone) / (0.95f - kDeadzone), 1.0f);
 					const float step = speed * turn_dt / mag;
-					const float move_right_yaw = yaw - la.yaw_sign * (PI_F * 0.5f);
-					const float nx = p[0] + step * (my * std::sin(yaw) + mx * std::sin(move_right_yaw));
-					const float nz = p[2] + step * (my * std::cos(yaw) + mx * std::cos(move_right_yaw));
+					const float move_right_yaw = yaw_true - la.yaw_sign * (PI_F * 0.5f);
+					const float nx = p[0] + step * (my * std::sin(yaw_true) + mx * std::sin(move_right_yaw));
+					const float nz = p[2] + step * (my * std::cos(yaw_true) + mx * std::cos(move_right_yaw));
 					if (std::isfinite(nx) && std::isfinite(nz))
 					{
 						memWrite32(static_cast<u32>(pa), std::bit_cast<u32>(nx));
@@ -1251,7 +1303,7 @@ namespace VR::CameraDriver
 			// Body follows view: standing idle with the stick centred, the character turns to face where the
 			// camera looks, so picking up, checking and opening things work on what the player looks at.
 			if (!la.body_follow.empty() && heading_addr != 0 && RecordChecksPass(la.body_follow, base.value()))
-				memWrite16(heading_addr, ToBinaryAngle(yaw));
+				memWrite16(heading_addr, ToBinaryAngle(yaw_true));
 
 			const float target[3] = {eye[0] + la.distance * sy * cp, eye[1] + la.distance * sp,
 				eye[2] + la.distance * cy * cp};
@@ -1273,13 +1325,18 @@ namespace VR::CameraDriver
 				memWrite32(la.roll_address, static_cast<u32>(roll));
 			}
 			// The game view is yaw_offset + yawSign * the head's room yaw: a stick turn and a recenter both change
-			// it, so frames already on their way are placed right across either.
+			// it, so frames already on their way are placed right across either. The frame records the offset it
+			// was rendered at (ahead of the true one with lookAt.predict) and the compositor compares it with the
+			// true offset at display, so a predicted frame needs about no turning when it is shown.
 			const float yaw_offset = WrapPi(base_yaw - la.yaw_sign * s_ref_yaw);
+			const u64 now_ms = NowMs();
 			s_base_yaw_now.store(yaw_offset, std::memory_order_release);
+			s_base_yaw_ms.store(now_ms, std::memory_order_release);
 			if (out)
 			{
-				out->base_yaw = yaw_offset;
+				out->base_yaw = WrapPi(cam_base - la.yaw_sign * s_ref_yaw);
 				out->yaw_sign = la.yaw_sign;
+				out->ms = now_ms;
 				out->dir[0] = sy * cp;
 				out->dir[1] = sp;
 				out->dir[2] = cy * cp;
@@ -1368,12 +1425,6 @@ namespace VR::CameraDriver
 		bool s_fov_saved = false;
 		u32 s_fov_saved_raw = 0;
 
-		u64 NowMs()
-		{
-			return static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
-				std::chrono::steady_clock::now().time_since_epoch()).count());
-		}
-
 		struct StampedPose
 		{
 			u64 ms = 0;
@@ -1410,6 +1461,7 @@ namespace VR::CameraDriver
 			HeadPose::Snapshot pose;
 			float base_yaw = 0.0f;
 			float yaw_sign = 1.0f;
+			u64 write_ms = 0; // when the write the frame was built from was made (NowMs)
 		};
 		std::array<FramePose, 8> s_frame_poses{};
 		std::array<u32, 8> s_frame_age{}; // how many writes back the match was (for the sync log)
@@ -1425,6 +1477,7 @@ namespace VR::CameraDriver
 		std::mutex s_gs_render_mutex;
 		FramePose s_gs_render_pose;
 		bool s_gs_render_valid = false;
+		u32 s_gs_render_shows = 0; // how many times RenderPose has handed out the current pose
 
 		void PublishRenderPose(bool valid, const FramePose& pose)
 		{
@@ -1435,6 +1488,7 @@ namespace VR::CameraDriver
 				std::lock_guard<std::mutex> lock(s_gs_render_mutex);
 				s_gs_render_valid = valid;
 				s_gs_render_pose = pose;
+				s_gs_render_shows = 0;
 			});
 		}
 
@@ -1502,7 +1556,7 @@ namespace VR::CameraDriver
 			// Within about 3 deg and 30 units; anything else is a frame the game built from its own camera.
 			if (!hit || !(best < 0.0025f))
 				return;
-			s_frame_poses[s_frame_next] = FramePose{hit->pose, hit->w.base_yaw, hit->w.yaw_sign};
+			s_frame_poses[s_frame_next] = FramePose{hit->pose, hit->w.base_yaw, hit->w.yaw_sign, hit->w.ms};
 			s_frame_age[s_frame_next] = hit_age;
 			s_frame_next = (s_frame_next + 1) % s_frame_poses.size();
 			s_frame_count = std::min(s_frame_count + 1, s_frame_poses.size());
@@ -1569,6 +1623,7 @@ namespace VR::CameraDriver
 			p.orientation_y = sy * cp;
 			p.orientation_z = -sy * sp;
 			p.valid = true;
+			p.publish_ms = NowMs(); // taken now, so the prediction horizon measures from here
 			return p;
 		}
 
@@ -1598,6 +1653,7 @@ namespace VR::CameraDriver
 			t.frames_matched = static_cast<u32>(s_frame_seq);
 			t.online_safe = s_online_safe;
 			t.test_head = s_test_head;
+			t.prediction_ms = s_armed_logged ? s_prediction_s * 1000.0f : 0.0f;
 			std::lock_guard<std::mutex> lock(s_telemetry_mutex);
 			s_telemetry = t;
 		}
@@ -1661,6 +1717,7 @@ namespace VR::CameraDriver
 		MaybeRunSelfTest();
 		s_pause_hit = false;
 		s_test_head = false;
+		s_prediction_s = 0.0f;
 		s_online_safe = EmuConfig.VR.OnlineSafe || EmuConfig.DEV9.EthEnable;
 
 		const bool switched_on = EffectiveVREnabled(EmuConfig.VR.Enable) && EmuConfig.VR.HeadCamera &&
@@ -2047,9 +2104,56 @@ namespace VR::CameraDriver
 		*out = s_gs_render_pose.pose;
 		// The game camera's yaw is base + yawSign * head yaw. Showing a frame rendered at base B_r while
 		// the base is now B_n means placing it yawSign * (B_r - B_n) further round in the room.
+		const float turn = s_gs_render_pose.yaw_sign *
+		                   WrapPi(s_gs_render_pose.base_yaw - s_base_yaw_now.load(std::memory_order_acquire));
 		if (turn_yaw)
-			*turn_yaw = s_gs_render_pose.yaw_sign *
-			            WrapPi(s_gs_render_pose.base_yaw - s_base_yaw_now.load(std::memory_order_acquire));
+			*turn_yaw = turn;
+
+		// Prediction horizons (see s_predict_h). Only the first few showings of a pose count: a view that stops
+		// changing (nothing moving) or a stall keeps showing the last pose, which only ages.
+		constexpr u32 kPredictMaxShows = 4;
+		constexpr u64 kPredictMaxSampleMs = 250;
+		const u64 now = NowMs();
+		if (s_gs_render_shows < kPredictMaxShows)
+		{
+			const u64 taken = s_gs_render_pose.pose.publish_ms;
+			if (taken != 0 && now >= taken && now - taken <= kPredictMaxSampleMs)
+				FoldHorizonSample(s_predict_h, static_cast<float>(now - taken) * 0.001f);
+			const u64 written = s_gs_render_pose.write_ms;
+			const u64 latest = s_base_yaw_ms.load(std::memory_order_acquire);
+			if (written != 0 && latest >= written && latest - written <= kPredictMaxSampleMs)
+				FoldHorizonSample(s_predict_stick_h, static_cast<float>(latest - written) * 0.001f);
+			s_gs_render_shows++;
+		}
+
+		// PCSX2_VR_SYNCLOG: once a second, how far frames still had to be turned when shown (about 0 through a
+		// smooth turn while lookAt.predict leads it) and the horizons.
+		static const bool s_synclog = (std::getenv("PCSX2_VR_SYNCLOG") != nullptr);
+		if (s_synclog)
+		{
+			static u64 s_log_ms = 0;
+			static float s_turn_sum = 0.0f, s_turn_abs = 0.0f, s_turn_max = 0.0f;
+			static u32 s_turn_n = 0;
+			if (s_log_ms == 0)
+				s_log_ms = now;
+			const float deg = turn * (180.0f / PI_F);
+			s_turn_sum += deg;
+			s_turn_abs += std::abs(deg);
+			s_turn_max = std::max(s_turn_max, std::abs(deg));
+			s_turn_n++;
+			if (now - s_log_ms >= 1000)
+			{
+				const float n = static_cast<float>(s_turn_n);
+				Console.WriteLn("(VR) predict: turn at display mean %+.2f deg (abs %.2f, max %.2f) over %u frame(s); "
+								"horizon %.0f ms (head pose to present), %.0f ms (stick lead).",
+					s_turn_sum / n, s_turn_abs / n, s_turn_max, s_turn_n,
+					std::max(s_predict_h.load(std::memory_order_relaxed), 0.0f) * 1000.0f,
+					std::max(s_predict_stick_h.load(std::memory_order_relaxed), 0.0f) * 1000.0f);
+				s_log_ms = now;
+				s_turn_sum = s_turn_abs = s_turn_max = 0.0f;
+				s_turn_n = 0;
+			}
+		}
 		return true;
 	}
 

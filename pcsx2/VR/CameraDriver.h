@@ -35,7 +35,8 @@ namespace VR::CameraDriver
 	// view matrix and sent down the GS queue in step with the frames. False when not known (no
 	// viewMatrix in the profile, first person not active, or no frame matched yet). turn_yaw (radians,
 	// OpenXR yaw, may be null) is how much further round the frame belongs because the view has been
-	// turned by the stick (or the character's heading) since it was rendered.
+	// turned by the stick (or the character's heading) since it was rendered; about 0 through a smooth
+	// turn that lookAt.predict renders ahead. Each call also measures the prediction horizon.
 	bool RenderPose(HeadPose::Snapshot* out, float* turn_yaw);
 
 	void RequestRecenter();
@@ -68,12 +69,12 @@ namespace VR::CameraDriver
 		bool aim_moving = false;     // walk-and-shoot owns the move stick
 		bool yaw_anchor_valid = false;
 		float yaw_anchor = 0.0f;   // game yaw, radians
-		float base_yaw_now = 0.0f; // game yaw minus yawSign * the recenter yaw, radians
+		float base_yaw_now = 0.0f; // game yaw minus yawSign * the recenter yaw, radians (true, not predicted)
 		u32 match_age = 0;         // how many writes back the newest matched frame was (0: none)
 		u32 frames_matched = 0;
 		bool online_safe = false;
 		bool test_head = false;     // the head pose came from PINE test input
-		float prediction_ms = 0.0f; // how far ahead the head pose is predicted (0: not predicted)
+		float prediction_ms = 0.0f; // lookAt.predict horizon a smooth turn is rendered ahead by (0: off or not measured)
 	};
 
 	Telemetry GetTelemetry();

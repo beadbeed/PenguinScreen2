@@ -105,6 +105,10 @@ SLPM-65428:
       # back, 6-11 px at 0, 1 or 3, 10 px with the old 40 ms guess).
       viewMatrix: 0x3062E0
       syncFramesBack: 2
+      # A smooth stick turn is rendered ahead by how late frames reach the screen (measured, at most
+      # 120 ms), so its leading edge shows no black band; heading, aim and walking keep the true yaw.
+      # 0 turns it off. 0.8 is also the damping for head prediction (not used yet).
+      predict: 0.8
       # Weapon raised (stance 2, R1 or the hip holster): the character faces where the right
       # controller points. Aim pitch (+0xBC8, needs the servo silenced) is not enabled yet.
       # Walk and shoot: with the weapon up the left stick moves you at 70 cm/s (where you look, like

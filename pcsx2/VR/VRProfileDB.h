@@ -322,6 +322,12 @@ namespace VR::ProfileDB
 		// Used unless the VR SnapTurn setting is on or this is 0; then snap_turn_deg applies.
 		float smooth_turn_deg_s = 0.0f;
 
+		// Write the camera for when its frame is on screen (0 = off). While above 0, a smooth stick turn is
+		// rendered ahead by the measured frame latency (needs view_matrix_address to measure it), so
+		// the turn's leading edge shows no black band; heading, aim and walking keep the true yaw. The
+		// value itself is the damping for head prediction (0-1).
+		float predict = 0.0f;
+
 		// While these all pass (a menu, the map, pause), the camera holds its last view, the head no
 		// longer steers it and first person counts as inactive, so the world screen is shown.
 		std::vector<CameraGuard> pause_when;

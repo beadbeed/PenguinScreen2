@@ -1387,7 +1387,8 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 		warnUnknownKeys(serial, ln, "camera.lookAt",
 			{"eye", "target", "position", "heading", "eyeHeight", "eyeForward", "distance", "unitsPerMeter",
 				"yawSign", "pitchSign", "roll", "rollSign", "when", "notes", "yawAnchor", "snapTurnDeg", "snapStick",
-				"aim", "smoothTurnDegPerSec", "pauseWhen", "bodyFollow", "hold", "viewMatrix", "syncFramesBack"});
+				"aim", "smoothTurnDegPerSec", "pauseWhen", "bodyFollow", "hold", "viewMatrix", "syncFramesBack",
+				"predict"});
 		const std::optional<u32> eye = ln.has_child("eye") ? parseAddress(nodeVal(ln["eye"])) : std::nullopt;
 		const std::optional<u32> tgt = ln.has_child("target") ? parseAddress(nodeVal(ln["target"])) : std::nullopt;
 		const std::optional<s64> pos = ln.has_child("position") ? parseSignedOffset(nodeVal(ln["position"])) : std::nullopt;
@@ -1477,6 +1478,8 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 			}
 			readOptionalFloat(serial, ln, "smoothTurnDegPerSec", "camera.lookAt smoothTurnDegPerSec", la.smooth_turn_deg_s);
 			la.smooth_turn_deg_s = std::clamp(std::isfinite(la.smooth_turn_deg_s) ? la.smooth_turn_deg_s : 0.0f, 0.0f, 720.0f);
+			readOptionalFloat(serial, ln, "predict", "camera.lookAt predict", la.predict);
+			la.predict = std::clamp(std::isfinite(la.predict) ? la.predict : 0.0f, 0.0f, 1.0f);
 
 			if (ln.has_child("pauseWhen") && ln["pauseWhen"].is_seq())
 				parseGuardList(serial, ln["pauseWhen"], "camera.lookAt pauseWhen", la.pause_when);
@@ -1623,6 +1626,9 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 				else
 					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt syncFramesBack must be 0-4; keeping {}.", serial, la.sync_frames_back);
 			}
+			if (la.predict > 0.0f && la.view_matrix_address == 0)
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt predict needs viewMatrix to measure how late frames "
+								   "are shown; it will have no effect.", serial);
 
 			if (ln.has_child("aim") && ln["aim"].is_map())
 			{

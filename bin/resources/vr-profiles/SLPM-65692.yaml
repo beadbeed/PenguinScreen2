@@ -98,6 +98,10 @@ SLPM-65692:
         - { address: 0x718DB4, f32: 75.0, restoreF32: 80.0, when: [{ address: 0x543004, equals: 3 }], notes: "near-cull radius, characters" }
       viewMatrix: 0x3134F0
       syncFramesBack: 2
+      # A smooth stick turn is rendered ahead by how late frames reach the screen (measured, at most
+      # 120 ms), so its leading edge shows no black band; heading, aim and walking keep the true yaw.
+      # 0 turns it off. 0.8 is also the damping for head prediction (not used yet).
+      predict: 0.8
     fov: { address: 0x313590, encoding: f32, scale: 100.0 }   # vertical FOV, degrees (about 115 horizontal at 4:3)
   # VR controllers (only when launched with --vr; flat play is untouched).
   # A pad bound in Settings -> Controllers (e.g. a DualSense) keeps working alongside;

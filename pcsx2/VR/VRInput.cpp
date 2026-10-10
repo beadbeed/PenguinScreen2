@@ -951,6 +951,8 @@ namespace VR
 			p.position_z = t.head_pose.position_xyz[2];
 			p.position_valid = true;
 			p.valid = true;
+			// Taken now, like a fresh headset pose, so the camera's prediction horizon measures from here.
+			p.publish_ms = NowMs();
 			*out = p;
 			return true;
 		}
