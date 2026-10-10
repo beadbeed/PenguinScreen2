@@ -935,21 +935,34 @@ static bool parseRecordCheckList(const std::string_view serial, const ryml::Cons
 			all_ok = false;
 			continue;
 		}
-		warnUnknownKeys(serial, bn, where, {"offset", "equals", "notEquals", "width"});
+		warnUnknownKeys(serial, bn, where, {"offset", "equals", "notEquals", "min", "max", "width", "notes"});
 		const std::optional<s64> off = bn.has_child("offset") ? parseSignedOffset(nodeVal(bn["offset"])) : std::nullopt;
 		const bool has_ne = bn.has_child("notEquals");
+		const bool has_range = bn.has_child("min") && bn.has_child("max");
 		const std::optional<u32> eq = bn.has_child("equals") ? parseHexU32(nodeVal(bn["equals"])) :
 		                              has_ne                 ? parseHexU32(nodeVal(bn["notEquals"])) : std::nullopt;
-		if (!off.has_value() || !eq.has_value())
+		const std::optional<u32> lo = has_range ? parseHexU32(nodeVal(bn["min"])) : std::nullopt;
+		const std::optional<u32> hi = has_range ? parseHexU32(nodeVal(bn["max"])) : std::nullopt;
+		if (!off.has_value() || (!eq.has_value() && !(lo.has_value() && hi.has_value())))
 		{
-			Console.WarningFmt("(VR) ProfileDB: Serial '{}' {} entry needs offset and equals|notEquals; skipping it.", serial, where);
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' {} entry needs offset and equals|notEquals|min+max; skipping it.",
+				serial, where);
 			all_ok = false;
 			continue;
 		}
 		VR::ProfileDB::RecordCheck rc;
 		rc.offset = off.value();
-		rc.equals = eq.value();
-		rc.not_equals = has_ne && !bn.has_child("equals");
+		if (eq.has_value())
+		{
+			rc.equals = eq.value();
+			rc.not_equals = has_ne && !bn.has_child("equals");
+		}
+		else
+		{
+			rc.has_range = true;
+			rc.min = lo.value();
+			rc.max = hi.value();
+		}
 		if (bn.has_child("width"))
 		{
 			const std::optional<u32> w = StringUtil::FromChars<u32>(nodeVal(bn["width"]));
@@ -1447,7 +1460,7 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 		warnUnknownKeys(serial, ln, "camera.lookAt",
 			{"eye", "target", "position", "heading", "eyeHeight", "eyeForward", "distance", "unitsPerMeter",
 				"yawSign", "pitchSign", "roll", "rollSign", "when", "notes", "yawAnchor", "snapTurnDeg", "snapStick",
-				"aim", "smoothTurnDegPerSec", "pauseWhen", "bodyFollow", "hold", "viewMatrix", "syncFramesBack",
+				"aim", "smoothTurnDegPerSec", "pauseWhen", "bodyFollow", "hold", "viewMatrix", "syncFramesBack", "releaseWhen",
 				"predict"});
 		const std::optional<u32> eye = ln.has_child("eye") ? parseAddress(nodeVal(ln["eye"])) : std::nullopt;
 		const std::optional<u32> tgt = ln.has_child("target") ? parseAddress(nodeVal(ln["target"])) : std::nullopt;
@@ -1562,6 +1575,8 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 					la.body_follow.clear();
 				}
 			}
+			if (ln.has_child("releaseWhen") && ln["releaseWhen"].is_seq())
+				parseRecordCheckList(serial, ln["releaseWhen"], "camera.lookAt.releaseWhen", la.release_when);
 			if (ln.has_child("hold") && ln["hold"].is_seq())
 			{
 				for (const ryml::ConstNodeRef& hn : ln["hold"].children())

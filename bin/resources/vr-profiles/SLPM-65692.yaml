@@ -116,6 +116,12 @@ SLPM-65692:
       bodyFollow:
         - { offset: 0x08, equals: 1, width: 1 }     # stance: normal (2 = weapon raised)
         - { offset: 0xFA8, equals: 0, width: 2 }    # stick magnitude: centred
+      # Grabbed by a zombie (stance 5, checked on File #1: bites follow until Kevin breaks free), or down / dead /
+      # turned (status 0xBB8: 0x08-0x0B down, 0x0C down in gas, above that dead, 0x30-0x34 zombie): the game's own
+      # camera shows it on the world screen; first person comes back facing the way the character does.
+      releaseWhen:
+        - { offset: 0x08, equals: 5, width: 1 }
+        - { offset: 0xBB8, min: 0x08, max: 0x3F, width: 1 }
       hold:
         - { address: 0x3B31F4, value: 3, width: 1, restoreFrom: 0x4912BD, when: [{ address: 0x4912BD, notEquals: 3, width: 1 }], notes: "camera focus slot" }
         - { address: 0x3B31F4, value: 0, width: 1, restoreFrom: 0x4912BD, when: [{ address: 0x4912BD, equals: 3, width: 1 }], notes: "camera focus slot (you are slot 3)" }

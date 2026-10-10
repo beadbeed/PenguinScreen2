@@ -812,17 +812,41 @@ namespace VR::CameraDriver
 			}
 		}
 
+		bool RecordCheckPass(const ProfileDB::RecordCheck& c, u32 base)
+		{
+			const s64 a = static_cast<s64>(base) + c.offset;
+			if (a < 0 || a + c.width > static_cast<s64>(Ps2MemSize::MainRam) || (a % c.width) != 0)
+				return false;
+			const u32 v = ReadSized(static_cast<u32>(a), c.width);
+			if (c.has_range)
+				return v >= c.min && v <= c.max;
+			return (v == c.equals) != c.not_equals;
+		}
+
 		bool RecordChecksPass(const std::vector<ProfileDB::RecordCheck>& checks, u32 base)
 		{
 			for (const ProfileDB::RecordCheck& c : checks)
 			{
-				const s64 a = static_cast<s64>(base) + c.offset;
-				if (a < 0 || a + c.width > static_cast<s64>(Ps2MemSize::MainRam) || (a % c.width) != 0)
-					return false;
-				if ((ReadSized(static_cast<u32>(a), c.width) == c.equals) == c.not_equals)
+				if (!RecordCheckPass(c, base))
 					return false;
 			}
 			return true;
+		}
+
+		// lookAt.releaseWhen: true while any one entry holds for the local character.
+		bool LookAtReleased(const ProfileDB::CameraProfile& cam, u32 crc)
+		{
+			if (!cam.look_at.has_value() || cam.look_at->release_when.empty())
+				return false;
+			const std::optional<u32> base = GetBase(cam, crc);
+			if (!base.has_value())
+				return false;
+			for (const ProfileDB::RecordCheck& c : cam.look_at->release_when)
+			{
+				if (RecordCheckPass(c, base.value()))
+					return true;
+			}
+			return false;
 		}
 
 		// Online-safe: the VR setting, or any time the network adapter is on. Nothing that changes what the
@@ -1830,7 +1854,9 @@ namespace VR::CameraDriver
 			pose_in = HeadPose::Get();
 		const HeadPose::Snapshot pose = pose_in;
 
-		if (GuardsPass(cam))
+		// releaseWhen (grabbed, down, dead) counts as a failed guard, so the usual disarm grace hands the camera
+		// back and first person returns, facing the way the character does, once it lets go.
+		if (GuardsPass(cam) && !LookAtReleased(cam, crc))
 			s_guard_fail_vsyncs = 0;
 		else if (s_guard_fail_vsyncs < 0xFFFFFFFFu)
 			s_guard_fail_vsyncs++;

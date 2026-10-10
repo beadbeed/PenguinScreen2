@@ -244,6 +244,10 @@ namespace VR::ProfileDB
 		u32 equals = 0;
 		u8 width = 1;
 		bool not_equals = false;
+		// min/max instead of equals: holds while min <= value <= max.
+		bool has_range = false;
+		u32 min = 0;
+		u32 max = 0;
 	};
 
 	struct CameraSilence
@@ -349,6 +353,11 @@ namespace VR::ProfileDB
 		// Body follows view: while every check holds (standing idle, stick centred), the heading is
 		// written to the camera yaw, so picking up and checking things faces where the player looks.
 		std::vector<RecordCheck> body_follow;
+
+		// Any one of these holding (the character grabbed, down, dead) hands the camera back to the game for
+		// as long as it holds: its own shot of the struggle on the world screen beats a view from inside a
+		// head pinned in place.
+		std::vector<RecordCheck> release_when;
 
 		// Values held while first person is active (e.g. a camera-focus byte so the near-camera cull
 		// hides the local body) and put back when it ends, if the game has not changed them since.

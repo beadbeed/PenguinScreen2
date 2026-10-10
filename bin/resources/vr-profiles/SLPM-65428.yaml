@@ -115,6 +115,12 @@ SLPM-65428:
       # slot (3, empty offline; 0 if you are slot 3 online) and the cull hides the local character; it is
       # put back from the local slot byte. The class-1 radius goes from 80 to 75 so zombies and partners
       # stay visible down to about 0.5 m away.
+      # Grabbed by a zombie (stance 5, checked on File #1: bites follow until Kevin breaks free), or down / dead /
+      # turned (status 0xBA0: 0x08-0x0B down, 0x0C down in gas, above that dead, 0x30-0x34 zombie): the game's own
+      # camera shows it on the world screen; first person comes back facing the way the character does.
+      releaseWhen:
+        - { offset: 0x08, equals: 5, width: 1 }
+        - { offset: 0xBA0, min: 0x08, max: 0x3F, width: 1 }
       hold:
         - { address: 0x3AEF74, value: 3, width: 1, restoreFrom: 0x48BF7D, when: [{ address: 0x48BF7D, notEquals: 3, width: 1 }], notes: "camera focus slot" }
         - { address: 0x3AEF74, value: 0, width: 1, restoreFrom: 0x48BF7D, when: [{ address: 0x48BF7D, equals: 3, width: 1 }], notes: "camera focus slot (you are slot 3)" }
