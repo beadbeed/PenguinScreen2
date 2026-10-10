@@ -2289,7 +2289,10 @@ namespace VR::XRCompositor
 			}
 			else if (s.fp_switch_due_ms == 0)
 			{
-				if (HudCards::Blink(fp_want ? "first-person screen" : "world screen"))
+				// Wait only for a blink that can be drawn: with the HUD cards off for the session (or no VIEW
+				// space) the delay would just show the old placement with the new camera for 40 ms.
+				if (!s.hud_disabled && s.view_space != XR_NULL_HANDLE &&
+					HudCards::Blink(fp_want ? "first-person screen" : "world screen"))
 					s.fp_switch_due_ms = CameraDriver::SteadyNowMs() + HudCards::kBlinkRiseMs;
 				else
 					switch_now = true;
