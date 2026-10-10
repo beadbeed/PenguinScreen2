@@ -62,7 +62,7 @@ SLPM-65692:
       position: 0x38      # f32 x, y (up), z
       heading: 0x92       # s16, 0x10000 = 360 deg, 0 faces +Z
       eyeHeight: 155
-      eyeForward: 30      # in front of the face; at 10 the eye sits inside the head model (PS2 draws back faces)
+      eyeForward: 10      # about where the eyes are; the body is hidden (see hold) so the head model can't show
       distance: 100
       roll: 0x31359C         # camera roll (s32 holding a 16-bit angle): written level (rollSign 0) so a cut's
       rollSign: 0          # roll can't stay latched; the first-person screen itself stays roll-level
@@ -79,8 +79,16 @@ SLPM-65692:
       # Weapon raised (stance 2, R1 or the hip holster): the character faces where the right
       # controller points. Aim pitch (+0xBC8, needs the servo silenced) is not enabled yet.
       aim: { stance: 0x08, equals: 2, hand: right }
-      # File #1's view matrix moved by the same +0xD210 as eye/target/roll/FOV; not yet checked live. If it
-      # is wrong nothing matches and the screen falls back to poseLagMs.
+      # Checked live on File #2 (Training Ground): item screen flag, near-cull table, view matrix and the
+      # stick magnitude (+0xFA8: the record is 0x20 longer than File #1's). No File #1-style action byte
+      # was found, so body-follow uses stance + stick only.
+      pauseWhen: [{ address: 0x4912BE, equals: 1, width: 1 }]
+      bodyFollow:
+        - { offset: 0x08, equals: 1, width: 1 }     # stance: normal (2 = weapon raised)
+        - { offset: 0xFA8, equals: 0, width: 2 }    # stick magnitude: centred
+      hold:
+        - { address: 0x3B31F4, value: 3, width: 1, restore: 0, notes: "camera focus slot (normally the local slot)" }
+        - { address: 0x718DB4, f32: 70.0, restoreF32: 80.0, when: [{ address: 0x543004, equals: 3 }], notes: "near-cull radius, characters" }
       viewMatrix: 0x3134F0
       syncFramesBack: 2
     fov: { address: 0x313590, encoding: f32, scale: 100.0 }   # vertical FOV, degrees (about 115 horizontal at 4:3)
@@ -98,8 +106,8 @@ SLPM-65692:
   # The right stick turns the view (camera.lookAt), so it is not passed to the game: the PS2 right
   # stick's up/down plays ad-lib shouts in Outbreak.
   #
-  # The right grip is for gestures only, so a squeeze at the hip can't also do something
-  # else. Zones are placed from the head (metres: side + right, height + up, forward +
+  # The grips are for gestures only, so a squeeze at the hip can't also do something
+  # else (Outbreak doesn't use L2). Zones are placed from the head (metres: side + right, height + up, forward +
   # ahead) and turn with the head's yaw. Squeeze the grip inside one to press its button;
   # it holds until the grip opens, wherever the hand goes.
   # To tune: copy this file into <data dir>/vrprofiles/ and edit the copy.
@@ -120,7 +128,6 @@ SLPM-65692:
         DpadLeft: Left
         DpadRight: Right
         LeftTriggerPress: L1
-        LeftGripPress: L2
         RightStickClick: R3
         LeftStickX: LeftStickX
         LeftStickY: LeftStickY
@@ -132,6 +139,14 @@ SLPM-65692:
       pad: 1
       bind:
         Pressed: R1
+    - device: Zone
+      id: belt
+      notes: "Left hip: squeeze the left grip there to open the item screen (Start), shown in front of you; squeeze there again to close it."
+      placement: { side: -0.22, height: -0.50, forward: 0.12 }   # mirror of the holster
+      params: { radius: 0.20, hand: left, grip: true }
+      pad: 1
+      bind:
+        Pressed: Start
     - device: Zone
       id: backpack
       notes: "Over the right shoulder: reach back past your ear and squeeze the grip to open the item screen (Start)."

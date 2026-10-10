@@ -120,8 +120,8 @@ SLPM-65428:
   # The right stick turns the view (camera.lookAt), so it is not passed to the game: the PS2 right
   # stick's up/down plays ad-lib shouts in Outbreak.
   #
-  # The right grip is for gestures only, so a squeeze at the hip can't also do something
-  # else. Zones are placed from the head (metres: side + right, height + up, forward +
+  # The grips are for gestures only, so a squeeze at the hip can't also do something
+  # else (Outbreak doesn't use L2). Zones are placed from the head (metres: side + right, height + up, forward +
   # ahead) and turn with the head's yaw. Squeeze the grip inside one to press its button;
   # it holds until the grip opens, wherever the hand goes.
   # To tune: copy this file into <data dir>/vrprofiles/ and edit the copy.
@@ -142,7 +142,6 @@ SLPM-65428:
         DpadLeft: Left
         DpadRight: Right
         LeftTriggerPress: L1
-        LeftGripPress: L2
         RightStickClick: R3
         LeftStickX: LeftStickX
         LeftStickY: LeftStickY
@@ -154,6 +153,14 @@ SLPM-65428:
       pad: 1
       bind:
         Pressed: R1
+    - device: Zone
+      id: belt
+      notes: "Left hip: squeeze the left grip there to open the item screen (Start), shown in front of you; squeeze there again to close it."
+      placement: { side: -0.22, height: -0.50, forward: 0.12 }   # mirror of the holster
+      params: { radius: 0.20, hand: left, grip: true }
+      pad: 1
+      bind:
+        Pressed: Start
     - device: Zone
       id: backpack
       notes: "Over the right shoulder: reach back past your ear and squeeze the grip to open the item screen (Start)."
