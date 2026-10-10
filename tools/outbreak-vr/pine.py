@@ -7,6 +7,7 @@ Wire format: request  = u32 total_len (incl. these 4 bytes) + commands back to b
 """
 import socket
 import struct
+import threading
 import time
 
 MSG_READ8, MSG_READ16, MSG_READ32, MSG_READ64 = 0x00, 0x01, 0x02, 0x03
@@ -25,7 +26,11 @@ class PineError(RuntimeError):
 
 
 class Pine:
+    """One connection; PINE serves a single client at a time, so share this object (it is thread-safe)
+    instead of opening a second one."""
+
     def __init__(self, slot=28011, host="127.0.0.1", timeout=15.0):
+        self.lock = threading.Lock()
         self.sock = socket.create_connection((host, slot), timeout=timeout)
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
@@ -48,6 +53,10 @@ class Pine:
         return bytes(buf)
 
     def _transact(self, payload):
+        with self.lock:
+            return self._transact_locked(payload)
+
+    def _transact_locked(self, payload):
         self.sock.sendall(struct.pack("<I", len(payload) + 4) + payload)
         total = struct.unpack("<I", self._recv_exact(4))[0]
         body = self._recv_exact(total - 4)

@@ -51,7 +51,7 @@ SLPM-65428:
       position: 0x38      # f32 x, y (up), z
       heading: 0x92       # s16, 0x10000 = 360 deg, 0 faces +Z
       eyeHeight: 155
-      eyeForward: 10
+      eyeForward: 30      # in front of the face; at 10 the eye sits inside the head model (PS2 draws back faces)
       distance: 100
       unitsPerMeter: 100
     fov: { address: 0x306380, encoding: f32, scale: 80.0 }   # vertical FOV, degrees
