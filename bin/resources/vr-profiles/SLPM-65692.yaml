@@ -57,6 +57,17 @@ SLPM-65692:
       - { address: 0x5AA978, on: 0x00000000, off: 0x0C0D0D3C, when: [{ address: 0x543004, equals: 3 }] }   # door follow camera eye write
       - { address: 0x5AAAB4, on: 0x00000000, off: 0x0C0D0D3C, when: [{ address: 0x543004, equals: 3 }] }   # door follow camera eye write
       - { address: 0x6363B8, on: 0x00000000, off: 0xA2A20FBA, when: [{ address: 0x543004, equals: 3 }] }   # stick latch on camera-cut lines (would freeze gaze steering)
+      # Aim pitch (see lookAt.aim): the gun-elevation servo's easing calls and stores to +0xBE0 (2.DAT 0x557D04-0x557DEC)
+      # are NOP'd only while your weapon is raised (stance 2) and never online-safe, so the pitch written from the
+      # controller holds. They are put back as soon as the weapon is lowered. The servo is shared, so partners' aim
+      # pitch holds still while you aim.
+      - { address: 0x557D70, on: 0x00000000, off: 0x0C0D278C, when: [{ address: 0x543004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: easing call
+      - { address: 0x557D88, on: 0x00000000, off: 0x0C0D278C, when: [{ address: 0x543004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: easing call
+      - { address: 0x557DA0, on: 0x00000000, off: 0x0C0D278C, when: [{ address: 0x543004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: easing call
+      - { address: 0x557DD0, on: 0x00000000, off: 0xA6400BE0, when: [{ address: 0x543004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: sh zero, 0xBE0(s2)
+      - { address: 0x557DDC, on: 0x00000000, off: 0xA6430BE0, when: [{ address: 0x543004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: sh v1, 0xBE0(s2)
+      - { address: 0x557DE8, on: 0x00000000, off: 0xA6430BE0, when: [{ address: 0x543004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: sh v1, 0xBE0(s2)
+      - { address: 0x557DEC, on: 0x00000000, off: 0xA6400BE0, when: [{ address: 0x543004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: sh zero, 0xBE0(s2)
     lookAt:
       eye: 0x313548
       target: 0x313554
@@ -80,11 +91,14 @@ SLPM-65692:
       snapTurnDeg: 30
       snapStick: right
       # Weapon raised (stance 2, R1 or the hip holster): the character faces where the right
-      # controller points. Aim pitch (+0xBC8, needs the servo silenced) is not enabled yet.
+      # controller points, and aims as far up or down as it points (s16 +0xBE0, found statically in 2.DAT;
+      # pitchSign carried over from File #1, where positive is up, not yet checked live on File #2).
+      # Offline only: it needs the servo silenced (the offlineOnly silence entries above); online-safe the
+      # game keeps its own pitch. pitchClamp 8000 stays under the game's own 8192 clamp.
       # Walk and shoot: with the weapon up the left stick moves you at 70 cm/s (where you look, like
       # walking); the game itself would only turn and tilt the aim with it. Checked on File #1: walls
       # still stop you (the game's collision pushes the position back out).
-      aim: { stance: 0x08, equals: 2, hand: right, move: 70, moveStick: left }
+      aim: { stance: 0x08, equals: 2, hand: right, move: 70, moveStick: left, pitch: 0xBE0, pitchSign: 1, pitchClamp: 8000 }
       # Checked live on File #2 (Training Ground): item screen flag, near-cull table, view matrix and the
       # stick magnitude (+0xFA8: the record is 0x20 longer than File #1's). No File #1-style action byte
       # was found, so body-follow uses stance + stick only.

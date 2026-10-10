@@ -797,6 +797,36 @@ namespace VR::CameraDriver
 			return GuardListPass(cam.guards);
 		}
 
+		u32 ReadSized(u32 address, u8 width)
+		{
+			switch (width)
+			{
+				case 1: return memRead8(address);
+				case 2: return memRead16(address);
+				default: return memRead32(address);
+			}
+		}
+
+		bool RecordChecksPass(const std::vector<ProfileDB::RecordCheck>& checks, u32 base)
+		{
+			for (const ProfileDB::RecordCheck& c : checks)
+			{
+				const s64 a = static_cast<s64>(base) + c.offset;
+				if (a < 0 || a + c.width > static_cast<s64>(Ps2MemSize::MainRam) || (a % c.width) != 0)
+					return false;
+				if ((ReadSized(static_cast<u32>(a), c.width) == c.equals) == c.not_equals)
+					return false;
+			}
+			return true;
+		}
+
+		// Online-safe: the VR setting, or any time the network adapter is on. Nothing that changes what the
+		// game simulates (code patches, writes to the character) is done then.
+		bool OnlineSafeNow()
+		{
+			return EmuConfig.VR.OnlineSafe || EmuConfig.DEV9.EthEnable;
+		}
+
 		bool s_silence_applied = false;
 		u32 s_silence_crc = 0;
 		std::vector<u8> s_silence_patched; // per entry: the word holds value_on because of us
@@ -807,11 +837,14 @@ namespace VR::CameraDriver
 		// is patched again, and a word holding neither value (other code is resident) is left alone.
 		// An entry with a `when` guard is only touched while that guard passes. Only words we patched
 		// are ever restored, except for a one-shot repair of guarded entries after a savestate load.
-		void ApplySilence(const ProfileDB::CameraProfile& cam, u32 crc)
+		// An entry with activeWhen (checks on the base record) or offlineOnly is only patched while those
+		// hold; otherwise the word is put back at once (e.g. the aim servo runs again when the gun is lowered).
+		void ApplySilence(const ProfileDB::CameraProfile& cam, u32 crc, const std::optional<u32>& base)
 		{
 			if (s_silence_crc != crc || s_silence_patched.size() != cam.silence.size())
 				s_silence_patched.assign(cam.silence.size(), 0);
 			size_t patched = 0;
+			size_t restored = 0;
 			for (size_t i = 0; i < cam.silence.size(); i++)
 			{
 				const ProfileDB::CameraSilence& sil = cam.silence[i];
@@ -823,6 +856,18 @@ namespace VR::CameraDriver
 				if (sil.value_on == sil.value_off)
 					continue;
 				const u32 cur = static_cast<u32>(memRead32(sil.ee_address));
+				const bool active = !(sil.offline_only && OnlineSafeNow()) &&
+				                    (sil.active_when.empty() || (base.has_value() && RecordChecksPass(sil.active_when, base.value())));
+				if (!active)
+				{
+					if (cur == sil.value_on && (s_silence_patched[i] || s_silence_repair))
+					{
+						memWrite32(sil.ee_address, sil.value_off);
+						restored++;
+					}
+					s_silence_patched[i] = 0;
+					continue;
+				}
 				if (cur == sil.value_off)
 				{
 					memWrite32(sil.ee_address, sil.value_on);
@@ -834,6 +879,8 @@ namespace VR::CameraDriver
 			}
 			if (patched > 0)
 				DevCon.WriteLn("(VR) CameraDriver: game camera writer silenced (%zu patch(es)).", patched);
+			if (restored > 0)
+				DevCon.WriteLn("(VR) CameraDriver: game code restored while its silence is inactive (%zu patch(es)).", restored);
 			s_silence_applied = true;
 			s_silence_crc = crc;
 			s_silence_repair = false;
@@ -1030,16 +1077,6 @@ namespace VR::CameraDriver
 			return (dt > 0.0f && dt < 0.1f) ? dt : 0.0f;
 		}
 
-		u32 ReadSized(u32 address, u8 width)
-		{
-			switch (width)
-			{
-				case 1: return memRead8(address);
-				case 2: return memRead16(address);
-				default: return memRead32(address);
-			}
-		}
-
 		void WriteSized(u32 address, u8 width, u32 value)
 		{
 			switch (width)
@@ -1048,19 +1085,6 @@ namespace VR::CameraDriver
 				case 2: memWrite16(address, static_cast<u16>(value)); break;
 				default: memWrite32(address, value); break;
 			}
-		}
-
-		bool RecordChecksPass(const std::vector<ProfileDB::CameraLookAt::RecordCheck>& checks, u32 base)
-		{
-			for (const ProfileDB::CameraLookAt::RecordCheck& c : checks)
-			{
-				const s64 a = static_cast<s64>(base) + c.offset;
-				if (a < 0 || a + c.width > static_cast<s64>(Ps2MemSize::MainRam) || (a % c.width) != 0)
-					return false;
-				if ((ReadSized(static_cast<u32>(a), c.width) == c.equals) == c.not_equals)
-					return false;
-			}
-			return true;
 		}
 
 		// What camera.lookAt wrote this vsync, for matching against the game's view matrix later.
@@ -1255,7 +1279,8 @@ namespace VR::CameraDriver
 						const EulerAngles h = QuaternionToEulerYXZ(aim.orientation_xyzw[0], aim.orientation_xyzw[1],
 							aim.orientation_xyzw[2], aim.orientation_xyzw[3]);
 						memWrite16(heading_addr, ToBinaryAngle(base_yaw + la.yaw_sign * WrapPi(h.yaw - s_ref_yaw)));
-						if (la.has_aim_pitch)
+						// Online-safe: no pitch write. The servo is not silenced then and would fight it every frame.
+						if (la.has_aim_pitch && !OnlineSafeNow())
 						{
 							const s64 pa2 = static_cast<s64>(base.value()) + la.aim_pitch_offset;
 							if (pa2 >= 0 && pa2 + 2 <= static_cast<s64>(Ps2MemSize::MainRam))
@@ -1277,8 +1302,7 @@ namespace VR::CameraDriver
 			// (the game's collision still pushes it back out of walls), and the game doesn't get that stick.
 			// Stick up goes where the camera looks, like normal walking.
 			// Online-safe (the setting, or any time the network adapter is on): no moving the character.
-			const bool online_safe = EmuConfig.VR.OnlineSafe || EmuConfig.DEV9.EthEnable;
-			if (weapon_raised && la.aim_move_speed > 0.0f && la.aim_move_hand >= 0 && !online_safe)
+			if (weapon_raised && la.aim_move_speed > 0.0f && la.aim_move_hand >= 0 && !OnlineSafeNow())
 			{
 				s_aim_moving = true;
 				const float mx = input.hands[la.aim_move_hand].thumbstick_x;
@@ -1718,7 +1742,7 @@ namespace VR::CameraDriver
 		s_pause_hit = false;
 		s_test_head = false;
 		s_prediction_s = 0.0f;
-		s_online_safe = EmuConfig.VR.OnlineSafe || EmuConfig.DEV9.EthEnable;
+		s_online_safe = OnlineSafeNow();
 
 		const bool switched_on = EffectiveVREnabled(EmuConfig.VR.Enable) && EmuConfig.VR.HeadCamera &&
 		                         !SplitState::Active();
@@ -1873,10 +1897,11 @@ namespace VR::CameraDriver
 			return;
 		}
 
-		ApplySilence(cam, crc);
+		// The base first: silence entries with activeWhen check the record it points at.
+		const std::optional<u32> base = GetBase(cam, crc);
+		ApplySilence(cam, crc, base);
 		ApplyCodeHooks(cam, crc);
 
-		const std::optional<u32> base = GetBase(cam, crc);
 		if (cam.base.has_value() && !base.has_value())
 		{
 			s_base_unresolved_vsyncs++;

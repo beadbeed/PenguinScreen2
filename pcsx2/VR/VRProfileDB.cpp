@@ -922,6 +922,47 @@ static bool parseAobPattern(std::string_view str, std::vector<u8>& pattern, std:
 static void warnUnknownKeys(const std::string_view serial, const ryml::ConstNodeRef& node,
 	const char* where, std::initializer_list<const char*> known);
 
+// A list of { offset, equals | notEquals, width } checks on the camera base record. Returns false when an
+// entry was unusable and skipped, since a dropped check widens the rule.
+static bool parseRecordCheckList(const std::string_view serial, const ryml::ConstNodeRef& seq, const char* where,
+	std::vector<VR::ProfileDB::RecordCheck>& out)
+{
+	bool all_ok = true;
+	for (const ryml::ConstNodeRef& bn : seq.children())
+	{
+		if (!bn.is_map())
+		{
+			all_ok = false;
+			continue;
+		}
+		warnUnknownKeys(serial, bn, where, {"offset", "equals", "notEquals", "width"});
+		const std::optional<s64> off = bn.has_child("offset") ? parseSignedOffset(nodeVal(bn["offset"])) : std::nullopt;
+		const bool has_ne = bn.has_child("notEquals");
+		const std::optional<u32> eq = bn.has_child("equals") ? parseHexU32(nodeVal(bn["equals"])) :
+		                              has_ne                 ? parseHexU32(nodeVal(bn["notEquals"])) : std::nullopt;
+		if (!off.has_value() || !eq.has_value())
+		{
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' {} entry needs offset and equals|notEquals; skipping it.", serial, where);
+			all_ok = false;
+			continue;
+		}
+		VR::ProfileDB::RecordCheck rc;
+		rc.offset = off.value();
+		rc.equals = eq.value();
+		rc.not_equals = has_ne && !bn.has_child("equals");
+		if (bn.has_child("width"))
+		{
+			const std::optional<u32> w = StringUtil::FromChars<u32>(nodeVal(bn["width"]));
+			if (w.has_value() && (w.value() == 1 || w.value() == 2 || w.value() == 4))
+				rc.width = static_cast<u8>(w.value());
+			else
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' {} width must be 1, 2 or 4; keeping {}.", serial, where, rc.width);
+		}
+		out.push_back(rc);
+	}
+	return all_ok;
+}
+
 static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string_view serial, const ryml::ConstNodeRef& cnode)
 {
 	using namespace VR::ProfileDB;
@@ -1258,6 +1299,7 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 		{
 			if (!sn.is_map())
 				continue;
+			warnUnknownKeys(serial, sn, "camera.silence", {"address", "on", "off", "when", "activeWhen", "offlineOnly", "notes"});
 			const std::optional<u32> addr = sn.has_child("address") ? parseAddress(nodeVal(sn["address"])) : std::nullopt;
 			const std::optional<u32> von = sn.has_child("on") ? parseHexU32(nodeVal(sn["on"])) : std::nullopt;
 			const std::optional<u32> voff = sn.has_child("off") ? parseHexU32(nodeVal(sn["off"])) : std::nullopt;
@@ -1274,6 +1316,24 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 			CameraSilence sil{addr.value(), von.value(), voff.value()};
 			if (sn.has_child("when") && sn["when"].is_seq())
 				parseGuardList(serial, sn["when"], "camera silence when", sil.when);
+			// activeWhen: checks on the camera base record (e.g. the weapon raised). An entry whose checks did not
+			// all parse is dropped rather than patched all the time.
+			if (sn.has_child("activeWhen"))
+			{
+				const bool checks_ok = sn["activeWhen"].is_seq() &&
+				                       parseRecordCheckList(serial, sn["activeWhen"], "camera.silence activeWhen", sil.active_when);
+				if (!checks_ok || sil.active_when.empty())
+				{
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera silence {:#x} has an unusable activeWhen (needs a list of "
+									   "offset + equals|notEquals); skipping the entry.", serial, addr.value());
+					continue;
+				}
+				if (!cam.base.has_value())
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera silence {:#x} uses activeWhen, which reads the camera.base "
+									   "record, but the camera block has no usable base; it will never be patched.", serial, addr.value());
+			}
+			if (sn.has_child("offlineOnly"))
+				sil.offline_only = StringUtil::compareNoCase(nodeVal(sn["offlineOnly"]), "true");
 			cam.silence.push_back(std::move(sil));
 		}
 	}
@@ -1495,28 +1555,7 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 			};
 			if (ln.has_child("bodyFollow") && ln["bodyFollow"].is_seq())
 			{
-				for (const ryml::ConstNodeRef& bn : ln["bodyFollow"].children())
-				{
-					if (!bn.is_map())
-						continue;
-					warnUnknownKeys(serial, bn, "camera.lookAt.bodyFollow", {"offset", "equals", "notEquals", "width"});
-					const std::optional<s64> off = bn.has_child("offset") ? parseSignedOffset(nodeVal(bn["offset"])) : std::nullopt;
-					const bool has_ne = bn.has_child("notEquals");
-					const std::optional<u32> eq = bn.has_child("equals") ? parseHexU32(nodeVal(bn["equals"])) :
-					                              has_ne                 ? parseHexU32(nodeVal(bn["notEquals"])) : std::nullopt;
-					if (!off.has_value() || !eq.has_value())
-					{
-						Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt.bodyFollow entry needs offset and equals|notEquals; "
-										   "skipping it.", serial);
-						continue;
-					}
-					CameraLookAt::RecordCheck rc;
-					rc.offset = off.value();
-					rc.equals = eq.value();
-					rc.not_equals = has_ne && !bn.has_child("equals");
-					parseWidth(bn, rc.width);
-					la.body_follow.push_back(rc);
-				}
+				parseRecordCheckList(serial, ln["bodyFollow"], "camera.lookAt.bodyFollow", la.body_follow);
 				if (!la.body_follow.empty() && !la.yaw_anchor)
 				{
 					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt bodyFollow needs yawAnchor: true; ignoring it.", serial);

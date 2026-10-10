@@ -13,8 +13,9 @@ outranks the scripted one. Be in a room (J's Bar) standing idle with room to wal
   python vrtest.py --list
   python vrtest.py all --slot 3 --junit out/junit.xml --report out/   # report: HTML + Headset Window shots
 
-walk-and-shoot-online-safe only runs with VR "online-safe" (or the network adapter) on, where the
-scripted input must be refused and nothing may move the character; every other scenario is skipped then.
+walk-and-shoot-online-safe and pitch-online-safe only run with VR "online-safe" (or the network adapter)
+on, where the scripted input must be refused, nothing may move the character and the aim servo is never
+silenced (both raise the weapon with R1 on padd's virtual pad); every other scenario is skipped then.
 savestate-yaw saves to --scratch-slot (default 9) and overwrites it.
 
 To prove the runner can fail: put a copy of the profile in <data dir>/vrprofiles/ with
@@ -26,6 +27,7 @@ import math
 import os
 import struct
 import sys
+import threading
 import time
 import traceback
 from xml.etree import ElementTree as ET
@@ -41,12 +43,19 @@ POSITION, HEADING, STANCE = 0x38, 0x92, 0x08  # record offsets: f32 x/y/z, s16 h
 EYE, TARGET = 0x306338, 0x306344
 MENU_OPEN = 0x48BF7E
 CUT_HANDLER, FOCUS_SLOT, NEAR_CULL = 0x58EAEC, 0x3AEF74, 0x6D6CF4
+# Aim pitch: s16 record offset (0x10000 = 360 deg, positive up) and the gun-elevation servo words the profile
+# NOPs while the weapon is raised offline: (address, the game's own word).
+AIM_PITCH = 0xBC8
+PITCH_SERVO = ((0x556968, 0x0C0D1AEC), (0x556980, 0x0C0D1AEC), (0x556998, 0x0C0D1AEC), (0x5569CC, 0xA6200BC8),
+               (0x5569D8, 0xA6230BC8), (0x5569E4, 0xA6230BC8), (0x5569E8, 0xA6200BC8))
+PITCH_SERVO_STORES = (0x5569CC, 0x5569D8, 0x5569E4, 0x5569E8)
 
 # Profile values the scenarios expect.
 HOLSTER = zone(0.22, -0.50, 0.12)
 BELT = zone(-0.22, -0.50, 0.12)
 SMOOTH_TURN_DEG_S = 120.0
 AIM_MOVE_UNITS_S = 70.0
+PITCH_SIGN, PITCH_CLAMP = 1.0, 8000
 LEFT, RIGHT = 0, 1
 
 
@@ -69,6 +78,15 @@ def u2f(u):
 
 def wrap(deg):
     return (deg + 180.0) % 360.0 - 180.0
+
+
+def s16(raw):
+    return struct.unpack("<h", struct.pack("<H", raw & 0xFFFF))[0]
+
+
+def pitch_units(deg):
+    """The s16 the camera writes for an aim pitch of deg (profile pitchSign and pitchClamp)."""
+    return int(round(max(-PITCH_CLAMP, min(PITCH_CLAMP, PITCH_SIGN * deg * 65536.0 / 360.0))))
 
 
 def wait_until(fn, timeout, dt=0.02):
@@ -103,6 +121,14 @@ class Runner:
     def position(self):
         base = self.record() + POSITION
         return tuple(u2f(self.p.read32(base + i * 4)) for i in range(3))
+
+    def aim_pitch(self):
+        return s16(self.p.read16(self.record() + AIM_PITCH))
+
+    def servo_words(self):
+        """The servo words that do not hold the game's own value, as 'address=word' strings."""
+        found = ((a, own, self.p.read32(a)) for a, own in PITCH_SERVO)
+        return ["0x%06X=0x%08X" % (a, w) for a, own, w in found if w != own]
 
     def cam_yaw(self):
         """The game camera's yaw from target minus eye (0 faces +Z, counter-clockwise positive)."""
@@ -267,6 +293,108 @@ def sc_walk_and_shoot(r):
     return "moved %.1f units, %.1f deg off the camera yaw" % (dist, off)
 
 
+def sc_pitch(r):
+    """Point the gun 20 deg down: the servo is NOP'd and +0xBC8 holds the controller's pitch; lower it and
+    the servo is back within 6 vsyncs."""
+    deg = -20.0
+    want = pitch_units(deg)
+    aim = pose(pitch_deg=deg)
+    with r.controller() as fc:
+        r.wait_armed()
+        check(r.stance() == 1, "stance %d before the holster, expected 1 (normal)" % r.stance())
+        live = r.servo_words()
+        check(not live, "servo already changed with the weapon lowered: %s" % ", ".join(live))
+        took = r.raise_weapon(fc, aim=aim)
+        check(took is not None, "the holster did not raise the weapon (stance %d)" % r.stance())
+        time.sleep(0.2)
+        worst, samples = 0, 0
+        t0 = time.time()
+        while time.time() - t0 < 2.0:
+            v = r.aim_pitch()
+            check(abs(v - want) <= 2, "+0x%X = %d while aiming %.0f deg, expected %d +-2 (pitchSign wrong, or the servo "
+                  "still runs?)" % (AIM_PITCH, v, deg, want))
+            first = r.p.read32(PITCH_SERVO[0][0])
+            check(first == 0, "servo word 0x%06X = 0x%08X while aiming, expected 0 (silenced)" % (PITCH_SERVO[0][0], first))
+            worst, samples = max(worst, abs(v - want)), samples + 1
+            time.sleep(0.05)
+        patched = [a for a, _ in PITCH_SERVO if r.p.read32(a) != 0]
+        check(not patched, "servo words not silenced while aiming: %s" % ", ".join("0x%06X" % a for a in patched))
+        r.shot("aim-low")
+        # Lower the weapon: every word goes back as soon as the stance drops (6 vsyncs at 60 Hz).
+        fc.set_hand(RIGHT, aim=aim, grip=pose(pos=HOLSTER), head_relative=True, squeeze=0.0)
+        check(wait_until(lambda: r.stance() != 2, 1.5, 0.005) is not None,
+              "stance still 2 1.5 s after opening the grip")
+        back = wait_until(lambda: not r.servo_words(), 1.0, 0.005)
+        check(back is not None, "servo not restored 1 s after lowering the weapon: %s" % ", ".join(r.servo_words()))
+        check(back <= 6.0 / 60.0 + 0.05, "servo restored %.0f ms after the stance dropped, expected within 6 vsyncs" %
+              (back * 1000.0))
+        time.sleep(0.5)
+        after = r.aim_pitch()
+    return "+0x%X held %d (worst off %d over %d samples); servo restored %.0f ms after lowering; pitch %d 0.5 s later" % (
+        AIM_PITCH, want, worst, samples, back * 1000.0, after)
+
+
+def sc_pitch_online_safe(r):
+    """Online-safe: R1 + stick up on the virtual pad. The servo must never be silenced and the game's own
+    code must tilt the aim (stick up eases +0xBC8 toward +8192)."""
+    if not r.p.telemetry()["online_safe"]:
+        raise Skip("needs VR online-safe or the network adapter on")
+    try:
+        import padd
+    except ImportError:
+        raise Skip("padd.py not found: cannot raise the weapon without scripted input")
+    rec = r.record()
+    error = []
+
+    def hold():
+        try:
+            padd.send({"op": "hold", "b": ["r1"], "ms": 2000, "ly": 1.0})
+        except OSError as e:
+            error.append(e)
+
+    watch_ok = True
+    try:
+        r.p.memwatch_arm(rec + AIM_PITCH, size=2)
+    except PineError:
+        watch_ok = False
+    hits = []
+    raised, peak, silenced = False, -32768, []
+    try:
+        t = threading.Thread(target=hold, daemon=True)
+        t.start()
+        t0 = time.time()
+        while t.is_alive() and time.time() - t0 < 5.0:
+            raised = raised or r.stance() == 2
+            peak = max(peak, r.aim_pitch())
+            silenced += [a for a, _ in PITCH_SERVO if a not in silenced and r.p.read32(a) == 0]
+            time.sleep(0.05)
+        t.join(1.0)
+        if watch_ok:
+            try:
+                hits, _ = r.p.memwatch_poll()
+            except PineError:
+                watch_ok = False
+    finally:
+        if watch_ok:
+            try:
+                r.p.memwatch_clear()
+            except PineError:
+                pass
+    if error:
+        raise Skip("padd not running (python padd.py): %s" % error[0])
+    check(raised, "R1 on the virtual pad did not raise the weapon (stance %d)" % r.stance())
+    check(not silenced, "servo silenced with online-safe on: %s" % ", ".join("0x%06X" % a for a in silenced))
+    check(peak > 2000, "+0x%X peaked at %d with the stick up while aiming; the game's servo should tilt it toward +8192"
+          % (AIM_PITCH, peak))
+    writers = sorted({h["pc"] for h in hits if h["is_write"]})
+    seen = ("MemWatch writers %s" % ", ".join("0x%06X" % pc for pc in writers)) if writers else (
+        "MemWatch saw no writes" if watch_ok else "MemWatch unavailable")
+    if writers:
+        check(any(pc in PITCH_SERVO_STORES for pc in writers),
+              "+0x%X was written, but not by the servo stores (%s)" % (AIM_PITCH, seen))
+    return "servo never silenced, pitch peaked at %d (the game's own tilt); %s" % (peak, seen)
+
+
 def sc_walk_online_safe(r):
     if not r.p.telemetry()["online_safe"]:
         raise Skip("needs VR online-safe or the network adapter on")
@@ -371,10 +499,15 @@ SCENARIOS = [
     ("point-to-aim", sc_point_to_aim),
     ("walk-and-shoot", sc_walk_and_shoot),
     ("walk-and-shoot-online-safe", sc_walk_online_safe),
+    ("pitch", sc_pitch),
+    ("pitch-online-safe", sc_pitch_online_safe),
     ("belt", sc_belt),
     ("body-follow", sc_body_follow),
     ("savestate-yaw", sc_savestate_yaw),
 ]
+
+# The only ones that run with online-safe on (and skip without it).
+ONLINE_SAFE_SCENARIOS = (sc_walk_online_safe, sc_pitch_online_safe)
 
 
 def write_junit(path, results):
@@ -460,7 +593,7 @@ def main():
         runner.current = name
         t0 = time.time()
         try:
-            if online_safe and fn is not sc_walk_online_safe:
+            if online_safe and fn not in ONLINE_SAFE_SCENARIOS:
                 raise Skip("online-safe is on: scripted input is refused")
             if args.slot is not None:
                 p.load_state(args.slot)

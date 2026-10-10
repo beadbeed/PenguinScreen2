@@ -237,6 +237,15 @@ namespace VR::ProfileDB
 		u32 validate_equals = 0;
 	};
 
+	// A value at the camera base (e.g. the local character record) + offset; all checks of a list must hold.
+	struct RecordCheck
+	{
+		s64 offset = 0;
+		u32 equals = 0;
+		u8 width = 1;
+		bool not_equals = false;
+	};
+
 	struct CameraSilence
 	{
 		u32 ee_address = 0;
@@ -244,6 +253,11 @@ namespace VR::ProfileDB
 		u32 value_off = 0;
 		// Optional: only patch/restore while these pass (e.g. the overlay holding the code is resident).
 		std::vector<CameraGuard> when;
+		// Optional: only patched while these pass too (e.g. the weapon is raised). While they fail, a word we
+		// patched is put back at once, so the game's own code runs again.
+		std::vector<RecordCheck> active_when;
+		// Never patched while online-safe (the VR setting, or the network adapter on); a patched word is put back.
+		bool offline_only = false;
 	};
 
 	struct CameraCodeHook
@@ -332,14 +346,6 @@ namespace VR::ProfileDB
 		// longer steers it and first person counts as inactive, so the world screen is shown.
 		std::vector<CameraGuard> pause_when;
 
-		// A value at base + offset; all checks of a list must hold.
-		struct RecordCheck
-		{
-			s64 offset = 0;
-			u32 equals = 0;
-			u8 width = 1;
-			bool not_equals = false;
-		};
 		// Body follows view: while every check holds (standing idle, stick centred), the heading is
 		// written to the camera yaw, so picking up and checking things faces where the player looks.
 		std::vector<RecordCheck> body_follow;
