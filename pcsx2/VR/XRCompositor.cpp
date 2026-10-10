@@ -5,6 +5,7 @@
 #include "VR/CameraDriver.h"
 #include "VR/SplitState.h"
 #include "VR/ControlQuads.h"
+#include "VR/HandModel.h"
 #include "VR/SpatialControls.h"
 #include "VR/VRManager.h"
 #include "VR/SeatCast.h"
@@ -74,6 +75,10 @@ namespace VR::XRCompositor
 	{
 		constexpr int64_t ONE_SECOND_NS = 1000000000;
 		constexpr u32 NUM_CMD_BUFFERS = 2;
+		// First-person hands: one impostor quad per hand (HandModel::kLeft / kRight).
+		constexpr int kHandSlots = 2;
+		constexpr VkDeviceSize kHandImageBytes =
+			static_cast<VkDeviceSize>(HandModel::kImageSize) * HandModel::kImageSize * 4u;
 
 		struct
 		{
@@ -120,6 +125,26 @@ namespace VR::XRCompositor
 			bool warned_lever = false;
 			int lever_layers_logged = -1;
 			u32 lever_screen_logged = 0;
+
+			// First-person hands: CPU-rendered impostors with their own swapchains, staging buffer,
+			// command buffer and fence (the lever cards' path, kept separate so neither disturbs the other).
+			struct HandChain
+			{
+				XrSwapchain swapchain = XR_NULL_HANDLE;
+				std::vector<XrSwapchainImageVulkan2KHR> images;
+				bool ever_released = false;
+				bool wait_pending = false;
+				uint32_t pending_index = 0;
+			};
+			HandChain hand_chains[kHandSlots];
+			VkBuffer hand_staging = VK_NULL_HANDLE;
+			VkDeviceMemory hand_staging_memory = VK_NULL_HANDLE;
+			void* hand_staging_map = nullptr;
+			VkCommandBuffer hand_cmd = VK_NULL_HANDLE;
+			VkFence hand_fence = VK_NULL_HANDLE;
+			bool hand_fence_submitted = false;
+			// Set when creating any of the above fails: hands stay off until the next Initialize().
+			bool hands_disabled = false;
 
 			XrSpace view_space = XR_NULL_HANDLE;
 
@@ -784,6 +809,392 @@ namespace VR::XRCompositor
 			return appended;
 		}
 
+		void DestroyHandResources()
+		{
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			if (h.IsValid() && s.hand_fence != VK_NULL_HANDLE && s.hand_fence_submitted)
+			{
+				if (vkWaitForFences(h.device, 1, &s.hand_fence, VK_TRUE, ONE_SECOND_NS) == VK_TIMEOUT)
+					Console.Warning("(VR) Hands: upload fence still busy after 1s during teardown.");
+				vkResetFences(h.device, 1, &s.hand_fence);
+			}
+			s.hand_fence_submitted = false;
+			for (auto& hc : s.hand_chains)
+			{
+				if (hc.swapchain != XR_NULL_HANDLE)
+				{
+					xrDestroySwapchain(hc.swapchain);
+					hc.swapchain = XR_NULL_HANDLE;
+				}
+				hc.images.clear();
+				hc.ever_released = false;
+				hc.wait_pending = false;
+				hc.pending_index = 0;
+			}
+			if (h.IsValid())
+			{
+				if (s.hand_staging_map && s.hand_staging_memory != VK_NULL_HANDLE)
+					vkUnmapMemory(h.device, s.hand_staging_memory);
+				if (s.hand_staging != VK_NULL_HANDLE)
+					vkDestroyBuffer(h.device, s.hand_staging, nullptr);
+				if (s.hand_staging_memory != VK_NULL_HANDLE)
+					vkFreeMemory(h.device, s.hand_staging_memory, nullptr);
+				if (s.hand_fence != VK_NULL_HANDLE)
+					vkDestroyFence(h.device, s.hand_fence, nullptr);
+				if (s.hand_cmd != VK_NULL_HANDLE && s.cmd_pool != VK_NULL_HANDLE)
+					vkFreeCommandBuffers(h.device, s.cmd_pool, 1, &s.hand_cmd);
+			}
+			s.hand_staging_map = nullptr;
+			s.hand_staging = VK_NULL_HANDLE;
+			s.hand_staging_memory = VK_NULL_HANDLE;
+			s.hand_fence = VK_NULL_HANDLE;
+			s.hand_cmd = VK_NULL_HANDLE;
+		}
+
+		// Everything the hands need, created together the first time a hand is shown and kept until
+		// Shutdown (first person toggles often; recreating swapchains each time would only churn).
+		// Any failure is logged once and turns the hands off for the session; nothing else depends on them.
+		bool EnsureHandResources(bool fake, bool grip_orient)
+		{
+			if (s.hands_disabled)
+				return false;
+			if (s.hand_staging != VK_NULL_HANDLE && s.hand_cmd != VK_NULL_HANDLE && s.hand_fence != VK_NULL_HANDLE &&
+				s.hand_chains[0].swapchain != XR_NULL_HANDLE && s.hand_chains[1].swapchain != XR_NULL_HANDLE)
+			{
+				return true;
+			}
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			if (!h.IsValid() || s.cmd_pool == VK_NULL_HANDLE)
+				return false;
+			const auto fail = [&](const char* what, int code) {
+				s.hands_disabled = true;
+				Console.Error("(VR) Hands: %s failed (%d); first-person hands are off for this session.", what, code);
+				DestroyHandResources();
+				return false;
+			};
+
+			constexpr VkDeviceSize kBytes = kHandImageBytes * static_cast<VkDeviceSize>(kHandSlots);
+			if (s.hand_staging == VK_NULL_HANDLE)
+			{
+				VkBufferCreateInfo bci = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+				bci.size = kBytes;
+				bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+				bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+				VkResult vr = vkCreateBuffer(h.device, &bci, nullptr, &s.hand_staging);
+				if (vr != VK_SUCCESS)
+				{
+					s.hand_staging = VK_NULL_HANDLE;
+					return fail("vkCreateBuffer", static_cast<int>(vr));
+				}
+
+				VkMemoryRequirements mr = {};
+				vkGetBufferMemoryRequirements(h.device, s.hand_staging, &mr);
+				VkPhysicalDeviceMemoryProperties mp = {};
+				vkGetPhysicalDeviceMemoryProperties(h.physical_device, &mp);
+				constexpr VkMemoryPropertyFlags kWant = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+				u32 type = UINT32_MAX;
+				for (u32 i = 0; i < mp.memoryTypeCount; i++)
+				{
+					if ((mr.memoryTypeBits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & kWant) == kWant)
+					{
+						type = i;
+						break;
+					}
+				}
+				if (type == UINT32_MAX)
+					return fail("host-visible memory type lookup", 0);
+				VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+				mai.allocationSize = mr.size;
+				mai.memoryTypeIndex = type;
+				vr = vkAllocateMemory(h.device, &mai, nullptr, &s.hand_staging_memory);
+				if (vr != VK_SUCCESS)
+				{
+					s.hand_staging_memory = VK_NULL_HANDLE;
+					return fail("vkAllocateMemory", static_cast<int>(vr));
+				}
+				vr = vkBindBufferMemory(h.device, s.hand_staging, s.hand_staging_memory, 0);
+				if (vr != VK_SUCCESS)
+					return fail("vkBindBufferMemory", static_cast<int>(vr));
+				vr = vkMapMemory(h.device, s.hand_staging_memory, 0, VK_WHOLE_SIZE, 0, &s.hand_staging_map);
+				if (vr != VK_SUCCESS)
+				{
+					s.hand_staging_map = nullptr;
+					return fail("vkMapMemory", static_cast<int>(vr));
+				}
+			}
+
+			if (s.hand_cmd == VK_NULL_HANDLE)
+			{
+				VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+				cai.commandPool = s.cmd_pool;
+				cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+				cai.commandBufferCount = 1;
+				const VkResult vr = vkAllocateCommandBuffers(h.device, &cai, &s.hand_cmd);
+				if (vr != VK_SUCCESS)
+				{
+					s.hand_cmd = VK_NULL_HANDLE;
+					return fail("vkAllocateCommandBuffers", static_cast<int>(vr));
+				}
+			}
+			if (s.hand_fence == VK_NULL_HANDLE)
+			{
+				VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+				const VkResult vr = vkCreateFence(h.device, &fci, nullptr, &s.hand_fence);
+				if (vr != VK_SUCCESS)
+				{
+					s.hand_fence = VK_NULL_HANDLE;
+					return fail("vkCreateFence", static_cast<int>(vr));
+				}
+				s.hand_fence_submitted = false;
+			}
+
+			uint32_t image_count = 0;
+			for (auto& hc : s.hand_chains)
+			{
+				if (hc.swapchain != XR_NULL_HANDLE)
+					continue;
+				// Same format as the screen (sRGB normally): HandModel writes sRGB-encoded bytes with alpha.
+				XrSwapchainCreateInfo ci = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
+				ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+				ci.format = static_cast<int64_t>(s.swapchain_format);
+				ci.sampleCount = 1;
+				ci.width = HandModel::kImageSize;
+				ci.height = HandModel::kImageSize;
+				ci.faceCount = 1;
+				ci.arraySize = 1;
+				ci.mipCount = 1;
+				XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &hc.swapchain);
+				if (XR_FAILED(res))
+				{
+					hc.swapchain = XR_NULL_HANDLE;
+					return fail("xrCreateSwapchain", static_cast<int>(res));
+				}
+				uint32_t count = 0;
+				res = xrEnumerateSwapchainImages(hc.swapchain, 0, &count, nullptr);
+				if (XR_FAILED(res) || count == 0)
+					return fail("xrEnumerateSwapchainImages", static_cast<int>(res));
+				hc.images.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+				res = xrEnumerateSwapchainImages(hc.swapchain, count, &count,
+					reinterpret_cast<XrSwapchainImageBaseHeader*>(hc.images.data()));
+				if (XR_FAILED(res))
+					return fail("xrEnumerateSwapchainImages", static_cast<int>(res));
+				hc.ever_released = false;
+				hc.wait_pending = false;
+				image_count = count;
+			}
+			Console.WriteLn("(VR) Hands: impostor swapchains created (%d x %ux%u, %u images, %llu-byte staging; "
+							"orientation from the %s pose%s).",
+				kHandSlots, HandModel::kImageSize, HandModel::kImageSize, image_count, static_cast<unsigned long long>(kBytes),
+				grip_orient ? "grip" : "aim", fake ? "; PCSX2_VR_FAKE_HANDS test hands" : "");
+			return true;
+		}
+
+		void RecordHandUpload(VkCommandBuffer cmd, int slot, VkImage dst)
+		{
+			ImageBarrier(cmd, dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+				VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+			VkBufferImageCopy region = {};
+			region.bufferOffset = kHandImageBytes * static_cast<VkDeviceSize>(slot);
+			region.bufferRowLength = 0;
+			region.bufferImageHeight = 0;
+			region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+			region.imageOffset = {0, 0, 0};
+			region.imageExtent = {HandModel::kImageSize, HandModel::kImageSize, 1};
+			vkCmdCopyBufferToImage(cmd, s.hand_staging, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+			ImageBarrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+				VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+		}
+
+		// First-person hands. Each presented frame, while camera.lookAt drives the game camera and a
+		// controller's grip pose is valid, its hand is drawn on the CPU as seen from the head onto a
+		// quad that faces the head, uploaded, and submitted after the screen and lever layers. The quad
+		// is flat at the hand's depth, so the runtime's reprojection keeps it in place as the head moves.
+		u32 BuildHandLayers(XrCompositionLayerQuad* hand_quads, const XrCompositionLayerBaseHeader** layers,
+			u32& layer_count, u32 layer_capacity)
+		{
+			// PCSX2_VR_FAKE_HANDS (any value): both hands held at fixed offsets from the head and shown
+			// even outside first person, to check them on a headset without controllers (SteamVR's null
+			// driver). The value "gun" puts the pistol in the right hand.
+			static const int s_fake_hands = [] {
+				const char* v = std::getenv("PCSX2_VR_FAKE_HANDS");
+				if (!v)
+					return 0;
+				return (std::strcmp(v, "gun") == 0) ? 2 : 1;
+			}();
+			// PCSX2_VR_HANDS_GRIP_ORIENT: orient the hands by the grip pose instead of the aim pose.
+			static const bool s_grip_orient = (std::getenv("PCSX2_VR_HANDS_GRIP_ORIENT") != nullptr);
+			// Hands are optional: never hold the frame long for one of their images.
+			constexpr int64_t kHandWaitNs = 20000000;
+
+			if (s.hands_disabled || !s.head_pose_valid)
+				return 0;
+			const bool fake = (s_fake_hands != 0);
+			if (!fake && (!s.head_position_valid || !CameraDriver::LookAtActive()))
+				return 0;
+
+			// The head pose was located in XRSession::GetSpace() at this frame's display time, the same
+			// space and time XRInput::Update just located the controllers in.
+			const float eye[3] = {s.head_position_valid ? s.head_pose.position.x : 0.0f,
+				s.head_position_valid ? s.head_pose.position.y : 0.0f, s.head_position_valid ? s.head_pose.position.z : 0.0f};
+			const float head_quat[4] = {s.head_pose.orientation.x, s.head_pose.orientation.y, s.head_pose.orientation.z,
+				s.head_pose.orientation.w};
+
+			HandModel::HandState hs[kHandSlots];
+			if (fake)
+			{
+				for (int i = 0; i < kHandSlots; i++)
+					hs[i] = HandModel::FakeHandState(i, eye, head_quat, s_fake_hands == 2);
+			}
+			else
+			{
+				const VRInputSnapshot snap = GetInputSnapshot();
+				if (snap.generation == 0 || !snap.actions_active)
+					return 0;
+				const bool gun = HandModel::GunHeld();
+				for (int i = 0; i < kHandSlots; i++)
+				{
+					const auto& src = snap.hands[i];
+					if (!src.grip_pose.valid)
+						continue;
+					// Position from the grip pose (inside the handle, where the palm closes). Orientation from
+					// the aim pose, whose -Z is the controller's pointing direction on every runtime; the grip
+					// pose's own -Z runs up the handle at an angle that differs per controller.
+					const auto& orient = (!s_grip_orient && src.aim_pose.valid) ? src.aim_pose : src.grip_pose;
+					HandModel::HandState& d = hs[i];
+					d.valid = true;
+					for (int k = 0; k < 3; k++)
+						d.pos[k] = src.grip_pose.position_xyz[k];
+					for (int k = 0; k < 4; k++)
+						d.quat[k] = orient.orientation_xyzw[k];
+					d.grip = src.grip;
+					d.trigger = src.trigger;
+					d.gun = gun && (i == HandModel::kRight);
+				}
+			}
+			if (!hs[0].valid && !hs[1].valid)
+				return 0;
+			if (!EnsureHandResources(fake, s_grip_orient))
+				return 0;
+
+			HandModel::ImpostorQuad iq[kHandSlots];
+			bool want[kHandSlots] = {false, false};
+			for (int i = 0; i < kHandSlots; i++)
+				want[i] = hs[i].valid && HandModel::PlaceImpostor(i, hs[i], eye, &iq[i]);
+
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			static std::vector<u32> s_hand_pixels;
+			bool recording = false;
+			int pending[kHandSlots] = {0, 0};
+			int pending_count = 0;
+			bool uploaded[kHandSlots] = {false, false};
+			for (int i = 0; i < kHandSlots; i++)
+			{
+				if (!want[i])
+					continue;
+				auto& hc = s.hand_chains[i];
+				uint32_t index = 0;
+				if (hc.wait_pending)
+				{
+					index = hc.pending_index;
+				}
+				else
+				{
+					XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+					if (XR_FAILED(xrAcquireSwapchainImage(hc.swapchain, &ai, &index)))
+						continue;
+					hc.pending_index = index;
+					hc.wait_pending = true;
+				}
+				XrSwapchainImageWaitInfo wi = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+				wi.timeout = kHandWaitNs;
+				// XR_TIMEOUT_EXPIRED is a success code: the image is not ours yet, so wait again next frame.
+				const XrResult wr = xrWaitSwapchainImage(hc.swapchain, &wi);
+				if (wr == XR_TIMEOUT_EXPIRED || XR_FAILED(wr))
+					continue;
+				hc.wait_pending = false;
+
+				if (!recording)
+				{
+					// The staging buffer is shared by both hands: the previous upload must be done with it.
+					if (s.hand_fence_submitted)
+					{
+						if (vkWaitForFences(h.device, 1, &s.hand_fence, VK_TRUE, ONE_SECOND_NS) != VK_SUCCESS)
+						{
+							XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+							xrReleaseSwapchainImage(hc.swapchain, &ri);
+							break;
+						}
+						vkResetFences(h.device, 1, &s.hand_fence);
+						s.hand_fence_submitted = false;
+					}
+					VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+					bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+					if (vkBeginCommandBuffer(s.hand_cmd, &bi) != VK_SUCCESS)
+					{
+						XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+						xrReleaseSwapchainImage(hc.swapchain, &ri);
+						break;
+					}
+					recording = true;
+				}
+				HandModel::RenderImpostor(i, hs[i], eye, iq[i].centre, iq[i].right, iq[i].up, iq[i].size_m, s_hand_pixels);
+				if (s_hand_pixels.size() * sizeof(u32) == static_cast<size_t>(kHandImageBytes))
+				{
+					std::memcpy(static_cast<u8*>(s.hand_staging_map) + kHandImageBytes * static_cast<VkDeviceSize>(i),
+						s_hand_pixels.data(), static_cast<size_t>(kHandImageBytes));
+				}
+				RecordHandUpload(s.hand_cmd, i, hc.images[index].image);
+				pending[pending_count] = i;
+				pending_count++;
+			}
+			if (recording)
+			{
+				bool submitted = false;
+				if (vkEndCommandBuffer(s.hand_cmd) == VK_SUCCESS)
+				{
+					VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+					si.commandBufferCount = 1;
+					si.pCommandBuffers = &s.hand_cmd;
+					submitted = (vkQueueSubmit(h.queue, 1, &si, s.hand_fence) == VK_SUCCESS);
+					s.hand_fence_submitted = submitted;
+				}
+				for (int k = 0; k < pending_count; k++)
+				{
+					auto& hc = s.hand_chains[pending[k]];
+					XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+					if (XR_SUCCEEDED(xrReleaseSwapchainImage(hc.swapchain, &ri)) && submitted)
+					{
+						hc.ever_released = true;
+						uploaded[pending[k]] = true;
+					}
+				}
+			}
+
+			// Only hands drawn this frame: last frame's image on this frame's quad would be from the wrong place.
+			u32 appended = 0;
+			for (int i = 0; i < kHandSlots; i++)
+			{
+				if (!uploaded[i] || layer_count >= layer_capacity)
+					continue;
+				XrCompositionLayerQuad& quad = hand_quads[i];
+				quad.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
+				quad.next = nullptr;
+				quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+				quad.space = XRSession::GetSpace();
+				quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+				quad.subImage = {s.hand_chains[i].swapchain,
+					{{0, 0}, {static_cast<s32>(HandModel::kImageSize), static_cast<s32>(HandModel::kImageSize)}}, 0};
+				quad.pose.orientation = {iq[i].quat[0], iq[i].quat[1], iq[i].quat[2], iq[i].quat[3]};
+				quad.pose.position = {iq[i].centre[0], iq[i].centre[1], iq[i].centre[2]};
+				quad.size = {iq[i].size_m, iq[i].size_m};
+				layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+				appended++;
+			}
+			return appended;
+		}
+
 		float ComputeAspect()
 		{
 			switch (GSConfig.AspectRatio)
@@ -919,6 +1330,7 @@ namespace VR::XRCompositor
 		s.warned_lever = false;
 		s.lever_layers_logged = -1;
 		s.lever_screen_logged = 0;
+		s.hands_disabled = false;
 
 		if (!XRSession::HasSession())
 		{
@@ -1254,8 +1666,10 @@ namespace VR::XRCompositor
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}, {XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR},
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}, {XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR},
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}};
-		constexpr u32 kLayerCapacity = 5 + ControlQuads::kSlots;
+		constexpr u32 kLayerCapacity = 5 + ControlQuads::kSlots + kHandSlots;
 		XrCompositionLayerQuad lever_quads[ControlQuads::kSlots] = {
+			{XR_TYPE_COMPOSITION_LAYER_QUAD}, {XR_TYPE_COMPOSITION_LAYER_QUAD}};
+		XrCompositionLayerQuad hand_quads[kHandSlots] = {
 			{XR_TYPE_COMPOSITION_LAYER_QUAD}, {XR_TYPE_COMPOSITION_LAYER_QUAD}};
 		const XrCompositionLayerBaseHeader* layers[kLayerCapacity] = {};
 		u32 layer_count = 0;
@@ -1576,6 +1990,10 @@ namespace VR::XRCompositor
 		if (!force_zero_layers)
 			BuildLeverLayers(lever_quads, layers, layer_count, kLayerCapacity, cl_split);
 
+		// Hands go last so they draw over the screen and the lever cards.
+		if (!force_zero_layers && fs.shouldRender)
+			BuildHandLayers(hand_quads, layers, layer_count, kLayerCapacity);
+
 		XrFrameEndInfo ei = {XR_TYPE_FRAME_END_INFO};
 		ei.displayTime = fs.predictedDisplayTime;
 		ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
@@ -1632,6 +2050,7 @@ namespace VR::XRCompositor
 			WaitAllFences();
 
 		DestroyLeverResources();
+		DestroyHandResources();
 
 		for (auto& chain : s.chains)
 		{

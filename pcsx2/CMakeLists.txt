@@ -1064,6 +1064,7 @@ set(pcsx2arm64Headers
 set(pcsx2VRSources
 	VR/CameraDriver.cpp
 	VR/ControlQuads.cpp
+	VR/HandModel.cpp
 	VR/SplitState.cpp
 	VR/SeatCast.cpp
 	VR/SeatSession.cpp
@@ -1085,6 +1086,7 @@ set(pcsx2VRSources
 set(pcsx2VRHeaders
 	VR/CameraDriver.h
 	VR/ControlQuads.h
+	VR/HandModel.h
 	VR/SplitState.h
 	VR/SeatCast.h
 	VR/SeatSession.h
