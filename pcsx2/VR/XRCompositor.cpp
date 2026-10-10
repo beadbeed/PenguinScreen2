@@ -174,6 +174,11 @@ namespace VR::XRCompositor
 			VkFence hud_fence = VK_NULL_HANDLE;
 			bool hud_fence_submitted = false;
 			bool hud_disabled = false;
+			// Wrist card: facing the head (with hysteresis), its fade, and the clock the fade steps by.
+			bool hud_wrist_facing = false;
+			float hud_wrist_opacity = 0.0f;
+			u64 hud_last_ms = 0;
+			bool hud_wrist_logged = false;
 
 			XrSpace view_space = XR_NULL_HANDLE;
 
@@ -1242,6 +1247,8 @@ namespace VR::XRCompositor
 		{
 			if (card == HudCards::kToast)
 				return {HudCards::kToastWidth, HudCards::kToastHeight};
+			if (card == HudCards::kWrist)
+				return {HudCards::kWristWidth, HudCards::kWristHeight};
 			return {0, 0};
 		}
 
@@ -1509,6 +1516,84 @@ namespace VR::XRCompositor
 				wt.level = HudLevel(toast.opacity);
 			}
 
+			// Wrist card: on the left hand while first person is active and the profile reads hud.wrist,
+			// fading in while its face points at the head. PCSX2_VR_FAKE_HANDS shows it on the fake left
+			// hand whatever the angle (turned to the eye; NO DATA without first person), so it can be
+			// checked on a headset without controllers.
+			static const bool s_fake_hands = (std::getenv("PCSX2_VR_FAKE_HANDS") != nullptr);
+			static const bool s_grip_orient = (std::getenv("PCSX2_VR_HANDS_GRIP_ORIENT") != nullptr);
+			const u64 now_ms = CameraDriver::SteadyNowMs();
+			const float dt = (s.hud_last_ms != 0 && now_ms > s.hud_last_ms) ?
+			                     std::min(static_cast<float>(now_ms - s.hud_last_ms) / 1000.0f, 0.1f) :
+			                     0.0f;
+			s.hud_last_ms = now_ms;
+			HudCards::WristData wrist;
+			const bool wrist_live = HudCards::GetWrist(&wrist) && CameraDriver::LookAtActive();
+			const bool wrist_no_data = !wrist_live;
+			bool wrist_placed = false;
+			float wrist_pos[3] = {0.0f, 0.0f, 0.0f};
+			float wrist_quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+			float wrist_facing = -1.0f;
+			if ((wrist_live || s_fake_hands) && s.head_pose_valid)
+			{
+				const float eye[3] = {s.head_position_valid ? s.head_pose.position.x : 0.0f,
+					s.head_position_valid ? s.head_pose.position.y : 0.0f, s.head_position_valid ? s.head_pose.position.z : 0.0f};
+				if (s_fake_hands)
+				{
+					const float head_quat[4] = {s.head_pose.orientation.x, s.head_pose.orientation.y, s.head_pose.orientation.z,
+						s.head_pose.orientation.w};
+					const HandModel::HandState fake = HandModel::FakeHandState(HandModel::kLeft, eye, head_quat, false);
+					if (fake.valid)
+					{
+						HudCards::PlaceWrist(fake.pos, fake.quat, eye, true, wrist_pos, wrist_quat, &wrist_facing);
+						wrist_placed = true;
+					}
+				}
+				else if (s.head_position_valid)
+				{
+					// The pose the left hand is drawn with (BuildHandLayers): grip position, aim orientation.
+					const VRInputSnapshot snap = GetInputSnapshot();
+					const auto& src = snap.hands[HandModel::kLeft];
+					if (snap.generation != 0 && snap.actions_active && src.grip_pose.valid)
+					{
+						const auto& orient = (!s_grip_orient && src.aim_pose.valid) ? src.aim_pose : src.grip_pose;
+						const float hand_pos[3] = {src.grip_pose.position_xyz[0], src.grip_pose.position_xyz[1],
+							src.grip_pose.position_xyz[2]};
+						const float hand_quat[4] = {orient.orientation_xyzw[0], orient.orientation_xyzw[1],
+							orient.orientation_xyzw[2], orient.orientation_xyzw[3]};
+						HudCards::PlaceWrist(hand_pos, hand_quat, eye, false, wrist_pos, wrist_quat, &wrist_facing);
+						wrist_placed = true;
+					}
+				}
+			}
+			// Facing with hysteresis, then a fade toward it; with no hand to hang it on, the card is gone.
+			if (!wrist_placed)
+				s.hud_wrist_facing = false;
+			else if (s_fake_hands)
+				s.hud_wrist_facing = true;
+			else
+				s.hud_wrist_facing = wrist_facing > (s.hud_wrist_facing ? HudCards::kWristHideCos : HudCards::kWristShowCos);
+			const float fade_step = dt / HudCards::kFadeSeconds;
+			if (!wrist_placed)
+				s.hud_wrist_opacity = 0.0f;
+			else if (s.hud_wrist_facing)
+				s.hud_wrist_opacity = std::min(1.0f, s.hud_wrist_opacity + fade_step);
+			else
+				s.hud_wrist_opacity = std::max(0.0f, s.hud_wrist_opacity - fade_step);
+			if (wrist_placed && s.hud_wrist_opacity > 0.0f)
+			{
+				Want& ww = want[HudCards::kWrist];
+				ww.on = true;
+				ww.content = HudCards::WristKey(wrist, wrist_no_data);
+				ww.level = HudLevel(s.hud_wrist_opacity);
+				if (!s.hud_wrist_logged)
+				{
+					s.hud_wrist_logged = true;
+					Console.WriteLn("(VR) HUD: wrist card shown (%s).",
+						s_fake_hands ? "PCSX2_VR_FAKE_HANDS test hand, any angle" : "left wrist turned to the face");
+				}
+			}
+
 			bool any = false;
 			for (const Want& wv : want)
 				any = any || (wv.on && wv.level > 0);
@@ -1533,6 +1618,8 @@ namespace VR::XRCompositor
 				{
 					if (i == HudCards::kToast)
 						HudCards::RasterToast(raster.pixels, toast.text);
+					else if (i == HudCards::kWrist)
+						HudCards::RasterWrist(raster.pixels, wrist, wrist_no_data);
 					raster.content = wv.content;
 					raster.valid = true;
 				}
@@ -1645,6 +1732,14 @@ namespace VR::XRCompositor
 					quad.pose.orientation = {q[0], q[1], q[2], q[3]};
 					quad.pose.position = {pos[0], pos[1], pos[2]};
 					quad.size = {HudCards::kToastWidthM, HudCards::kToastHeightM};
+				}
+				else if (i == HudCards::kWrist)
+				{
+					// In the base space, where the hands were located for this frame's display time.
+					quad.space = XRSession::GetSpace();
+					quad.pose.orientation = {wrist_quat[0], wrist_quat[1], wrist_quat[2], wrist_quat[3]};
+					quad.pose.position = {wrist_pos[0], wrist_pos[1], wrist_pos[2]};
+					quad.size = {HudCards::kWristWidthM, HudCards::kWristHeightM};
 				}
 				layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
 				appended++;
@@ -1789,6 +1884,10 @@ namespace VR::XRCompositor
 		s.lever_screen_logged = 0;
 		s.hands_disabled = false;
 		s.hud_disabled = false;
+		s.hud_wrist_facing = false;
+		s.hud_wrist_opacity = 0.0f;
+		s.hud_last_ms = 0;
+		s.hud_wrist_logged = false;
 
 		if (!XRSession::HasSession())
 		{

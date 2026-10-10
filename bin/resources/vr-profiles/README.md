@@ -42,6 +42,7 @@ SLUS-20851:              # the disc serial; must match the file name
   screen: { ... }        # where the virtual screen sits
   presentation: { ... }  # optional: brighter picture in the headset only
   feedback: { ... }      # optional: controller vibration from the game
+  hud: { ... }           # optional: a status card on your wrist
   stereo: { ... }        # depth tuning
 ```
 
@@ -98,6 +99,23 @@ The `hurt`, `fire` and `danger` cues run only while the head-tracked
 first-person camera is active, so they stay quiet on title screens, in
 cutscenes and with first person off. The Haptic Strength setting scales all
 of this vibration, and `0` turns it off.
+
+## `hud`: a status card on your wrist
+
+`hud: { wrist: { ... } }` puts a small card on the back of your left wrist
+while the head-tracked first-person camera is active. Turn your wrist toward
+your face, as if checking a watch, and it fades in. It shows the character's
+condition (FINE, CAUTION below 60% of maximum HP, DANGER below 20%, BLEED
+while bleeding), an HP bar, and the virus gauge. Like `feedback`, it only reads
+the game's memory and does nothing without a running VR session.
+
+| Key | Meaning |
+|---|---|
+| `hp` | `{ offset, max, width }`: the character's HP and maximum HP, as offsets into the record `camera.base` finds, each `width` bytes (`1`, `2` or `4`, default `2`) |
+| `virus` | `{ offset, maxTable, charOffset }`: a 4-byte virus counter at `offset` in the record, shown as a percentage of the character's maximum. The maximum is the 4-byte entry for the character id (the byte at `charOffset` in the record) in a table at the fixed address `maxTable` |
+| `bleed` | `{ offset, width }`: the character is bleeding while this value in the record is not zero |
+
+Each part is optional; the card leaves out whatever it can't read sensibly.
 
 ## `stereo`: depth
 
