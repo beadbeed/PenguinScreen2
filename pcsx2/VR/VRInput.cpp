@@ -22,6 +22,7 @@ namespace VR
 
 		constexpr const char* TOUCH_PROFILE = "/interaction_profiles/oculus/touch_controller";
 		constexpr const char* SIMPLE_PROFILE = "/interaction_profiles/khr/simple_controller";
+		constexpr const char* FRAME_PROFILE = "/interaction_profiles/valve/frame_controller";
 
 		std::mutex s_snapshot_mutex;
 		VRInputSnapshot s_snapshot;
@@ -225,7 +226,13 @@ namespace VR
 		       CreateAction(instance, XR_ACTION_TYPE_BOOLEAN_INPUT,    "button_x",         "X Button",         &m_button_x) &&
 		       CreateAction(instance, XR_ACTION_TYPE_BOOLEAN_INPUT,    "button_y",         "Y Button",         &m_button_y) &&
 		       CreateAction(instance, XR_ACTION_TYPE_BOOLEAN_INPUT,    "button_menu",      "Menu Button",      &m_button_menu) &&
+		       CreateAction(instance, XR_ACTION_TYPE_BOOLEAN_INPUT,    "button_view",      "View Button",      &m_button_view) &&
 		       CreateAction(instance, XR_ACTION_TYPE_BOOLEAN_INPUT,    "thumbstick_click", "Thumbstick Click", &m_thumbstick_click) &&
+		       CreateAction(instance, XR_ACTION_TYPE_BOOLEAN_INPUT,    "dpad_up",          "D-pad Up",         &m_dpad_up) &&
+		       CreateAction(instance, XR_ACTION_TYPE_BOOLEAN_INPUT,    "dpad_down",        "D-pad Down",       &m_dpad_down) &&
+		       CreateAction(instance, XR_ACTION_TYPE_BOOLEAN_INPUT,    "dpad_left",        "D-pad Left",       &m_dpad_left) &&
+		       CreateAction(instance, XR_ACTION_TYPE_BOOLEAN_INPUT,    "dpad_right",       "D-pad Right",      &m_dpad_right) &&
+		       CreateAction(instance, XR_ACTION_TYPE_BOOLEAN_INPUT,    "bumper",           "Bumper",           &m_bumper) &&
 		       CreateAction(instance, XR_ACTION_TYPE_FLOAT_INPUT,      "trigger",          "Trigger",          &m_trigger) &&
 		       CreateAction(instance, XR_ACTION_TYPE_FLOAT_INPUT,      "grip",             "Grip",             &m_grip) &&
 		       CreateAction(instance, XR_ACTION_TYPE_VECTOR2F_INPUT,   "thumbstick",       "Thumbstick",       &m_thumbstick) &&
@@ -310,6 +317,53 @@ namespace VR
 			{m_haptic,      "/user/hand/left/output/haptic"},
 			{m_haptic,      "/user/hand/right/output/haptic"},
 		});
+
+		// Valve Steam Frame (SteamVR) is gamepad-shaped: A/B/X/Y and Menu are on the right
+		// controller, the D-pad and View on the left. Without its own bindings SteamVR remaps the
+		// Touch ones onto it and X/Y come out as B. A runtime rejects a whole suggestion over one
+		// path it doesn't support, so if the full set fails, retry without the D-pad, bumpers and
+		// View. The Frame is optional: only Touch and Simple decide whether input works at all.
+		const std::vector<Suggestion> frame_minimal = {
+			{m_aim_pose,         "/user/hand/left/input/aim/pose"},
+			{m_aim_pose,         "/user/hand/right/input/aim/pose"},
+			{m_grip_pose,        "/user/hand/left/input/grip/pose"},
+			{m_grip_pose,        "/user/hand/right/input/grip/pose"},
+			{m_button_a,         "/user/hand/right/input/a/click"},
+			{m_button_b,         "/user/hand/right/input/b/click"},
+			{m_button_x,         "/user/hand/right/input/x/click"},
+			{m_button_y,         "/user/hand/right/input/y/click"},
+			{m_button_menu,      "/user/hand/right/input/menu/click"},
+			{m_thumbstick_click, "/user/hand/left/input/thumbstick/click"},
+			{m_thumbstick_click, "/user/hand/right/input/thumbstick/click"},
+			{m_trigger,          "/user/hand/left/input/trigger/value"},
+			{m_trigger,          "/user/hand/right/input/trigger/value"},
+			{m_grip,             "/user/hand/left/input/squeeze/value"},
+			{m_grip,             "/user/hand/right/input/squeeze/value"},
+			{m_thumbstick,       "/user/hand/left/input/thumbstick"},
+			{m_thumbstick,       "/user/hand/right/input/thumbstick"},
+			{m_haptic,           "/user/hand/left/output/haptic"},
+			{m_haptic,           "/user/hand/right/output/haptic"},
+		};
+		const std::vector<Suggestion> frame_extra = {
+			{m_button_view, "/user/hand/left/input/view/click"},
+			{m_dpad_up,     "/user/hand/left/input/dpad_up/click"},
+			{m_dpad_down,   "/user/hand/left/input/dpad_down/click"},
+			{m_dpad_left,   "/user/hand/left/input/dpad_left/click"},
+			{m_dpad_right,  "/user/hand/left/input/dpad_right/click"},
+			{m_bumper,      "/user/hand/left/input/bumper/click"},
+			{m_bumper,      "/user/hand/right/input/bumper/click"},
+		};
+		std::vector<Suggestion> frame_full = frame_minimal;
+		frame_full.insert(frame_full.end(), frame_extra.begin(), frame_extra.end());
+
+		const bool frame_full_ok = suggest(FRAME_PROFILE, frame_full);
+		const bool frame_minimal_ok = !frame_full_ok && suggest(FRAME_PROFILE, frame_minimal);
+		if (frame_full_ok)
+			Console.WriteLn("(VR) Steam Frame controller: full bindings accepted (D-pad, bumpers and View included).");
+		else if (frame_minimal_ok)
+			Console.WriteLn("(VR) Steam Frame controller: minimal bindings accepted (no D-pad, bumpers or View).");
+		else
+			Console.Warning("(VR) Steam Frame controller bindings not accepted (only matters with Steam Frame controllers).");
 
 		if (!touch_ok && !simple_ok)
 		{
@@ -413,7 +467,8 @@ namespace VR
 		}
 
 		for (XrAction* action : {&m_aim_pose, &m_grip_pose, &m_button_a, &m_button_b, &m_button_x, &m_button_y,
-				 &m_button_menu, &m_thumbstick_click, &m_trigger, &m_grip, &m_thumbstick, &m_haptic})
+				 &m_button_menu, &m_button_view, &m_thumbstick_click, &m_dpad_up, &m_dpad_down, &m_dpad_left,
+				 &m_dpad_right, &m_bumper, &m_trigger, &m_grip, &m_thumbstick, &m_haptic})
 		{
 			if (*action != XR_NULL_HANDLE)
 			{
@@ -450,6 +505,12 @@ namespace VR
 		out->y = ReadBool(session, m_button_y, hand_path);
 		out->menu = ReadBool(session, m_button_menu, hand_path);
 		out->thumbstick_click = ReadBool(session, m_thumbstick_click, hand_path);
+		out->dpad_up = ReadBool(session, m_dpad_up, hand_path);
+		out->dpad_down = ReadBool(session, m_dpad_down, hand_path);
+		out->dpad_left = ReadBool(session, m_dpad_left, hand_path);
+		out->dpad_right = ReadBool(session, m_dpad_right, hand_path);
+		out->bumper = ReadBool(session, m_bumper, hand_path);
+		out->view = ReadBool(session, m_button_view, hand_path);
 		out->trigger = ReadFloat(session, m_trigger, hand_path);
 		out->grip = ReadFloat(session, m_grip, hand_path);
 

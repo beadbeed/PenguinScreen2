@@ -626,7 +626,8 @@ namespace VR::SpatialControls
 
 	namespace
 	{
-		constexpr const char* kControlNames[kControlCount] = {
+		// Indexed by ControlId: same order as the enum.
+		constexpr const char* kControlNames[] = {
 			"LeftLever", "RightLever", "Power", "Steer", "GrabbedLeft", "GrabbedRight",
 			"Throttle", "Grabbed", "Notch1", "Notch2", "Notch3", "Notch4", "Notch5", "Notch6", "Notch7", "Notch8",
 			"Steering",
@@ -638,7 +639,9 @@ namespace VR::SpatialControls
 			"LeftStickX", "LeftStickY", "RightStickX", "RightStickY",
 			"Pressed",
 			"LeftTriggerPress", "RightTriggerPress", "LeftGripPress", "RightGripPress",
+			"DpadUp", "DpadDown", "DpadLeft", "DpadRight", "LeftBumper", "RightBumper", "View",
 		};
+		static_assert(std::size(kControlNames) == kControlCount);
 
 		constexpr ControlDef kThrottleControls[] = {
 			{ControlId::Throttle, "Throttle", ControlType::Axis},
@@ -715,6 +718,13 @@ namespace VR::SpatialControls
 			{ControlId::RightTriggerPress, "RightTriggerPress", ControlType::Button},
 			{ControlId::LeftGripPress, "LeftGripPress", ControlType::Button},
 			{ControlId::RightGripPress, "RightGripPress", ControlType::Button},
+			{ControlId::DpadUp, "DpadUp", ControlType::Button},
+			{ControlId::DpadDown, "DpadDown", ControlType::Button},
+			{ControlId::DpadLeft, "DpadLeft", ControlType::Button},
+			{ControlId::DpadRight, "DpadRight", ControlType::Button},
+			{ControlId::LeftBumper, "LeftBumper", ControlType::Button},
+			{ControlId::RightBumper, "RightBumper", ControlType::Button},
+			{ControlId::View, "View", ControlType::Button},
 		};
 		constexpr ControlDef kZoneControls[] = {
 			{ControlId::Pressed, "Pressed", ControlType::Button},
@@ -1016,9 +1026,10 @@ namespace VR::SpatialControls
 		const auto axis = [](float f) { return std::clamp(Finite(f), -1.0f, 1.0f); };
 		At(v, ControlId::ButtonA) = button(r.a);
 		At(v, ControlId::ButtonB) = button(r.b);
-		At(v, ControlId::ButtonX) = button(l.x);
-		At(v, ControlId::ButtonY) = button(l.y);
-		At(v, ControlId::Menu) = button(l.menu);
+		// X, Y and Menu are on the left Touch controller but the right Steam Frame one.
+		At(v, ControlId::ButtonX) = button(l.x || r.x);
+		At(v, ControlId::ButtonY) = button(l.y || r.y);
+		At(v, ControlId::Menu) = button(l.menu || r.menu);
 		At(v, ControlId::LeftStickClick) = button(l.thumbstick_click);
 		At(v, ControlId::RightStickClick) = button(r.thumbstick_click);
 		At(v, ControlId::LeftTrigger) = Clamp01(Finite(l.trigger));
@@ -1034,6 +1045,13 @@ namespace VR::SpatialControls
 		At(v, ControlId::RightTriggerPress) = button(At(v, ControlId::RightTrigger) >= kPressAt);
 		At(v, ControlId::LeftGripPress) = button(At(v, ControlId::LeftGrip) >= kPressAt);
 		At(v, ControlId::RightGripPress) = button(At(v, ControlId::RightGrip) >= kPressAt);
+		At(v, ControlId::DpadUp) = button(l.dpad_up || r.dpad_up);
+		At(v, ControlId::DpadDown) = button(l.dpad_down || r.dpad_down);
+		At(v, ControlId::DpadLeft) = button(l.dpad_left || r.dpad_left);
+		At(v, ControlId::DpadRight) = button(l.dpad_right || r.dpad_right);
+		At(v, ControlId::LeftBumper) = button(l.bumper);
+		At(v, ControlId::RightBumper) = button(r.bumper);
+		At(v, ControlId::View) = button(l.view || r.view);
 		return v;
 	}
 

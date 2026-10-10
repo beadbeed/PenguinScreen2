@@ -1299,6 +1299,8 @@ struct Pcsx2Config
 		float StereoConvergence = 20.0f;
 
 		bool HeadCamera = true;
+		// First person: turn the view in steps on the turn stick instead of smoothly.
+		bool SnapTurn = false;
 
 		VROptions();
 		void LoadSave(SettingsWrapper& wrap);

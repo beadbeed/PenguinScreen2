@@ -16,6 +16,7 @@
 #include "fmt/format.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
@@ -1386,7 +1387,7 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 		warnUnknownKeys(serial, ln, "camera.lookAt",
 			{"eye", "target", "position", "heading", "eyeHeight", "eyeForward", "distance", "unitsPerMeter",
 				"yawSign", "pitchSign", "roll", "rollSign", "when", "notes", "yawAnchor", "snapTurnDeg", "snapStick",
-				"aim"});
+				"aim", "smoothTurnDegPerSec", "pauseWhen", "bodyFollow", "hold", "viewMatrix", "syncFramesBack"});
 		const std::optional<u32> eye = ln.has_child("eye") ? parseAddress(nodeVal(ln["eye"])) : std::nullopt;
 		const std::optional<u32> tgt = ln.has_child("target") ? parseAddress(nodeVal(ln["target"])) : std::nullopt;
 		const std::optional<s64> pos = ln.has_child("position") ? parseSignedOffset(nodeVal(ln["position"])) : std::nullopt;
@@ -1473,6 +1474,129 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 			{
 				Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt yawAnchor needs heading; turning it off.", serial);
 				la.yaw_anchor = false;
+			}
+			readOptionalFloat(serial, ln, "smoothTurnDegPerSec", "camera.lookAt smoothTurnDegPerSec", la.smooth_turn_deg_s);
+			la.smooth_turn_deg_s = std::clamp(std::isfinite(la.smooth_turn_deg_s) ? la.smooth_turn_deg_s : 0.0f, 0.0f, 720.0f);
+
+			if (ln.has_child("pauseWhen") && ln["pauseWhen"].is_seq())
+				parseGuardList(serial, ln["pauseWhen"], "camera.lookAt pauseWhen", la.pause_when);
+
+			const auto parseWidth = [&](const ryml::ConstNodeRef& n, u8& dst) {
+				if (!n.has_child("width"))
+					return;
+				const std::optional<u32> w = StringUtil::FromChars<u32>(nodeVal(n["width"]));
+				if (w.has_value() && (w.value() == 1 || w.value() == 2 || w.value() == 4))
+					dst = static_cast<u8>(w.value());
+				else
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt width must be 1, 2 or 4; keeping {}.", serial, dst);
+			};
+			if (ln.has_child("bodyFollow") && ln["bodyFollow"].is_seq())
+			{
+				for (const ryml::ConstNodeRef& bn : ln["bodyFollow"].children())
+				{
+					if (!bn.is_map())
+						continue;
+					warnUnknownKeys(serial, bn, "camera.lookAt.bodyFollow", {"offset", "equals", "notEquals", "width"});
+					const std::optional<s64> off = bn.has_child("offset") ? parseSignedOffset(nodeVal(bn["offset"])) : std::nullopt;
+					const bool has_ne = bn.has_child("notEquals");
+					const std::optional<u32> eq = bn.has_child("equals") ? parseHexU32(nodeVal(bn["equals"])) :
+					                              has_ne                 ? parseHexU32(nodeVal(bn["notEquals"])) : std::nullopt;
+					if (!off.has_value() || !eq.has_value())
+					{
+						Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt.bodyFollow entry needs offset and equals|notEquals; "
+										   "skipping it.", serial);
+						continue;
+					}
+					CameraLookAt::RecordCheck rc;
+					rc.offset = off.value();
+					rc.equals = eq.value();
+					rc.not_equals = has_ne && !bn.has_child("equals");
+					parseWidth(bn, rc.width);
+					la.body_follow.push_back(rc);
+				}
+				if (!la.body_follow.empty() && !la.yaw_anchor)
+				{
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt bodyFollow needs yawAnchor: true; ignoring it.", serial);
+					la.body_follow.clear();
+				}
+			}
+			if (ln.has_child("hold") && ln["hold"].is_seq())
+			{
+				for (const ryml::ConstNodeRef& hn : ln["hold"].children())
+				{
+					if (!hn.is_map())
+						continue;
+					warnUnknownKeys(serial, hn, "camera.lookAt.hold", {"address", "value", "f32", "width", "restore", "restoreF32", "when", "notes"});
+					const std::optional<u32> addr = hn.has_child("address") ? parseAddress(nodeVal(hn["address"])) : std::nullopt;
+					CameraLookAt::Hold h;
+					bool have_value = false;
+					if (hn.has_child("f32"))
+					{
+						float f = 0.0f;
+						readOptionalFloat(serial, hn, "f32", "camera.lookAt.hold f32", f);
+						if (std::isfinite(f))
+						{
+							h.value = std::bit_cast<u32>(f);
+							h.width = 4;
+							have_value = true;
+						}
+					}
+					else if (hn.has_child("value"))
+					{
+						const std::optional<u32> v = parseHexU32(nodeVal(hn["value"]));
+						if (v.has_value())
+						{
+							h.value = v.value();
+							parseWidth(hn, h.width);
+							have_value = true;
+						}
+					}
+					if (!addr.has_value() || !have_value || !inMainRam(addr.value(), h.width) || (addr.value() % h.width) != 0)
+					{
+						Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt.hold entry needs an aligned main-RAM address "
+										   "and value|f32; skipping it.", serial);
+						continue;
+					}
+					if (hn.has_child("restoreF32"))
+					{
+						float f = std::numeric_limits<float>::quiet_NaN();
+						readOptionalFloat(serial, hn, "restoreF32", "camera.lookAt.hold restoreF32", f);
+						if (std::isfinite(f) && h.width == 4)
+						{
+							h.restore = std::bit_cast<u32>(f);
+							h.has_restore = true;
+						}
+					}
+					else if (hn.has_child("restore"))
+					{
+						const std::optional<u32> r = parseHexU32(nodeVal(hn["restore"]));
+						if (r.has_value())
+						{
+							h.restore = r.value();
+							h.has_restore = true;
+						}
+					}
+					if (hn.has_child("when") && hn["when"].is_seq())
+						parseGuardList(serial, hn["when"], "camera.lookAt.hold when", h.when);
+					h.address = addr.value();
+					la.holds.push_back(std::move(h));
+				}
+			}
+			if (ln.has_child("viewMatrix"))
+			{
+				const std::optional<u32> vm = parseAddress(nodeVal(ln["viewMatrix"]));
+				if (vm.has_value() && inMainRam(vm.value(), 64) && (vm.value() % 4) == 0)
+					la.view_matrix_address = vm.value();
+				else
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt viewMatrix is not an aligned main-RAM address; ignoring it.", serial);
+			}
+			if (ln.has_child("syncFramesBack"))
+			{
+				const std::optional<u32> sf = StringUtil::FromChars<u32>(nodeVal(ln["syncFramesBack"]));
+				if (sf.has_value() && sf.value() <= 4)
+					la.sync_frames_back = sf.value();
+				else
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt syncFramesBack must be 0-4; keeping {}.", serial, la.sync_frames_back);
 			}
 
 			if (ln.has_child("aim") && ln["aim"].is_map())

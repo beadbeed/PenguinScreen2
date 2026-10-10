@@ -23,6 +23,13 @@ struct VRHandState
   bool y = false;
   bool menu = false;
   bool thumbstick_click = false;
+  // Only bound on gamepad-shaped controllers (Valve Steam Frame: D-pad and View on the left).
+  bool dpad_up = false;
+  bool dpad_down = false;
+  bool dpad_left = false;
+  bool dpad_right = false;
+  bool bumper = false;
+  bool view = false;
   float trigger = 0.f;
   float grip = 0.f;
   float thumbstick_x = 0.f;

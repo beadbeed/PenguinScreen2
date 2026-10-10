@@ -59,7 +59,13 @@ namespace VR
 		XrAction m_button_x = XR_NULL_HANDLE;
 		XrAction m_button_y = XR_NULL_HANDLE;
 		XrAction m_button_menu = XR_NULL_HANDLE;
+		XrAction m_button_view = XR_NULL_HANDLE;
 		XrAction m_thumbstick_click = XR_NULL_HANDLE;
+		XrAction m_dpad_up = XR_NULL_HANDLE;
+		XrAction m_dpad_down = XR_NULL_HANDLE;
+		XrAction m_dpad_left = XR_NULL_HANDLE;
+		XrAction m_dpad_right = XR_NULL_HANDLE;
+		XrAction m_bumper = XR_NULL_HANDLE;
 		XrAction m_trigger = XR_NULL_HANDLE;
 		XrAction m_grip = XR_NULL_HANDLE;
 		XrAction m_thumbstick = XR_NULL_HANDLE;

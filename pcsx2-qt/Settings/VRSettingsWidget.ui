@@ -240,6 +240,13 @@
         </property>
        </widget>
       </item>
+      <item>
+       <widget class="QCheckBox" name="snapTurn">
+        <property name="text">
+         <string>Snap Turning (first person)</string>
+        </property>
+       </widget>
+      </item>
      </layout>
     </widget>
    </item>
@@ -278,6 +285,7 @@
   <tabstop>stereoConvergence</tabstop>
   <tabstop>profileBrowser</tabstop>
   <tabstop>headCamera</tabstop>
+  <tabstop>snapTurn</tabstop>
  </tabstops>
  <resources/>
  <connections/>

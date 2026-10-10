@@ -17,12 +17,14 @@ SLPM-65428:
   crcs: [0x32088394, 0x198EFDC1, 0x03C8F393, 0x32097C02, 0x03C90C05]
   tier: stereo
   notes: "Fixed/rail cameras over real-time 3D rooms. First person: camera.lookAt puts the eye at the local character's head."
-  # World-locked screen for menus, the item screen, cutscenes and doors. While first person drives the
-  # camera, the firstPerson screen is used instead: locked to the head, sized to the game camera's FOV
-  # (camera.fov below, 100 deg vertical: height = 2 * distance * tan(50 deg)), flat so perspective holds.
-  # It is placed where the shown frame was rendered from (the head pose about poseLagMs ago), so the
-  # runtime can reproject it as the head turns instead of the old frame being glued to the face.
-  screen: { distance: 2.0, height: 1.4, firstPerson: { distance: 1.5, height: 3.575, arc: 0, poseLagMs: 40 } }
+  # World-locked screen for menus, the item screen, the map, cutscenes and doors: placed straight in front
+  # of the head each time first person hands over, 2.5 m out and 1.3 m tall (about 29 deg), so a menu sits
+  # in front of you rather than filling your view. While first person drives the camera, the firstPerson
+  # screen is used instead: sized to the game camera's FOV (camera.fov below, 100 deg vertical: height =
+  # 2 * distance * tan(50 deg)), flat so perspective holds, and placed where the shown frame was rendered
+  # from (camera.lookAt viewMatrix; poseLagMs is the fallback guess), so the runtime can reproject it as
+  # the head turns instead of the old frame being glued to the face.
+  screen: { distance: 2.5, height: 1.3, firstPerson: { distance: 1.5, height: 3.575, arc: 0, poseLagMs: 40 } }
   stereo:
     separation: 0.012
     convergence: 55.0
@@ -62,7 +64,7 @@ SLPM-65428:
       position: 0x38      # f32 x, y (up), z
       heading: 0x92       # s16, 0x10000 = 360 deg, 0 faces +Z
       eyeHeight: 155
-      eyeForward: 30      # in front of the face; at 10 the eye sits inside the head model (PS2 draws back faces)
+      eyeForward: 10      # about where the eyes are; the body is hidden (see hold) so the head model can't show
       distance: 100
       roll: 0x30638C         # camera roll (s32 holding a 16-bit angle): written level (rollSign 0) so a cut's
       rollSign: 0          # roll can't stay latched; the first-person screen itself stays roll-level
@@ -70,11 +72,34 @@ SLPM-65428:
       # Outbreak's yaw grows counter-clockwise like the headset's (checked: with the camera held at yaw W,
       # stick left walks toward W+90, right toward W-90), so yawSign stays 1.
       # Movement is camera-relative in the default control type: stick up walks where the camera
-      # looks, i.e. where you look. So the camera keeps its own yaw (from the heading each time first
-      # person takes over or you recenter), turned by 30 deg snap turns on the right controller stick.
+      # looks, i.e. where you look. So the camera keeps its own yaw (the way the character faces each
+      # time first person takes over or you recenter), turned smoothly by the right controller stick
+      # (120 deg/s at full push), or in 30 deg steps with the VR "Snap Turning" setting.
       yawAnchor: true
+      smoothTurnDegPerSec: 120
       snapTurnDeg: 30
       snapStick: right
+      # Item screen, map or pause open (u8 0x48BF7E = 1, next to the local slot byte; checked with all
+      # three): the camera holds still and the menu goes on the world screen in front of you.
+      pauseWhen: [{ address: 0x48BF7E, equals: 1, width: 1 }]
+      # Standing idle (stance 1, action 0) with the stick centred, the character turns to face where you
+      # look, so picking things up and examining them works on what you're looking at.
+      bodyFollow:
+        - { offset: 0x08, equals: 1, width: 1 }     # stance: normal (2 = weapon raised)
+        - { offset: 0x54F, equals: 0, width: 1 }    # action: idle (1 walk, 3 run, 128 aiming)
+        - { offset: 0xF98, equals: 0, width: 2 }    # stick magnitude: centred
+      # Hide your own body: the room's near-camera cull (models whose feet + 100 up are nearer the eye
+      # than their class radius) spares only the camera's focus character. Point the focus at an empty
+      # slot and the cull hides the local character; its class-1 radius goes from 80 to 70 so zombies and
+      # partners stay visible down to about 0.43 m away.
+      hold:
+        - { address: 0x3AEF74, value: 3, width: 1, restore: 0, notes: "camera focus slot (normally the local slot)" }
+        - { address: 0x6D6CF4, f32: 70.0, restoreF32: 80.0, when: [{ address: 0x540004, equals: 3 }], notes: "near-cull radius, characters" }
+      # The view matrix the game builds from eye/target (row vectors). Matching it against what was
+      # written says which head pose each displayed frame came from, so the first-person screen is
+      # placed exactly there (no judder). Outbreak builds the next view right after a flip: 1 frame back.
+      viewMatrix: 0x3062E0
+      syncFramesBack: 1
       # Weapon raised (stance 2, R1 or the hip holster): the character faces where the right
       # controller points. Aim pitch (+0xBC8, needs the servo silenced) is not enabled yet.
       aim: { stance: 0x08, equals: 2, hand: right }
@@ -88,6 +113,10 @@ SLPM-65428:
   # (hold + forward = run), Square = ad-lib, Triangle = map, Start = item screen,
   # R1 held = weapon ready with lock-on, L1 = reload / next target / tab.
   # Select (pause/options) stays off the controllers on purpose: online it doesn't pause.
+  # Steam Frame: A, B, X, Y and Menu are on the right controller, the D-pad and View on the left.
+  # Touch-style controllers: A/B right, X/Y and Menu left. Y (the top button) opens the map on both.
+  # The right stick turns the view (camera.lookAt), so it is not passed to the game: the PS2 right
+  # stick's up/down plays ad-lib shouts in Outbreak.
   #
   # The right grip is for gestures only, so a squeeze at the hip can't also do something
   # else. Zones are placed from the head (metres: side + right, height + up, forward +
@@ -102,16 +131,19 @@ SLPM-65428:
         RightTriggerPress: Circle
         ButtonA: Circle
         ButtonB: Cross
-        ButtonX: Triangle
-        ButtonY: Square
+        ButtonX: Square
+        ButtonY: Triangle
         Menu: Start
+        RightBumper: R1
+        DpadUp: Up
+        DpadDown: Down
+        DpadLeft: Left
+        DpadRight: Right
         LeftTriggerPress: L1
         LeftGripPress: L2
         RightStickClick: R3
         LeftStickX: LeftStickX
         LeftStickY: LeftStickY
-        RightStickX: RightStickX
-        RightStickY: RightStickY
     - device: Zone
       id: holster
       notes: "Right hip holster: squeeze the grip there to ready the weapon (R1, lock-on); keep squeezing to stay aimed."

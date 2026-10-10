@@ -29,6 +29,7 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.stereoSeparation, "VR", "StereoSeparation", 0.02f);
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.stereoConvergence, "VR", "StereoConvergence", 20.0f);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.headCamera, "VR", "HeadCamera", true);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.snapTurn, "VR", "SnapTurn", false);
 
 	dialog()->registerWidgetHelp(m_ui.enable, tr("Enable VR (OpenXR)"), tr("Unchecked"),
 		tr("Renders the emulated display on a virtual screen inside a connected OpenXR headset. Requires the Vulkan "
@@ -66,6 +67,10 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 		tr("Drives the game's own camera with your head movement, by writing the head pose into the game's memory each "
 		   "frame. Requires a per-game immersive profile with verified camera addresses; does nothing for games without "
 		   "one. Takes effect immediately."));
+
+	dialog()->registerWidgetHelp(m_ui.snapTurn, tr("Snap Turning"), tr("Unchecked"),
+		tr("In first-person profiles, the turn stick turns the view in steps (more comfortable for some people) "
+		   "instead of smoothly. Takes effect immediately."));
 
 	dialog()->registerWidgetHelp(m_ui.profileBrowser, tr("Per-Game Profiles"), tr("N/A"),
 		tr("Browses the profiles bundled in vr-profiles.yaml. Profiles apply automatically to the matching game — this "

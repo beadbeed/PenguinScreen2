@@ -313,6 +313,48 @@ namespace VR::ProfileDB
 		s64 aim_pitch_offset = 0; // s16 binary angle (0x10000 = 360 deg)
 		float aim_pitch_sign = 1.0f;
 		float aim_pitch_clamp = 8192.0f; // s16 units
+
+		// Smooth turning on the turn stick, degrees per second at full deflection (needs yaw_anchor).
+		// Used unless the VR SnapTurn setting is on or this is 0; then snap_turn_deg applies.
+		float smooth_turn_deg_s = 0.0f;
+
+		// While these all pass (a menu, the map, pause), the camera holds its last view, the head no
+		// longer steers it and first person counts as inactive, so the world screen is shown.
+		std::vector<CameraGuard> pause_when;
+
+		// A value at base + offset; all checks of a list must hold.
+		struct RecordCheck
+		{
+			s64 offset = 0;
+			u32 equals = 0;
+			u8 width = 1;
+			bool not_equals = false;
+		};
+		// Body follows view: while every check holds (standing idle, stick centred), the heading is
+		// written to the camera yaw, so picking up and checking things faces where the player looks.
+		std::vector<RecordCheck> body_follow;
+
+		// Values held while first person is active (e.g. a camera-focus byte so the near-camera cull
+		// hides the local body) and put back when it ends, if the game has not changed them since.
+		struct Hold
+		{
+			u32 address = 0;
+			u8 width = 4;
+			u32 value = 0;
+			// The value to put back when the one found already equals ours (a savestate made while held).
+			bool has_restore = false;
+			u32 restore = 0;
+			// Only held (and put back) while these pass, e.g. the overlay holding the data is resident.
+			std::vector<CameraGuard> when;
+		};
+		std::vector<Hold> holds;
+
+		// The game's view matrix (4x4 f32, row vectors: look = -column 2, eye = -row 3 * R^T). Matching
+		// it against recent writes tells which head pose each displayed frame was rendered from.
+		u32 view_matrix_address = 0;
+		// Which matched frame is on screen at a vsync: the newest matched view matrix minus this many
+		// (1 = the game builds its next view right after a flip, while the last frame is displayed).
+		u32 sync_frames_back = 1;
 	};
 
 	struct CameraProfile

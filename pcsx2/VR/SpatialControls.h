@@ -366,6 +366,13 @@ namespace VR::SpatialControls
 		RightTriggerPress,
 		LeftGripPress,
 		RightGripPress,
+		DpadUp,
+		DpadDown,
+		DpadLeft,
+		DpadRight,
+		LeftBumper,
+		RightBumper,
+		View,
 		Count,
 	};
 	static constexpr u32 kControlCount = static_cast<u32>(ControlId::Count);
@@ -523,7 +530,9 @@ namespace VR::SpatialControls
 	// Gamepad: the controllers' own buttons, triggers, grips and sticks, passed straight
 	// through so a profile can bind them onto the PS2 pad. Stick Y is +1 pushed forward.
 	// Triggers and grips also come as *Press buttons, pressed past half travel, for binding
-	// to a digital PS2 button without a resting finger pressing it.
+	// to a digital PS2 button without a resting finger pressing it. ButtonX, ButtonY and Menu
+	// read either hand (left on Touch, right on the Steam Frame); the D-pad, bumpers and View
+	// exist only on gamepad-shaped controllers such as the Steam Frame and stay 0 elsewhere.
 	ControlValues ComposeGamepad(const VRInputSnapshot& snapshot);
 
 	// Zone: a spot on the body that a hand reaches into, such as a hip holster or over the

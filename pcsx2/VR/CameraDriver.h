@@ -31,6 +31,11 @@ namespace VR::CameraDriver
 	bool FirstPersonPoseAt(u64 time_ms, HeadPose::Snapshot* out);
 	u64 SteadyNowMs();
 
+	// GS thread: the head pose the frame being presented was rendered from, matched through the game's
+	// view matrix and sent down the GS queue in step with the frames. False when not known (no
+	// viewMatrix in the profile, first person not active, or no frame matched yet).
+	bool RenderPose(HeadPose::Snapshot* out);
+
 	void RequestRecenter();
 
 	void OnStateLoaded();

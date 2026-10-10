@@ -1292,7 +1292,8 @@ namespace VR::XRCompositor
 			}
 
 			// First-person screen: placed in the room (base space) in front of the head pose the shown
-			// frame was rendered from (the pose camera.lookAt used about poseLagMs ago), along its yaw and
+			// frame was rendered from (matched through the game's view matrix when the profile names it,
+			// else the pose camera.lookAt used about poseLagMs ago), along its yaw and
 			// pitch but never its roll. The runtime then reprojects it for the head's motion since, so the
 			// world holds still while the head turns instead of an old frame being glued to the face.
 			XrPosef fp_pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
@@ -1303,7 +1304,8 @@ namespace VR::XRCompositor
 				fp_head = s.head_position_valid ? s.head_pose.position : XrVector3f{0.0f, 0.0f, 0.0f};
 				HeadPose::Snapshot stamped;
 				const u64 lag = static_cast<u64>(sp.fp_pose_lag_ms);
-				if (CameraDriver::FirstPersonPoseAt(CameraDriver::SteadyNowMs() - lag, &stamped))
+				if (CameraDriver::RenderPose(&stamped) ||
+					CameraDriver::FirstPersonPoseAt(CameraDriver::SteadyNowMs() - lag, &stamped))
 				{
 					q = {stamped.orientation_x, stamped.orientation_y, stamped.orientation_z, stamped.orientation_w};
 					if (stamped.position_valid)

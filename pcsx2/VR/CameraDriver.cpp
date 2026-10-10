@@ -10,6 +10,7 @@
 #include "VR/VRProfileDB.h"
 
 #include "Config.h"
+#include "MTGS.h"
 #include "Memory.h"
 #include "VMManager.h"
 
@@ -973,6 +974,7 @@ namespace VR::CameraDriver
 		bool s_yaw_anchor_valid = false;
 		float s_yaw_anchor = 0.0f;
 		bool s_snap_ready = false;
+		std::chrono::steady_clock::time_point s_turn_last{};
 
 		float WrapPi(float a)
 		{
@@ -1008,13 +1010,62 @@ namespace VR::CameraDriver
 			w = ow;
 		}
 
+		// Seconds since the previous call, for smooth turning; 0 after a gap (pause, disarm, first call).
+		float TurnDt()
+		{
+			const auto now = std::chrono::steady_clock::now();
+			const float dt = std::chrono::duration<float>(now - s_turn_last).count();
+			s_turn_last = now;
+			return (dt > 0.0f && dt < 0.1f) ? dt : 0.0f;
+		}
+
+		u32 ReadSized(u32 address, u8 width)
+		{
+			switch (width)
+			{
+				case 1: return memRead8(address);
+				case 2: return memRead16(address);
+				default: return memRead32(address);
+			}
+		}
+
+		void WriteSized(u32 address, u8 width, u32 value)
+		{
+			switch (width)
+			{
+				case 1: memWrite8(address, static_cast<u8>(value)); break;
+				case 2: memWrite16(address, static_cast<u16>(value)); break;
+				default: memWrite32(address, value); break;
+			}
+		}
+
+		bool RecordChecksPass(const std::vector<ProfileDB::CameraLookAt::RecordCheck>& checks, u32 base)
+		{
+			for (const ProfileDB::CameraLookAt::RecordCheck& c : checks)
+			{
+				const s64 a = static_cast<s64>(base) + c.offset;
+				if (a < 0 || a + c.width > static_cast<s64>(Ps2MemSize::MainRam) || (a % c.width) != 0)
+					return false;
+				if ((ReadSized(static_cast<u32>(a), c.width) == c.equals) == c.not_equals)
+					return false;
+			}
+			return true;
+		}
+
+		// What camera.lookAt wrote this vsync, for matching against the game's view matrix later.
+		struct LookAtWrite
+		{
+			float dir[3] = {0.0f, 0.0f, 1.0f};
+			float eye[3] = {0.0f, 0.0f, 0.0f};
+		};
+
 		// camera.lookAt: put the game's eye/target camera at the character's head. Game yaw 0 faces
 		// +Z, forward = (sin y, cos y) on the x/z floor plane, y up. Head yaw (OpenXR, CCW positive) is
 		// added times yawSign (-1 for a game whose yaw grows clockwise), head pitch tilts the target,
 		// and head translation since the last recenter moves the eye (forward/right/up, scaled to game
 		// units). The base yaw is the character's heading, or with yawAnchor the camera's own yaw.
 		bool ApplyLookAt(const ProfileDB::CameraLookAt& la, const std::optional<u32>& base, const EulerAngles& e,
-			const HeadPose::Snapshot& pose)
+			const HeadPose::Snapshot& pose, LookAtWrite* out)
 		{
 			if (!base.has_value() || (!la.when.empty() && !GuardListPass(la.when)))
 				return false;
@@ -1042,29 +1093,49 @@ namespace VR::CameraDriver
 
 			float base_yaw = heading;
 			VRInputSnapshot input;
-			const bool want_input = la.yaw_anchor && ((la.snap_turn_deg > 0.0f && la.snap_stick_hand >= 0) || la.has_aim);
+			const bool smooth = la.smooth_turn_deg_s > 0.0f && !EmuConfig.VR.SnapTurn;
+			const bool snap = !smooth && (la.snap_turn_deg > 0.0f || la.smooth_turn_deg_s > 0.0f);
+			const float snap_deg = (la.snap_turn_deg > 0.0f) ? la.snap_turn_deg : 30.0f;
+			const bool want_input = la.yaw_anchor && (((smooth || snap) && la.snap_stick_hand >= 0) || la.has_aim);
 			if (want_input)
 				input = GetInputSnapshot();
+			const float turn_dt = TurnDt();
 			if (la.yaw_anchor)
 			{
 				if (!s_yaw_anchor_valid)
 				{
-					s_yaw_anchor = heading;
+					// Each time first person takes over, the view looks the way the character faces,
+					// whichever way the head happens to be turned.
+					s_yaw_anchor = WrapPi(heading - la.yaw_sign * e.yaw);
 					s_yaw_anchor_valid = true;
 					s_snap_ready = false;
 				}
-				if (la.snap_turn_deg > 0.0f && la.snap_stick_hand >= 0 && input.actions_active)
+				if (la.snap_stick_hand >= 0 && input.actions_active)
 				{
 					const float sx = input.hands[la.snap_stick_hand].thumbstick_x;
-					if (s_snap_ready && std::abs(sx) > 0.7f)
+					// A right push turns the view right: -yawSign converts "clockwise" into game yaw.
+					const float dir = (sx > 0.0f) ? 1.0f : -1.0f;
+					if (smooth)
 					{
-						// A right flick turns the view right: -yawSign converts "clockwise" into game yaw.
-						const float dir = (sx > 0.0f) ? 1.0f : -1.0f;
-						s_yaw_anchor = WrapPi(s_yaw_anchor - la.yaw_sign * dir * la.snap_turn_deg * (PI_F / 180.0f));
+						constexpr float kDeadzone = 0.2f;
+						const float t = std::clamp((std::abs(sx) - kDeadzone) / (0.95f - kDeadzone), 0.0f, 1.0f);
+						if (t > 0.0f)
+						{
+							const float rate = la.smooth_turn_deg_s * t * (0.5f + 0.5f * t);
+							s_yaw_anchor = WrapPi(s_yaw_anchor - la.yaw_sign * dir * rate * turn_dt * (PI_F / 180.0f));
+						}
 						s_snap_ready = false;
 					}
-					else if (std::abs(sx) < 0.3f)
-						s_snap_ready = true;
+					else if (snap)
+					{
+						if (s_snap_ready && std::abs(sx) > 0.7f)
+						{
+							s_yaw_anchor = WrapPi(s_yaw_anchor - la.yaw_sign * dir * snap_deg * (PI_F / 180.0f));
+							s_snap_ready = false;
+						}
+						else if (std::abs(sx) < 0.3f)
+							s_snap_ready = true;
+					}
 				}
 				base_yaw = s_yaw_anchor;
 			}
@@ -1129,6 +1200,11 @@ namespace VR::CameraDriver
 					}
 				}
 			}
+			// Body follows view: standing idle with the stick centred, the character turns to face where the
+			// camera looks, so picking up, checking and opening things work on what the player looks at.
+			if (!la.body_follow.empty() && heading_addr != 0 && RecordChecksPass(la.body_follow, base.value()))
+				memWrite16(heading_addr, ToBinaryAngle(yaw));
+
 			const float target[3] = {eye[0] + la.distance * sy * cp, eye[1] + la.distance * sp,
 				eye[2] + la.distance * cy * cp};
 			for (int i = 0; i < 3; i++)
@@ -1148,7 +1224,65 @@ namespace VR::CameraDriver
 				const s32 roll = static_cast<s32>(std::lround(la.roll_sign * e.roll * (65536.0f / (2.0f * PI_F)))) & 0xFFFF;
 				memWrite32(la.roll_address, static_cast<u32>(roll));
 			}
+			if (out)
+			{
+				out->dir[0] = sy * cp;
+				out->dir[1] = sp;
+				out->dir[2] = cy * cp;
+				std::memcpy(out->eye, eye, sizeof(out->eye));
+			}
 			return true;
+		}
+
+		// camera.lookAt holds: saved on first write, put back (only if still ours) when first person ends.
+		struct HoldState
+		{
+			bool saved = false;
+			u32 original = 0;
+		};
+		std::vector<HoldState> s_hold_state;
+		u32 s_hold_crc = 0;
+
+		void ApplyHolds(const ProfileDB::CameraLookAt& la, u32 crc)
+		{
+			if (s_hold_crc != crc || s_hold_state.size() != la.holds.size())
+			{
+				s_hold_state.assign(la.holds.size(), HoldState{});
+				s_hold_crc = crc;
+			}
+			for (size_t i = 0; i < la.holds.size(); i++)
+			{
+				const ProfileDB::CameraLookAt::Hold& h = la.holds[i];
+				if (!h.when.empty() && !GuardListPass(h.when))
+					continue;
+				HoldState& st = s_hold_state[i];
+				const u32 cur = ReadSized(h.address, h.width);
+				if (!st.saved)
+				{
+					st.original = (cur == h.value && h.has_restore) ? h.restore : cur;
+					st.saved = true;
+				}
+				if (cur != h.value)
+					WriteSized(h.address, h.width, h.value);
+			}
+		}
+
+		void RestoreHolds(const ProfileDB::CameraLookAt* la, bool write)
+		{
+			if (la && write && s_hold_state.size() == la->holds.size())
+			{
+				for (size_t i = 0; i < la->holds.size(); i++)
+				{
+					const ProfileDB::CameraLookAt::Hold& h = la->holds[i];
+					HoldState& st = s_hold_state[i];
+					if (!st.saved || (!h.when.empty() && !GuardListPass(h.when)))
+						continue;
+					if (ReadSized(h.address, h.width) == h.value)
+						WriteSized(h.address, h.width, st.original);
+				}
+			}
+			for (HoldState& st : s_hold_state)
+				st.saved = false;
 		}
 
 		std::atomic_bool s_lookat_active{false};
@@ -1178,6 +1312,141 @@ namespace VR::CameraDriver
 			s_pose_ring[s_pose_next] = StampedPose{NowMs(), pose};
 			s_pose_next = (s_pose_next + 1) % s_pose_ring.size();
 			s_pose_count = std::min(s_pose_count + 1, s_pose_ring.size());
+		}
+
+		// Render-pose sync. Each vsync records what camera.lookAt wrote; when the game's view matrix
+		// changes (it built a new frame), the write it was built from is found by matching direction and
+		// eye, and that write's head pose is queued for the frame. The pose of the frame on screen is sent
+		// down the GS queue just before the vsync that presents it, so the compositor places each frame
+		// exactly where it was rendered from: no time guess, no judder from 30 fps frames shown twice.
+		struct WrittenPose
+		{
+			LookAtWrite w;
+			HeadPose::Snapshot pose;
+		};
+		std::array<WrittenPose, 16> s_written{};
+		size_t s_written_next = 0;
+		size_t s_written_count = 0;
+		std::array<HeadPose::Snapshot, 8> s_frame_poses{};
+		std::array<u32, 8> s_frame_age{}; // how many writes back the match was (for the sync log)
+		size_t s_frame_next = 0;
+		size_t s_frame_count = 0;
+		u64 s_frame_seq = 0;
+		u64 s_frame_published_seq = 0;
+		float s_view_prev[16] = {};
+		bool s_view_prev_valid = false;
+		bool s_render_published = false; // a valid render pose is on the GS side
+		bool s_render_sync_logged = false;
+
+		std::mutex s_gs_render_mutex;
+		HeadPose::Snapshot s_gs_render_pose;
+		bool s_gs_render_valid = false;
+
+		void PublishRenderPose(bool valid, const HeadPose::Snapshot& pose)
+		{
+			s_render_published = valid;
+			if (!MTGS::IsOpen())
+				return;
+			MTGS::RunOnGSThread([valid, pose]() {
+				std::lock_guard<std::mutex> lock(s_gs_render_mutex);
+				s_gs_render_valid = valid;
+				s_gs_render_pose = pose;
+			});
+		}
+
+		void ResetRenderSync()
+		{
+			s_written_count = 0;
+			s_frame_count = 0;
+			s_view_prev_valid = false;
+			if (s_render_published)
+				PublishRenderPose(false, HeadPose::Snapshot{});
+		}
+
+		void PushWritten(const LookAtWrite& w, const HeadPose::Snapshot& pose)
+		{
+			s_written[s_written_next] = WrittenPose{w, pose};
+			s_written_next = (s_written_next + 1) % s_written.size();
+			s_written_count = std::min(s_written_count + 1, s_written.size());
+		}
+
+		// Before this vsync's write: if the view matrix changed since the last vsync, the game built a frame
+		// from one of the earlier writes. Match it and queue that write's head pose for the frame.
+		void TrackRenderPose(const ProfileDB::CameraLookAt& la)
+		{
+			if (la.view_matrix_address == 0)
+				return;
+			float m[16];
+			for (u32 i = 0; i < 16; i++)
+			{
+				m[i] = std::bit_cast<float>(static_cast<u32>(memRead32(la.view_matrix_address + i * 4)));
+				if (!std::isfinite(m[i]))
+				{
+					s_view_prev_valid = false;
+					return;
+				}
+			}
+			const bool changed = !s_view_prev_valid || std::memcmp(m, s_view_prev, sizeof(m)) != 0;
+			std::memcpy(s_view_prev, m, sizeof(m));
+			s_view_prev_valid = true;
+			if (!changed || s_written_count == 0)
+				return;
+
+			// Row vectors: the camera looks down -column 2, and the eye is -(row 3) * R^T.
+			const float look[3] = {-m[2], -m[6], -m[10]};
+			float eye[3];
+			for (int i = 0; i < 3; i++)
+				eye[i] = -(m[12] * m[i * 4 + 0] + m[13] * m[i * 4 + 1] + m[14] * m[i * 4 + 2]);
+
+			float best = std::numeric_limits<float>::max();
+			const WrittenPose* hit = nullptr;
+			u32 hit_age = 0;
+			for (size_t i = 0; i < s_written_count; i++)
+			{
+				const WrittenPose& wp = s_written[(s_written_next + s_written.size() - 1 - i) % s_written.size()];
+				const float dot = look[0] * wp.w.dir[0] + look[1] * wp.w.dir[1] + look[2] * wp.w.dir[2];
+				const float dx = eye[0] - wp.w.eye[0], dy = eye[1] - wp.w.eye[1], dz = eye[2] - wp.w.eye[2];
+				// Direction error (1 - cos) plus eye distance; 10 game units weigh about as much as 0.8 deg.
+				const float err = (1.0f - dot) + 1.0e-6f * (dx * dx + dy * dy + dz * dz);
+				if (err < best)
+				{
+					best = err;
+					hit = &wp;
+					hit_age = static_cast<u32>(i + 1);
+				}
+			}
+			// Within about 3 deg and 30 units; anything else is a frame the game built from its own camera.
+			if (!hit || !(best < 0.0025f))
+				return;
+			s_frame_poses[s_frame_next] = hit->pose;
+			s_frame_age[s_frame_next] = hit_age;
+			s_frame_next = (s_frame_next + 1) % s_frame_poses.size();
+			s_frame_count = std::min(s_frame_count + 1, s_frame_poses.size());
+			s_frame_seq++;
+		}
+
+		// Send the head pose of the frame on screen now, `syncFramesBack` matched frames behind the newest.
+		void PublishMatchedPose(const ProfileDB::CameraLookAt& la)
+		{
+			if (la.view_matrix_address == 0 || s_frame_count <= la.sync_frames_back || s_frame_seq == s_frame_published_seq)
+				return;
+			const size_t idx = (s_frame_next + s_frame_poses.size() - 1 - la.sync_frames_back) % s_frame_poses.size();
+			PublishRenderPose(true, s_frame_poses[idx]);
+			s_frame_published_seq = s_frame_seq;
+			static const bool s_synclog = (std::getenv("PCSX2_VR_SYNCLOG") != nullptr);
+			if (!s_render_sync_logged)
+			{
+				Console.WriteLn("(VR) CameraDriver: first-person frames placed at their matched render pose (view matrix "
+								"0x%08X, %u frame(s) back).", la.view_matrix_address, la.sync_frames_back);
+				s_render_sync_logged = true;
+			}
+			if (s_synclog)
+			{
+				const size_t newest = (s_frame_next + s_frame_poses.size() - 1) % s_frame_poses.size();
+				Console.WriteLn("(VR) sync: vsync %llu frame %llu matched the write %u vsync(s) back; showing frame -%u (match age %u).",
+					static_cast<unsigned long long>(s_vsync_counter), static_cast<unsigned long long>(s_frame_seq),
+					s_frame_age[newest], la.sync_frames_back, s_frame_age[idx]);
+			}
 		}
 
 		void SetLookAtActive(bool active)
@@ -1278,6 +1547,15 @@ namespace VR::CameraDriver
 		if (!vm_live)
 		{
 			SetLookAtActive(false);
+			RestoreHolds(nullptr, false);
+			s_written_count = 0;
+			s_frame_count = 0;
+			s_view_prev_valid = false;
+			s_render_published = false;
+			{
+				std::lock_guard<std::mutex> lock(s_gs_render_mutex);
+				s_gs_render_valid = false;
+			}
 			s_fov_saved = false;
 			s_armed_logged = false;
 			s_silence_applied = false;
@@ -1295,6 +1573,8 @@ namespace VR::CameraDriver
 		if (!profile || !profile->camera.has_value())
 		{
 			SetLookAtActive(false);
+			RestoreHolds(nullptr, false);
+			ResetRenderSync();
 			s_fov_saved = false;
 			s_armed_logged = false;
 			s_silence_applied = false;
@@ -1347,6 +1627,11 @@ namespace VR::CameraDriver
 		if (!armed)
 		{
 			SetLookAtActive(false);
+			// While the VM is paused nothing can change; holds keep their saved originals for the resume.
+			if (vm_state == VMState::Running)
+				RestoreHolds(cam.look_at.has_value() ? &cam.look_at.value() : nullptr, true);
+			ResetRenderSync();
+			s_render_sync_logged = false;
 			RestoreFov(cam);
 			RestoreSilence(cam, crc);
 			RestoreCodeHooks(cam, crc);
@@ -1523,15 +1808,33 @@ namespace VR::CameraDriver
 			SetLookAtActive(false);
 		else if (guards_now)
 		{
-			// lookAt recenters yaw only, so pitch and roll stay level with gravity whatever the head was
-			// doing at the recenter.
-			const EulerAngles head = QuaternionToEulerYXZ(pose.orientation_x, pose.orientation_y,
-				pose.orientation_z, pose.orientation_w);
-			const EulerAngles look{WrapPi(head.yaw - s_ref_yaw), head.pitch, head.roll};
-			const bool wrote = ApplyLookAt(cam.look_at.value(), base, look, pose);
-			if (wrote)
-				PushStampedPose(pose);
-			SetLookAtActive(wrote);
+			const ProfileDB::CameraLookAt& la = cam.look_at.value();
+			ApplyHolds(la, crc);
+			if (!la.pause_when.empty() && GuardListPass(la.pause_when))
+			{
+				// A menu, the map or pause: the camera keeps its last view (its writers stay silenced) and the
+				// world screen shows the menu in front of the player.
+				ResetRenderSync();
+				SetLookAtActive(false);
+			}
+			else
+			{
+				// lookAt recenters yaw only, so pitch and roll stay level with gravity whatever the head was
+				// doing at the recenter.
+				const EulerAngles head = QuaternionToEulerYXZ(pose.orientation_x, pose.orientation_y,
+					pose.orientation_z, pose.orientation_w);
+				const EulerAngles look{WrapPi(head.yaw - s_ref_yaw), head.pitch, head.roll};
+				TrackRenderPose(la);
+				LookAtWrite w;
+				const bool wrote = ApplyLookAt(la, base, look, pose, &w);
+				if (wrote)
+				{
+					PushStampedPose(pose);
+					PushWritten(w, pose);
+					PublishMatchedPose(la);
+				}
+				SetLookAtActive(wrote);
+			}
 		}
 		else if (s_lookat_active.load(std::memory_order_relaxed))
 			SetLookAtActive(true);
@@ -1565,6 +1868,18 @@ namespace VR::CameraDriver
 		ResetDeltaState();
 		s_silence_repair = true;
 		s_fov_saved = false;
+		// The loaded memory has its own values: holds save them afresh, and no frame matches old writes.
+		RestoreHolds(nullptr, false);
+		ResetRenderSync();
+	}
+
+	bool RenderPose(HeadPose::Snapshot* out)
+	{
+		std::lock_guard<std::mutex> lock(s_gs_render_mutex);
+		if (!s_gs_render_valid)
+			return false;
+		*out = s_gs_render_pose;
+		return true;
 	}
 
 	u64 SteadyNowMs()
