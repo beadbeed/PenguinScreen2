@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/CameraDriver.h"
+#include "VR/HandModel.h"
 #include "VR/HeadPose.h"
 #include "VR/PadLook.h"
 #include "VR/VRManager.h"
@@ -1176,6 +1177,7 @@ namespace VR::CameraDriver
 
 			// Point-to-aim: while the stance says the weapon is raised, face where the aim hand points
 			// (recenter-relative, around the camera anchor), so the camera itself does not turn.
+			bool weapon_raised = false;
 			if (la.has_aim && heading_addr != 0 && input.actions_active && la.aim_hand >= 0)
 			{
 				const s64 sa = static_cast<s64>(base.value()) + la.aim_stance_offset;
@@ -1189,6 +1191,7 @@ namespace VR::CameraDriver
 						default: stance = memRead32(static_cast<u32>(sa)); break;
 					}
 					const VRPose& aim = input.hands[la.aim_hand].aim_pose;
+					weapon_raised = (stance == la.aim_stance_equals);
 					if (stance == la.aim_stance_equals && aim.valid)
 					{
 						const EulerAngles h = QuaternionToEulerYXZ(aim.orientation_xyzw[0], aim.orientation_xyzw[1],
@@ -1207,6 +1210,9 @@ namespace VR::CameraDriver
 					}
 				}
 			}
+			// The first-person hands show the pistol in the right hand while the weapon is raised.
+			HandModel::SetGunHeld(weapon_raised);
+
 			// Body follows view: standing idle with the stick centred, the character turns to face where the
 			// camera looks, so picking up, checking and opening things work on what the player looks at.
 			if (!la.body_follow.empty() && heading_addr != 0 && RecordChecksPass(la.body_follow, base.value()))
