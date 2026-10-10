@@ -1078,6 +1078,9 @@ namespace VR::CameraDriver
 		// smoothTurnDegPerSec, and walking (the move stick's push or the character's own speed, the larger).
 		float s_comfort_turn = 0.0f;
 		float s_comfort_walk = 0.0f;
+		// Whether this vsync's ApplyLookAt took the samples above (false through the disarm grace, when lookAt
+		// stays active but nothing runs).
+		bool s_comfort_sampled = false;
 		// The larger of the two, eased (CPU thread), and as published for the compositor with when (NowMs).
 		float s_comfort_eased = 0.0f;
 		u64 s_comfort_last_ms = 0;
@@ -1674,6 +1677,7 @@ namespace VR::CameraDriver
 					walk_stick = ComfortStickMotion(walk.thumbstick_x, walk.thumbstick_y);
 				}
 				s_comfort_walk = std::max(walk_stick, ComfortOwnMovement(la, p, NowMs()));
+				s_comfort_sampled = true;
 			}
 
 			// Body follows view: standing idle with the stick centred, the character turns to face where the
@@ -2141,10 +2145,13 @@ namespace VR::CameraDriver
 			{
 				s_comfort_eased = 0.0f;
 			}
-			else
+			else if (s_comfort_sampled)
 			{
 				s_comfort_eased = EaseComfort(s_comfort_eased, std::max(s_comfort_turn, s_comfort_walk), dt);
 			}
+			// Else the disarm grace (the guard byte flickers about 12 times a second, lookAt stays active and
+			// ApplyLookAt doesn't run): hold the last value instead of easing toward clear on those vsyncs, so the
+			// vignette's edge doesn't flicker with the guard byte. It drops at once if the grace ends in a disarm.
 			s_comfort_motion.store(s_comfort_eased, std::memory_order_relaxed);
 			s_comfort_ms.store(now, std::memory_order_release);
 		}
@@ -2248,6 +2255,7 @@ namespace VR::CameraDriver
 		// Set again by this vsync's ApplyLookAt, if it runs.
 		s_comfort_turn = 0.0f;
 		s_comfort_walk = 0.0f;
+		s_comfort_sampled = false;
 		s_online_safe = OnlineSafeNow();
 		// Every early return below (no VM, no camera profile, disarmed) leaves it cleared; it is set again
 		// only once armed, from this vsync's GetBase.
