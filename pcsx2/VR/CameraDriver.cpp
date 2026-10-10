@@ -363,6 +363,8 @@ namespace VR::CameraDriver
 			return fail;
 		}
 
+		int CountPredictMismatches(bool log); // with the head prediction code below
+
 		void MaybeRunSelfTest()
 		{
 			static const bool enabled = (std::getenv("PCSX2_VR_SELFTEST") != nullptr);
@@ -372,6 +374,7 @@ namespace VR::CameraDriver
 			ran = true;
 			RunMatrixSelfTest();
 			RunHookSelfTest();
+			Console.WriteLn("(VR) CameraDriver predict self-test: %d mismatch(es).", CountPredictMismatches(true));
 			const char* gamepad_fail = nullptr;
 			if (SpatialControls::SelfTestGamepad(&gamepad_fail))
 				Console.WriteLn("(VR) Gamepad self-test: passed (sprint latch, ad-lib flicks, unchanged without sprintLatch).");
@@ -1141,13 +1144,163 @@ namespace VR::CameraDriver
 			h.store((v < 0.0f) ? sample : (v + 0.05f * (sample - v)), std::memory_order_relaxed);
 		}
 
+		// lookAt.predict, head: the last two distinct head poses (CPU thread), for the angular velocity when
+		// the pose carries none (the runtime did not report one, or PINE's scripted head).
+		struct HeadSample
+		{
+			float q[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+			u64 frame = 0;
+			u64 ms = 0;
+			bool has = false;
+		};
+		HeadSample s_head_last;
+		HeadSample s_head_prev;
+		constexpr u64 kHeadSampleMaxGapMs = 100; // an older pair says nothing about how the head moves now
+		constexpr float kHeadPredictMaxRad = 25.0f * (PI_F / 180.0f);
+		bool s_head_predict_logged[2] = {false, false}; // [0] the pose's own velocity, [1] differenced poses
+
+		bool NormalizeQuat(float* q)
+		{
+			const float n2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+			if (!std::isfinite(n2) || n2 < 1e-12f)
+				return false;
+			const float inv = 1.0f / std::sqrt(n2);
+			for (int i = 0; i < 4; i++)
+				q[i] *= inv;
+			return true;
+		}
+
+		// The room-frame angular velocity (rad/s) that turns the unit quaternion prev into last in dt seconds.
+		bool AngularVelocityBetween(const float* prev, const float* last, float dt, float* omega)
+		{
+			if (!(dt > 0.0f))
+				return false;
+			// last = d * prev with d in the room frame, so d = last * conj(prev).
+			float dx, dy, dz, dw;
+			QuatMultiply(last[0], last[1], last[2], last[3], -prev[0], -prev[1], -prev[2], prev[3], dx, dy, dz, dw);
+			if (dw < 0.0f)
+			{
+				// The short way round.
+				dx = -dx;
+				dy = -dy;
+				dz = -dz;
+				dw = -dw;
+			}
+			const float sn = std::sqrt(dx * dx + dy * dy + dz * dz);
+			if (!std::isfinite(sn))
+				return false;
+			if (sn < 1e-7f)
+			{
+				omega[0] = omega[1] = omega[2] = 0.0f;
+				return true;
+			}
+			const float rate = 2.0f * std::atan2(sn, dw) / (sn * dt);
+			omega[0] = dx * rate;
+			omega[1] = dy * rate;
+			omega[2] = dz * rate;
+			return std::isfinite(omega[0]) && std::isfinite(omega[1]) && std::isfinite(omega[2]);
+		}
+
+		// AxisAngle(rv) * q: q turned on by the room-frame rotation vector rv (radians), at most max_rad.
+		bool RotateByVector(const float* rv, float max_rad, const float* q, float* out)
+		{
+			const float angle = std::sqrt(rv[0] * rv[0] + rv[1] * rv[1] + rv[2] * rv[2]);
+			if (!std::isfinite(angle))
+				return false;
+			if (angle < 1e-6f)
+			{
+				for (int i = 0; i < 4; i++)
+					out[i] = q[i];
+				return NormalizeQuat(out);
+			}
+			const float half = 0.5f * std::min(angle, max_rad);
+			const float k = std::sin(half) / angle;
+			QuatMultiply(rv[0] * k, rv[1] * k, rv[2] * k, std::cos(half), q[0], q[1], q[2], q[3], out[0], out[1], out[2],
+				out[3]);
+			return NormalizeQuat(out);
+		}
+
+		// The head's angular velocity (room frame, rad/s): the pose's own when it has one, else the rotation
+		// between the last two distinct poses over the time between them. *differenced says which.
+		bool HeadAngularVelocity(const HeadPose::Snapshot& pose, float* omega, bool* differenced)
+		{
+			// A new headset frame (its counter), or a fake / scripted pose taken at another time.
+			if (!s_head_last.has || pose.frame != s_head_last.frame || pose.publish_ms != s_head_last.ms)
+			{
+				HeadSample cur;
+				cur.q[0] = pose.orientation_x;
+				cur.q[1] = pose.orientation_y;
+				cur.q[2] = pose.orientation_z;
+				cur.q[3] = pose.orientation_w;
+				cur.frame = pose.frame;
+				cur.ms = pose.publish_ms;
+				cur.has = (pose.publish_ms != 0) && NormalizeQuat(cur.q);
+				s_head_prev = s_head_last;
+				s_head_last = cur;
+			}
+			*differenced = false;
+			if (pose.angular_valid)
+			{
+				for (int i = 0; i < 3; i++)
+					omega[i] = pose.angular_velocity[i];
+				return std::isfinite(omega[0]) && std::isfinite(omega[1]) && std::isfinite(omega[2]);
+			}
+			*differenced = true;
+			// Both samples recent and close together: a stalled head pose or a long gap says nothing about now.
+			const u64 now = NowMs();
+			if (!s_head_last.has || !s_head_prev.has || s_head_last.ms <= s_head_prev.ms ||
+				s_head_last.ms - s_head_prev.ms > kHeadSampleMaxGapMs ||
+				(now > s_head_last.ms && now - s_head_last.ms > kHeadSampleMaxGapMs))
+				return false;
+			const float dt = static_cast<float>(s_head_last.ms - s_head_prev.ms) * 0.001f;
+			return AngularVelocityBetween(s_head_prev.q, s_head_last.q, dt, omega);
+		}
+
+		// lookAt.predict, head: the pose the camera is written from, turned on by the head's angular velocity
+		// over the measured horizon times the damping k (the predict value), so the frame is rendered about
+		// where the head will be when it is shown: q_pred = AxisAngle(omega * H * k) * q. The velocity is in
+		// the room frame, so it multiplies on the left. The extra turn is capped at 25 deg. Only the camera
+		// write uses it; heading, aim, walk-and-shoot and body follow keep the true head.
+		HeadPose::Snapshot PredictCameraPose(const ProfileDB::CameraLookAt& la, const HeadPose::Snapshot& pose)
+		{
+			if (la.predict <= 0.0f)
+				return pose;
+			float omega[3];
+			bool differenced = false;
+			if (!HeadAngularVelocity(pose, omega, &differenced))
+				return pose;
+			const float horizon = PredictHorizon(s_predict_h);
+			const float lead = horizon * la.predict;
+			if (!(lead > 0.0f))
+				return pose;
+			const float rv[3] = {omega[0] * lead, omega[1] * lead, omega[2] * lead};
+			const float q_in[4] = {pose.orientation_x, pose.orientation_y, pose.orientation_z, pose.orientation_w};
+			float q[4];
+			if (!RotateByVector(rv, kHeadPredictMaxRad, q_in, q))
+				return pose;
+			if (!s_head_predict_logged[differenced ? 1 : 0])
+			{
+				s_head_predict_logged[differenced ? 1 : 0] = true;
+				Console.WriteLn("(VR) CameraDriver: lookAt.predict %.2f leads the head by %.0f ms (angular velocity %s).",
+					la.predict, horizon * 1000.0f, differenced ? "from successive head poses" : "reported with the pose");
+			}
+			HeadPose::Snapshot p = pose;
+			p.orientation_x = q[0];
+			p.orientation_y = q[1];
+			p.orientation_z = q[2];
+			p.orientation_w = q[3];
+			return p;
+		}
+
 		// camera.lookAt: put the game's eye/target camera at the character's head. Game yaw 0 faces
 		// +Z, forward = (sin y, cos y) on the x/z floor plane, y up. Head yaw (OpenXR, CCW positive) is
 		// added times yawSign (-1 for a game whose yaw grows clockwise), head pitch tilts the target,
 		// and head translation since the last recenter moves the eye (forward/right/up, scaled to game
 		// units). The base yaw is the character's heading, or with yawAnchor the camera's own yaw.
+		// e is the true head (recenter-relative) and drives gameplay; e_cam is the head the camera is written
+		// from (ahead of e with lookAt.predict, else the same).
 		bool ApplyLookAt(const ProfileDB::CameraLookAt& la, const std::optional<u32>& base, const EulerAngles& e,
-			const HeadPose::Snapshot& pose, LookAtWrite* out)
+			const EulerAngles& e_cam, const HeadPose::Snapshot& pose, LookAtWrite* out)
 		{
 			s_aim_moving = false;
 			s_weapon_raised = false;
@@ -1242,8 +1395,8 @@ namespace VR::CameraDriver
 			}
 
 			const float yaw_true = base_yaw + la.yaw_sign * e.yaw;
-			const float yaw_cam = cam_base + la.yaw_sign * e.yaw;
-			const float pitch = std::clamp(la.pitch_sign * e.pitch, -1.45f, 1.45f);
+			const float yaw_cam = cam_base + la.yaw_sign * e_cam.yaw;
+			const float pitch = std::clamp(la.pitch_sign * e_cam.pitch, -1.45f, 1.45f);
 			const float sy = std::sin(yaw_cam), cy = std::cos(yaw_cam);
 			const float sp = std::sin(pitch), cp = std::cos(pitch);
 
@@ -1357,7 +1510,7 @@ namespace VR::CameraDriver
 			}
 			if (la.roll_address != 0)
 			{
-				const s32 roll = static_cast<s32>(std::lround(la.roll_sign * e.roll * (65536.0f / (2.0f * PI_F)))) & 0xFFFF;
+				const s32 roll = static_cast<s32>(std::lround(la.roll_sign * e_cam.roll * (65536.0f / (2.0f * PI_F)))) & 0xFFFF;
 				memWrite32(la.roll_address, static_cast<u32>(roll));
 			}
 			// The game view is yaw_offset + yawSign * the head's room yaw: a stick turn and a recenter both change
@@ -1677,6 +1830,26 @@ namespace VR::CameraDriver
 			return f;
 		}
 
+		// Yaw about +Y, then pitch about the yawed X axis: q = Ry(yaw) * Rx(pitch), as x, y, z, w.
+		void FakeHeadQuat(const FakeHead& f, float* q)
+		{
+			const float cy = std::cos(f.yaw * 0.5f), sy = std::sin(f.yaw * 0.5f);
+			const float cp = std::cos(f.pitch * 0.5f), sp = std::sin(f.pitch * 0.5f);
+			q[0] = cy * sp;
+			q[1] = sy * cp;
+			q[2] = -sy * sp;
+			q[3] = cy * cp;
+		}
+
+		// Room-frame angular velocity of FakeHeadQuat: the yaw rate about +Y plus the pitch rate about the
+		// yawed X axis, which is (cos yaw, 0, -sin yaw).
+		void FakeHeadOmega(const FakeHead& f, float* omega)
+		{
+			omega[0] = f.pitch_rate * std::cos(f.yaw);
+			omega[1] = f.yaw_rate;
+			omega[2] = -f.pitch_rate * std::sin(f.yaw);
+		}
+
 		std::optional<HeadPose::Snapshot> MaybeFakePose()
 		{
 			const std::optional<float>& amp = FakeHeadAmplitude();
@@ -1685,24 +1858,80 @@ namespace VR::CameraDriver
 
 			const u64 now = NowMs();
 			const FakeHead f = FakeHeadAt(amp.value(), now);
-
-			// Yaw about +Y, then pitch about the yawed X axis: q = Ry(yaw) * Rx(pitch).
-			const float cy = std::cos(f.yaw * 0.5f), sy = std::sin(f.yaw * 0.5f);
-			const float cp = std::cos(f.pitch * 0.5f), sp = std::sin(f.pitch * 0.5f);
+			float q[4];
+			FakeHeadQuat(f, q);
 			HeadPose::Snapshot p;
-			p.orientation_w = cy * cp;
-			p.orientation_x = cy * sp;
-			p.orientation_y = sy * cp;
-			p.orientation_z = -sy * sp;
-			// Room-frame angular velocity of that: yaw rate about +Y plus pitch rate about the yawed X axis,
-			// which is (cos yaw, 0, -sin yaw).
-			p.angular_velocity[0] = f.pitch_rate * std::cos(f.yaw);
-			p.angular_velocity[1] = f.yaw_rate;
-			p.angular_velocity[2] = -f.pitch_rate * std::sin(f.yaw);
+			p.orientation_x = q[0];
+			p.orientation_y = q[1];
+			p.orientation_z = q[2];
+			p.orientation_w = q[3];
+			FakeHeadOmega(f, p.angular_velocity);
 			p.angular_valid = true;
 			p.valid = true;
 			p.publish_ms = now; // taken now, so the prediction horizon measures from here
 			return p;
+		}
+
+		// PCSX2_VR_SELFTEST: the head prediction math. Differencing two poses, the room-frame (left-multiplied)
+		// lead and its cap, and the fake head's analytic angular velocity against its own poses differenced.
+		int CountPredictMismatches(bool log)
+		{
+			int fail = 0;
+			const auto check = [&](bool ok, const char* name) {
+				if (!ok) { ++fail; if (log) Console.WriteLn("(VR) predict self-test FAIL: %s", name); }
+			};
+			const auto close_to = [](float a, float b, float tol) { return std::abs(a - b) < tol; };
+			const auto yaw_quat = [](float yaw, float* q) {
+				q[0] = 0.0f;
+				q[1] = std::sin(yaw * 0.5f);
+				q[2] = 0.0f;
+				q[3] = std::cos(yaw * 0.5f);
+			};
+			float a[4] = {}, b[4] = {}, out[4] = {}, w[3] = {};
+
+			yaw_quat(0.30f, a);
+			yaw_quat(0.31f, b);
+			check(AngularVelocityBetween(a, b, 0.01f, w) && close_to(w[0], 0.0f, 1e-3f) && close_to(w[1], 1.0f, 1e-2f) &&
+				close_to(w[2], 0.0f, 1e-3f), "yaw 0.01 rad in 10 ms -> 1 rad/s about +Y");
+			check(AngularVelocityBetween(b, a, 0.01f, w) && close_to(w[1], -1.0f, 1e-2f), "yaw back -> -1 rad/s");
+
+			FakeHead f0;
+			f0.yaw = 0.5f;
+			FakeHead f1 = f0;
+			f1.pitch = 0.01f;
+			FakeHeadQuat(f0, a);
+			FakeHeadQuat(f1, b);
+			check(AngularVelocityBetween(a, b, 0.01f, w) && close_to(w[0], std::cos(0.5f), 1e-2f) && close_to(w[1], 0.0f, 1e-2f) &&
+				close_to(w[2], -std::sin(0.5f), 1e-2f), "pitch turns about the yawed X axis");
+
+			const float lead_yaw[3] = {0.0f, 0.1f, 0.0f};
+			const float lead_big[3] = {0.0f, 1.0f, 0.0f};
+			yaw_quat(0.3f, a);
+			check(RotateByVector(lead_yaw, kHeadPredictMaxRad, a, out) &&
+				close_to(QuaternionToEulerYXZ(out[0], out[1], out[2], out[3]).yaw, 0.4f, 1e-3f), "yaw lead adds to the yaw");
+			check(RotateByVector(lead_big, kHeadPredictMaxRad, a, out) &&
+				close_to(QuaternionToEulerYXZ(out[0], out[1], out[2], out[3]).yaw, 0.3f + kHeadPredictMaxRad, 1e-3f),
+				"lead capped at 25 deg");
+			FakeHead fp;
+			fp.yaw = 0.2f;
+			fp.pitch = 0.3f;
+			FakeHeadQuat(fp, a);
+			const bool rotated = RotateByVector(lead_yaw, kHeadPredictMaxRad, a, out);
+			const EulerAngles re = QuaternionToEulerYXZ(out[0], out[1], out[2], out[3]);
+			check(rotated && close_to(re.yaw, 0.3f, 1e-3f) && close_to(re.pitch, 0.3f, 1e-3f) && close_to(re.roll, 0.0f, 1e-3f),
+				"a room-frame yaw lead keeps a pitched head's pitch");
+
+			const u64 times[3] = {1300, 5150, 10900};
+			for (const u64 t : times)
+			{
+				float wa[3] = {};
+				FakeHeadOmega(FakeHeadAt(0.7f, t), wa);
+				FakeHeadQuat(FakeHeadAt(0.7f, t - 1), a);
+				FakeHeadQuat(FakeHeadAt(0.7f, t + 1), b);
+				check(AngularVelocityBetween(a, b, 0.002f, w) && close_to(w[0], wa[0], 2e-2f) && close_to(w[1], wa[1], 2e-2f) &&
+					close_to(w[2], wa[2], 2e-2f), "fake head analytic velocity matches its poses differenced");
+			}
+			return fail;
 		}
 
 		// Telemetry: taken on the CPU thread as Apply() leaves, read from any thread (PINE's).
@@ -2124,13 +2353,20 @@ namespace VR::CameraDriver
 				const EulerAngles head = QuaternionToEulerYXZ(pose.orientation_x, pose.orientation_y,
 					pose.orientation_z, pose.orientation_w);
 				const EulerAngles look{WrapPi(head.yaw - s_ref_yaw), head.pitch, head.roll};
+				// lookAt.predict: the camera is written from where the head will be when the frame is shown.
+				// The frame records that pose, so the compositor places it exactly where it was rendered from
+				// (a wrong guess only moves an edge, the world never wobbles); gameplay keeps the true head.
+				const HeadPose::Snapshot cam_pose = PredictCameraPose(la, pose);
+				const EulerAngles head_cam = QuaternionToEulerYXZ(cam_pose.orientation_x, cam_pose.orientation_y,
+					cam_pose.orientation_z, cam_pose.orientation_w);
+				const EulerAngles look_cam{WrapPi(head_cam.yaw - s_ref_yaw), head_cam.pitch, head_cam.roll};
 				TrackRenderPose(la);
 				LookAtWrite w;
-				const bool wrote = ApplyLookAt(la, base, look, pose, &w);
+				const bool wrote = ApplyLookAt(la, base, look, look_cam, pose, &w);
 				if (wrote)
 				{
-					PushStampedPose(pose);
-					PushWritten(w, pose);
+					PushStampedPose(cam_pose);
+					PushWritten(w, cam_pose);
 					PublishMatchedPose(la);
 				}
 				SetLookAtActive(wrote);
@@ -2327,6 +2563,6 @@ namespace VR::CameraDriver
 
 	bool SelfTestMath()
 	{
-		return CountMathMismatches(false) == 0;
+		return CountMathMismatches(false) == 0 && CountPredictMismatches(false) == 0;
 	}
 }
