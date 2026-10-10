@@ -57,6 +57,17 @@ SLPM-65692:
       eyeForward: 30      # in front of the face; at 10 the eye sits inside the head model (PS2 draws back faces)
       distance: 100
       unitsPerMeter: 100
+      # Outbreak's yaw grows counter-clockwise like the headset's (checked: with the camera held at yaw W,
+      # stick left walks toward W+90, right toward W-90), so yawSign stays 1.
+      # Movement is camera-relative in the default control type: stick up walks where the camera
+      # looks, i.e. where you look. So the camera keeps its own yaw (from the heading each time first
+      # person takes over or you recenter), turned by 30 deg snap turns on the right controller stick.
+      yawAnchor: true
+      snapTurnDeg: 30
+      snapStick: right
+      # Weapon raised (stance 2, R1 or the hip holster): the character faces where the right
+      # controller points. Aim pitch (+0xBC8, needs the servo silenced) is not enabled yet.
+      aim: { stance: 0x08, equals: 2, hand: right }
     fov: { address: 0x313590, encoding: f32, scale: 80.0 }   # vertical FOV, degrees
   # VR controllers (only when launched with --vr; flat play is untouched).
   # A pad bound in Settings -> Controllers (e.g. a DualSense) keeps working alongside;

@@ -288,6 +288,26 @@ namespace VR::ProfileDB
 		u32 roll_address = 0;
 		float roll_sign = 1.0f;
 		std::vector<CameraGuard> when;
+
+		// Camera yaw anchor: the camera keeps its own yaw (taken from the heading whenever the camera
+		// arms or recenters, then turned by snap turns) instead of following the heading every vsync.
+		// Needed when the game's movement is camera-relative: following the heading feeds back, the
+		// character turns toward where the head looks and the camera turns further.
+		bool yaw_anchor = false;
+		float snap_turn_deg = 0.0f;
+		s8 snap_stick_hand = 1; // VRInputSnapshot hand whose thumbstick X snap-turns; -1 = none
+
+		// Point-to-aim (needs yaw_anchor): while the stance value at base + aim_stance_offset equals
+		// aim_stance_equals, the heading is written so the character faces where the aim hand points.
+		bool has_aim = false;
+		s64 aim_stance_offset = 0;
+		u32 aim_stance_equals = 0;
+		u8 aim_stance_width = 1;
+		s8 aim_hand = 1;
+		bool has_aim_pitch = false;
+		s64 aim_pitch_offset = 0; // s16 binary angle (0x10000 = 360 deg)
+		float aim_pitch_sign = 1.0f;
+		float aim_pitch_clamp = 8192.0f; // s16 units
 	};
 
 	struct CameraProfile

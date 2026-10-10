@@ -6,6 +6,7 @@
 #include "VR/PadLook.h"
 #include "VR/VRManager.h"
 #include "VR/SplitState.h"
+#include "VR/VRInputState.h"
 #include "VR/VRProfileDB.h"
 
 #include "Config.h"
@@ -935,6 +936,24 @@ namespace VR::CameraDriver
 		// Head position and yaw at the last recenter, for camera.lookAt head translation.
 		float s_ref_px = 0.0f, s_ref_py = 0.0f, s_ref_pz = 0.0f, s_ref_yaw = 0.0f;
 
+		// camera.lookAt yaw anchor (game yaw, radians); retaken from the heading on arm and recenter.
+		bool s_yaw_anchor_valid = false;
+		float s_yaw_anchor = 0.0f;
+		bool s_snap_ready = false;
+
+		float WrapPi(float a)
+		{
+			a = std::fmod(a + PI_F, 2.0f * PI_F);
+			if (a < 0.0f)
+				a += 2.0f * PI_F;
+			return a - PI_F;
+		}
+
+		u16 ToBinaryAngle(float radians)
+		{
+			return static_cast<u16>(static_cast<s32>(std::lround(WrapPi(radians) * (65536.0f / (2.0f * PI_F)))) & 0xFFFF);
+		}
+
 		void QuatMultiply(float ax, float ay, float az, float aw, float bx, float by, float bz, float bw,
 			float& ox, float& oy, float& oz, float& ow)
 		{
@@ -956,10 +975,11 @@ namespace VR::CameraDriver
 			w = ow;
 		}
 
-		// camera.lookAt: put the game's eye/target camera at the character's head. Heading 0 faces
-		// +Z, forward = (sin h, cos h) on the x/z floor plane, y up; head yaw (CCW positive, like the
-		// heading) adds to it and head pitch tilts the target. Head translation since the last
-		// recenter is mapped onto the character's heading (forward/right/up) and scaled to game units.
+		// camera.lookAt: put the game's eye/target camera at the character's head. Game yaw 0 faces
+		// +Z, forward = (sin y, cos y) on the x/z floor plane, y up. Head yaw (OpenXR, CCW positive) is
+		// added times yawSign (-1 for a game whose yaw grows clockwise), head pitch tilts the target,
+		// and head translation since the last recenter moves the eye (forward/right/up, scaled to game
+		// units). The base yaw is the character's heading, or with yawAnchor the camera's own yaw.
 		void ApplyLookAt(const ProfileDB::CameraLookAt& la, const std::optional<u32>& base, const EulerAngles& e,
 			const HeadPose::Snapshot& pose)
 		{
@@ -976,16 +996,47 @@ namespace VR::CameraDriver
 					return;
 			}
 			float heading = 0.0f;
+			u32 heading_addr = 0;
 			if (la.has_heading)
 			{
 				const s64 ha = static_cast<s64>(base.value()) + la.heading_offset;
 				if (ha < 0 || ha + 2 > static_cast<s64>(Ps2MemSize::MainRam))
 					return;
-				heading = static_cast<float>(static_cast<s16>(static_cast<u16>(memRead16(static_cast<u32>(ha))))) *
+				heading_addr = static_cast<u32>(ha);
+				heading = static_cast<float>(static_cast<s16>(static_cast<u16>(memRead16(heading_addr)))) *
 				          (2.0f * PI_F / 65536.0f);
 			}
 
-			const float yaw = heading + la.yaw_sign * e.yaw;
+			float base_yaw = heading;
+			VRInputSnapshot input;
+			const bool want_input = la.yaw_anchor && ((la.snap_turn_deg > 0.0f && la.snap_stick_hand >= 0) || la.has_aim);
+			if (want_input)
+				input = GetInputSnapshot();
+			if (la.yaw_anchor)
+			{
+				if (!s_yaw_anchor_valid)
+				{
+					s_yaw_anchor = heading;
+					s_yaw_anchor_valid = true;
+					s_snap_ready = false;
+				}
+				if (la.snap_turn_deg > 0.0f && la.snap_stick_hand >= 0 && input.actions_active)
+				{
+					const float sx = input.hands[la.snap_stick_hand].thumbstick_x;
+					if (s_snap_ready && std::abs(sx) > 0.7f)
+					{
+						// A right flick turns the view right: -yawSign converts "clockwise" into game yaw.
+						const float dir = (sx > 0.0f) ? 1.0f : -1.0f;
+						s_yaw_anchor = WrapPi(s_yaw_anchor - la.yaw_sign * dir * la.snap_turn_deg * (PI_F / 180.0f));
+						s_snap_ready = false;
+					}
+					else if (std::abs(sx) < 0.3f)
+						s_snap_ready = true;
+				}
+				base_yaw = s_yaw_anchor;
+			}
+
+			const float yaw = base_yaw + la.yaw_sign * e.yaw;
 			const float pitch = std::clamp(la.pitch_sign * e.pitch, -1.45f, 1.45f);
 			const float sy = std::sin(yaw), cy = std::cos(yaw);
 			const float sp = std::sin(pitch), cp = std::cos(pitch);
@@ -1000,12 +1051,46 @@ namespace VR::CameraDriver
 				const float rs = std::sin(s_ref_yaw), rc = std::cos(s_ref_yaw);
 				const float fwd = -dx * rs - dz * rc;
 				const float right = dx * rc - dz * rs;
-				// Game: forward (sin h, cos h), right (-cos h, sin h) on x/z.
-				const float sh = std::sin(heading), ch = std::cos(heading);
+				// Game: forward at base_yaw; "right" is a quarter turn clockwise, i.e. -yawSign * 90 deg.
+				const float right_yaw = base_yaw - la.yaw_sign * (PI_F * 0.5f);
 				const float u = la.units_per_meter;
-				eye[0] += u * (fwd * sh - right * ch);
+				eye[0] += u * (fwd * std::sin(base_yaw) + right * std::sin(right_yaw));
 				eye[1] += u * dy;
-				eye[2] += u * (fwd * ch + right * sh);
+				eye[2] += u * (fwd * std::cos(base_yaw) + right * std::cos(right_yaw));
+			}
+
+			// Point-to-aim: while the stance says the weapon is raised, face where the aim hand points
+			// (recenter-relative, around the camera anchor), so the camera itself does not turn.
+			if (la.has_aim && heading_addr != 0 && input.actions_active && la.aim_hand >= 0)
+			{
+				const s64 sa = static_cast<s64>(base.value()) + la.aim_stance_offset;
+				if (sa >= 0 && sa + la.aim_stance_width <= static_cast<s64>(Ps2MemSize::MainRam))
+				{
+					u32 stance = 0;
+					switch (la.aim_stance_width)
+					{
+						case 1: stance = memRead8(static_cast<u32>(sa)); break;
+						case 2: stance = memRead16(static_cast<u32>(sa)); break;
+						default: stance = memRead32(static_cast<u32>(sa)); break;
+					}
+					const VRPose& aim = input.hands[la.aim_hand].aim_pose;
+					if (stance == la.aim_stance_equals && aim.valid)
+					{
+						const EulerAngles h = QuaternionToEulerYXZ(aim.orientation_xyzw[0], aim.orientation_xyzw[1],
+							aim.orientation_xyzw[2], aim.orientation_xyzw[3]);
+						memWrite16(heading_addr, ToBinaryAngle(base_yaw + la.yaw_sign * WrapPi(h.yaw - s_ref_yaw)));
+						if (la.has_aim_pitch)
+						{
+							const s64 pa2 = static_cast<s64>(base.value()) + la.aim_pitch_offset;
+							if (pa2 >= 0 && pa2 + 2 <= static_cast<s64>(Ps2MemSize::MainRam))
+							{
+								const float raw = std::clamp(la.aim_pitch_sign * h.pitch * (65536.0f / (2.0f * PI_F)),
+									-la.aim_pitch_clamp, la.aim_pitch_clamp);
+								memWrite16(static_cast<u32>(pa2), static_cast<u16>(static_cast<s16>(std::lround(raw))));
+							}
+						}
+					}
+				}
 			}
 			const float target[3] = {eye[0] + la.distance * sy * cp, eye[1] + la.distance * sp,
 				eye[2] + la.distance * cy * cp};
@@ -1146,6 +1231,9 @@ namespace VR::CameraDriver
 
 		if (armed != s_armed_logged)
 		{
+			// Each time first person takes over (after a door, cutscene or menu) the camera faces the
+			// way the character faces.
+			s_yaw_anchor_valid = false;
 			if (armed)
 				Console.WriteLn(Color_StrongGreen,
 					"(VR) CameraDriver: ARMED (CRC %08X) — %zu write op(s), %zu matrix op(s)%s.",
@@ -1227,6 +1315,7 @@ namespace VR::CameraDriver
 			s_ref_py = pose.position_y;
 			s_ref_pz = pose.position_z;
 			s_ref_yaw = QuaternionToEulerYXZ(s_ref_x, s_ref_y, s_ref_z, s_ref_w).yaw;
+			s_yaw_anchor_valid = false;
 			s_has_reference = true;
 			s_reference_crc = crc;
 			ResetDeltaState( true);

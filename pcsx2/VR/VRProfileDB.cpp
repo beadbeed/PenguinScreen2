@@ -1385,7 +1385,8 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 		const ryml::ConstNodeRef ln = cnode["lookAt"];
 		warnUnknownKeys(serial, ln, "camera.lookAt",
 			{"eye", "target", "position", "heading", "eyeHeight", "eyeForward", "distance", "unitsPerMeter",
-				"yawSign", "pitchSign", "roll", "rollSign", "when", "notes"});
+				"yawSign", "pitchSign", "roll", "rollSign", "when", "notes", "yawAnchor", "snapTurnDeg", "snapStick",
+				"aim"});
 		const std::optional<u32> eye = ln.has_child("eye") ? parseAddress(nodeVal(ln["eye"])) : std::nullopt;
 		const std::optional<u32> tgt = ln.has_child("target") ? parseAddress(nodeVal(ln["target"])) : std::nullopt;
 		const std::optional<s64> pos = ln.has_child("position") ? parseSignedOffset(nodeVal(ln["position"])) : std::nullopt;
@@ -1449,6 +1450,68 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 			}
 			if (ln.has_child("when") && ln["when"].is_seq())
 				parseGuardList(serial, ln["when"], "camera.lookAt when", la.when);
+
+			const auto parseHand = [&](const ryml::ConstNodeRef& n, const char* key, s8& dst) {
+				if (!n.has_child(key))
+					return;
+				const std::string_view v = nodeVal(n[key]);
+				if (StringUtil::compareNoCase(v, "left"))
+					dst = 0;
+				else if (StringUtil::compareNoCase(v, "right"))
+					dst = 1;
+				else if (StringUtil::compareNoCase(v, "none"))
+					dst = -1;
+				else
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt {} must be left|right|none; keeping the default.", serial, key);
+			};
+			if (ln.has_child("yawAnchor"))
+				la.yaw_anchor = StringUtil::compareNoCase(nodeVal(ln["yawAnchor"]), "true");
+			readOptionalFloat(serial, ln, "snapTurnDeg", "camera.lookAt snapTurnDeg", la.snap_turn_deg);
+			la.snap_turn_deg = std::clamp(std::isfinite(la.snap_turn_deg) ? la.snap_turn_deg : 0.0f, 0.0f, 180.0f);
+			parseHand(ln, "snapStick", la.snap_stick_hand);
+			if (la.yaw_anchor && !la.has_heading)
+			{
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt yawAnchor needs heading; turning it off.", serial);
+				la.yaw_anchor = false;
+			}
+
+			if (ln.has_child("aim") && ln["aim"].is_map())
+			{
+				const ryml::ConstNodeRef an = ln["aim"];
+				warnUnknownKeys(serial, an, "camera.lookAt.aim", {"stance", "equals", "width", "hand", "pitch", "pitchSign", "pitchClamp"});
+				const std::optional<s64> so = an.has_child("stance") ? parseSignedOffset(nodeVal(an["stance"])) : std::nullopt;
+				const std::optional<u32> se = an.has_child("equals") ? parseHexU32(nodeVal(an["equals"])) : std::nullopt;
+				if (!so.has_value() || !se.has_value() || !la.yaw_anchor)
+				{
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt.aim needs stance + equals and yawAnchor: true; "
+									   "ignoring the aim block.", serial);
+				}
+				else
+				{
+					la.has_aim = true;
+					la.aim_stance_offset = so.value();
+					la.aim_stance_equals = se.value();
+					if (an.has_child("width"))
+					{
+						const std::optional<u32> w = StringUtil::FromChars<u32>(nodeVal(an["width"]));
+						if (w.has_value() && (w.value() == 1 || w.value() == 2 || w.value() == 4))
+							la.aim_stance_width = static_cast<u8>(w.value());
+					}
+					parseHand(an, "hand", la.aim_hand);
+					if (an.has_child("pitch"))
+					{
+						const std::optional<s64> po = parseSignedOffset(nodeVal(an["pitch"]));
+						if (po.has_value())
+						{
+							la.has_aim_pitch = true;
+							la.aim_pitch_offset = po.value();
+						}
+					}
+					readOptionalFloat(serial, an, "pitchSign", "camera.lookAt.aim pitchSign", la.aim_pitch_sign);
+					readOptionalFloat(serial, an, "pitchClamp", "camera.lookAt.aim pitchClamp", la.aim_pitch_clamp);
+					la.aim_pitch_clamp = std::clamp(std::isfinite(la.aim_pitch_clamp) ? la.aim_pitch_clamp : 0.0f, 0.0f, 32767.0f);
+				}
+			}
 			if (ok)
 				cam.look_at = std::move(la);
 		}
