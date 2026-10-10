@@ -5,6 +5,7 @@
 #include "BuildVersion.h"
 #ifdef ENABLE_VR
 #include "VR/CameraDriver.h"
+#include "VR/GameFeedback.h"
 #include "VR/SplitState.h"
 #include "VR/VRManager.h"
 #endif
@@ -1831,6 +1832,7 @@ bool VMManager::DoLoadState(const char* filename, Error* error)
 	Host::OnSaveStateLoaded(filename, true);
 #ifdef ENABLE_VR
 	VR::CameraDriver::OnStateLoaded();
+	VR::GameFeedback::OnStateLoaded();
 #endif
 	if (g_InputRecording.isActive())
 	{
@@ -2786,6 +2788,8 @@ void VMManager::Internal::VSyncOnCPUThread()
 
 #ifdef ENABLE_VR
 	VR::CameraDriver::Apply();
+	// Reads the record Apply just resolved for this vsync.
+	VR::GameFeedback::Poll();
 	{
 		static const char* s_dump_env = std::getenv("PCSX2_VR_GSDUMP_AT_VSYNC");
 		static u64 s_dump_vsyncs = 0;

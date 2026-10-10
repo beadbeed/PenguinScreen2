@@ -1932,6 +1932,8 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(SnapTurn);
 	SettingsWrapEntry(OnlineSafe);
 	SettingsWrapEntry(Brightness);
+	SettingsWrapEntry(GameRumble);
+	SettingsWrapEntry(HapticStrength);
 	SettingsWrapEntry(XrSeatRuntimeDirs);
 	SettingsWrapEntry(XrSeatRuntimeJsons);
 
@@ -1944,6 +1946,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 		StereoSeparation = std::clamp(StereoSeparation, 0.0f, 0.1f);
 		StereoConvergence = std::clamp(StereoConvergence, 0.0f, 200.0f);
 		Brightness = std::clamp(Brightness, MIN_BRIGHTNESS, MAX_BRIGHTNESS);
+		HapticStrength = std::clamp(HapticStrength, 0.0f, 1.0f);
 	}
 }
 
@@ -1953,7 +1956,8 @@ bool Pcsx2Config::VROptions::operator==(const VROptions& right) const
 	       OpEqu(ScreenVerticalOffset) &&
 	       OpEqu(ScreenArcDeg) && OpEqu(StereoMode) && OpEqu(StereoUseProfile) &&
 	       OpEqu(StereoSeparation) && OpEqu(StereoConvergence) &&
-	       OpEqu(HeadCamera) && OpEqu(SnapTurn) && OpEqu(OnlineSafe) && OpEqu(Brightness);
+	       OpEqu(HeadCamera) && OpEqu(SnapTurn) && OpEqu(OnlineSafe) && OpEqu(Brightness) &&
+	       OpEqu(GameRumble) && OpEqu(HapticStrength);
 }
 
 bool Pcsx2Config::VROptions::operator!=(const VROptions& right) const

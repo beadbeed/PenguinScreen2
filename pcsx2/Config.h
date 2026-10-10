@@ -1312,6 +1312,12 @@ struct Pcsx2Config
 		static constexpr float MIN_BRIGHTNESS = 0.8f;
 		static constexpr float MAX_BRIGHTNESS = 1.8f;
 
+		// Forward the game's DualShock rumble to the VR controllers, for profiles whose feedback block asks
+		// for it, on the pad port of the profile's VR Gamepad.
+		bool GameRumble = true;
+		// Scales the game-feedback haptics (forwarded rumble, hit, shot and heartbeat cues); 0 turns them off.
+		float HapticStrength = 1.0f;
+
 		VROptions();
 		void LoadSave(SettingsWrapper& wrap);
 

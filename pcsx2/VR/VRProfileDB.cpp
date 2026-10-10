@@ -2276,6 +2276,127 @@ static std::vector<VR::ProfileDB::SpatialControlSpec> parseControls(const std::s
 	return out;
 }
 
+// feedback: controller haptics. Everything is read, nothing is written, so a bad entry only loses that
+// cue: it is dropped with a warning and the rest of the block still loads.
+static VR::ProfileDB::FeedbackParams parseFeedback(const std::string_view serial, const ryml::ConstNodeRef& fnode)
+{
+	VR::ProfileDB::FeedbackParams fp;
+	warnUnknownKeys(serial, fnode, "feedback", {"padRumble", "hurt", "fire", "danger"});
+	readOptionalBool(serial, fnode, "padRumble", "feedback.padRumble", fp.pad_rumble);
+
+	const auto read_width = [serial](const ryml::ConstNodeRef& n, const char* what, u8& dst) {
+		if (!n.has_child("width"))
+			return true;
+		const std::optional<u32> w = StringUtil::FromChars<u32>(nodeVal(n["width"]));
+		if (!w.has_value() || (w.value() != 1 && w.value() != 2 && w.value() != 4))
+		{
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' has an invalid {} (1, 2 or 4); ignoring that cue.", serial, what);
+			return false;
+		}
+		dst = static_cast<u8>(w.value());
+		return true;
+	};
+	// Offsets into the record camera.base resolves to; a record is a few KB, so 1 MB catches typos.
+	const auto record_offset = [](const ryml::ConstNodeRef& n, const char* key) -> std::optional<u32> {
+		if (!n.has_child(key))
+			return std::nullopt;
+		const std::optional<s64> v = parseSignedOffset(nodeVal(n[key]));
+		if (!v.has_value() || v.value() < 0 || v.value() >= 0x100000)
+			return std::nullopt;
+		return static_cast<u32>(v.value());
+	};
+
+	if (fnode.has_child("hurt"))
+	{
+		const ryml::ConstNodeRef h = fnode["hurt"];
+		if (!h.is_map())
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.hurt is not a map; ignoring it.", serial);
+		else
+		{
+			warnUnknownKeys(serial, h, "feedback.hurt", {"offset", "max", "width"});
+			const std::optional<u32> off = record_offset(h, "offset");
+			const std::optional<u32> max = record_offset(h, "max");
+			u8 width = 2;
+			if (read_width(h, "feedback.hurt.width", width))
+			{
+				if (!off.has_value() || !max.has_value())
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.hurt needs offset and max (camera.base offsets, 0x0-0xFFFFF); ignoring it.", serial);
+				else
+				{
+					fp.has_hurt = true;
+					fp.hurt_offset = off.value();
+					fp.hurt_max_offset = max.value();
+					fp.hurt_width = width;
+				}
+			}
+		}
+	}
+
+	if (fnode.has_child("fire"))
+	{
+		const ryml::ConstNodeRef f = fnode["fire"];
+		if (!f.is_map())
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.fire is not a map; ignoring it.", serial);
+		else
+		{
+			warnUnknownKeys(serial, f, "feedback.fire", {"address", "width", "hand"});
+			const std::optional<u32> addr = f.has_child("address") ? parseAddress(nodeVal(f["address"])) : std::nullopt;
+			u8 width = 2;
+			s8 hand = -1;
+			bool ok = read_width(f, "feedback.fire.width", width);
+			if (ok && f.has_child("hand"))
+			{
+				const std::string_view hv = nodeVal(f["hand"]);
+				if (StringUtil::compareNoCase(hv, "left"))
+					hand = 0;
+				else if (StringUtil::compareNoCase(hv, "right"))
+					hand = 1;
+				else
+				{
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.fire.hand '{}' is not left|right; ignoring that cue.", serial, hv);
+					ok = false;
+				}
+			}
+			if (ok && (!addr.has_value() || !inMainRam(addr.value(), width)))
+			{
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.fire needs an address in main RAM; ignoring it.", serial);
+				ok = false;
+			}
+			if (ok)
+			{
+				fp.has_fire = true;
+				fp.fire_address = addr.value();
+				fp.fire_width = width;
+				fp.fire_hand = hand;
+			}
+		}
+	}
+
+	if (fnode.has_child("danger"))
+	{
+		const ryml::ConstNodeRef d = fnode["danger"];
+		if (!d.is_map())
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.danger is not a map; ignoring it.", serial);
+		else
+		{
+			warnUnknownKeys(serial, d, "feedback.danger", {"below"});
+			float below = 0.25f;
+			readOptionalFloat(serial, d, "below", "feedback.danger.below", below);
+			if (!std::isfinite(below) || below <= 0.0f || below > 1.0f)
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.danger.below must be a fraction of max HP in (0, 1]; ignoring the heartbeat.", serial);
+			else if (!fp.has_hurt)
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.danger needs a valid feedback.hurt (HP and max); ignoring the heartbeat.", serial);
+			else
+			{
+				fp.has_danger = true;
+				fp.danger_below = below;
+			}
+		}
+	}
+
+	return fp;
+}
+
 
 bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::NodeRef& node, Profile& out)
 {
@@ -2562,6 +2683,17 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 
 	if (node.has_child("camera") && node["camera"].is_map())
 		out.camera = parseCamera(serial, node["camera"]);
+
+	if (node.has_child("feedback") && node["feedback"].is_map())
+	{
+		out.feedback = parseFeedback(serial, node["feedback"]);
+		// The cues read through the camera's resolved record, so they need camera.base; rumble does not.
+		if ((out.feedback->has_hurt || out.feedback->has_fire) && !(out.camera.has_value() && out.camera->base.has_value()))
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' has feedback cues but no camera.base; they run only while first "
+							   "person is armed with that record resolved, so they never will.", serial);
+	}
+	else if (node.has_child("feedback"))
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a feedback that is not a map; ignoring it.", serial);
 
 	if (node.has_child("split") && node["split"].is_map())
 		out.split = parseSplit(serial, node["split"]);

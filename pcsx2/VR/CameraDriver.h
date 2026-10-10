@@ -40,6 +40,10 @@ namespace VR::CameraDriver
 
 	void RequestRecenter();
 
+	// CPU thread, after Apply: true while first person is armed (guards holding, head pose valid) and this
+	// vsync resolved camera.base; *base (may be null) is that record, the local character's in Outbreak.
+	bool LocalRecord(u32* base);
+
 	void OnStateLoaded();
 
 	bool SelfTestAssembler();

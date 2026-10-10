@@ -349,6 +349,12 @@ std::array<int, 2> VRInputSource::Instance::HoldingHands() const
 		case SC::DeviceKind::LightGun:
 			hands[0] = gun.aim_hand;
 			break;
+		case SC::DeviceKind::Gamepad:
+			// Both controllers are the pad, so a VR-<id>/Rumble motor binding buzzes both. Constant, so it
+			// never reads as a grab or release.
+			hands[0] = 0;
+			hands[1] = 1;
+			break;
 		default:
 			break;
 	}
