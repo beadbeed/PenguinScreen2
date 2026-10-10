@@ -24,6 +24,10 @@ SLPM-65692:
   # and placed where the shown frame was rendered from (camera.lookAt viewMatrix; poseLagMs is the
   # fallback guess), so the runtime can reproject it as the head turns.
   screen: { distance: 2.5, height: 1.3, firstPerson: { distance: 1.5, height: 3.575, arc: 0, poseLagMs: 40 } }
+  # Headset only: a gamma lift so the dark rooms read on a headset's LCD without washing out the blacks.
+  # Applied only while first person drives the camera (firstPersonOnly defaults to true), so menus and the
+  # item screen keep their own levels; 1.0 is neutral. Carried over from File #1 until tuned in the headset.
+  presentation: { gamma: 1.2 }
   stereo:
     separation: 0.012
     convergence: 55.0

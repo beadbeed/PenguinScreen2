@@ -1306,6 +1306,12 @@ struct Pcsx2Config
 		// adapter is enabled, so it holds for online play without having to remember it.
 		bool OnlineSafe = false;
 
+		// Headset brightness: scales the gamma of the presentation lift (1.0 = neutral) on top of the
+		// profile's own. Applied only while a VR session runs, so flat play is never touched.
+		float Brightness = 1.0f;
+		static constexpr float MIN_BRIGHTNESS = 0.8f;
+		static constexpr float MAX_BRIGHTNESS = 1.8f;
+
 		VROptions();
 		void LoadSave(SettingsWrapper& wrap);
 

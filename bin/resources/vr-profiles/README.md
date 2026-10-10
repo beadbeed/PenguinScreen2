@@ -40,6 +40,7 @@ SLUS-20851:              # the disc serial; must match the file name
   crcs: [0x39B574F0]     # optional: only apply to these disc CRCs (hex)
   tier: stereo           # screen | stereo | immersive
   screen: { ... }        # where the virtual screen sits
+  presentation: { ... }  # optional: brighter picture in the headset only
   stereo: { ... }        # depth tuning
 ```
 
@@ -60,6 +61,24 @@ rejects the profile.
 A `distance`, `height` or `arc` written here wins over the matching slider in
 the settings window for that game. Leave a key out to keep it adjustable from
 the settings window.
+
+## `presentation`: brightness in the headset
+
+Some games are too dark to read on a headset's display. `presentation`
+brightens the picture only while a VR session is running (the desktop window
+mirrors it then); playing without VR never changes. `1.0` is neutral for both
+numbers.
+
+| Key | Meaning |
+|---|---|
+| `gamma` | raises dark and middle tones while black stays black and white stays white. `1.2` is a mild lift; accepted range `0.5` to `2.5` |
+| `brightness` | multiplies every colour, which can clip bright areas; prefer `gamma`. Accepted range `0.5` to `2.0` |
+| `firstPersonOnly` | `true` (the default) applies the lift only while the head-tracked first-person camera is active, so menus and item screens keep their own levels; `false` applies it all the time |
+
+The Headset Brightness setting in the settings window, and the VR brightness
+hotkeys, scale `gamma` on top of this, in every scene and for every game.
+While the graphics option Shade Boost is on, its own values are used instead
+and neither this block nor the setting has any effect.
 
 ## `stereo`: depth
 

@@ -235,6 +235,16 @@ bool GSRenderer::Merge(int field)
 
 	if (GSConfig.ShadeBoost)
 		g_gs_device->ShadeBoost();
+#ifdef ENABLE_VR
+	else if (g_gs_device->GetCurrent())
+	{
+		// Headset-only dark-room lift through the same shader, before VR::EndOfFrame takes the frame.
+		// PresentationLift is false without a running VR session, so flat play is untouched.
+		GSVector4 lift = GSVector4::cxpr(1.0f);
+		if (VR::PresentationLift(&lift))
+			g_gs_device->ShadeBoost(lift);
+	}
+#endif
 
 	if (GSConfig.FXAA)
 		g_gs_device->FXAA();

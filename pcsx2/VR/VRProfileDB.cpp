@@ -2525,6 +2525,41 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 		}
 	}
 
+	if (node.has_child("presentation") && node["presentation"].is_map())
+	{
+		// Headset-only lift (1.0 = neutral). Clamped so a typo can't crush the picture or wash it out.
+		const ryml::ConstNodeRef pn = node["presentation"];
+		warnUnknownKeys(serial, pn, "presentation", {"gamma", "brightness", "firstPersonOnly"});
+		PresentationParams pp;
+		if (pn.has_child("gamma"))
+		{
+			const std::optional<float> v = StringUtil::FromChars<float>(nodeVal(pn["gamma"]));
+			if (v.has_value() && std::isfinite(v.value()) && v.value() > 0.0f)
+				pp.gamma = std::clamp(v.value(), 0.5f, 2.5f);
+			else
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' has an invalid presentation.gamma; using 1.0.", serial);
+		}
+		if (pn.has_child("brightness"))
+		{
+			const std::optional<float> v = StringUtil::FromChars<float>(nodeVal(pn["brightness"]));
+			if (v.has_value() && std::isfinite(v.value()) && v.value() > 0.0f)
+				pp.brightness = std::clamp(v.value(), 0.5f, 2.0f);
+			else
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' has an invalid presentation.brightness; using 1.0.", serial);
+		}
+		if (pn.has_child("firstPersonOnly"))
+		{
+			const std::string_view v = nodeVal(pn["firstPersonOnly"]);
+			if (StringUtil::compareNoCase(v, "false"))
+				pp.first_person_only = false;
+			else if (!StringUtil::compareNoCase(v, "true"))
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' has presentation.firstPersonOnly '{}' (not true|false); using true.", serial, v);
+		}
+		out.presentation = pp;
+	}
+	else if (node.has_child("presentation"))
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a presentation that is not a map; ignoring it.", serial);
+
 	if (node.has_child("camera") && node["camera"].is_map())
 		out.camera = parseCamera(serial, node["camera"]);
 

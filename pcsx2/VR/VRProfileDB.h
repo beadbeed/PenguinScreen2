@@ -478,6 +478,16 @@ namespace VR::ProfileDB
 		bool stereo_on = true;
 	};
 
+	// presentation: a headset-only lift through the ShadeBoost shader (1.0 = neutral) for games whose dark
+	// rooms are unreadable on a headset's LCD. Never applied without a running VR session.
+	struct PresentationParams
+	{
+		float gamma = 1.0f;
+		float brightness = 1.0f;
+		// Only while camera.lookAt drives the camera, so menus and the item screen keep their own levels.
+		bool first_person_only = true;
+	};
+
 	struct Profile
 	{
 		std::string serial;
@@ -495,6 +505,7 @@ namespace VR::ProfileDB
 		std::optional<float> fp_screen_height;
 		std::optional<float> fp_screen_arc_deg;
 		std::optional<float> fp_screen_pose_lag_ms;
+		std::optional<PresentationParams> presentation;
 		std::optional<CameraProfile> camera;
 		std::optional<SplitParams> split;
 		std::vector<SpatialControlSpec> controls;

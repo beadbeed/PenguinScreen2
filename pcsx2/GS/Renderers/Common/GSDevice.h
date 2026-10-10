@@ -1628,6 +1628,8 @@ public:
 	void Interlace(const GSVector2i& ds, int field, int mode, float yoffset);
 	void FXAA();
 	void ShadeBoost();
+	// params = (brightness, contrast, saturation, gamma), 1.0 neutral; applied to every array layer.
+	void ShadeBoost(const GSVector4& params);
 	void Resize(int width, int height);
 
 	void CAS(GSTexture*& tex, GSVector4i& src_rect, GSVector4& src_uv, const GSVector4& draw_rect, bool sharpen_only);

@@ -95,6 +95,21 @@ static void HotkeyToggleMute()
 		Host::AddIconOSDMessage("VolumeChanged", ICON_FA_VOLUME_XMARK, TRANSLATE_STR("Hotkeys_Volume", "Volume: Muted in Settings"));
 }
 
+#ifdef ENABLE_VR
+// VR headset brightness (the presentation lift's gamma scale). Saved so it survives a restart; the
+// lift reads EmuConfig each vsync, so nothing else needs reapplying.
+static void HotkeyAdjustVRBrightness(const float delta)
+{
+	const float value = std::clamp(std::round((EmuConfig.VR.Brightness + delta) * 100.0f) / 100.0f,
+		Pcsx2Config::VROptions::MIN_BRIGHTNESS, Pcsx2Config::VROptions::MAX_BRIGHTNESS);
+	EmuConfig.VR.Brightness = value;
+	Host::SetBaseFloatSettingValue("VR", "Brightness", value);
+	Host::CommitBaseSettingChanges();
+	Host::AddKeyedOSDMessage("VRBrightness",
+		fmt::format(TRANSLATE_FS("Hotkeys", "VR brightness: {:.2f}"), value), Host::OSD_QUICK_DURATION);
+}
+#endif
+
 static void HotkeyLoadStateSlot(s32 slot)
 {
 	Host::RunOnCPUThread([slot]() {
@@ -168,6 +183,16 @@ DEFINE_HOTKEY("VRRecenterHead", TRANSLATE_NOOP("Hotkeys", "VR"), TRANSLATE_NOOP(
 			VR::XRCompositor::RequestScreenReanchor();
 			Host::AddKeyedOSDMessage("VRRecenter", TRANSLATE_STR("Hotkeys", "VR recentered (head + screen)."), 2.0f);
 		}
+	})
+DEFINE_HOTKEY("VRBrightnessUp", TRANSLATE_NOOP("Hotkeys", "VR"), TRANSLATE_NOOP("Hotkeys", "VR: Increase Headset Brightness"),
+	[](s32 pressed) {
+		if (!pressed)
+			HotkeyAdjustVRBrightness(0.1f);
+	})
+DEFINE_HOTKEY("VRBrightnessDown", TRANSLATE_NOOP("Hotkeys", "VR"), TRANSLATE_NOOP("Hotkeys", "VR: Decrease Headset Brightness"),
+	[](s32 pressed) {
+		if (!pressed)
+			HotkeyAdjustVRBrightness(-0.1f);
 	})
 #endif
 DEFINE_HOTKEY("OpenAchievementsList", TRANSLATE_NOOP("Hotkeys", "Navigation"),
