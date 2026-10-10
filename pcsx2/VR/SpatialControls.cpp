@@ -1212,7 +1212,7 @@ namespace VR::SpatialControls
 
 		// Without sprintLatch the click and B pass straight through, as before the latch existed.
 		{
-			const GamepadParams off;
+			const GamepadParams off{};
 			GamepadState st;
 			l.thumbstick_y = 1.0f;
 			l.thumbstick_click = true;
@@ -1292,7 +1292,7 @@ namespace VR::SpatialControls
 
 		// Ad-lib flicks.
 		{
-			const GamepadParams off;
+			const GamepadParams off{};
 			GamepadState st;
 			l = VRHandState{};
 			r = VRHandState{};
