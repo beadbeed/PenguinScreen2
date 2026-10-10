@@ -323,6 +323,7 @@ void VRInputSource::Instance::ResetState()
 	gamepad_state.Reset();
 	at_stop = {};
 	break_away_flash_s = {};
+	zone_press_s = -1.0f;
 }
 
 std::array<int, 2> VRInputSource::Instance::HoldingHands() const
@@ -511,6 +512,8 @@ void VRInputSource::BuildInstance(Instance& in) const
 			in.zone.radius = s.zone_radius;
 			in.zone.hand = s.zone_hand;
 			in.zone.require_grip = s.zone_require_grip;
+			in.zone.stop_first = s.zone_stop_first;
+			in.zone.press_delay_s = s.zone_press_delay;
 			break;
 		case SC::DeviceKind::Gamepad:
 			in.gamepad.sprint_latch = s.sprint_latch;
@@ -600,6 +603,10 @@ void VRInputSource::SyncSpecs()
 	const bool had_instances = !m_instances.empty();
 	for (Instance& in : m_instances)
 	{
+		// Let go of whatever the old devices still hold (a latched run's Cross, a holster's R1) before they
+		// go; a button still physically held is pressed again by the new device's first compose.
+		if (in.ever_emitted)
+			Emit(in, SC::ControlValues{});
 		if (in.announced)
 			Announce(in, false);
 	}
@@ -705,7 +712,10 @@ void VRInputSource::PollEvents()
 	}
 
 	if (m_instances.empty())
+	{
+		SC::SetZoneStop(false);
 		return;
+	}
 
 	if (live != m_session_live)
 	{
@@ -727,6 +737,7 @@ void VRInputSource::PollEvents()
 	a.yaw = anchor.yaw;
 
 	const SC::Hands hands = SC::HandsFromSnapshot(snap);
+	bool zone_stop = false; // a stop-first zone is held this poll
 	const bool split = VR::SplitState::Active();
 	const GuestReader reader = s_guest_reader.load(std::memory_order_acquire);
 
@@ -833,6 +844,24 @@ void VRInputSource::PollEvents()
 					in.zone_state.Reset();
 				}
 				values = SC::ComposeZone(in.zone_state);
+				if (in.zone.stop_first)
+				{
+					// The game takes this button only standing still (Outbreak's item screen won't open while
+					// walking or running): stop the character first, press once it has stopped. A squeeze let
+					// go before the delay still gives one press, long enough for a 30 fps game to see.
+					constexpr float kMinPress = 0.15f;
+					float& pressed = values[static_cast<u32>(SC::ControlId::Pressed)];
+					const bool held = pressed > 0.5f;
+					if (held && in.zone_press_s < 0.0f)
+						in.zone_press_s = 0.0f;
+					else if (in.zone_press_s >= 0.0f)
+						in.zone_press_s += dt;
+					const float delay = in.zone.press_delay_s;
+					pressed = (in.zone_press_s >= delay && (held || in.zone_press_s < delay + kMinPress)) ? 1.0f : 0.0f;
+					if (!held && in.zone_press_s >= delay + kMinPress)
+						in.zone_press_s = -1.0f;
+					zone_stop = zone_stop || in.zone_press_s >= 0.0f;
+				}
 				break;
 			}
 			default:
@@ -842,6 +871,7 @@ void VRInputSource::PollEvents()
 		Emit(in, values);
 		publish_cards(values, true);
 	}
+	SC::SetZoneStop(zone_stop);
 }
 
 std::vector<std::pair<std::string, std::string>> VRInputSource::EnumerateDevices()

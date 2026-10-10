@@ -1043,6 +1043,7 @@ namespace VR::SpatialControls
 		}
 
 		std::atomic_bool s_sprint_blocked{false};
+		std::atomic_bool s_zone_stop{false};
 
 		constexpr float kSprintOn = 0.5f; // stick magnitude (after the deadzone) the click must come with
 		constexpr float kSprintHold = 0.25f; // the latch holds while the stick is pushed past this
@@ -1182,10 +1183,22 @@ namespace VR::SpatialControls
 		s_sprint_blocked.store(blocked, std::memory_order_release);
 	}
 
+	void SetZoneStop(bool stop)
+	{
+		s_zone_stop.store(stop, std::memory_order_release);
+	}
+
 	ControlValues ComposeGamepad(const VRInputSnapshot& snapshot, const GamepadParams& p, GamepadState& st, float dt)
 	{
-		return ComposeGamepadWith(snapshot, p, st, dt, s_suppressed_move_hand.load(std::memory_order_acquire),
-			s_sprint_blocked.load(std::memory_order_acquire));
+		const bool zone_stop = s_zone_stop.load(std::memory_order_acquire);
+		ControlValues v = ComposeGamepadWith(snapshot, p, st, dt, s_suppressed_move_hand.load(std::memory_order_acquire),
+			s_sprint_blocked.load(std::memory_order_acquire) || zone_stop);
+		if (zone_stop)
+		{
+			At(v, ControlId::LeftStickX) = 0.0f;
+			At(v, ControlId::LeftStickY) = 0.0f;
+		}
+		return v;
 	}
 
 	bool SelfTestGamepad(const char** failed)

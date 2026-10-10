@@ -99,6 +99,7 @@ private:
 		std::array<bool, 2> buzzing{};
 		std::array<bool, 2> at_stop{};
 		std::array<float, 2> break_away_flash_s{};
+		float zone_press_s = -1.0f; // time since a stop-first zone was squeezed; -1 = no press pending
 		std::array<bool, VR::SpatialControls::kControlCount> stick_bound{};
 
 		void ResetState();

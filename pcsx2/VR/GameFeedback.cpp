@@ -328,6 +328,12 @@ namespace VR::GameFeedback
 			if (!enabled || ran)
 				return;
 			ran = true;
+			if (XRInput::IsInitialized())
+			{
+				Console.Warning("(VR) Feedback self-test skipped: VR controller input is running and would take the test "
+								"pulses (run it with no headset session).");
+				return;
+			}
 			SelfTest();
 		}
 	}

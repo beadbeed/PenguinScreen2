@@ -2083,7 +2083,7 @@ static std::optional<VR::ProfileDB::SpatialControlSpec> parseControlEntry(const 
 				"steerDeadband", "steerCurve", "steerSign", "outputFloor", "lockToLockDeg", "rimRadius", "gears", "reverse",
 				"neutral", "travelX", "travelY", "twist", "twistRangeDeg", "aim", "aimHand", "preset", "mode", "leverSign",
 				"grabMode", "breakAway", "grabLength", "sweep", "armLength", "upright", "radius", "hand", "grip",
-				"sprintLatch"});
+				"sprintLatch", "stopFirst", "pressDelay"});
 		readOptionalFloat(serial, p, "travel", "controls travel", spec.travel);
 		readOptionalFloat(serial, p, "sweep", "controls sweep", spec.sweep_deg);
 		readOptionalFloat(serial, p, "armLength", "controls armLength", spec.arm_length);
@@ -2180,6 +2180,9 @@ static std::optional<VR::ProfileDB::SpatialControlSpec> parseControlEntry(const 
 		}
 		readOptionalFloat(serial, p, "radius", "controls radius", spec.zone_radius);
 		readOptionalBool(serial, p, "grip", "controls grip", spec.zone_require_grip);
+		readOptionalBool(serial, p, "stopFirst", "controls stopFirst", spec.zone_stop_first);
+		readOptionalFloat(serial, p, "pressDelay", "controls pressDelay", spec.zone_press_delay);
+		spec.zone_press_delay = std::clamp(std::isfinite(spec.zone_press_delay) ? spec.zone_press_delay : 0.25f, 0.0f, 1.0f);
 		if (p.has_child("hand"))
 		{
 			const std::string_view v = nodeVal(p["hand"]);

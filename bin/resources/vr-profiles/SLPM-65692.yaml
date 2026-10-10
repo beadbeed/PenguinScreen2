@@ -186,7 +186,7 @@ SLPM-65692:
       id: belt
       notes: "Left hip: squeeze the left grip there to open the item screen (Start), shown in front of you; squeeze there again to close it."
       placement: { side: -0.22, height: -0.50, forward: 0.12 }   # mirror of the holster
-      params: { radius: 0.20, hand: left, grip: true }
+      params: { radius: 0.20, hand: left, grip: true, stopFirst: true }   # the item screen only opens standing still: stop, then press
       pad: 1
       bind:
         Pressed: Start
@@ -194,7 +194,7 @@ SLPM-65692:
       id: backpack
       notes: "Over the right shoulder: reach back past your ear and squeeze the grip to open the item screen (Start)."
       placement: { side: 0.15, height: -0.05, forward: -0.08 }   # a chair back blocks reaching further
-      params: { radius: 0.15, hand: right, grip: true }
+      params: { radius: 0.15, hand: right, grip: true, stopFirst: true }
       pad: 1
       bind:
         Pressed: Start

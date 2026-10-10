@@ -580,6 +580,10 @@ namespace VR::SpatialControls
 	// stay held into it. Any thread.
 	void SetSprintBlocked(bool blocked);
 
+	// While set (a stop-first zone is held), the Gamepad's left stick reads 0 and its sprint latch lets go.
+	// Any thread.
+	void SetZoneStop(bool stop);
+
 	// The Gamepad's sprint latch and ad-lib flicks on scripted input, and that without sprint_latch the
 	// click and the buttons pass through as before. False with *failed naming the first failed check.
 	bool SelfTestGamepad(const char** failed);
@@ -605,6 +609,11 @@ namespace VR::SpatialControls
 		bool require_grip = true;
 		float grip_on = 0.6f;
 		float grip_off = 0.4f;
+		// For a button the game only takes standing still (Outbreak's item screen): while the zone is held the
+		// Gamepad's move stick and sprint latch are let go (SetZoneStop), and the press itself waits
+		// press_delay_s so it lands once the character has stopped.
+		bool stop_first = false;
+		float press_delay_s = 0.25f;
 	};
 	struct ZoneState
 	{

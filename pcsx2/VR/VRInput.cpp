@@ -809,6 +809,9 @@ namespace VR
 		{
 			VRInput s_input;
 			constexpr float kHapticPulseSeconds = 0.05f;
+			// Display time a pulse ends at, per hand: until then the continuous rumble (re-triggered every frame)
+			// holds off, or it would cut a hit or shot pulse down to one frame.
+			XrTime s_pulse_end[2] = {0, 0};
 		}
 
 		bool Initialize()
@@ -818,6 +821,7 @@ namespace VR
 			for (std::atomic<int>& r : s_pulse_request)
 				r.store(-1, std::memory_order_relaxed);
 			s_haptic_applied[0] = s_haptic_applied[1] = 0;
+			s_pulse_end[0] = s_pulse_end[1] = 0;
 			return s_input.Initialize();
 		}
 
@@ -832,14 +836,23 @@ namespace VR
 				const int requested = s_haptic_request[hand].exchange(-1, std::memory_order_acq_rel);
 				if (requested >= 0)
 					s_haptic_applied[hand] = requested;
-				if (s_haptic_applied[hand] > 0)
-					s_input.TriggerHaptic(hand, kHapticPulseSeconds, 0.f, static_cast<float>(s_haptic_applied[hand]) / 1000.f);
-				else if (requested == 0)
-					s_input.StopHaptic(hand);
 
+				// A pulse at least as strong as the rumble plays out in full; a weaker one is drowned by the
+				// rumble anyway and is dropped. Each haptic call replaces the one playing on that hand.
 				const int pulse = s_pulse_request[hand].exchange(-1, std::memory_order_acq_rel);
-				if (pulse >= 0)
-					s_input.TriggerHaptic(hand, static_cast<float>(pulse >> 16) / 1000.f, 0.f, static_cast<float>(pulse & 0xFFFF) / 1000.f);
+				if (pulse >= 0 && (pulse & 0xFFFF) >= s_haptic_applied[hand])
+				{
+					const int ms = pulse >> 16;
+					s_input.TriggerHaptic(hand, static_cast<float>(ms) / 1000.f, 0.f, static_cast<float>(pulse & 0xFFFF) / 1000.f);
+					s_pulse_end[hand] = display_time + static_cast<XrTime>(ms) * 1000000;
+				}
+				else if (display_time >= s_pulse_end[hand])
+				{
+					if (s_haptic_applied[hand] > 0)
+						s_input.TriggerHaptic(hand, kHapticPulseSeconds, 0.f, static_cast<float>(s_haptic_applied[hand]) / 1000.f);
+					else if (requested == 0)
+						s_input.StopHaptic(hand);
+				}
 			}
 		}
 
