@@ -1227,6 +1227,9 @@ namespace VR::CameraDriver
 						{
 							s_yaw_anchor = WrapPi(s_yaw_anchor - la.yaw_sign * dir * snap_deg * (PI_F / 180.0f));
 							s_snap_ready = false;
+							// Prediction can't lead a step: the old frame shows turned aside, with a black band,
+							// until the new view's frames arrive. The comfort blink (if on) covers that.
+							HudCards::Blink("snap turn");
 						}
 						else if (std::abs(sx) < 0.3f)
 							s_snap_ready = true;

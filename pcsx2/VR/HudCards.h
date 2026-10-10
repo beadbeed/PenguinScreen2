@@ -14,15 +14,17 @@
 // placement maths; no XR or Vulkan types, so it stays self-contained. XRCompositor owns the swapchains,
 // uploads the pixels and submits the layers, and only while a VR session runs.
 //
-// Two cards: the toast, a short line of text view-locked below the line of sight (recenters, brightness,
-// controllers paused), and the wrist card, on the back of the left wrist in first person, with the
-// character's condition, an HP bar and the virus gauge read from the profile's hud.wrist block.
+// Three cards: the toast, a short line of text view-locked below the line of sight (recenters, brightness,
+// controllers paused); the wrist card, on the back of the left wrist in first person, with the
+// character's condition, an HP bar and the virus gauge read from the profile's hud.wrist block; and the
+// comfort blink, a black quad over the whole view for snap turns and screen changes.
 namespace VR::HudCards
 {
-	// Card slots, in the order the compositor submits them (the toast last, on top).
+	// Card slots, in the order the compositor submits them (the blink last, over everything).
 	static constexpr int kWrist = 0;
 	static constexpr int kToast = 1;
-	static constexpr int kCardCount = 2;
+	static constexpr int kBlink = 2;
+	static constexpr int kCardCount = 3;
 
 	// Toast image and quad: about 1.2 m ahead and 0.25 m below eye level, 0.5 m wide (about 24 deg, so
 	// the image's 1024 pixels give the text 1.1 deg tall letters up to ~23 characters, smaller beyond).
@@ -51,6 +53,22 @@ namespace VR::HudCards
 	// Cards fade in and out over this long.
 	static constexpr float kFadeSeconds = 0.15f;
 
+	// Comfort blink: black over kBlinkRiseMs, held for kBlinkHoldMs, clear again over kBlinkFallMs (0.18 s in
+	// all). It hides the jumps prediction can't: a snap turn shows the old frame turned aside with a black
+	// band until the new view's frames arrive, about 85-100 ms later (inside the hold), and the screen
+	// changing between the first-person and the world screen (made while black, see XRCompositor). Quick to
+	// go dark so little of the jump shows, slower to clear.
+	static constexpr u32 kBlinkRiseMs = 40;
+	static constexpr u32 kBlinkHoldMs = 60;
+	static constexpr u32 kBlinkFallMs = 80;
+	// A plain black image, stretched by the quad layer. Not the smallest possible: a runtime turning down
+	// a tiny swapchain would take every card down with it.
+	static constexpr u32 kBlinkImageSize = 16;
+	// View-locked just in front of the eyes, 4 m square at 0.3 m: about 163 degrees across each way, past
+	// any headset's field of view.
+	static constexpr float kBlinkDistanceM = 0.3f;
+	static constexpr float kBlinkSizeM = 4.0f;
+
 	// Same byte order as the lever cards and hands (ControlQuads::PackRgba): R in the low byte,
 	// unpremultiplied alpha in the high byte, sRGB-encoded colour.
 	constexpr u32 Rgba(u32 r, u32 g, u32 b, u32 a = 255)
@@ -77,6 +95,18 @@ namespace VR::HudCards
 	// the whole font.
 	void MaybeTestToast();
 
+	// Starts a comfort blink; any thread. Returns false, and does nothing, while the VR ComfortBlink
+	// setting is off (as published by Poll, so the GS thread never reads EmuConfig). A blink already
+	// running carries on from its current darkness and holds black again from now, so overlapping
+	// triggers never lighten the view mid-blink. reason is for the log. Drawn only while a VR session runs.
+	bool Blink(const char* reason = "blink");
+
+	// Compositor: the blink's opacity now (0-1); false when no blink is on screen. Any thread.
+	bool CurrentBlink(float* opacity);
+
+	// Compositor, each frame: with PCSX2_VR_BLINK_TEST=1 a blink every 2 s.
+	void MaybeTestBlink();
+
 	// The wrist card's data, read each vsync from the local character's record.
 	struct WristData
 	{
@@ -100,7 +130,7 @@ namespace VR::HudCards
 	Condition ConditionOf(const WristData& d);
 
 	// CPU thread, every vsync right after CameraDriver::Apply: reads the record Apply resolved, the same
-	// way GameFeedback does. Reads only, so the same online.
+	// way GameFeedback does. Reads only, so the same online. Also publishes the ComfortBlink setting.
 	void Poll();
 
 	// Any thread: true while first person is armed with the record resolved and the profile has a
@@ -114,6 +144,7 @@ namespace VR::HudCards
 	// Rasterise a card at full opacity into out (resized to the card's width x height).
 	void RasterToast(std::vector<u32>& out, const std::string& text);
 	void RasterWrist(std::vector<u32>& out, const WristData& d, bool no_data);
+	void RasterBlink(std::vector<u32>& out);
 
 	// dst = src with every pixel's alpha scaled by opacity (0-1), for the fades.
 	void ScaleAlpha(const u32* src, size_t count, float opacity, u32* dst);
@@ -121,6 +152,9 @@ namespace VR::HudCards
 	// The toast's pose in the head's VIEW space (position xyz, orientation xyzw): ahead and below,
 	// tilted to face the eye.
 	void ToastPose(float pos[3], float quat[4]);
+
+	// The blink's pose in the VIEW space: straight ahead at kBlinkDistanceM, square to the line of sight.
+	void BlinkPose(float pos[3], float quat[4]);
 
 	// The wrist card's pose in the XR base space for a left hand given the way HandModel takes it (pos:
 	// the controller's grip position; quat: its pointing frame, -Z forward, +Y up, +X right): on the
@@ -131,7 +165,7 @@ namespace VR::HudCards
 	void PlaceWrist(const float hand_pos[3], const float hand_quat[4], const float eye[3], bool face_eye,
 		float out_pos[3], float out_quat[4], float* facing_cos);
 
-	// Condition thresholds, labels, keys, the font, the fades and the placement maths. Runs once (the
+	// Condition thresholds, labels, keys, the font, the fades, the blink and the placement maths. Runs once (the
 	// compositor's first HUD frame or the first Poll) when PCSX2_VR_HUD_SELFTEST is set.
 	bool SelfTest();
 }

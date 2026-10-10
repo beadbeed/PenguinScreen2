@@ -274,6 +274,13 @@
        </widget>
       </item>
       <item>
+       <widget class="QCheckBox" name="comfortBlink">
+        <property name="text">
+         <string>Comfort Blink (snap turns and screen changes)</string>
+        </property>
+       </widget>
+      </item>
+      <item>
        <widget class="QCheckBox" name="onlineSafe">
         <property name="text">
          <string>Online-Safe First Person (camera only; on whenever the network adapter is on)</string>
@@ -370,6 +377,7 @@
   <tabstop>profileBrowser</tabstop>
   <tabstop>headCamera</tabstop>
   <tabstop>snapTurn</tabstop>
+  <tabstop>comfortBlink</tabstop>
   <tabstop>onlineSafe</tabstop>
   <tabstop>gameRumble</tabstop>
   <tabstop>hapticStrength</tabstop>

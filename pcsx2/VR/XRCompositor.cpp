@@ -152,7 +152,7 @@ namespace VR::XRCompositor
 			// Set when creating any of the above fails: hands stay off until the next Initialize().
 			bool hands_disabled = false;
 
-			// HUD cards (HudCards: the toast and the wrist card): the same CPU-raster upload path once more,
+			// HUD cards (HudCards: the wrist card, the toast and the blink): the same CPU-raster upload path once more,
 			// one swapchain per card sharing a staging buffer, command buffer and fence. Created the first
 			// time a card shows and kept until Shutdown; any failure turns the cards off for the session.
 			struct HudChain
@@ -179,6 +179,9 @@ namespace VR::XRCompositor
 			float hud_wrist_opacity = 0.0f;
 			u64 hud_last_ms = 0;
 			bool hud_wrist_logged = false;
+			// Comfort blink on a screen-mode change: when (SteadyNowMs) the change waiting for the blink to
+			// go black is made; 0 while none waits.
+			u64 fp_switch_due_ms = 0;
 
 			XrSpace view_space = XR_NULL_HANDLE;
 
@@ -1249,6 +1252,8 @@ namespace VR::XRCompositor
 				return {HudCards::kToastWidth, HudCards::kToastHeight};
 			if (card == HudCards::kWrist)
 				return {HudCards::kWristWidth, HudCards::kWristHeight};
+			if (card == HudCards::kBlink)
+				return {HudCards::kBlinkImageSize, HudCards::kBlinkImageSize};
 			return {0, 0};
 		}
 
@@ -1495,6 +1500,7 @@ namespace VR::XRCompositor
 			u32& layer_count, u32 layer_capacity)
 		{
 			HudCards::MaybeTestToast();
+			HudCards::MaybeTestBlink();
 			if (s.hud_disabled)
 				return 0;
 
@@ -1514,6 +1520,16 @@ namespace VR::XRCompositor
 				wt.on = true;
 				wt.content = toast.serial;
 				wt.level = HudLevel(toast.opacity);
+			}
+
+			// Comfort blink: view-locked too. One unchanging image; only its fade step is uploaded again.
+			float blink_opacity = 0.0f;
+			if (s.view_space != XR_NULL_HANDLE && HudCards::CurrentBlink(&blink_opacity))
+			{
+				Want& wb = want[HudCards::kBlink];
+				wb.on = true;
+				wb.content = 1;
+				wb.level = HudLevel(blink_opacity);
 			}
 
 			// Wrist card: on the left hand while first person is active and the profile reads hud.wrist,
@@ -1620,6 +1636,8 @@ namespace VR::XRCompositor
 						HudCards::RasterToast(raster.pixels, toast.text);
 					else if (i == HudCards::kWrist)
 						HudCards::RasterWrist(raster.pixels, wrist, wrist_no_data);
+					else if (i == HudCards::kBlink)
+						HudCards::RasterBlink(raster.pixels);
 					raster.content = wv.content;
 					raster.valid = true;
 				}
@@ -1740,6 +1758,17 @@ namespace VR::XRCompositor
 					quad.pose.orientation = {wrist_quat[0], wrist_quat[1], wrist_quat[2], wrist_quat[3]};
 					quad.pose.position = {wrist_pos[0], wrist_pos[1], wrist_pos[2]};
 					quad.size = {HudCards::kWristWidthM, HudCards::kWristHeightM};
+				}
+				else if (i == HudCards::kBlink)
+				{
+					// Just in front of the eyes and far wider than any field of view, so it covers the whole view.
+					float pos[3];
+					float q[4];
+					HudCards::BlinkPose(pos, q);
+					quad.space = s.view_space;
+					quad.pose.orientation = {q[0], q[1], q[2], q[3]};
+					quad.pose.position = {pos[0], pos[1], pos[2]};
+					quad.size = {HudCards::kBlinkSizeM, HudCards::kBlinkSizeM};
 				}
 				layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
 				appended++;
@@ -1888,6 +1917,7 @@ namespace VR::XRCompositor
 		s.hud_wrist_opacity = 0.0f;
 		s.hud_last_ms = 0;
 		s.hud_wrist_logged = false;
+		s.fp_switch_due_ms = 0;
 
 		if (!XRSession::HasSession())
 		{
@@ -2242,10 +2272,36 @@ namespace VR::XRCompositor
 			// First person: head-locked screen sized to the game camera's FOV. Anything else (menus,
 			// item screen, cutscenes, doors) goes back to the world screen, re-anchored in front of the
 			// head each time first person hands over so it never appears behind the player.
-			const bool fp_screen = sp.has_fp && CameraDriver::LookAtActive() && s.head_pose_valid;
-			if (fp_screen != s_fp_screen_was_active)
+			// With the comfort blink on, a change of screen waits until the blink has gone black
+			// (kBlinkRiseMs), so the jump in placement is never seen; the blink then holds black while the
+			// frames from the new camera, about 85-100 ms behind the change, reach the screen.
+			const bool fp_want = sp.has_fp && CameraDriver::LookAtActive() && s.head_pose_valid;
+			bool switch_now = false;
+			if (fp_want == s_fp_screen_was_active)
 			{
-				if (!fp_screen && s.head_pose_valid)
+				// Wanted back before the change was made (a flicker): nothing to change; the blink plays out.
+				s.fp_switch_due_ms = 0;
+			}
+			else if (!s.head_pose_valid)
+			{
+				// Tracking lost: straight to the world screen, which needs no head pose.
+				switch_now = true;
+			}
+			else if (s.fp_switch_due_ms == 0)
+			{
+				if (HudCards::Blink(fp_want ? "first-person screen" : "world screen"))
+					s.fp_switch_due_ms = CameraDriver::SteadyNowMs() + HudCards::kBlinkRiseMs;
+				else
+					switch_now = true;
+			}
+			else if (CameraDriver::SteadyNowMs() >= s.fp_switch_due_ms)
+			{
+				switch_now = true;
+			}
+			if (switch_now)
+			{
+				s.fp_switch_due_ms = 0;
+				if (!fp_want && s.head_pose_valid)
 				{
 					const XrQuaternionf& q = s.head_pose.orientation;
 					const float fx = -2.0f * (q.w * q.y + q.z * q.x);
@@ -2259,9 +2315,10 @@ namespace VR::XRCompositor
 						s.world_anchor_z = s.head_pose.position.z;
 					}
 				}
-				Console.WriteLn("(VR) Screen: %s.", fp_screen ? "first person (placed at the render pose, roll-level)" : "world-locked");
-				s_fp_screen_was_active = fp_screen;
+				Console.WriteLn("(VR) Screen: %s.", fp_want ? "first person (placed at the render pose, roll-level)" : "world-locked");
+				s_fp_screen_was_active = fp_want;
 			}
+			const bool fp_screen = s_fp_screen_was_active;
 
 			// First-person screen: placed in the room (base space) in front of the head pose the shown
 			// frame was rendered from (matched through the game's view matrix when the profile names it,

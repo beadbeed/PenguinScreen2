@@ -5,6 +5,7 @@
 #include "VR/CameraDriver.h"
 #include "VR/VRProfileDB.h"
 
+#include "Config.h"
 #include "Memory.h"
 #include "VMManager.h"
 
@@ -37,6 +38,10 @@ namespace VR::HudCards
 		constexpr int kToastPadPx = 40;
 		// 7 * 7 = 49 px letters, about 1.1 deg at the toast's size and distance.
 		constexpr int kToastMaxScale = 7;
+
+		// Comfort blink: opaque black; the fade is all in the upload's alpha scaling.
+		constexpr u32 kBlinkBlack = Rgba(0, 0, 0, 255);
+		constexpr u64 kBlinkTotalMs = static_cast<u64>(kBlinkRiseMs) + kBlinkHoldMs + kBlinkFallMs;
 
 		// Wrist card: a dark panel edged in the condition colour, the condition label, the HP bar and the
 		// virus line.
@@ -357,6 +362,42 @@ namespace VR::HudCards
 		std::mutex s_toast_mutex;
 		ToastState s_toast;
 
+		// Blink opacity at now_ms for a blink started at start_ms (0: none yet): dark over the rise, black
+		// through the hold, clear again over the fall.
+		float BlinkOpacityAt(u64 start_ms, u64 now_ms)
+		{
+			if (start_ms == 0 || now_ms < start_ms)
+				return 0.0f;
+			const u64 t = now_ms - start_ms;
+			if (t < kBlinkRiseMs)
+				return static_cast<float>(t) / static_cast<float>(kBlinkRiseMs);
+			if (t < static_cast<u64>(kBlinkRiseMs) + kBlinkHoldMs)
+				return 1.0f;
+			if (t < kBlinkTotalMs)
+				return static_cast<float>(kBlinkTotalMs - t) / static_cast<float>(kBlinkFallMs);
+			return 0.0f;
+		}
+
+		// The start that carries a blink on when it is triggered again at now_ms: kept while it is still going
+		// dark, otherwise moved onto the rising edge at its current opacity (black now if it was holding), so
+		// it never lightens and the hold runs in full again once it is black.
+		u64 BlinkRestartAt(u64 start_ms, u64 now_ms)
+		{
+			const float o = BlinkOpacityAt(start_ms, now_ms);
+			if (o <= 0.0f)
+				return now_ms;
+			if (now_ms - start_ms < kBlinkRiseMs)
+				return start_ms;
+			const u64 back = static_cast<u64>(std::lround(o * static_cast<float>(kBlinkRiseMs)));
+			return (now_ms > back) ? (now_ms - back) : 1;
+		}
+
+		std::mutex s_blink_mutex;
+		u64 s_blink_start_ms = 0;
+		// The ComfortBlink setting, published by Poll (CPU thread) for every thread; on until the first
+		// vsync, as the setting's default is.
+		std::atomic<bool> s_blink_enabled{true};
+
 		// The wrist card's reads, published by Poll (CPU thread) for the compositor.
 		std::mutex s_wrist_mutex;
 		bool s_wrist_active = false;
@@ -514,6 +555,32 @@ namespace VR::HudCards
 		return true;
 	}
 
+	bool Blink(const char* reason)
+	{
+		if (!s_blink_enabled.load(std::memory_order_relaxed))
+			return false;
+		const u64 now = NowMs();
+		{
+			std::lock_guard<std::mutex> lock(s_blink_mutex);
+			s_blink_start_ms = BlinkRestartAt(s_blink_start_ms, now);
+		}
+		Console.WriteLn("(VR) HUD blink (%s).", reason ? reason : "blink");
+		return true;
+	}
+
+	bool CurrentBlink(float* opacity)
+	{
+		const u64 now = NowMs();
+		float o = 0.0f;
+		{
+			std::lock_guard<std::mutex> lock(s_blink_mutex);
+			o = BlinkOpacityAt(s_blink_start_ms, now);
+		}
+		if (opacity)
+			*opacity = o;
+		return o > 0.0f;
+	}
+
 	Condition ConditionOf(const WristData& d)
 	{
 		if (!d.has_hp || d.hp_max == 0)
@@ -529,6 +596,10 @@ namespace VR::HudCards
 	void Poll()
 	{
 		MaybeRunSelfTest();
+
+		// Read live (the setting is not part of the VR config comparison), and only here: the compositor's
+		// GS thread must not touch EmuConfig.
+		s_blink_enabled.store(EmuConfig.VR.ComfortBlink, std::memory_order_relaxed);
 
 		// LocalRecord is true only while first person is armed (its guards hold, so the GAME overlay and the
 		// virus table in it are resident) with the record resolved this vsync; flat play never gets past it.
@@ -607,6 +678,23 @@ namespace VR::HudCards
 		s_count++;
 	}
 
+	void MaybeTestBlink()
+	{
+		static const bool s_test = [] {
+			const char* v = std::getenv("PCSX2_VR_BLINK_TEST");
+			return v && v[0] != '\0' && std::strcmp(v, "0") != 0;
+		}();
+		if (!s_test)
+			return;
+		// Compositor thread only.
+		static u64 s_next_ms = 0;
+		const u64 now = NowMs();
+		if (now < s_next_ms)
+			return;
+		s_next_ms = now + 2000;
+		Blink("PCSX2_VR_BLINK_TEST");
+	}
+
 	void RasterToast(std::vector<u32>& out, const std::string& text)
 	{
 		constexpr int w = static_cast<int>(kToastWidth);
@@ -647,6 +735,11 @@ namespace VR::HudCards
 		c.Text(w / 2, kVirusY, virus_line, FitScale(virus_line.size(), w - 2 * kWristPadPx, 3), kWristText);
 	}
 
+	void RasterBlink(std::vector<u32>& out)
+	{
+		out.assign(static_cast<size_t>(kBlinkImageSize) * kBlinkImageSize, kBlinkBlack);
+	}
+
 	void ScaleAlpha(const u32* src, size_t count, float opacity, u32* dst)
 	{
 		const float o = std::isfinite(opacity) ? std::clamp(opacity, 0.0f, 1.0f) : 0.0f;
@@ -670,6 +763,17 @@ namespace VR::HudCards
 		quat[1] = 0.0f;
 		quat[2] = 0.0f;
 		quat[3] = std::cos(tilt * 0.5f);
+	}
+
+	void BlinkPose(float pos[3], float quat[4])
+	{
+		pos[0] = 0.0f;
+		pos[1] = 0.0f;
+		pos[2] = -kBlinkDistanceM;
+		quat[0] = 0.0f;
+		quat[1] = 0.0f;
+		quat[2] = 0.0f;
+		quat[3] = 1.0f;
 	}
 
 	void PlaceWrist(const float hand_pos[3], const float hand_quat[4], const float eye[3], bool face_eye,
@@ -729,6 +833,32 @@ namespace VR::HudCards
 		check(ToastOpacityAt(1000, 3000, 2000) == 1.0f, "toast opaque mid-way");
 		check(std::abs(ToastOpacityAt(1000, 3000, 2925) - 0.5f) < 0.01f, "toast half faded out 75 ms before the end");
 		check(ToastOpacityAt(1000, 3000, 3000) == 0.0f, "toast gone at the end");
+
+		// Blink: black after 40 ms, held to 100 ms, clear at 180 ms; a new trigger never lightens it.
+		check(BlinkOpacityAt(1000, 1000) == 0.0f, "blink starts clear");
+		check(std::abs(BlinkOpacityAt(1000, 1020) - 0.5f) < 0.01f, "blink half dark after 20 ms");
+		check(BlinkOpacityAt(1000, 1040) == 1.0f && BlinkOpacityAt(1000, 1099) == 1.0f, "blink black from 40 to 100 ms");
+		check(std::abs(BlinkOpacityAt(1000, 1140) - 0.5f) < 0.01f, "blink half clear 40 ms into the fall");
+		check(BlinkOpacityAt(1000, 1180) == 0.0f && BlinkOpacityAt(0, 5000) == 0.0f,
+			"blink over after 180 ms, and none before the first");
+		check(BlinkRestartAt(1000, 1020) == 1000u, "a trigger while going dark keeps going dark");
+		check(BlinkRestartAt(1000, 1070) == 1030u && BlinkOpacityAt(1030, 1129) == 1.0f,
+			"a trigger while black holds black again in full");
+		const u64 again = BlinkRestartAt(1000, 1140);
+		check(std::abs(BlinkOpacityAt(again, 1140) - 0.5f) < 0.03f && BlinkOpacityAt(again, 1141) >= BlinkOpacityAt(again, 1140),
+			"a trigger while clearing goes dark again from where it was");
+		check(BlinkRestartAt(1000, 1300) == 1300u, "a trigger after a blink starts a new one");
+		std::vector<u32> bimg;
+		RasterBlink(bimg);
+		bool black = (bimg.size() == static_cast<size_t>(kBlinkImageSize) * kBlinkImageSize);
+		for (const u32 p : bimg)
+			black = black && (p == kBlinkBlack);
+		check(black, "the blink image is opaque black");
+		float bpos[3];
+		float bquat[4];
+		BlinkPose(bpos, bquat);
+		const float blink_half_deg = std::atan((0.5f * kBlinkSizeM) / kBlinkDistanceM) * (180.0f / 3.14159265f);
+		check(bpos[2] < 0.0f && bquat[3] == 1.0f && blink_half_deg > 75.0f, "the blink covers over 150 degrees ahead");
 
 		// Alpha scaling keeps the colour.
 		const u32 px = Rgba(10, 20, 30, 200);

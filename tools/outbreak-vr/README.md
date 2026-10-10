@@ -25,6 +25,12 @@ whole font), `PCSX2_VR_FAKE_HANDS` also shows the wrist card on the fake left ha
 outside first person), and `PCSX2_VR_HUD_SELFTEST` runs the HUD self-test once (`(VR) HUD self-test:` in
 the emulog). Every toast is logged as `(VR) HUD toast: "..."`.
 
+Comfort blink (VR setting `ComfortBlink`, on by default): a view-locked black quad 0.3 m ahead that goes black
+over 40 ms, holds 60 ms and clears over 80 ms, on each snap turn and each change between the first-person and
+the world screen. The screen change itself is made once the blink is black (`(VR) HUD blink (world screen).`
+then `(VR) Screen: world-locked.` about 40 ms later); snap turns log `(VR) HUD blink (snap turn).`.
+`PCSX2_VR_BLINK_TEST=1` blinks every 2 s (with the setting on) for `hmdshot.py` captures on the null headset.
+
 Rules when testing: never change emulation speed; never pause, savestate or dump RAM while online
 (obsrv drops clients after ~30 s without packets and bans speed changes); do not run the virtual pad
 while an anti-cheat game is open.
