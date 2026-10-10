@@ -98,7 +98,7 @@ def sample(fn, secs, dt=0.05):
 
 def features(p):
     base = 0x476DD0 + p.read8(0x48BF7D) * 0x10E0
-    print("holds: focus slot %d (expect 3), near-cull radius %.1f (expect 70)" % (p.read8(0x3AEF74), u2f(p.read32(0x6D6CF4))))
+    print("holds: focus slot %d (expect 3), near-cull radius %.1f (expect 75)" % (p.read8(0x3AEF74), u2f(p.read32(0x6D6CF4))))
 
     def pair():
         head = struct.unpack("<h", struct.pack("<H", p.read16(base + 0x92)))[0] * 360 / 65536
