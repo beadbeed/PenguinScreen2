@@ -1242,6 +1242,15 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 	if (cnode.has_child("guards") && cnode["guards"].is_seq())
 		parseGuardList(serial, cnode["guards"], "camera guard", cam.guards);
 
+	if (cnode.has_child("disarmAfterVsyncs"))
+	{
+		const std::optional<u32> n = StringUtil::FromChars<u32>(nodeVal(cnode["disarmAfterVsyncs"]));
+		if (n.has_value() && n.value() <= 600)
+			cam.disarm_after_vsyncs = n.value();
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.disarmAfterVsyncs must be 0..600; keeping 0.", serial);
+	}
+
 	if (cnode.has_child("silence") && cnode["silence"].is_seq())
 	{
 		for (const ryml::ConstNodeRef& sn : cnode["silence"].children())

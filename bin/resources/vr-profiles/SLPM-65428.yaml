@@ -38,6 +38,9 @@ SLPM-65428:
       - { address: 0x540004, equals: 3 }             # GAME overlay resident
       - { address: 0x48BF60, equals: 2, width: 1 }   # scenario status: in game
       - { address: 0x3AEF75, equals: 0, width: 1 }   # room camera in normal mode (not a scripted shot)
+    # The camera update flips the mode byte to 3 and back inside a frame about 12 times a second;
+    # only hand the camera back once the guards have failed for 0.1 s.
+    disarmAfterVsyncs: 6
     silence:
       - { address: 0x58EAEC, on: 0x00000000, off: 0x0C163B1C, when: [{ address: 0x540004, equals: 3 }] }   # fixed-cut handler
       - { address: 0x58EAFC, on: 0x00000000, off: 0x0C163C8C, when: [{ address: 0x540004, equals: 3 }] }   # spline cut handler

@@ -301,6 +301,9 @@ namespace VR::ProfileDB
 		std::vector<CameraCodeHook> code_hooks;
 		std::optional<CameraPadLook> pad_look;
 		std::optional<CameraLookAt> look_at;
+		// Stay armed until the guards have failed this many vsyncs in a row, so a guard byte the game
+		// flips for a frame inside its own update doesn't hand the camera back for a frame.
+		u32 disarm_after_vsyncs = 0;
 	};
 
 	struct SpatialControlSpec

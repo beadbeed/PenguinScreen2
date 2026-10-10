@@ -926,6 +926,7 @@ namespace VR::CameraDriver
 		PadLookState s_padlook{};
 
 		bool s_armed_logged = false;
+		u32 s_guard_fail_vsyncs = 0;
 
 		std::atomic_bool s_recenter_requested{false};
 		bool s_has_reference = false;
@@ -1135,7 +1136,13 @@ namespace VR::CameraDriver
 		std::optional<HeadPose::Snapshot> fake = MaybeFakePose();
 		const HeadPose::Snapshot pose = fake.has_value() ? fake.value() : HeadPose::Get();
 
-		const bool armed = switched_on && (vm_state == VMState::Running) && pose.valid && GuardsPass(cam);
+		if (GuardsPass(cam))
+			s_guard_fail_vsyncs = 0;
+		else if (s_guard_fail_vsyncs < 0xFFFFFFFFu)
+			s_guard_fail_vsyncs++;
+		const bool guards_hold = (s_guard_fail_vsyncs == 0) ||
+		                         (s_armed_logged && s_guard_fail_vsyncs <= cam.disarm_after_vsyncs);
+		const bool armed = switched_on && (vm_state == VMState::Running) && pose.valid && guards_hold;
 
 		if (armed != s_armed_logged)
 		{
