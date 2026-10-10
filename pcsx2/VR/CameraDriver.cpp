@@ -1640,26 +1640,68 @@ namespace VR::CameraDriver
 				memWrite32(cam.fov->ee_address, s_fov_saved_raw);
 		}
 
+		// PCSX2_VR_FAKE_HEADPOSE=<deg>: a swaying head for headset-free tests, yaw at that amplitude over 4 s and
+		// pitch at half of it over 3 s. Read once (static init is thread-safe: the GS thread asks too).
+		const std::optional<float>& FakeHeadAmplitude()
+		{
+			static const std::optional<float> amp = []() -> std::optional<float> {
+				const char* env = std::getenv("PCSX2_VR_FAKE_HEADPOSE");
+				if (!env)
+					return std::nullopt;
+				return static_cast<float>(std::atof(env)) * (PI_F / 180.0f);
+			}();
+			return amp;
+		}
+
+		struct FakeHead
+		{
+			float yaw = 0.0f;
+			float pitch = 0.0f;
+			float yaw_rate = 0.0f;   // rad/s
+			float pitch_rate = 0.0f; // rad/s
+		};
+
+		// Driven by the clock rather than the vsync count, so the compositor can tell where the fake head is
+		// when a frame is shown (FakeHeadYawAt). 12 s holds whole periods of both, so the phase restarts
+		// seamlessly and a float keeps millisecond precision.
+		FakeHead FakeHeadAt(float amp, u64 ms)
+		{
+			constexpr float kYawW = 2.0f * PI_F / 4.0f;
+			constexpr float kPitchW = 2.0f * PI_F / 3.0f;
+			const float t = static_cast<float>(ms % 12000u) * 0.001f;
+			FakeHead f;
+			f.yaw = amp * std::sin(kYawW * t);
+			f.pitch = 0.5f * amp * std::sin(kPitchW * t);
+			f.yaw_rate = amp * kYawW * std::cos(kYawW * t);
+			f.pitch_rate = 0.5f * amp * kPitchW * std::cos(kPitchW * t);
+			return f;
+		}
+
 		std::optional<HeadPose::Snapshot> MaybeFakePose()
 		{
-			static const char* env = std::getenv("PCSX2_VR_FAKE_HEADPOSE");
-			if (!env)
+			const std::optional<float>& amp = FakeHeadAmplitude();
+			if (!amp.has_value())
 				return std::nullopt;
-			static const float amp_rad = static_cast<float>(std::atof(env)) * (PI_F / 180.0f);
 
-			const float t = static_cast<float>(s_vsync_counter);
-			const float yaw = amp_rad * std::sin(t * (2.0f * PI_F / 240.0f));
-			const float pitch = 0.5f * amp_rad * std::sin(t * (2.0f * PI_F / 180.0f));
+			const u64 now = NowMs();
+			const FakeHead f = FakeHeadAt(amp.value(), now);
 
-			const float cy = std::cos(yaw * 0.5f), sy = std::sin(yaw * 0.5f);
-			const float cp = std::cos(pitch * 0.5f), sp = std::sin(pitch * 0.5f);
+			// Yaw about +Y, then pitch about the yawed X axis: q = Ry(yaw) * Rx(pitch).
+			const float cy = std::cos(f.yaw * 0.5f), sy = std::sin(f.yaw * 0.5f);
+			const float cp = std::cos(f.pitch * 0.5f), sp = std::sin(f.pitch * 0.5f);
 			HeadPose::Snapshot p;
 			p.orientation_w = cy * cp;
 			p.orientation_x = cy * sp;
 			p.orientation_y = sy * cp;
 			p.orientation_z = -sy * sp;
+			// Room-frame angular velocity of that: yaw rate about +Y plus pitch rate about the yawed X axis,
+			// which is (cos yaw, 0, -sin yaw).
+			p.angular_velocity[0] = f.pitch_rate * std::cos(f.yaw);
+			p.angular_velocity[1] = f.yaw_rate;
+			p.angular_velocity[2] = -f.pitch_rate * std::sin(f.yaw);
+			p.angular_valid = true;
 			p.valid = true;
-			p.publish_ms = NowMs(); // taken now, so the prediction horizon measures from here
+			p.publish_ms = now; // taken now, so the prediction horizon measures from here
 			return p;
 		}
 
@@ -2212,6 +2254,21 @@ namespace VR::CameraDriver
 	u64 SteadyNowMs()
 	{
 		return NowMs();
+	}
+
+	float HeadPredictionHorizon()
+	{
+		return PredictHorizon(s_predict_h);
+	}
+
+	bool FakeHeadYawAt(u64 time_ms, float* yaw)
+	{
+		const std::optional<float>& amp = FakeHeadAmplitude();
+		if (!amp.has_value())
+			return false;
+		if (yaw)
+			*yaw = FakeHeadAt(amp.value(), time_ms).yaw;
+		return true;
 	}
 
 	bool FirstPersonPoseAt(u64 time_ms, HeadPose::Snapshot* out)

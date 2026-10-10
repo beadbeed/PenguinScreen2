@@ -28,6 +28,12 @@ namespace VR::HeadPose
 		// Steady-clock milliseconds when the pose was taken (CameraDriver::SteadyNowMs's clock), so the GS
 		// thread can tell how old a frame's pose is by the time the frame is shown. 0 = unknown.
 		u64 publish_ms = 0;
+
+		// Angular velocity in the room (base space) frame, radians per second, when the source reports one
+		// (the runtime's XrSpaceVelocity, or the analytic fake head). For camera.lookAt head prediction;
+		// without it the camera differences successive poses instead.
+		float angular_velocity[3] = {0.0f, 0.0f, 0.0f};
+		bool angular_valid = false;
 	};
 
 	void Publish(const Snapshot& pose);
