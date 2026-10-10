@@ -5,6 +5,7 @@
 
 #include "common/Pcsx2Defs.h"
 
+#include "VR/HeadPose.h"
 #include "VR/VRInputState.h"
 
 #include <openxr/openxr.h>
@@ -98,5 +99,35 @@ namespace VR
 		void PublishSnapshotForTest(const VRInputSnapshot& snapshot);
 
 		void ResetSnapshotForTest();
+
+		// Scripted controllers for the headset-free test runner (PINE MsgVRFakeInput, only with
+		// PCSX2_VR_TEST_INPUT set and never online). GetInputSnapshot() lays it over the real input
+		// until it expires, so every consumer (camera, zones, gamepad, hands) takes the real path.
+		struct TestInput
+		{
+			struct Hand
+			{
+				bool supplied = false;      // replace this hand's real state; otherwise it is left alone
+				bool head_relative = false; // poses are in the head's floor-yaw frame, positions from the head
+				VRPose aim_pose;            // .valid: tracked
+				VRPose grip_pose;
+				float trigger = 0.f;
+				float grip = 0.f;
+				float thumbstick_x = 0.f;
+				float thumbstick_y = 0.f;
+				// Bit i is the i-th button in VRHandState order: a, b, x, y, menu, thumbstick_click,
+				// dpad_up, dpad_down, dpad_left, dpad_right, bumper, view.
+				u32 buttons = 0;
+			};
+
+			VRPose head_pose; // replaces the real head while .valid
+			std::array<Hand, 2> hands;
+			u32 ttl_ms = 0; // capped at 500 ms; 0 drops any test input now
+		};
+
+		void SetTestInput(const TestInput& input);
+
+		// The scripted head while test input is live and supplies one.
+		bool TestHeadPose(HeadPose::Snapshot* out);
 	}
 }

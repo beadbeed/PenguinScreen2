@@ -11,9 +11,12 @@
 #ifdef ENABLE_VR
 #include "Counters.h"
 #include "MTGS.h"
+#include "VR/CameraDriver.h"
 #include "VR/DepthHistogram.h"
 #include "VR/MemWatch.h"
+#include "VR/VRInput.h"
 #include "fmt/format.h"
+#include <bit>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -144,6 +147,8 @@ namespace PINEServer
 		MsgVRQhistFlush = 0xE0,
 		MsgVRMemWatch = 0xE1,
 		MsgVRMemWatchPoll = 0xE2,
+		MsgVRFakeInput = 0xE3,
+		MsgVRTelemetry = 0xE4,
 		MsgUnimplemented = 0xFF
 	};
 
@@ -193,6 +198,25 @@ namespace PINEServer
 		return !((command_len + command_size) > buf_size ||
 				 (reply_len + reply_size) >= MAX_IPC_RETURN_SIZE);
 	}
+
+#ifdef ENABLE_VR
+	// MsgVRFakeInput fields, read one at a time at fixed little-endian offsets (never a struct copy).
+	static float ReadF32(std::span<u8> span, u32& at)
+	{
+		const float v = std::bit_cast<float>(FromSpan<u32>(span, at));
+		at += 4;
+		return v;
+	}
+
+	// Quaternion xyzw, then position xyz.
+	static void ReadPose(std::span<u8> span, u32& at, VR::VRPose* out)
+	{
+		for (float& c : out->orientation_xyzw)
+			c = ReadF32(span, at);
+		for (float& c : out->position_xyz)
+			c = ReadF32(span, at);
+	}
+#endif
 }
 
 bool PINEServer::Initialize(int slot)
@@ -655,6 +679,111 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 				ret_cnt += 4;
 				memcpy(&ret_buffer[ret_cnt], payload.data(), size);
 				ret_cnt += size;
+				break;
+			}
+			case MsgVRFakeInput:
+			{
+				// Scripted VR controllers for the headset-free test runner (tools/outbreak-vr/vrtest.py).
+				// Version 1, little-endian:
+				//   u8 ver (1), u8 flags (bit0 head valid, bit1 recenter after applying), u16 ttl_ms
+				//   head: 7 x f32 (quaternion xyzw, position xyz)
+				//   2 x hand (left, right): u8 flags (bit0 aim valid, bit1 grip valid, bit2 head-relative,
+				//     bit3 supplied: replace this hand), aim pose 7 x f32, grip pose 7 x f32,
+				//     trigger, grip, stick x, stick y (4 x f32), u32 buttons (VRHandState order from bit0)
+				// Reply: u8 1. Only with PCSX2_VR_TEST_INPUT set, and never while online play is possible:
+				// injected input must not reach other players.
+				constexpr int kPoseSize = 7 * 4;
+				constexpr int kHandSize = 1 + 2 * kPoseSize + 4 * 4 + 4;
+				constexpr int kFakeInputSize = 4 + kPoseSize + 2 * kHandSize;
+				if (!SafetyChecks(buf_cnt, kFakeInputSize, ret_cnt, 1, buf_size)) [[unlikely]]
+					goto error;
+				const char* refusal = nullptr;
+				if (!std::getenv("PCSX2_VR_TEST_INPUT"))
+					refusal = "PCSX2_VR_TEST_INPUT is not set";
+				else if (EmuConfig.VR.OnlineSafe || EmuConfig.DEV9.EthEnable)
+					refusal = "online-safe mode or the network adapter is on";
+				else if (FromSpan<u8>(buf, buf_cnt) != 1)
+					refusal = "unknown version";
+				if (refusal)
+				{
+					// A runner re-sends at 20 Hz; one line per hundred refusals is loud enough.
+					static u32 s_fake_input_refusals = 0;
+					if ((s_fake_input_refusals++ % 100) == 0)
+						Console.Warning("(PINE) MsgVRFakeInput refused: %s.", refusal);
+					goto error;
+				}
+
+				VR::XRInput::TestInput input;
+				u32 at = buf_cnt;
+				const u8 flags = FromSpan<u8>(buf, at + 1);
+				input.ttl_ms = FromSpan<u16>(buf, at + 2);
+				at += 4;
+				ReadPose(buf, at, &input.head_pose);
+				input.head_pose.valid = (flags & 0x01) != 0;
+				for (VR::XRInput::TestInput::Hand& hand : input.hands)
+				{
+					const u8 hand_flags = FromSpan<u8>(buf, at);
+					at += 1;
+					ReadPose(buf, at, &hand.aim_pose);
+					ReadPose(buf, at, &hand.grip_pose);
+					hand.aim_pose.valid = (hand_flags & 0x01) != 0;
+					hand.grip_pose.valid = (hand_flags & 0x02) != 0;
+					hand.head_relative = (hand_flags & 0x04) != 0;
+					hand.supplied = (hand_flags & 0x08) != 0;
+					hand.trigger = ReadF32(buf, at);
+					hand.grip = ReadF32(buf, at);
+					hand.thumbstick_x = ReadF32(buf, at);
+					hand.thumbstick_y = ReadF32(buf, at);
+					hand.buttons = FromSpan<u32>(buf, at);
+					at += 4;
+				}
+				buf_cnt += kFakeInputSize;
+
+				VR::XRInput::SetTestInput(input);
+				// After the head is in place, so the recenter takes the scripted head as forward.
+				if ((flags & 0x02) != 0)
+					VR::CameraDriver::RequestRecenter();
+				ToResultVector<u8>(ret_buffer, 1, ret_cnt);
+				ret_cnt += 1;
+				break;
+			}
+			case MsgVRTelemetry:
+			{
+				// What the first-person camera saw on its last vsync, for the test runner. Read-only.
+				// Reply: u32 size, then the payload (little-endian), version 1:
+				//   u8 ver (1), u8 flags (bit0 armed, bit1 lookAt active, bit2 pauseWhen hit, bit3 weapon
+				//   raised, bit4 walk-and-shoot moving, bit5 yaw anchor valid, bit6 online-safe, bit7 test
+				//   head), u8 disarm reason (CameraDriver::DisarmReason), u8 0, u32 guard-fail vsyncs,
+				//   f32 yaw anchor (rad), f32 base yaw now (rad), u32 match age, u32 frames matched,
+				//   u64 vsync, f32 prediction horizon (ms)
+				// Later versions only append, so a reader takes the size and the fields it knows.
+				constexpr u32 kTelemetrySize = 36;
+				if (!SafetyChecks(buf_cnt, 0, ret_cnt, kTelemetrySize + 4, buf_size)) [[unlikely]]
+					goto error;
+				const VR::CameraDriver::Telemetry t = VR::CameraDriver::GetTelemetry();
+				u32 flags = 0;
+				flags |= t.armed ? 0x01u : 0u;
+				flags |= t.look_at_active ? 0x02u : 0u;
+				flags |= t.pause_when_hit ? 0x04u : 0u;
+				flags |= t.weapon_raised ? 0x08u : 0u;
+				flags |= t.aim_moving ? 0x10u : 0u;
+				flags |= t.yaw_anchor_valid ? 0x20u : 0u;
+				flags |= t.online_safe ? 0x40u : 0u;
+				flags |= t.test_head ? 0x80u : 0u;
+				ToResultVector(ret_buffer, kTelemetrySize, ret_cnt);
+				ret_cnt += 4;
+				ToResultVector<u8>(ret_buffer, 1, ret_cnt + 0);
+				ToResultVector<u8>(ret_buffer, static_cast<u8>(flags), ret_cnt + 1);
+				ToResultVector<u8>(ret_buffer, static_cast<u8>(t.disarm_reason), ret_cnt + 2);
+				ToResultVector<u8>(ret_buffer, 0, ret_cnt + 3);
+				ToResultVector<u32>(ret_buffer, t.guard_fail_vsyncs, ret_cnt + 4);
+				ToResultVector<float>(ret_buffer, t.yaw_anchor, ret_cnt + 8);
+				ToResultVector<float>(ret_buffer, t.base_yaw_now, ret_cnt + 12);
+				ToResultVector<u32>(ret_buffer, t.match_age, ret_cnt + 16);
+				ToResultVector<u32>(ret_buffer, t.frames_matched, ret_cnt + 20);
+				ToResultVector<u64>(ret_buffer, t.vsync, ret_cnt + 24);
+				ToResultVector<float>(ret_buffer, t.prediction_ms, ret_cnt + 32);
+				ret_cnt += kTelemetrySize;
 				break;
 			}
 #endif

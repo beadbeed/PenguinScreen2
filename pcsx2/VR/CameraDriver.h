@@ -42,6 +42,42 @@ namespace VR::CameraDriver
 
 	void OnStateLoaded();
 
+	// Why the camera is not armed (the DISARMED log line), for telemetry.
+	enum class DisarmReason : u8
+	{
+		Armed = 0,
+		NoVM = 1,
+		NoProfile = 2,   // no profile, or it has no camera section
+		SwitchedOff = 3, // VR, the head-tracked camera setting, or split-screen
+		NotRunning = 4,  // paused
+		NoHeadPose = 5,
+		GuardFailed = 6,
+	};
+
+	// What Apply() saw on the last vsync, for the PINE test runner (MsgVRTelemetry) and later the
+	// flight recorder. Any thread.
+	struct Telemetry
+	{
+		u64 vsync = 0;
+		bool armed = false;
+		DisarmReason disarm_reason = DisarmReason::NoVM;
+		u32 guard_fail_vsyncs = 0;
+		bool look_at_active = false;
+		bool pause_when_hit = false; // lookAt.pauseWhen passed (a menu is open)
+		bool weapon_raised = false;  // lookAt.aim stance
+		bool aim_moving = false;     // walk-and-shoot owns the move stick
+		bool yaw_anchor_valid = false;
+		float yaw_anchor = 0.0f;   // game yaw, radians
+		float base_yaw_now = 0.0f; // game yaw minus yawSign * the recenter yaw, radians
+		u32 match_age = 0;         // how many writes back the newest matched frame was (0: none)
+		u32 frames_matched = 0;
+		bool online_safe = false;
+		bool test_head = false;     // the head pose came from PINE test input
+		float prediction_ms = 0.0f; // how far ahead the head pose is predicted (0: not predicted)
+	};
+
+	Telemetry GetTelemetry();
+
 	bool SelfTestAssembler();
 
 	bool SelfTestMath();

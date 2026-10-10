@@ -8,6 +8,7 @@
 #include "VR/PadLook.h"
 #include "VR/VRManager.h"
 #include "VR/SplitState.h"
+#include "VR/VRInput.h"
 #include "VR/VRInputState.h"
 #include "VR/VRProfileDB.h"
 
@@ -978,6 +979,7 @@ namespace VR::CameraDriver
 		bool s_snap_ready = false;
 		std::chrono::steady_clock::time_point s_turn_last{};
 		bool s_aim_moving = false; // this vsync's ApplyLookAt is moving the character from the stick
+		bool s_weapon_raised = false; // this vsync's ApplyLookAt saw the aim stance (telemetry)
 
 		float WrapPi(float a)
 		{
@@ -1078,6 +1080,7 @@ namespace VR::CameraDriver
 			const HeadPose::Snapshot& pose, LookAtWrite* out)
 		{
 			s_aim_moving = false;
+			s_weapon_raised = false;
 			if (!base.has_value() || (!la.when.empty() && !GuardListPass(la.when)))
 				return false;
 			const s64 pa = static_cast<s64>(base.value()) + la.position_offset;
@@ -1215,6 +1218,7 @@ namespace VR::CameraDriver
 			}
 			// The first-person hands show the pistol in the right hand while the weapon is raised.
 			HandModel::SetGunHeld(weapon_raised);
+			s_weapon_raised = weapon_raised;
 
 			// Walk while aiming: with the weapon up Outbreak only turns and tilts the aim with the stick. The
 			// body is hidden in first person, so the move stick shifts the character's position directly
@@ -1567,6 +1571,36 @@ namespace VR::CameraDriver
 			p.valid = true;
 			return p;
 		}
+
+		// Telemetry: taken on the CPU thread as Apply() leaves, read from any thread (PINE's).
+		std::mutex s_telemetry_mutex;
+		Telemetry s_telemetry;
+		DisarmReason s_disarm_reason = DisarmReason::NoVM;
+		bool s_pause_hit = false;
+		bool s_test_head = false;
+		bool s_online_safe = false;
+
+		void PublishTelemetry()
+		{
+			Telemetry t;
+			t.vsync = s_vsync_counter;
+			t.armed = s_armed_logged;
+			t.disarm_reason = s_armed_logged ? DisarmReason::Armed : s_disarm_reason;
+			t.guard_fail_vsyncs = s_guard_fail_vsyncs;
+			t.look_at_active = s_lookat_active.load(std::memory_order_relaxed);
+			t.pause_when_hit = s_armed_logged && s_pause_hit;
+			t.weapon_raised = s_armed_logged && s_weapon_raised;
+			t.aim_moving = s_armed_logged && s_aim_moving;
+			t.yaw_anchor_valid = s_yaw_anchor_valid;
+			t.yaw_anchor = s_yaw_anchor;
+			t.base_yaw_now = s_base_yaw_now.load(std::memory_order_relaxed);
+			t.match_age = (s_frame_count > 0) ? s_frame_age[(s_frame_next + s_frame_age.size() - 1) % s_frame_age.size()] : 0;
+			t.frames_matched = static_cast<u32>(s_frame_seq);
+			t.online_safe = s_online_safe;
+			t.test_head = s_test_head;
+			std::lock_guard<std::mutex> lock(s_telemetry_mutex);
+			s_telemetry = t;
+		}
 	}
 
 	float PadLookDeflection(const ProfileDB::CameraPadLook& pl, float yaw_deg, PadLookState& st)
@@ -1616,8 +1650,18 @@ namespace VR::CameraDriver
 
 	void Apply()
 	{
+		// Telemetry is taken on every way out, so a reader always sees this vsync's outcome.
+		struct PublishOnExit
+		{
+			~PublishOnExit() { PublishTelemetry(); }
+		};
+		PublishOnExit publish_on_exit;
+
 		s_vsync_counter++;
 		MaybeRunSelfTest();
+		s_pause_hit = false;
+		s_test_head = false;
+		s_online_safe = EmuConfig.VR.OnlineSafe || EmuConfig.DEV9.EthEnable;
 
 		const bool switched_on = EffectiveVREnabled(EmuConfig.VR.Enable) && EmuConfig.VR.HeadCamera &&
 		                         !SplitState::Active();
@@ -1626,6 +1670,7 @@ namespace VR::CameraDriver
 		const bool vm_live = (vm_state == VMState::Running || vm_state == VMState::Paused);
 		if (!vm_live)
 		{
+			s_disarm_reason = DisarmReason::NoVM;
 			SetLookAtActive(false);
 			SpatialControls::SetMoveStickSuppressed(-1);
 			RestoreHolds(nullptr, false);
@@ -1653,6 +1698,7 @@ namespace VR::CameraDriver
 		const ProfileDB::Profile* profile = ProfileDB::Lookup(VMManager::GetDiscSerial(), crc);
 		if (!profile || !profile->camera.has_value())
 		{
+			s_disarm_reason = DisarmReason::NoProfile;
 			SetLookAtActive(false);
 			SpatialControls::SetMoveStickSuppressed(-1);
 			RestoreHolds(nullptr, false);
@@ -1674,8 +1720,17 @@ namespace VR::CameraDriver
 		}
 		const ProfileDB::CameraProfile& cam = profile->camera.value();
 
+		// The env fake head first, then a scripted head from PINE test input, then the headset. The test
+		// head also reaches the input snapshot, so the zones and SpatialControls::HeadAnchor see it too.
 		std::optional<HeadPose::Snapshot> fake = MaybeFakePose();
-		const HeadPose::Snapshot pose = fake.has_value() ? fake.value() : HeadPose::Get();
+		HeadPose::Snapshot pose_in;
+		if (fake.has_value())
+			pose_in = fake.value();
+		else if (XRInput::TestHeadPose(&pose_in))
+			s_test_head = true;
+		else
+			pose_in = HeadPose::Get();
+		const HeadPose::Snapshot pose = pose_in;
 
 		if (GuardsPass(cam))
 			s_guard_fail_vsyncs = 0;
@@ -1684,6 +1739,11 @@ namespace VR::CameraDriver
 		const bool guards_hold = (s_guard_fail_vsyncs == 0) ||
 		                         (s_armed_logged && s_guard_fail_vsyncs <= cam.disarm_after_vsyncs);
 		const bool armed = switched_on && (vm_state == VMState::Running) && pose.valid && guards_hold;
+		s_disarm_reason = armed                          ? DisarmReason::Armed :
+		                  !switched_on                   ? DisarmReason::SwitchedOff :
+		                  (vm_state != VMState::Running) ? DisarmReason::NotRunning :
+		                  !pose.valid                    ? DisarmReason::NoHeadPose :
+		                                                   DisarmReason::GuardFailed;
 
 		if (armed != s_armed_logged)
 		{
@@ -1711,6 +1771,7 @@ namespace VR::CameraDriver
 			SetLookAtActive(false);
 			SpatialControls::SetMoveStickSuppressed(-1);
 			s_aim_moving = false;
+			s_weapon_raised = false;
 			// While the VM is paused nothing can change; holds keep their saved originals for the resume.
 			if (vm_state == VMState::Running)
 			{
@@ -1906,6 +1967,8 @@ namespace VR::CameraDriver
 				// A menu, the map or pause: the camera keeps its last view (its writers stay silenced) and the
 				// world screen shows the menu in front of the player.
 				s_aim_moving = false;
+				s_weapon_raised = false;
+				s_pause_hit = true;
 				ResetRenderSync();
 				SetLookAtActive(false);
 			}
@@ -1971,6 +2034,9 @@ namespace VR::CameraDriver
 		s_hold_repair = true;
 		s_holds_after_load = true;
 		ResetRenderSync();
+		// The loaded state has its own heading; `armed` does not toggle across a load, so without this the
+		// view would keep facing the way it did before the load.
+		s_yaw_anchor_valid = false;
 	}
 
 	bool RenderPose(HeadPose::Snapshot* out, float* turn_yaw)
@@ -2024,6 +2090,12 @@ namespace VR::CameraDriver
 	void RequestRecenter()
 	{
 		s_recenter_requested.store(true, std::memory_order_release);
+	}
+
+	Telemetry GetTelemetry()
+	{
+		std::lock_guard<std::mutex> lock(s_telemetry_mutex);
+		return s_telemetry;
 	}
 
 	bool SelfTestAssembler()
