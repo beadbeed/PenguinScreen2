@@ -25,6 +25,14 @@ namespace VR::CameraDriver
 	// True while camera.lookAt is driving the game camera (any thread).
 	bool LookAtActive();
 
+	// Comfort vignette: how much the view is moving without the head right now, 0-1. The larger of a smooth stick
+	// turn's rate against lookAt.smoothTurnDegPerSec and walking (the move stick's push, or the character's own
+	// speed against a brisk walk), eased in over about 0.15 s and out over 0.3 s. Snap turns count nothing (the
+	// comfort blink covers them). Published by Apply (CPU thread) only while the VR ComfortVignette setting is on
+	// and camera.lookAt drives the camera; 0 at once otherwise, after a savestate load, and when Apply stops
+	// running (pause, stall). Any thread.
+	float ComfortMotion();
+
 	// The head pose camera.lookAt drove the game camera with at (or just before) time_ms, on the
 	// SteadyNowMs() clock, so the compositor can show each frame where it was rendered from instead
 	// of gluing an old frame to the face. False when nothing recent is recorded. Any thread.

@@ -25,6 +25,7 @@ private:
 	void populateProfileBrowser();
 	void updateProfileDetails(int index);
 	void updateTuningFields();
+	void updateVignetteFields();
 
 	void updateVRStatusBanner();
 

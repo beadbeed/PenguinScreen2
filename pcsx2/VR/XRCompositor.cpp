@@ -152,9 +152,10 @@ namespace VR::XRCompositor
 			// Set when creating any of the above fails: hands stay off until the next Initialize().
 			bool hands_disabled = false;
 
-			// HUD cards (HudCards: the wrist card, the toast and the blink): the same CPU-raster upload path once more,
-			// one swapchain per card sharing a staging buffer, command buffer and fence. Created the first
-			// time a card shows and kept until Shutdown; any failure turns the cards off for the session.
+			// HUD cards (HudCards: the laser sight, the wrist card, the comfort vignette, the toast and the blink):
+			// the same CPU-raster upload path once more, one swapchain per card sharing a staging buffer, command
+			// buffer and fence. Created the first time a card shows and kept until Shutdown; any failure turns the
+			// cards off for the session.
 			struct HudChain
 			{
 				XrSwapchain swapchain = XR_NULL_HANDLE;
@@ -179,6 +180,11 @@ namespace VR::XRCompositor
 			float hud_wrist_opacity = 0.0f;
 			u64 hud_last_ms = 0;
 			bool hud_wrist_logged = false;
+			// Laser sight: its fade in (on the same clock), and whether it was logged yet this session.
+			float hud_laser_opacity = 0.0f;
+			bool hud_laser_logged = false;
+			// Comfort vignette: whether it was logged yet this session (its opacity comes eased from CameraDriver).
+			bool hud_vignette_logged = false;
 			// Comfort blink on a screen-mode change: when (SteadyNowMs) the change waiting for the blink to
 			// go black is made; 0 while none waits.
 			u64 fp_switch_due_ms = 0;
@@ -1254,6 +1260,10 @@ namespace VR::XRCompositor
 				return {HudCards::kWristWidth, HudCards::kWristHeight};
 			if (card == HudCards::kBlink)
 				return {HudCards::kBlinkImageSize, HudCards::kBlinkImageSize};
+			if (card == HudCards::kLaser)
+				return {HudCards::kLaserImageWidth, HudCards::kLaserImageHeight};
+			if (card == HudCards::kVignette)
+				return {HudCards::kVignetteImageSize, HudCards::kVignetteImageSize};
 			return {0, 0};
 		}
 
@@ -1493,11 +1503,12 @@ namespace VR::XRCompositor
 				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 		}
 
-		// HUD cards, submitted after everything else so they draw on top. A card is rastered at full
-		// opacity when its content changes and uploaded only when its content or fade step does; between
-		// uploads the runtime keeps showing the last released image.
+		// HUD cards, submitted after everything else so they draw on top, except the laser sight: it goes in at
+		// under_from, under the layers appended from there on (the hands, nearer the eye than the beam). A card
+		// is rastered at full opacity when its content changes and uploaded only when its content or fade step
+		// does; between uploads the runtime keeps showing the last released image.
 		u32 BuildHudLayers(XrCompositionLayerQuad* hud_quads, const XrCompositionLayerBaseHeader** layers,
-			u32& layer_count, u32 layer_capacity)
+			u32& layer_count, u32 layer_capacity, u32 under_from)
 		{
 			HudCards::MaybeTestToast();
 			HudCards::MaybeTestBlink();
@@ -1530,6 +1541,33 @@ namespace VR::XRCompositor
 				wb.on = true;
 				wb.content = 1;
 				wb.level = HudLevel(blink_opacity);
+			}
+
+			// Comfort vignette: view-locked like the blink, closing in on the edges of the view while first person
+			// moves the view without the head (a smooth stick turn, walking): the VignetteStrength setting times the
+			// motion CameraDriver publishes, already eased in and out there. Snap turns publish none (the blink
+			// covers them), and it goes at once with first person (paused, a menu, a door, a cutscene: LookAtActive
+			// lapses) or tracking. PCSX2_VR_VIGNETTE_TEST ramps the motion up and down every 2 s at any time. One
+			// unchanging image; only its fade step is uploaded again.
+			const float vignette_strength = HudCards::VignetteStrength();
+			float vignette_motion = 0.0f;
+			const bool vignette_test = HudCards::TestVignetteMotion(&vignette_motion);
+			if (!vignette_test)
+				vignette_motion = CameraDriver::LookAtActive() ? CameraDriver::ComfortMotion() : 0.0f;
+			const float vignette_opacity = vignette_strength * vignette_motion;
+			if (s.view_space != XR_NULL_HANDLE && s.head_pose_valid && vignette_opacity > 0.0f)
+			{
+				Want& wvg = want[HudCards::kVignette];
+				wvg.on = true;
+				wvg.content = 1;
+				wvg.level = HudLevel(vignette_opacity);
+				if (!s.hud_vignette_logged && wvg.level > 0)
+				{
+					s.hud_vignette_logged = true;
+					Console.WriteLn("(VR) HUD: comfort vignette shown (%s, strength %.2f).",
+						vignette_test ? "PCSX2_VR_VIGNETTE_TEST" : "first person moving",
+						static_cast<double>(vignette_strength));
+				}
 			}
 
 			// Wrist card: on the left hand while first person is active and the profile reads hud.wrist,
@@ -1610,6 +1648,79 @@ namespace VR::XRCompositor
 				}
 			}
 
+			// Laser sight: from the pistol's muzzle along the right hand's aim while the weapon is raised in first
+			// person, with the LaserSight setting on; PCSX2_VR_FAKE_HANDS=gun shows it on the fake right hand
+			// whatever the game is doing (the other fake hands hold no pistol, so they get no beam). Placed each
+			// frame from the pose the right hand is drawn with (BuildHandLayers: grip position, aim orientation),
+			// so it needs no new image as it moves: one unchanging image, uploaded again only while it fades in.
+			// It fades in with the raised weapon and goes at once with it, as the pistol leaves the hand.
+			static const bool s_fake_gun = [] {
+				const char* v = std::getenv("PCSX2_VR_FAKE_HANDS");
+				return v && std::strcmp(v, "gun") == 0;
+			}();
+			const bool laser_raised = s_fake_hands ?
+			                              s_fake_gun :
+			                              (HandModel::GunHeld() && CameraDriver::LookAtActive() && s.head_position_valid);
+			const bool laser_on = HudCards::LaserSightEnabled() && s.head_pose_valid && laser_raised;
+			bool laser_hand = false;
+			bool laser_placed = false;
+			float laser_pos[3] = {0.0f, 0.0f, 0.0f};
+			float laser_quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+			if (laser_on)
+			{
+				const float eye[3] = {s.head_position_valid ? s.head_pose.position.x : 0.0f,
+					s.head_position_valid ? s.head_pose.position.y : 0.0f, s.head_position_valid ? s.head_pose.position.z : 0.0f};
+				float hand_pos[3] = {0.0f, 0.0f, 0.0f};
+				float hand_quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+				if (s_fake_gun)
+				{
+					const float head_quat[4] = {s.head_pose.orientation.x, s.head_pose.orientation.y, s.head_pose.orientation.z,
+						s.head_pose.orientation.w};
+					const HandModel::HandState fake = HandModel::FakeHandState(HandModel::kRight, eye, head_quat, true);
+					if (fake.valid)
+					{
+						for (int k = 0; k < 3; k++)
+							hand_pos[k] = fake.pos[k];
+						for (int k = 0; k < 4; k++)
+							hand_quat[k] = fake.quat[k];
+						laser_hand = true;
+					}
+				}
+				else
+				{
+					const VRInputSnapshot snap = GetInputSnapshot();
+					const auto& src = snap.hands[HandModel::kRight];
+					if (snap.generation != 0 && snap.actions_active && src.grip_pose.valid)
+					{
+						const auto& orient = (!s_grip_orient && src.aim_pose.valid) ? src.aim_pose : src.grip_pose;
+						for (int k = 0; k < 3; k++)
+							hand_pos[k] = src.grip_pose.position_xyz[k];
+						for (int k = 0; k < 4; k++)
+							hand_quat[k] = orient.orientation_xyzw[k];
+						laser_hand = true;
+					}
+				}
+				// Looking straight down the beam no side of the quad faces the eye: that frame goes without it.
+				laser_placed = laser_hand && HudCards::PlaceLaser(hand_pos, hand_quat, eye, laser_pos, laser_quat);
+			}
+			if (!laser_hand)
+				s.hud_laser_opacity = 0.0f;
+			else
+				s.hud_laser_opacity = std::min(1.0f, s.hud_laser_opacity + fade_step);
+			if (laser_placed && s.hud_laser_opacity > 0.0f)
+			{
+				Want& wl = want[HudCards::kLaser];
+				wl.on = true;
+				wl.content = 1;
+				wl.level = HudLevel(s.hud_laser_opacity);
+				if (!s.hud_laser_logged)
+				{
+					s.hud_laser_logged = true;
+					Console.WriteLn("(VR) HUD: laser sight shown (%s).",
+						s_fake_gun ? "PCSX2_VR_FAKE_HANDS=gun test hand" : "weapon raised in first person");
+				}
+			}
+
 			bool any = false;
 			for (const Want& wv : want)
 				any = any || (wv.on && wv.level > 0);
@@ -1638,6 +1749,10 @@ namespace VR::XRCompositor
 						HudCards::RasterWrist(raster.pixels, wrist, wrist_no_data);
 					else if (i == HudCards::kBlink)
 						HudCards::RasterBlink(raster.pixels);
+					else if (i == HudCards::kLaser)
+						HudCards::RasterLaser(raster.pixels);
+					else if (i == HudCards::kVignette)
+						HudCards::RasterVignette(raster.pixels);
 					raster.content = wv.content;
 					raster.valid = true;
 				}
@@ -1770,7 +1885,39 @@ namespace VR::XRCompositor
 					quad.pose.position = {pos[0], pos[1], pos[2]};
 					quad.size = {HudCards::kBlinkSizeM, HudCards::kBlinkSizeM};
 				}
-				layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+				else if (i == HudCards::kLaser)
+				{
+					// In the base space with the hands, its long side along the beam (+Y toward the far end).
+					quad.space = XRSession::GetSpace();
+					quad.pose.orientation = {laser_quat[0], laser_quat[1], laser_quat[2], laser_quat[3]};
+					quad.pose.position = {laser_pos[0], laser_pos[1], laser_pos[2]};
+					quad.size = {HudCards::kLaserWidthM, HudCards::kLaserLengthM};
+				}
+				else if (i == HudCards::kVignette)
+				{
+					// Just ahead of the eyes, its ring centred on the line of sight and its opaque border past any
+					// field of view.
+					float pos[3];
+					float q[4];
+					HudCards::VignettePose(pos, q);
+					quad.space = s.view_space;
+					quad.pose.orientation = {q[0], q[1], q[2], q[3]};
+					quad.pose.position = {pos[0], pos[1], pos[2]};
+					quad.size = {HudCards::kVignetteSizeM, HudCards::kVignetteSizeM};
+				}
+				const XrCompositionLayerBaseHeader* layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+				if (i == HudCards::kLaser && under_from < layer_count)
+				{
+					// In under the hands: the layers from under_from move up one (layer_count < capacity, checked above).
+					for (u32 k = layer_count; k > under_from; k--)
+						layers[k] = layers[k - 1];
+					layers[under_from] = layer;
+					layer_count++;
+				}
+				else
+				{
+					layers[layer_count++] = layer;
+				}
 				appended++;
 			}
 			return appended;
@@ -1975,6 +2122,9 @@ namespace VR::XRCompositor
 		s.hud_wrist_opacity = 0.0f;
 		s.hud_last_ms = 0;
 		s.hud_wrist_logged = false;
+		s.hud_laser_opacity = 0.0f;
+		s.hud_laser_logged = false;
+		s.hud_vignette_logged = false;
 		s.fp_switch_due_ms = 0;
 
 		if (!XRSession::HasSession())
@@ -2334,7 +2484,11 @@ namespace VR::XRCompositor
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}, {XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR},
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}, {XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR},
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}};
+		// Worst case 13 layers: four for the screen (split screen in stereo, two viewports per eye; five slots
+		// kept), two lever cards, two hands and the five HUD cards (laser, wrist, vignette, toast, blink), in a
+		// capacity of 14. SteamVR takes at most 16 a frame.
 		constexpr u32 kLayerCapacity = 5 + ControlQuads::kSlots + kHandSlots + HudCards::kCardCount;
+		static_assert(kLayerCapacity <= 16, "more composition layers than SteamVR takes in a frame");
 		XrCompositionLayerQuad lever_quads[ControlQuads::kSlots] = {
 			{XR_TYPE_COMPOSITION_LAYER_QUAD}, {XR_TYPE_COMPOSITION_LAYER_QUAD}};
 		XrCompositionLayerQuad hand_quads[kHandSlots] = {
@@ -2694,12 +2848,13 @@ namespace VR::XRCompositor
 			BuildLeverLayers(lever_quads, layers, layer_count, kLayerCapacity, cl_split);
 
 		// Hands go last so they draw over the screen and the lever cards.
+		const u32 hands_from = layer_count;
 		if (!force_zero_layers && fs.shouldRender)
 			BuildHandLayers(hand_quads, layers, layer_count, kLayerCapacity);
 
-		// HUD cards last of all, over the hands and everything else.
+		// HUD cards last of all, over the hands and everything else; only the laser sight goes in under the hands.
 		if (!force_zero_layers && fs.shouldRender)
-			BuildHudLayers(hud_quads, layers, layer_count, kLayerCapacity);
+			BuildHudLayers(hud_quads, layers, layer_count, kLayerCapacity, hands_from);
 
 		XrFrameEndInfo ei = {XR_TYPE_FRAME_END_INFO};
 		ei.displayTime = fs.predictedDisplayTime;

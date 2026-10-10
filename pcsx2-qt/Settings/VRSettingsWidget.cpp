@@ -32,6 +32,9 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.headCamera, "VR", "HeadCamera", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.snapTurn, "VR", "SnapTurn", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.comfortBlink, "VR", "ComfortBlink", true);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.comfortVignette, "VR", "ComfortVignette", false);
+	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.vignetteStrength, "VR", "VignetteStrength", 0.6f);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.laserSight, "VR", "LaserSight", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.onlineSafe, "VR", "OnlineSafe", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.gameRumble, "VR", "GameRumble", true);
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.hapticStrength, "VR", "HapticStrength", 1.0f);
@@ -89,6 +92,22 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 		   "whenever the picture changes between the first-person view and the virtual screen, so the jump is "
 		   "hidden instead of seen. Only changes what you see. Takes effect immediately."));
 
+	dialog()->registerWidgetHelp(m_ui.comfortVignette, tr("Comfort Vignette"), tr("Unchecked"),
+		tr("In first-person profiles, darkens the edges of the headset view while the view moves without your head: "
+		   "while you turn with the stick (smooth turning) or walk. The faster it moves, the further the dark edge "
+		   "closes in, leaving the middle clear; it opens again as you stop. Snap turns use the Comfort Blink instead. "
+		   "Can ease motion sickness. Only changes what you see. Takes effect immediately."));
+
+	dialog()->registerWidgetHelp(m_ui.vignetteStrength, tr("Comfort Vignette Strength"), tr("0.60"),
+		tr("How dark the Comfort Vignette's edges get while turning or walking at full speed, from 0.20 (a light "
+		   "shade) to 1.00 (black). Takes effect immediately."));
+
+	dialog()->registerWidgetHelp(m_ui.laserSight, tr("Laser Sight"), tr("Checked"),
+		tr("In first-person profiles, while your weapon is raised, draws a thin red beam from the muzzle of the pistol "
+		   "in your hand straight along where it points, fading out over about 6 metres. It is drawn over the picture "
+		   "and does not stop at walls or enemies. Only changes what you see; the game itself is not touched. Takes "
+		   "effect immediately."));
+
 	dialog()->registerWidgetHelp(m_ui.onlineSafe, tr("Online-Safe First Person"), tr("Unchecked"),
 		tr("First-person profiles change only what you see (camera, screen, your own body) and nothing other players "
 		   "would see, such as walking while aiming. Always on while the network adapter is enabled, whatever this box "
@@ -114,6 +133,9 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 
 	updateTuningFields();
 	connect(m_ui.stereoUseProfile, &QCheckBox::toggled, this, [this](bool) { updateTuningFields(); });
+
+	updateVignetteFields();
+	connect(m_ui.comfortVignette, &QCheckBox::checkStateChanged, this, &VRSettingsWidget::updateVignetteFields);
 
 	m_status_banner = new QLabel(this);
 	m_status_banner->setWordWrap(true);
@@ -161,6 +183,15 @@ void VRSettingsWidget::updateVRStatusBanner()
 		QStringLiteral("QLabel { background-color: %1; color: #f0f0f0; padding: 8px; border-radius: 4px; }")
 			.arg(accent));
 	m_status_banner->show();
+}
+
+void VRSettingsWidget::updateVignetteFields()
+{
+	// The strength only does something with the vignette on (per game, the effective value: the global one while
+	// the box inherits it).
+	const bool on = dialog()->getEffectiveBoolValue("VR", "ComfortVignette", false);
+	m_ui.vignetteStrength->setEnabled(on);
+	m_ui.vignetteStrengthLabel->setEnabled(on);
 }
 
 void VRSettingsWidget::updateTuningFields()

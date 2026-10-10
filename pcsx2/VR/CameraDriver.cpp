@@ -365,6 +365,7 @@ namespace VR::CameraDriver
 		}
 
 		int CountPredictMismatches(bool log); // with the head prediction code below
+		int CountComfortMismatches(bool log); // with the comfort vignette's state below
 
 		void MaybeRunSelfTest()
 		{
@@ -376,6 +377,7 @@ namespace VR::CameraDriver
 			RunMatrixSelfTest();
 			RunHookSelfTest();
 			Console.WriteLn("(VR) CameraDriver predict self-test: %d mismatch(es).", CountPredictMismatches(true));
+			Console.WriteLn("(VR) CameraDriver comfort self-test: %d mismatch(es).", CountComfortMismatches(true));
 			const char* gamepad_fail = nullptr;
 			if (SpatialControls::SelfTestGamepad(&gamepad_fail))
 				Console.WriteLn("(VR) Gamepad self-test: passed (sprint latch, ad-lib flicks, unchanged without sprintLatch).");
@@ -1071,6 +1073,136 @@ namespace VR::CameraDriver
 		bool s_aim_moving = false; // this vsync's ApplyLookAt is moving the character from the stick
 		bool s_weapon_raised = false; // this vsync's ApplyLookAt saw the aim stance (telemetry)
 
+		// Comfort vignette (ComfortMotion): how much the view moves without the head, 0-1. This vsync's samples,
+		// set by ApplyLookAt and 0 on any vsync it does not run: a smooth stick turn's rate against
+		// smoothTurnDegPerSec, and walking (the move stick's push or the character's own speed, the larger).
+		float s_comfort_turn = 0.0f;
+		float s_comfort_walk = 0.0f;
+		// Whether this vsync's ApplyLookAt took the samples above (false through the disarm grace, when lookAt
+		// stays active but nothing runs).
+		bool s_comfort_sampled = false;
+		// The larger of the two, eased (CPU thread), and as published for the compositor with when (NowMs).
+		float s_comfort_eased = 0.0f;
+		u64 s_comfort_last_ms = 0;
+		std::atomic<float> s_comfort_motion{0.0f};
+		std::atomic<u64> s_comfort_ms{0};
+		// The character's own horizontal speed (metres per second), measured over windows of at least
+		// kComfortSpeedWindowMs from where the window started, so a game that moves the character every other
+		// vsync still reads a steady speed.
+		bool s_comfort_ref_valid = false;
+		float s_comfort_ref_x = 0.0f;
+		float s_comfort_ref_z = 0.0f;
+		u64 s_comfort_ref_ms = 0;
+		float s_comfort_speed = 0.0f;
+		constexpr float kComfortAttackS = 0.15f; // clear to full motion at the quickest
+		constexpr float kComfortReleaseS = 0.3f; // full motion back to clear at the quickest
+		constexpr float kComfortMaxDtS = 0.1f; // a longer gap between vsyncs starts the easing again from clear
+		constexpr float kComfortStickDeadzone = 0.2f; // as walk-and-shoot reads the stick
+		constexpr u64 kComfortSpeedWindowMs = 100;
+		constexpr u64 kComfortSpeedGapMs = 250; // a longer window spans a stall: it says nothing about walking
+		constexpr float kComfortSpeedFloorMps = 0.15f; // slower is standing still (animation drift)
+		constexpr float kComfortFullSpeedMps = 1.5f; // a brisk walk and faster count as full motion
+		constexpr float kComfortMaxSpeedMps = 8.0f; // faster is a warp, not walking
+		constexpr u64 kComfortStaleMs = 150; // as LookAtActive: Apply has stopped running (pause, stall)
+
+		// The move stick's push as motion: 0 inside the deadzone, 1 at a full push.
+		float ComfortStickMotion(float x, float y)
+		{
+			const float mag = std::sqrt(x * x + y * y);
+			if (!std::isfinite(mag))
+				return 0.0f;
+			return std::clamp((mag - kComfortStickDeadzone) / (0.95f - kComfortStickDeadzone), 0.0f, 1.0f);
+		}
+
+		// One easing step toward target: up by at most dt / kComfortAttackS, down by at most dt / kComfortReleaseS.
+		float EaseComfort(float current, float target, float dt)
+		{
+			if (!std::isfinite(target))
+				target = 0.0f;
+			if (target > current)
+				return std::min(target, current + dt / kComfortAttackS);
+			return std::max(target, current - dt / kComfortReleaseS);
+		}
+
+		// The horizontal speed (metres per second) of a move of dx, dz game units over elapsed_ms; 0 for one too
+		// fast to be walking (a warp) or over a window that spans a stall.
+		float ComfortWindowSpeed(float dx, float dz, float units_per_meter, u64 elapsed_ms)
+		{
+			if (elapsed_ms == 0 || elapsed_ms > kComfortSpeedGapMs || !(units_per_meter > 0.0f))
+				return 0.0f;
+			const float metres = std::sqrt(dx * dx + dz * dz) / units_per_meter;
+			const float speed = metres / (static_cast<float>(elapsed_ms) * 0.001f);
+			return (std::isfinite(speed) && speed <= kComfortMaxSpeedMps) ? speed : 0.0f;
+		}
+
+		// A speed as motion: 0 at kComfortSpeedFloorMps or slower, 1 from kComfortFullSpeedMps.
+		float ComfortSpeedMotion(float speed_mps)
+		{
+			if (!std::isfinite(speed_mps))
+				return 0.0f;
+			constexpr float span = kComfortFullSpeedMps - kComfortSpeedFloorMps;
+			return std::clamp((speed_mps - kComfortSpeedFloorMps) / span, 0.0f, 1.0f);
+		}
+
+		// The character's own movement as motion, from its position p (game units) this vsync at now_ms: every way
+		// it moves counts (the game's walking and running, walk-and-shoot, a pad's stick the controllers don't see).
+		// 0 without lookAt.unitsPerMeter to scale by.
+		float ComfortOwnMovement(const ProfileDB::CameraLookAt& la, const float p[3], u64 now_ms)
+		{
+			const float units = std::abs(la.units_per_meter);
+			if (!(units > 0.0f) || !std::isfinite(units) || !std::isfinite(p[0]) || !std::isfinite(p[2]))
+				return 0.0f;
+			if (!s_comfort_ref_valid || now_ms < s_comfort_ref_ms)
+			{
+				s_comfort_ref_valid = true;
+				s_comfort_ref_x = p[0];
+				s_comfort_ref_z = p[2];
+				s_comfort_ref_ms = now_ms;
+				s_comfort_speed = 0.0f;
+				return 0.0f;
+			}
+			const u64 elapsed = now_ms - s_comfort_ref_ms;
+			if (elapsed >= kComfortSpeedWindowMs)
+			{
+				s_comfort_speed = ComfortWindowSpeed(p[0] - s_comfort_ref_x, p[2] - s_comfort_ref_z, units, elapsed);
+				s_comfort_ref_x = p[0];
+				s_comfort_ref_z = p[2];
+				s_comfort_ref_ms = now_ms;
+			}
+			return ComfortSpeedMotion(s_comfort_speed);
+		}
+
+		// PCSX2_VR_SELFTEST: the comfort vignette's motion maths (the easing, the stick, the speed).
+		int CountComfortMismatches(bool log)
+		{
+			int fail = 0;
+			const auto check = [&](bool ok, const char* name) {
+				if (!ok) { ++fail; if (log) Console.WriteLn("(VR) comfort self-test FAIL: %s", name); }
+			};
+			const auto close_to = [](float a, float b, float tol) { return std::abs(a - b) < tol; };
+			check(close_to(EaseComfort(0.0f, 1.0f, 0.075f), 0.5f, 1e-4f) && EaseComfort(0.0f, 1.0f, 0.15f) == 1.0f,
+				"motion eases in over 0.15 s");
+			check(close_to(EaseComfort(1.0f, 0.0f, 0.15f), 0.5f, 1e-4f) && EaseComfort(1.0f, 0.0f, 0.3f) == 0.0f,
+				"motion eases out over 0.3 s");
+			check(EaseComfort(0.3f, 0.5f, 1.0f) == 0.5f && EaseComfort(0.7f, 0.5f, 1.0f) == 0.5f,
+				"easing stops at the target");
+			check(EaseComfort(0.4f, std::numeric_limits<float>::quiet_NaN(), 0.0f) == 0.4f,
+				"no target eases toward clear");
+			check(ComfortStickMotion(0.1f, 0.1f) == 0.0f && ComfortStickMotion(1.0f, 0.0f) == 1.0f &&
+					  close_to(ComfortStickMotion(0.0f, -0.575f), 0.5f, 1e-4f),
+				"the move stick counts its push past the deadzone");
+			check(close_to(ComfortWindowSpeed(30.0f, 40.0f, 100.0f, 100), 5.0f, 1e-3f),
+				"own speed in metres per second");
+			check(ComfortWindowSpeed(3000.0f, 0.0f, 100.0f, 100) == 0.0f &&
+					  ComfortWindowSpeed(10.0f, 0.0f, 100.0f, 400) == 0.0f,
+				"a warp or a stall is not walking");
+			check(ComfortSpeedMotion(0.1f) == 0.0f && ComfortSpeedMotion(1.6f) == 1.0f &&
+					  ComfortSpeedMotion(5.0f) == 1.0f && ComfortSpeedMotion(0.825f) > 0.4f &&
+					  ComfortSpeedMotion(0.825f) < 0.6f,
+				"own speed counts from a standstill to a brisk walk");
+			return fail;
+		}
+
 		float WrapPi(float a)
 		{
 			a = std::fmod(a + PI_F, 2.0f * PI_F);
@@ -1396,6 +1528,8 @@ namespace VR::CameraDriver
 							const float rate = la.smooth_turn_deg_s * t * (0.5f + 0.5f * t);
 							s_yaw_anchor = WrapPi(s_yaw_anchor - la.yaw_sign * dir * rate * turn_dt * (PI_F / 180.0f));
 							stick_rate = -la.yaw_sign * dir * rate * (PI_F / 180.0f);
+							// Comfort vignette: the turn's share of full speed (snap turns below count nothing).
+							s_comfort_turn = std::clamp(rate / la.smooth_turn_deg_s, 0.0f, 1.0f);
 						}
 						s_snap_ready = false;
 					}
@@ -1521,6 +1655,29 @@ namespace VR::CameraDriver
 						memWrite32(static_cast<u32>(pa) + 8, std::bit_cast<u32>(nz));
 					}
 				}
+			}
+
+			// Comfort vignette (the VR setting; nothing is sampled without it): walking this vsync, the move stick's
+			// push or the character's own speed, whichever is more. The move stick is the left one (the right when
+			// the left one turns), or walk-and-shoot's; with the weapon raised and no walk-and-shoot the game aims
+			// with that stick instead of walking, so then only the character's own movement counts.
+			if (EmuConfig.VR.ComfortVignette)
+			{
+				VRInputSnapshot walk_snap;
+				if (!want_input)
+					walk_snap = GetInputSnapshot();
+				const VRInputSnapshot& walk_src = want_input ? input : walk_snap;
+				const int walk_hand = s_aim_moving ? static_cast<int>(la.aim_move_hand) :
+				                      (la.snap_stick_hand == VRInputSnapshot::LEFT) ? VRInputSnapshot::RIGHT :
+				                                                                      VRInputSnapshot::LEFT;
+				float walk_stick = 0.0f;
+				if (walk_src.actions_active && (!weapon_raised || s_aim_moving) && walk_hand >= 0 && walk_hand < 2)
+				{
+					const VRHandState& walk = walk_src.hands[static_cast<size_t>(walk_hand)];
+					walk_stick = ComfortStickMotion(walk.thumbstick_x, walk.thumbstick_y);
+				}
+				s_comfort_walk = std::max(walk_stick, ComfortOwnMovement(la, p, NowMs()));
+				s_comfort_sampled = true;
 			}
 
 			// Body follows view: standing idle with the stick centred, the character turns to face where the
@@ -1968,6 +2125,37 @@ namespace VR::CameraDriver
 			return fail;
 		}
 
+		// Comfort vignette: eases this vsync's motion (the larger of the turn and walk samples) and publishes it for
+		// the compositor, as Apply() leaves on every path. With the setting off or first person inactive (paused,
+		// a menu, a door, a cutscene, released to the game's camera) it is 0 at once, and the next one starts clear.
+		void PublishComfortMotion()
+		{
+			const u64 now = NowMs();
+			const float dt = (s_comfort_last_ms != 0 && now > s_comfort_last_ms) ?
+			                     static_cast<float>(now - s_comfort_last_ms) * 0.001f :
+			                     0.0f;
+			s_comfort_last_ms = now;
+			const bool live = EmuConfig.VR.ComfortVignette && s_lookat_active.load(std::memory_order_relaxed);
+			if (!live)
+			{
+				s_comfort_eased = 0.0f;
+				s_comfort_ref_valid = false;
+			}
+			else if (dt > kComfortMaxDtS)
+			{
+				s_comfort_eased = 0.0f;
+			}
+			else if (s_comfort_sampled)
+			{
+				s_comfort_eased = EaseComfort(s_comfort_eased, std::max(s_comfort_turn, s_comfort_walk), dt);
+			}
+			// Else the disarm grace (the guard byte flickers about 12 times a second, lookAt stays active and
+			// ApplyLookAt doesn't run): hold the last value instead of easing toward clear on those vsyncs, so the
+			// vignette's edge doesn't flicker with the guard byte. It drops at once if the grace ends in a disarm.
+			s_comfort_motion.store(s_comfort_eased, std::memory_order_relaxed);
+			s_comfort_ms.store(now, std::memory_order_release);
+		}
+
 		// Telemetry: taken on the CPU thread as Apply() leaves, read from any thread (PINE's).
 		std::mutex s_telemetry_mutex;
 		Telemetry s_telemetry;
@@ -2047,10 +2235,15 @@ namespace VR::CameraDriver
 
 	void Apply()
 	{
-		// Telemetry is taken on every way out, so a reader always sees this vsync's outcome.
+		// Telemetry and the comfort vignette's motion are taken on every way out, so a reader always sees this
+		// vsync's outcome.
 		struct PublishOnExit
 		{
-			~PublishOnExit() { PublishTelemetry(); }
+			~PublishOnExit()
+			{
+				PublishComfortMotion();
+				PublishTelemetry();
+			}
 		};
 		PublishOnExit publish_on_exit;
 
@@ -2059,6 +2252,10 @@ namespace VR::CameraDriver
 		s_pause_hit = false;
 		s_test_head = false;
 		s_prediction_s = 0.0f;
+		// Set again by this vsync's ApplyLookAt, if it runs.
+		s_comfort_turn = 0.0f;
+		s_comfort_walk = 0.0f;
+		s_comfort_sampled = false;
 		s_online_safe = OnlineSafeNow();
 		// Every early return below (no VM, no camera profile, disarmed) leaves it cleared; it is set again
 		// only once armed, from this vsync's GetBase.
@@ -2476,6 +2673,11 @@ namespace VR::CameraDriver
 		// The loaded state has its own heading; `armed` does not toggle across a load, so without this the
 		// view would keep facing the way it did before the load.
 		s_yaw_anchor_valid = false;
+		// No vignette carried across a load, and the character's position jumps with it (not walking).
+		s_comfort_eased = 0.0f;
+		s_comfort_ref_valid = false;
+		s_comfort_speed = 0.0f;
+		s_comfort_motion.store(0.0f, std::memory_order_relaxed);
 	}
 
 	bool RenderPose(HeadPose::Snapshot* out, float* turn_yaw)
@@ -2588,6 +2790,17 @@ namespace VR::CameraDriver
 		       NowMs() - s_lookat_stamp_ms.load(std::memory_order_acquire) < 150;
 	}
 
+	float ComfortMotion()
+	{
+		// Lapses like LookAtActive when Apply stops running (pause, stall).
+		const u64 ms = s_comfort_ms.load(std::memory_order_acquire);
+		const u64 now = NowMs();
+		if (ms == 0 || (now > ms && now - ms >= kComfortStaleMs))
+			return 0.0f;
+		const float m = s_comfort_motion.load(std::memory_order_relaxed);
+		return std::isfinite(m) ? std::clamp(m, 0.0f, 1.0f) : 0.0f;
+	}
+
 	void RequestRecenter(bool toast)
 	{
 		// Before the request itself, so the vsync that takes the request sees the matching quiet flag.
@@ -2619,6 +2832,7 @@ namespace VR::CameraDriver
 
 	bool SelfTestMath()
 	{
-		return CountMathMismatches(false) == 0 && CountPredictMismatches(false) == 0;
+		return CountMathMismatches(false) == 0 && CountPredictMismatches(false) == 0 &&
+		       CountComfortMismatches(false) == 0;
 	}
 }

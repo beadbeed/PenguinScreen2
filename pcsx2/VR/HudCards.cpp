@@ -75,6 +75,22 @@ namespace VR::HudCards
 		// to the face (palm down, forearm across the body) that reads upright, facing the eyes.
 		constexpr float kWristLocalQuat[4] = {0.70710678f, 0.0f, -0.70710678f, 0.0f};
 
+		// Laser sight: red, paler toward a hot core, at most this opaque (just past the muzzle, on the centre
+		// line); the alpha falls off across the beam and along it.
+		constexpr float kLaserPeakAlpha = 230.0f;
+		// Fraction of the length (about 3 cm) over which the beam fades in from its start, so it doesn't begin
+		// on a hard edge; and how steeply it fades out along the rest (alpha ~ (1 - s)^k at fraction s of the
+		// length: about 40% at 3 m, 10% at 5 m).
+		constexpr float kLaserStartFade = 0.005f;
+		constexpr float kLaserFadePower = 1.3f;
+		// Half-width fraction (from the centre line) of the paler core.
+		constexpr float kLaserCoreHalf = 0.4f;
+		// The impostor pistol's muzzle in the right hand's pointing frame, metres: the front face of HandModel's
+		// muzzle box (BuildGunTop), on the barrel's axis 6.7 cm above the grip position and 14.14 cm ahead of it.
+		constexpr float kPistolMuzzle[3] = {0.0f, 0.067f, -0.1414f};
+		// Nearer the beam's line than this, the eye sees the quad edge-on.
+		constexpr float kLaserMinOffAxisM = 0.001f;
+
 		u64 NowMs()
 		{
 			return static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -397,6 +413,11 @@ namespace VR::HudCards
 		// The ComfortBlink setting, published by Poll (CPU thread) for every thread; on until the first
 		// vsync, as the setting's default is.
 		std::atomic<bool> s_blink_enabled{true};
+		// The LaserSight setting, published the same way.
+		std::atomic<bool> s_laser_enabled{true};
+		// The comfort vignette's strength (0 while ComfortVignette is off), published the same way; off until the
+		// first vsync, as the setting's default is.
+		std::atomic<float> s_vignette_strength{0.0f};
 
 		// The wrist card's reads, published by Poll (CPU thread) for the compositor.
 		std::mutex s_wrist_mutex;
@@ -612,6 +633,17 @@ namespace VR::HudCards
 		// Read live (the setting is not part of the VR config comparison), and only here: the compositor's
 		// GS thread must not touch EmuConfig.
 		s_blink_enabled.store(EmuConfig.VR.ComfortBlink, std::memory_order_relaxed);
+		s_laser_enabled.store(EmuConfig.VR.LaserSight, std::memory_order_relaxed);
+		// Clamped here too, for a value that did not come through LoadSave.
+		float vignette = 0.0f;
+		if (EmuConfig.VR.ComfortVignette)
+		{
+			const float v = EmuConfig.VR.VignetteStrength;
+			vignette = std::isfinite(v) ? std::clamp(v, Pcsx2Config::VROptions::MIN_VIGNETTE_STRENGTH,
+			                                  Pcsx2Config::VROptions::MAX_VIGNETTE_STRENGTH) :
+			                              Pcsx2Config::VROptions::DEFAULT_VIGNETTE_STRENGTH;
+		}
+		s_vignette_strength.store(vignette, std::memory_order_relaxed);
 
 		// LocalRecord is true only while first person is armed with the record resolved this vsync (flat play
 		// never gets past it); guards_now says the camera guards held too, so the GAME overlay's virus table is
@@ -711,6 +743,32 @@ namespace VR::HudCards
 		Blink("PCSX2_VR_BLINK_TEST");
 	}
 
+	bool LaserSightEnabled()
+	{
+		return s_laser_enabled.load(std::memory_order_relaxed);
+	}
+
+	float VignetteStrength()
+	{
+		return s_vignette_strength.load(std::memory_order_relaxed);
+	}
+
+	bool TestVignetteMotion(float* motion)
+	{
+		static const bool s_test = [] {
+			const char* v = std::getenv("PCSX2_VR_VIGNETTE_TEST");
+			return v && v[0] != '\0' && std::strcmp(v, "0") != 0;
+		}();
+		if (!s_test)
+			return false;
+		// Up over a second, down over the next.
+		const u64 phase = NowMs() % 2000u;
+		const u64 rise = (phase < 1000u) ? phase : (2000u - phase);
+		if (motion)
+			*motion = static_cast<float>(rise) / 1000.0f;
+		return true;
+	}
+
 	void RasterToast(std::vector<u32>& out, const std::string& text)
 	{
 		constexpr int w = static_cast<int>(kToastWidth);
@@ -756,6 +814,54 @@ namespace VR::HudCards
 		out.assign(static_cast<size_t>(kBlinkImageSize) * kBlinkImageSize, kBlinkBlack);
 	}
 
+	void RasterLaser(std::vector<u32>& out)
+	{
+		constexpr int w = static_cast<int>(kLaserImageWidth);
+		constexpr int h = static_cast<int>(kLaserImageHeight);
+		out.assign(static_cast<size_t>(kLaserImageWidth) * kLaserImageHeight, kTransparent);
+		for (int y = 0; y < h; ++y)
+		{
+			// Row 0 is the quad's top, the beam's far end: s runs from 0 at the muzzle end to 1 there.
+			const float s = (static_cast<float>(h - 1 - y) + 0.5f) / static_cast<float>(h);
+			const float along = std::min(1.0f, s / kLaserStartFade) * std::pow(1.0f - s, kLaserFadePower);
+			for (int x = 0; x < w; ++x)
+			{
+				// t: 0 on the centre line, 1 at the edges.
+				const float t = std::fabs((static_cast<float>(x) + 0.5f) / static_cast<float>(w) - 0.5f) * 2.0f;
+				const float across = (1.0f - t * t) * (1.0f - t * t);
+				const float core = std::clamp(1.0f - t / kLaserCoreHalf, 0.0f, 1.0f);
+				const float alpha = std::clamp(kLaserPeakAlpha * across * along, 0.0f, 255.0f);
+				const u32 a = static_cast<u32>(std::lround(alpha));
+				const u32 g = static_cast<u32>(std::lround(30.0f + 110.0f * core));
+				const u32 b = static_cast<u32>(std::lround(20.0f + 90.0f * core));
+				out[static_cast<size_t>(y) * kLaserImageWidth + static_cast<size_t>(x)] = Rgba(255, g, b, a);
+			}
+		}
+	}
+
+	void RasterVignette(std::vector<u32>& out)
+	{
+		constexpr int n = static_cast<int>(kVignetteImageSize);
+		out.assign(static_cast<size_t>(kVignetteImageSize) * kVignetteImageSize, kBlinkBlack);
+		// The ring's radius in pixels: where tangent kVignetteRadiusTan off the line of sight lands on the quad.
+		constexpr float half = 0.5f * static_cast<float>(n);
+		constexpr float radius_px = (kVignetteRadiusTan * kVignetteDistanceM) / (0.5f * kVignetteSizeM) * half;
+		for (int y = 0; y < n; ++y)
+		{
+			const float dy = (static_cast<float>(y) + 0.5f) - half;
+			for (int x = 0; x < n; ++x)
+			{
+				const float dx = (static_cast<float>(x) + 0.5f) - half;
+				// r: 0 at the centre, 1 on the ring; clear to kVignetteClearFrac, opaque from 1 out to the corners.
+				const float r = std::sqrt(dx * dx + dy * dy) / radius_px;
+				const float t = std::clamp((r - kVignetteClearFrac) / (1.0f - kVignetteClearFrac), 0.0f, 1.0f);
+				const float alpha = 255.0f * t * t * (3.0f - 2.0f * t);
+				out[static_cast<size_t>(y) * kVignetteImageSize + static_cast<size_t>(x)] =
+					Rgba(0, 0, 0, static_cast<u32>(std::lround(alpha)));
+			}
+		}
+	}
+
 	void ScaleAlpha(const u32* src, size_t count, float opacity, u32* dst)
 	{
 		const float o = std::isfinite(opacity) ? std::clamp(opacity, 0.0f, 1.0f) : 0.0f;
@@ -792,6 +898,17 @@ namespace VR::HudCards
 		quat[3] = 1.0f;
 	}
 
+	void VignettePose(float pos[3], float quat[4])
+	{
+		pos[0] = 0.0f;
+		pos[1] = 0.0f;
+		pos[2] = -kVignetteDistanceM;
+		quat[0] = 0.0f;
+		quat[1] = 0.0f;
+		quat[2] = 0.0f;
+		quat[3] = 1.0f;
+	}
+
 	void PlaceWrist(const float hand_pos[3], const float hand_quat[4], const float eye[3], bool face_eye,
 		float out_pos[3], float out_quat[4], float* facing_cos)
 	{
@@ -815,6 +932,38 @@ namespace VR::HudCards
 		Store(centre, out_pos);
 		if (facing_cos)
 			*facing_cos = Dot(Rotate(out_quat, V3{0.0f, 0.0f, 1.0f}), to_eye);
+	}
+
+	bool PlaceLaser(const float hand_pos[3], const float hand_quat[4], const float eye[3], float out_pos[3],
+		float out_quat[4])
+	{
+		for (int i = 0; i < 3; i++)
+		{
+			if (!std::isfinite(hand_pos[i]) || !std::isfinite(eye[i]))
+				return false;
+		}
+		// A beam pointing the wrong way is worse than none: no identity fallback for an unusable orientation.
+		const float n2 = hand_quat[0] * hand_quat[0] + hand_quat[1] * hand_quat[1] + hand_quat[2] * hand_quat[2] +
+		                 hand_quat[3] * hand_quat[3];
+		if (!std::isfinite(n2) || n2 < 1.0e-6f)
+			return false;
+		float q[4];
+		NormalizeQuat(hand_quat, q);
+		const V3 dir = Rotate(q, V3{0.0f, 0.0f, -1.0f});
+		const V3 muzzle = Add(Load(hand_pos), Rotate(q, V3{kPistolMuzzle[0], kPistolMuzzle[1], kPistolMuzzle[2]}));
+		const V3 centre = Add(muzzle, Mul(dir, kLaserMuzzleGapM + 0.5f * kLaserLengthM));
+		// The eye's offset from the beam's line, the same from every point along it: turning the quad's face
+		// toward it squares the whole beam to the eye as far as one flat quad can be.
+		const V3 to_eye = Sub(Load(eye), centre);
+		const V3 off_axis = Sub(to_eye, Mul(dir, Dot(to_eye, dir)));
+		const float off_len = std::sqrt(Dot(off_axis, off_axis));
+		if (!(off_len > kLaserMinOffAxisM))
+			return false;
+		const V3 z = Mul(off_axis, 1.0f / off_len);
+		const V3 x = Cross(dir, z);
+		QuatFromBasis(x, dir, z, out_quat);
+		Store(centre, out_pos);
+		return true;
 	}
 
 	bool SelfTest()
@@ -983,6 +1132,85 @@ namespace VR::HudCards
 		for (const u32 p : wimg)
 			green_px += (p == kColourFine) ? 1u : 0u;
 		check(green_px > 0, "the wrist card draws Fine in green");
+
+		// Laser: bright just past the muzzle (the image's bottom rows) and gone at the far end (its top row),
+		// soft across, red.
+		std::vector<u32> limg;
+		RasterLaser(limg);
+		check(limg.size() == static_cast<size_t>(kLaserImageWidth) * kLaserImageHeight, "laser image size");
+		const auto laser_px = [&limg](u32 x, u32 y) {
+			const size_t i = static_cast<size_t>(y) * kLaserImageWidth + x;
+			return (i < limg.size()) ? limg[i] : 0u;
+		};
+		constexpr u32 kLaserMidX = kLaserImageWidth / 2;
+		constexpr u32 kLaserNearY = kLaserImageHeight - 8;
+		const u32 near_a = laser_px(kLaserMidX, kLaserNearY) >> 24;
+		const u32 mid_a = laser_px(kLaserMidX, kLaserImageHeight / 2) >> 24;
+		const u32 far_a = laser_px(kLaserMidX, 0) >> 24;
+		check(near_a > 200u && mid_a < near_a && far_a < mid_a && far_a < 8u, "the laser fades out toward its far end");
+		check((laser_px(0, kLaserNearY) >> 24) < near_a / 4u &&
+				  (laser_px(kLaserImageWidth - 1, kLaserNearY) >> 24) < near_a / 4u,
+			"the laser's edges are soft");
+		check((laser_px(0, kLaserNearY) & 0xFFu) == 255u && (laser_px(kLaserMidX, kLaserNearY) & 0xFFu) == 255u,
+			"the laser is red");
+
+		// Laser placement: along the aim from just past the pistol's muzzle, turned about the beam to face the
+		// eye; looking straight down the beam, or with no usable aim, the frame goes without it.
+		float lp[3];
+		float lq[4];
+		const float eye_above[3] = {0.0f, 1.3f, 0.3f};
+		bool laser_placed = PlaceLaser(hand_pos, hand_quat, eye_above, lp, lq);
+		V3 beam_dir = Rotate(lq, V3{0.0f, 1.0f, 0.0f});
+		V3 beam_face = Rotate(lq, V3{0.0f, 0.0f, 1.0f});
+		const float beam_mid_z = kPistolMuzzle[2] - kLaserMuzzleGapM - 0.5f * kLaserLengthM;
+		check(laser_placed && beam_dir.z < -0.999f, "the laser quad's +Y runs along the aim");
+		check(laser_placed && std::abs(lp[0]) < 1.0e-4f && std::abs(lp[1] - (1.0f + kPistolMuzzle[1])) < 1.0e-4f &&
+				  std::abs(lp[2] - beam_mid_z) < 1.0e-3f,
+			"the laser runs on from just past the pistol's muzzle");
+		check(laser_placed && beam_face.y > 0.999f, "the laser quad turns about the beam to face the eye");
+		// Aim turned a quarter left (along -X) and the eye off to its right: still along the aim, facing the eye.
+		const float yaw_quat[4] = {0.0f, 0.70710678f, 0.0f, 0.70710678f};
+		const float eye_side[3] = {-1.0f, 1.0f + kPistolMuzzle[1], -1.0f};
+		laser_placed = PlaceLaser(hand_pos, yaw_quat, eye_side, lp, lq);
+		beam_dir = Rotate(lq, V3{0.0f, 1.0f, 0.0f});
+		beam_face = Rotate(lq, V3{0.0f, 0.0f, 1.0f});
+		check(laser_placed && beam_dir.x < -0.999f && beam_face.z < -0.999f, "a turned laser still faces the eye");
+		const float eye_on_axis[3] = {0.0f, 1.0f + kPistolMuzzle[1], 0.5f};
+		check(!PlaceLaser(hand_pos, hand_quat, eye_on_axis, lp, lq), "looking straight down the beam skips the frame");
+		const float bad_quat[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+		check(!PlaceLaser(hand_pos, bad_quat, eye_above, lp, lq), "no beam from an unusable aim");
+
+		// Vignette: clear in the middle and out to 45% of its ring's radius, opaque black from the ring out to the
+		// corners, darkening steadily between; straight ahead, covering over 150 degrees.
+		std::vector<u32> vimg;
+		RasterVignette(vimg);
+		check(vimg.size() == static_cast<size_t>(kVignetteImageSize) * kVignetteImageSize, "vignette image size");
+		const auto vignette_a = [&vimg](u32 x, u32 y) {
+			const size_t i = static_cast<size_t>(y) * kVignetteImageSize + x;
+			return (i < vimg.size()) ? (vimg[i] >> 24) : 0u;
+		};
+		constexpr u32 kVignetteMid = kVignetteImageSize / 2;
+		constexpr float kVignetteRingPx = (kVignetteRadiusTan * kVignetteDistanceM) / (0.5f * kVignetteSizeM) *
+		                                  (0.5f * static_cast<float>(kVignetteImageSize));
+		const u32 vignette_clear_x = kVignetteMid + static_cast<u32>(kVignetteRingPx * kVignetteClearFrac) - 1u;
+		const u32 vignette_ring_x = kVignetteMid + static_cast<u32>(kVignetteRingPx) + 1u;
+		check(vignette_a(kVignetteMid, kVignetteMid) == 0u && vignette_a(vignette_clear_x, kVignetteMid) == 0u,
+			"the vignette is clear in the middle");
+		check(vignette_a(vignette_ring_x, kVignetteMid) == 255u && vignette_a(0, 0) == 255u &&
+				  vignette_a(kVignetteImageSize - 1, kVignetteImageSize - 1) == 255u,
+			"the vignette is opaque from its ring out to the corners");
+		bool vignette_ramps = vignette_a(vignette_clear_x + 8u, kVignetteMid) > 0u &&
+		                      vignette_a(vignette_clear_x + 8u, kVignetteMid) < 255u;
+		for (u32 x = kVignetteMid; x + 1 < kVignetteImageSize; x++)
+			vignette_ramps = vignette_ramps && vignette_a(x + 1, kVignetteMid) >= vignette_a(x, kVignetteMid);
+		check(vignette_ramps, "the vignette darkens steadily outward");
+		check(!vimg.empty() && (vimg[0] & 0x00FFFFFFu) == 0u, "the vignette is black");
+		float vpos[3];
+		float vquat[4];
+		VignettePose(vpos, vquat);
+		const float vignette_half_deg = std::atan((0.5f * kVignetteSizeM) / kVignetteDistanceM) * (180.0f / 3.14159265f);
+		check(vpos[0] == 0.0f && vpos[1] == 0.0f && vpos[2] < 0.0f && vquat[3] == 1.0f && vignette_half_deg > 75.0f,
+			"the vignette covers over 150 degrees straight ahead");
 
 		Console.WriteLn(fail == 0 ? Color_StrongGreen : Color_StrongRed, "(VR) HUD self-test: %d failure(s).", fail);
 		return fail == 0;

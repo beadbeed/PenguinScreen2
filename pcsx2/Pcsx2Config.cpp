@@ -18,6 +18,9 @@
 #include "USB/USB.h"
 
 #include "fmt/format.h"
+
+#include <cmath>
+
 #ifdef _WIN32
 #include "common/RedtapeWindows.h"
 #include <KnownFolders.h>
@@ -1931,6 +1934,9 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(HeadCamera);
 	SettingsWrapEntry(SnapTurn);
 	SettingsWrapEntry(ComfortBlink);
+	SettingsWrapEntry(LaserSight);
+	SettingsWrapEntry(ComfortVignette);
+	SettingsWrapEntry(VignetteStrength);
 	SettingsWrapEntry(OnlineSafe);
 	SettingsWrapEntry(Brightness);
 	SettingsWrapEntry(GameRumble);
@@ -1948,14 +1954,17 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 		StereoConvergence = std::clamp(StereoConvergence, 0.0f, 200.0f);
 		Brightness = std::clamp(Brightness, MIN_BRIGHTNESS, MAX_BRIGHTNESS);
 		HapticStrength = std::clamp(HapticStrength, 0.0f, 1.0f);
+		VignetteStrength = std::isfinite(VignetteStrength) ?
+		                       std::clamp(VignetteStrength, MIN_VIGNETTE_STRENGTH, MAX_VIGNETTE_STRENGTH) :
+		                       DEFAULT_VIGNETTE_STRENGTH;
 	}
 }
 
 bool Pcsx2Config::VROptions::operator==(const VROptions& right) const
 {
-	// SnapTurn, ComfortBlink, OnlineSafe, Brightness, GameRumble and HapticStrength are read from EmuConfig
-	// every vsync; leaving them out keeps a settings tweak from rebuilding (and so re-announcing) every VR
-	// control.
+	// SnapTurn, ComfortBlink, LaserSight, ComfortVignette, VignetteStrength, OnlineSafe, Brightness, GameRumble
+	// and HapticStrength are read from EmuConfig every vsync; leaving them out keeps a settings tweak from
+	// rebuilding (and so re-announcing) every VR control.
 	return OpEqu(Enable) && OpEqu(ScreenDistance) && OpEqu(ScreenHeight) &&
 	       OpEqu(ScreenVerticalOffset) &&
 	       OpEqu(ScreenArcDeg) && OpEqu(StereoMode) && OpEqu(StereoUseProfile) &&

@@ -31,6 +31,26 @@ the world screen. The screen change itself is made once the blink is black (`(VR
 then `(VR) Screen: world-locked.` about 40 ms later); snap turns log `(VR) HUD blink (snap turn).`.
 `PCSX2_VR_BLINK_TEST=1` blinks every 2 s (with the setting on) for `hmdshot.py` captures on the null headset.
 
+Laser sight (VR setting `LaserSight`, on by default): while the weapon is raised in first person, a 4 mm red
+beam from 2 cm past the impostor pistol's muzzle straight along the right hand's aim, fading out over 6 m. It
+has no depth, so it does not stop at walls or enemies. One quad in the base space turned about the beam to face
+the head, drawn under the hands and over the screen; it fades in over 0.15 s with the weapon and goes at once
+when it is lowered, and a frame looking straight down the beam goes without it. The first one in a session logs
+`(VR) HUD: laser sight shown (weapon raised in first person).`. `PCSX2_VR_FAKE_HANDS=gun` shows it on the fake
+right hand at any time (with the setting on).
+
+Comfort vignette (VR settings `ComfortVignette`, off by default, and `VignetteStrength`, 0.2-1.0, default 0.6):
+while first person moves the view without the head, a view-locked quad 0.5 m ahead (6 m square, about 161 deg
+across) darkens the edges of the view: clear out to 45% of its ring's radius, ramping to opaque black at the
+ring (about 58 deg off the line of sight) and opaque beyond it to the quad's edges. Its opacity is the strength
+times the motion CameraDriver publishes each vsync (`CameraDriver::ComfortMotion()`): the larger of the smooth
+stick turn's rate against `smoothTurnDegPerSec` and walking (the move stick's push past its deadzone, or the
+character's own horizontal speed with 1.5 m/s and up counting fully), eased in over 0.15 s and out over 0.3 s.
+Snap turns count nothing (the blink covers them). It goes at once when first person does (pause, a menu, a door,
+a cutscene, a savestate load). The first one in a session logs `(VR) HUD: comfort vignette shown (...)`.
+`PCSX2_VR_VIGNETTE_TEST=1` ramps it up and down every 2 s at any time (with the setting on) for `hmdshot.py`
+captures on the null headset.
+
 Rules when testing: never change emulation speed; never pause, savestate or dump RAM while online
 (obsrv drops clients after ~30 s without packets and bans speed changes); do not run the virtual pad
 while an anti-cheat game is open.
