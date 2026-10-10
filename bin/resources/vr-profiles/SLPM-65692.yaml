@@ -82,7 +82,7 @@ SLPM-65692:
       # File #1's view matrix moved by the same +0xD210 as eye/target/roll/FOV; not yet checked live. If it
       # is wrong nothing matches and the screen falls back to poseLagMs.
       viewMatrix: 0x3134F0
-      syncFramesBack: 1
+      syncFramesBack: 2
     fov: { address: 0x313590, encoding: f32, scale: 100.0 }   # vertical FOV, degrees (about 115 horizontal at 4:3)
   # VR controllers (only when launched with --vr; flat play is untouched).
   # A pad bound in Settings -> Controllers (e.g. a DualSense) keeps working alongside;

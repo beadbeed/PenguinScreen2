@@ -641,11 +641,17 @@ void VRInputSource::Emit(Instance& in, const SC::ControlValues& values)
 	for (const SC::ControlDef& c : in.def->controls)
 	{
 		const u32 i = static_cast<u32>(c.id);
-		if (values[i] == in.last[i])
+		// A held (non-zero) control is sent again every poll, not only when it changes: another pad bound
+		// to the same PS2 input (a DualSense, Steam Input's virtual pad for the VR controllers) sends its
+		// resting value whenever its stick jitters, and the latest event wins, so a steadily held VR stick
+		// kept dropping to centre. Resting values still go out once, so the other pad keeps working.
+		const bool changed = (values[i] != in.last[i]);
+		if (!changed && values[i] == 0.0f)
 			continue;
 		in.last[i] = values[i];
 		in.ever_emitted = true;
-		s_events_emitted.fetch_add(1, std::memory_order_relaxed);
+		if (changed)
+			s_events_emitted.fetch_add(1, std::memory_order_relaxed);
 		const float handed = in.stick_bound[i] ? CompensateAxisScale(values[i], axis_scale) : values[i];
 		InputManager::InvokeEvents(MakeControlKey(in.device_index, c.id), handed);
 	}

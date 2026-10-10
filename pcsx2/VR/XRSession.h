@@ -44,6 +44,9 @@ namespace VR::XRSession
 
 	bool HasCylinderLayer();
 
+	// XR_VALVE_frame_controller_interaction is enabled (SteamVR: Steam Frame controller bindings).
+	bool HasFrameControllerInteraction();
+
 	bool IsLost();
 
 	const char* GetStateName();

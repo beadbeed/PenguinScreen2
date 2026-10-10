@@ -1242,6 +1242,7 @@ namespace VR::CameraDriver
 		};
 		std::vector<HoldState> s_hold_state;
 		u32 s_hold_crc = 0;
+		bool s_hold_repair = false; // one-shot after a savestate load: undo holds saved in the state
 
 		void ApplyHolds(const ProfileDB::CameraLookAt& la, u32 crc)
 		{
@@ -1283,6 +1284,19 @@ namespace VR::CameraDriver
 			}
 			for (HoldState& st : s_hold_state)
 				st.saved = false;
+		}
+
+		// After loading a savestate made while first person was active, with first person now off: put
+		// back the holds whose known original the profile gives, if the state carried our value.
+		void RepairHolds(const ProfileDB::CameraLookAt& la)
+		{
+			for (const ProfileDB::CameraLookAt::Hold& h : la.holds)
+			{
+				if (!h.has_restore || (!h.when.empty() && !GuardListPass(h.when)))
+					continue;
+				if (ReadSized(h.address, h.width) == h.value)
+					WriteSized(h.address, h.width, h.restore);
+			}
 		}
 
 		std::atomic_bool s_lookat_active{false};
@@ -1629,7 +1643,12 @@ namespace VR::CameraDriver
 			SetLookAtActive(false);
 			// While the VM is paused nothing can change; holds keep their saved originals for the resume.
 			if (vm_state == VMState::Running)
+			{
 				RestoreHolds(cam.look_at.has_value() ? &cam.look_at.value() : nullptr, true);
+				if (s_hold_repair && cam.look_at.has_value())
+					RepairHolds(cam.look_at.value());
+				s_hold_repair = false;
+			}
 			ResetRenderSync();
 			s_render_sync_logged = false;
 			RestoreFov(cam);
@@ -1809,6 +1828,7 @@ namespace VR::CameraDriver
 		else if (guards_now)
 		{
 			const ProfileDB::CameraLookAt& la = cam.look_at.value();
+			s_hold_repair = false;
 			ApplyHolds(la, crc);
 			if (!la.pause_when.empty() && GuardListPass(la.pause_when))
 			{
@@ -1870,6 +1890,7 @@ namespace VR::CameraDriver
 		s_fov_saved = false;
 		// The loaded memory has its own values: holds save them afresh, and no frame matches old writes.
 		RestoreHolds(nullptr, false);
+		s_hold_repair = true;
 		ResetRenderSync();
 	}
 

@@ -97,9 +97,11 @@ SLPM-65428:
         - { address: 0x6D6CF4, f32: 70.0, restoreF32: 80.0, when: [{ address: 0x540004, equals: 3 }], notes: "near-cull radius, characters" }
       # The view matrix the game builds from eye/target (row vectors). Matching it against what was
       # written says which head pose each displayed frame came from, so the first-person screen is
-      # placed exactly there (no judder). Outbreak builds the next view right after a flip: 1 frame back.
+      # placed exactly there (no judder). The frame on screen is two view updates behind the newest one
+      # (measured on SteamVR's null headset with a fake swaying head: world wobble 2-3 px at 2 frames
+      # back, 6-11 px at 0, 1 or 3, 10 px with the old 40 ms guess).
       viewMatrix: 0x3062E0
-      syncFramesBack: 1
+      syncFramesBack: 2
       # Weapon raised (stance 2, R1 or the hip holster): the character faces where the right
       # controller points. Aim pitch (+0xBC8, needs the servo silenced) is not enabled yet.
       aim: { stance: 0x08, equals: 2, hand: right }

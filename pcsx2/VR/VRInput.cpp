@@ -356,14 +356,18 @@ namespace VR
 		std::vector<Suggestion> frame_full = frame_minimal;
 		frame_full.insert(frame_full.end(), frame_extra.begin(), frame_extra.end());
 
-		const bool frame_full_ok = suggest(FRAME_PROFILE, frame_full);
-		const bool frame_minimal_ok = !frame_full_ok && suggest(FRAME_PROFILE, frame_minimal);
-		if (frame_full_ok)
-			Console.WriteLn("(VR) Steam Frame controller: full bindings accepted (D-pad, bumpers and View included).");
-		else if (frame_minimal_ok)
-			Console.WriteLn("(VR) Steam Frame controller: minimal bindings accepted (no D-pad, bumpers or View).");
-		else
-			Console.Warning("(VR) Steam Frame controller bindings not accepted (only matters with Steam Frame controllers).");
+		// The profile only exists with XR_VALVE_frame_controller_interaction (SteamVR); other runtimes skip it.
+		if (XRSession::HasFrameControllerInteraction())
+		{
+			const bool frame_full_ok = suggest(FRAME_PROFILE, frame_full);
+			const bool frame_minimal_ok = !frame_full_ok && suggest(FRAME_PROFILE, frame_minimal);
+			if (frame_full_ok)
+				Console.WriteLn("(VR) Steam Frame controller: full bindings accepted (D-pad, bumpers and View included).");
+			else if (frame_minimal_ok)
+				Console.WriteLn("(VR) Steam Frame controller: minimal bindings accepted (no D-pad, bumpers or View).");
+			else
+				Console.Warning("(VR) Steam Frame controller bindings not accepted (only matters with Steam Frame controllers).");
+		}
 
 		if (!touch_ok && !simple_ok)
 		{

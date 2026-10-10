@@ -31,6 +31,9 @@ namespace VR::XRSession
 		std::atomic_bool s_session_running{false};
 		bool s_lost = false;
 		bool s_cylinder_supported = false;
+		// SteamVR only accepts bindings for its Steam Frame controller profile with this enabled.
+		constexpr const char* kFrameControllerExtension = "XR_VALVE_frame_controller_interaction";
+		bool s_frame_controller_supported = false;
 
 #ifdef ENABLE_VULKAN
 		PFN_xrGetVulkanGraphicsRequirements2KHR s_xrGetVulkanGraphicsRequirements2KHR = nullptr;
@@ -173,6 +176,7 @@ namespace VR::XRSession
 		ici.applicationInfo.apiVersion = XR_API_VERSION_1_0;
 
 		s_cylinder_supported = false;
+		s_frame_controller_supported = false;
 		{
 			u32 ext_count = 0;
 			if (XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(nullptr, 0, &ext_count, nullptr)) && ext_count > 0)
@@ -184,19 +188,27 @@ namespace VR::XRSession
 					{
 						if (std::strcmp(p.extensionName, XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME) == 0)
 							s_cylinder_supported = true;
+						else if (std::strcmp(p.extensionName, kFrameControllerExtension) == 0)
+							s_frame_controller_supported = true;
 					}
 				}
 			}
 		}
 #ifdef ENABLE_VULKAN
-		const char* enabled_extensions[2] = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, nullptr};
+		const char* enabled_extensions[3] = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, nullptr, nullptr};
 		u32 enabled_count = 1;
 		if (s_cylinder_supported)
 			enabled_extensions[enabled_count++] = XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME;
+		if (s_frame_controller_supported)
+			enabled_extensions[enabled_count++] = kFrameControllerExtension;
 		ici.enabledExtensionCount = enabled_count;
 		ici.enabledExtensionNames = enabled_extensions;
 		Console.WriteLn("(VR) Cylinder composition layers: %s.",
 			s_cylinder_supported ? "supported (curved screen available)" : "not offered by the runtime");
+		if (s_frame_controller_supported)
+			Console.WriteLn("(VR) Steam Frame controller interaction: offered by the runtime, enabled.");
+#else
+		s_frame_controller_supported = false;
 #endif
 
 		XrResult res = xrCreateInstance(&ici, &s_instance);
@@ -528,6 +540,11 @@ namespace VR::XRSession
 	bool HasCylinderLayer()
 	{
 		return s_cylinder_supported;
+	}
+
+	bool HasFrameControllerInteraction()
+	{
+		return s_frame_controller_supported;
 	}
 
 	bool IsLost()
