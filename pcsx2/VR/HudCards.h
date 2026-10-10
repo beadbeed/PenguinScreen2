@@ -14,20 +14,24 @@
 // placement maths; no XR or Vulkan types, so it stays self-contained. XRCompositor owns the swapchains,
 // uploads the pixels and submits the layers, and only while a VR session runs.
 //
-// Four cards: the toast, a short line of text view-locked below the line of sight (recenters, brightness,
+// Five cards: the toast, a short line of text view-locked below the line of sight (recenters, brightness,
 // controllers paused); the wrist card, on the back of the left wrist in first person, with the
 // character's condition, an HP bar and the virus gauge read from the profile's hud.wrist block; the
-// comfort blink, a black quad over the whole view for snap turns and screen changes; and the laser sight,
-// a thin red beam from the pistol's muzzle along the aim while the weapon is raised in first person.
+// comfort blink, a black quad over the whole view for snap turns and screen changes; the laser sight,
+// a thin red beam from the pistol's muzzle along the aim while the weapon is raised in first person; and
+// the comfort vignette, a view-locked black ring that closes in on the edges of the view while first
+// person turns or walks the view without the head.
 namespace VR::HudCards
 {
 	// Card slots, in the order the compositor submits them: the laser first, in under the hands (which are
-	// nearer the eye than the beam), the rest over everything, the blink last.
+	// nearer the eye than the beam), the rest over everything: the vignette over the hands and the wrist
+	// card, the toast over the vignette so it stays readable, the blink last.
 	static constexpr int kLaser = 0;
 	static constexpr int kWrist = 1;
-	static constexpr int kToast = 2;
-	static constexpr int kBlink = 3;
-	static constexpr int kCardCount = 4;
+	static constexpr int kVignette = 2;
+	static constexpr int kToast = 3;
+	static constexpr int kBlink = 4;
+	static constexpr int kCardCount = 5;
 
 	// Toast image and quad: about 1.2 m ahead and 0.25 m below eye level, 0.5 m wide (about 24 deg, so
 	// the image's 1024 pixels give the text 1.1 deg tall letters up to ~23 characters, smaller beyond).
@@ -84,6 +88,21 @@ namespace VR::HudCards
 	// The beam starts this far ahead of the muzzle's face.
 	static constexpr float kLaserMuzzleGapM = 0.02f;
 
+	// Comfort vignette: view-locked like the blink, kVignetteDistanceM ahead and kVignetteSizeM square (about
+	// 161 degrees across, past any headset's field of view). Its image is clear out to kVignetteClearFrac of the
+	// vignette's radius and ramps (smoothstep) to opaque black at that radius, which lies about 58 degrees off
+	// the line of sight (tangent kVignetteRadiusTan), inside a headset's view so the ramp is seen; past it, out
+	// to the quad's edges, it stays opaque, so a wide headset never sees round the quad. Shown at the VR
+	// VignetteStrength setting times CameraDriver::ComfortMotion(), so the ring only closes in while the view
+	// moves without the head.
+	static constexpr u32 kVignetteImageSize = 256;
+	static constexpr float kVignetteDistanceM = 0.5f;
+	static constexpr float kVignetteSizeM = 6.0f;
+	static constexpr float kVignetteRadiusTan = 1.6f;
+	static constexpr float kVignetteClearFrac = 0.45f;
+	static_assert(kVignetteRadiusTan * kVignetteDistanceM < 0.5f * kVignetteSizeM,
+		"the vignette's ring must fit on its quad");
+
 	// Same byte order as the lever cards and hands (ControlQuads::PackRgba): R in the low byte,
 	// unpremultiplied alpha in the high byte, sRGB-encoded colour.
 	constexpr u32 Rgba(u32 r, u32 g, u32 b, u32 a = 255)
@@ -126,6 +145,15 @@ namespace VR::HudCards
 	// GS thread never reads EmuConfig. Any thread.
 	bool LaserSightEnabled();
 
+	// The comfort vignette's strength as published by Poll: the VR VignetteStrength setting (clamped to its
+	// range) while ComfortVignette is on, else 0 (off until the first vsync, as its default is), so the GS
+	// thread never reads EmuConfig. Any thread.
+	float VignetteStrength();
+
+	// Compositor, each frame: with PCSX2_VR_VIGNETTE_TEST=1, true and *motion (may be null) going 0 -> 1 -> 0
+	// every 2 s in place of CameraDriver::ComfortMotion(), at any time; false when the test is off.
+	bool TestVignetteMotion(float* motion);
+
 	// The wrist card's data, read each vsync from the local character's record.
 	struct WristData
 	{
@@ -149,8 +177,8 @@ namespace VR::HudCards
 	Condition ConditionOf(const WristData& d);
 
 	// CPU thread, every vsync right after CameraDriver::Apply: reads the record Apply resolved, the same
-	// way GameFeedback does. Reads only, so the same online. Also publishes the ComfortBlink and LaserSight
-	// settings.
+	// way GameFeedback does. Reads only, so the same online. Also publishes the ComfortBlink, LaserSight and
+	// comfort vignette (ComfortVignette, VignetteStrength) settings.
 	void Poll();
 
 	// Any thread: true while first person is armed with the record resolved and the profile has a
@@ -166,6 +194,7 @@ namespace VR::HudCards
 	void RasterWrist(std::vector<u32>& out, const WristData& d, bool no_data);
 	void RasterBlink(std::vector<u32>& out);
 	void RasterLaser(std::vector<u32>& out);
+	void RasterVignette(std::vector<u32>& out);
 
 	// dst = src with every pixel's alpha scaled by opacity (0-1), for the fades.
 	void ScaleAlpha(const u32* src, size_t count, float opacity, u32* dst);
@@ -176,6 +205,10 @@ namespace VR::HudCards
 
 	// The blink's pose in the VIEW space: straight ahead at kBlinkDistanceM, square to the line of sight.
 	void BlinkPose(float pos[3], float quat[4]);
+
+	// The vignette's pose in the VIEW space: straight ahead at kVignetteDistanceM, square to the line of sight,
+	// its ring centred on it.
+	void VignettePose(float pos[3], float quat[4]);
 
 	// The wrist card's pose in the XR base space for a left hand given the way HandModel takes it (pos:
 	// the controller's grip position; quat: its pointing frame, -Z forward, +Y up, +X right): on the
@@ -195,7 +228,8 @@ namespace VR::HudCards
 	bool PlaceLaser(const float hand_pos[3], const float hand_quat[4], const float eye[3], float out_pos[3],
 		float out_quat[4]);
 
-	// Condition thresholds, labels, keys, the font, the fades, the blink, the laser and the placement maths.
-	// Runs once (the compositor's first HUD frame or the first Poll) when PCSX2_VR_HUD_SELFTEST is set.
+	// Condition thresholds, labels, keys, the font, the fades, the blink, the laser, the vignette and the
+	// placement maths. Runs once (the compositor's first HUD frame or the first Poll) when PCSX2_VR_HUD_SELFTEST
+	// is set.
 	bool SelfTest();
 }

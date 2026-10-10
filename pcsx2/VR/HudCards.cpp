@@ -415,6 +415,9 @@ namespace VR::HudCards
 		std::atomic<bool> s_blink_enabled{true};
 		// The LaserSight setting, published the same way.
 		std::atomic<bool> s_laser_enabled{true};
+		// The comfort vignette's strength (0 while ComfortVignette is off), published the same way; off until the
+		// first vsync, as the setting's default is.
+		std::atomic<float> s_vignette_strength{0.0f};
 
 		// The wrist card's reads, published by Poll (CPU thread) for the compositor.
 		std::mutex s_wrist_mutex;
@@ -631,6 +634,16 @@ namespace VR::HudCards
 		// GS thread must not touch EmuConfig.
 		s_blink_enabled.store(EmuConfig.VR.ComfortBlink, std::memory_order_relaxed);
 		s_laser_enabled.store(EmuConfig.VR.LaserSight, std::memory_order_relaxed);
+		// Clamped here too, for a value that did not come through LoadSave.
+		float vignette = 0.0f;
+		if (EmuConfig.VR.ComfortVignette)
+		{
+			const float v = EmuConfig.VR.VignetteStrength;
+			vignette = std::isfinite(v) ? std::clamp(v, Pcsx2Config::VROptions::MIN_VIGNETTE_STRENGTH,
+			                                  Pcsx2Config::VROptions::MAX_VIGNETTE_STRENGTH) :
+			                              Pcsx2Config::VROptions::DEFAULT_VIGNETTE_STRENGTH;
+		}
+		s_vignette_strength.store(vignette, std::memory_order_relaxed);
 
 		// LocalRecord is true only while first person is armed with the record resolved this vsync (flat play
 		// never gets past it); guards_now says the camera guards held too, so the GAME overlay's virus table is
@@ -735,6 +748,27 @@ namespace VR::HudCards
 		return s_laser_enabled.load(std::memory_order_relaxed);
 	}
 
+	float VignetteStrength()
+	{
+		return s_vignette_strength.load(std::memory_order_relaxed);
+	}
+
+	bool TestVignetteMotion(float* motion)
+	{
+		static const bool s_test = [] {
+			const char* v = std::getenv("PCSX2_VR_VIGNETTE_TEST");
+			return v && v[0] != '\0' && std::strcmp(v, "0") != 0;
+		}();
+		if (!s_test)
+			return false;
+		// Up over a second, down over the next.
+		const u64 phase = NowMs() % 2000u;
+		const u64 rise = (phase < 1000u) ? phase : (2000u - phase);
+		if (motion)
+			*motion = static_cast<float>(rise) / 1000.0f;
+		return true;
+	}
+
 	void RasterToast(std::vector<u32>& out, const std::string& text)
 	{
 		constexpr int w = static_cast<int>(kToastWidth);
@@ -805,6 +839,29 @@ namespace VR::HudCards
 		}
 	}
 
+	void RasterVignette(std::vector<u32>& out)
+	{
+		constexpr int n = static_cast<int>(kVignetteImageSize);
+		out.assign(static_cast<size_t>(kVignetteImageSize) * kVignetteImageSize, kBlinkBlack);
+		// The ring's radius in pixels: where tangent kVignetteRadiusTan off the line of sight lands on the quad.
+		constexpr float half = 0.5f * static_cast<float>(n);
+		constexpr float radius_px = (kVignetteRadiusTan * kVignetteDistanceM) / (0.5f * kVignetteSizeM) * half;
+		for (int y = 0; y < n; ++y)
+		{
+			const float dy = (static_cast<float>(y) + 0.5f) - half;
+			for (int x = 0; x < n; ++x)
+			{
+				const float dx = (static_cast<float>(x) + 0.5f) - half;
+				// r: 0 at the centre, 1 on the ring; clear to kVignetteClearFrac, opaque from 1 out to the corners.
+				const float r = std::sqrt(dx * dx + dy * dy) / radius_px;
+				const float t = std::clamp((r - kVignetteClearFrac) / (1.0f - kVignetteClearFrac), 0.0f, 1.0f);
+				const float alpha = 255.0f * t * t * (3.0f - 2.0f * t);
+				out[static_cast<size_t>(y) * kVignetteImageSize + static_cast<size_t>(x)] =
+					Rgba(0, 0, 0, static_cast<u32>(std::lround(alpha)));
+			}
+		}
+	}
+
 	void ScaleAlpha(const u32* src, size_t count, float opacity, u32* dst)
 	{
 		const float o = std::isfinite(opacity) ? std::clamp(opacity, 0.0f, 1.0f) : 0.0f;
@@ -835,6 +892,17 @@ namespace VR::HudCards
 		pos[0] = 0.0f;
 		pos[1] = 0.0f;
 		pos[2] = -kBlinkDistanceM;
+		quat[0] = 0.0f;
+		quat[1] = 0.0f;
+		quat[2] = 0.0f;
+		quat[3] = 1.0f;
+	}
+
+	void VignettePose(float pos[3], float quat[4])
+	{
+		pos[0] = 0.0f;
+		pos[1] = 0.0f;
+		pos[2] = -kVignetteDistanceM;
 		quat[0] = 0.0f;
 		quat[1] = 0.0f;
 		quat[2] = 0.0f;
@@ -1111,6 +1179,38 @@ namespace VR::HudCards
 		check(!PlaceLaser(hand_pos, hand_quat, eye_on_axis, lp, lq), "looking straight down the beam skips the frame");
 		const float bad_quat[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 		check(!PlaceLaser(hand_pos, bad_quat, eye_above, lp, lq), "no beam from an unusable aim");
+
+		// Vignette: clear in the middle and out to 45% of its ring's radius, opaque black from the ring out to the
+		// corners, darkening steadily between; straight ahead, covering over 150 degrees.
+		std::vector<u32> vimg;
+		RasterVignette(vimg);
+		check(vimg.size() == static_cast<size_t>(kVignetteImageSize) * kVignetteImageSize, "vignette image size");
+		const auto vignette_a = [&vimg](u32 x, u32 y) {
+			const size_t i = static_cast<size_t>(y) * kVignetteImageSize + x;
+			return (i < vimg.size()) ? (vimg[i] >> 24) : 0u;
+		};
+		constexpr u32 kVignetteMid = kVignetteImageSize / 2;
+		constexpr float kVignetteRingPx = (kVignetteRadiusTan * kVignetteDistanceM) / (0.5f * kVignetteSizeM) *
+		                                  (0.5f * static_cast<float>(kVignetteImageSize));
+		const u32 vignette_clear_x = kVignetteMid + static_cast<u32>(kVignetteRingPx * kVignetteClearFrac) - 1u;
+		const u32 vignette_ring_x = kVignetteMid + static_cast<u32>(kVignetteRingPx) + 1u;
+		check(vignette_a(kVignetteMid, kVignetteMid) == 0u && vignette_a(vignette_clear_x, kVignetteMid) == 0u,
+			"the vignette is clear in the middle");
+		check(vignette_a(vignette_ring_x, kVignetteMid) == 255u && vignette_a(0, 0) == 255u &&
+				  vignette_a(kVignetteImageSize - 1, kVignetteImageSize - 1) == 255u,
+			"the vignette is opaque from its ring out to the corners");
+		bool vignette_ramps = vignette_a(vignette_clear_x + 8u, kVignetteMid) > 0u &&
+		                      vignette_a(vignette_clear_x + 8u, kVignetteMid) < 255u;
+		for (u32 x = kVignetteMid; x + 1 < kVignetteImageSize; x++)
+			vignette_ramps = vignette_ramps && vignette_a(x + 1, kVignetteMid) >= vignette_a(x, kVignetteMid);
+		check(vignette_ramps, "the vignette darkens steadily outward");
+		check(!vimg.empty() && (vimg[0] & 0x00FFFFFFu) == 0u, "the vignette is black");
+		float vpos[3];
+		float vquat[4];
+		VignettePose(vpos, vquat);
+		const float vignette_half_deg = std::atan((0.5f * kVignetteSizeM) / kVignetteDistanceM) * (180.0f / 3.14159265f);
+		check(vpos[0] == 0.0f && vpos[1] == 0.0f && vpos[2] < 0.0f && vquat[3] == 1.0f && vignette_half_deg > 75.0f,
+			"the vignette covers over 150 degrees straight ahead");
 
 		Console.WriteLn(fail == 0 ? Color_StrongGreen : Color_StrongRed, "(VR) HUD self-test: %d failure(s).", fail);
 		return fail == 0;

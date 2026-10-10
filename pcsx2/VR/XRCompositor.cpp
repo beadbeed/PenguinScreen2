@@ -152,10 +152,10 @@ namespace VR::XRCompositor
 			// Set when creating any of the above fails: hands stay off until the next Initialize().
 			bool hands_disabled = false;
 
-			// HUD cards (HudCards: the laser sight, the wrist card, the toast and the blink): the same CPU-raster
-			// upload path once more, one swapchain per card sharing a staging buffer, command buffer and fence.
-			// Created the first time a card shows and kept until Shutdown; any failure turns the cards off for
-			// the session.
+			// HUD cards (HudCards: the laser sight, the wrist card, the comfort vignette, the toast and the blink):
+			// the same CPU-raster upload path once more, one swapchain per card sharing a staging buffer, command
+			// buffer and fence. Created the first time a card shows and kept until Shutdown; any failure turns the
+			// cards off for the session.
 			struct HudChain
 			{
 				XrSwapchain swapchain = XR_NULL_HANDLE;
@@ -183,6 +183,8 @@ namespace VR::XRCompositor
 			// Laser sight: its fade in (on the same clock), and whether it was logged yet this session.
 			float hud_laser_opacity = 0.0f;
 			bool hud_laser_logged = false;
+			// Comfort vignette: whether it was logged yet this session (its opacity comes eased from CameraDriver).
+			bool hud_vignette_logged = false;
 			// Comfort blink on a screen-mode change: when (SteadyNowMs) the change waiting for the blink to
 			// go black is made; 0 while none waits.
 			u64 fp_switch_due_ms = 0;
@@ -1260,6 +1262,8 @@ namespace VR::XRCompositor
 				return {HudCards::kBlinkImageSize, HudCards::kBlinkImageSize};
 			if (card == HudCards::kLaser)
 				return {HudCards::kLaserImageWidth, HudCards::kLaserImageHeight};
+			if (card == HudCards::kVignette)
+				return {HudCards::kVignetteImageSize, HudCards::kVignetteImageSize};
 			return {0, 0};
 		}
 
@@ -1539,6 +1543,33 @@ namespace VR::XRCompositor
 				wb.level = HudLevel(blink_opacity);
 			}
 
+			// Comfort vignette: view-locked like the blink, closing in on the edges of the view while first person
+			// moves the view without the head (a smooth stick turn, walking): the VignetteStrength setting times the
+			// motion CameraDriver publishes, already eased in and out there. Snap turns publish none (the blink
+			// covers them), and it goes at once with first person (paused, a menu, a door, a cutscene: LookAtActive
+			// lapses) or tracking. PCSX2_VR_VIGNETTE_TEST ramps the motion up and down every 2 s at any time. One
+			// unchanging image; only its fade step is uploaded again.
+			const float vignette_strength = HudCards::VignetteStrength();
+			float vignette_motion = 0.0f;
+			const bool vignette_test = HudCards::TestVignetteMotion(&vignette_motion);
+			if (!vignette_test)
+				vignette_motion = CameraDriver::LookAtActive() ? CameraDriver::ComfortMotion() : 0.0f;
+			const float vignette_opacity = vignette_strength * vignette_motion;
+			if (s.view_space != XR_NULL_HANDLE && s.head_pose_valid && vignette_opacity > 0.0f)
+			{
+				Want& wvg = want[HudCards::kVignette];
+				wvg.on = true;
+				wvg.content = 1;
+				wvg.level = HudLevel(vignette_opacity);
+				if (!s.hud_vignette_logged && wvg.level > 0)
+				{
+					s.hud_vignette_logged = true;
+					Console.WriteLn("(VR) HUD: comfort vignette shown (%s, strength %.2f).",
+						vignette_test ? "PCSX2_VR_VIGNETTE_TEST" : "first person moving",
+						static_cast<double>(vignette_strength));
+				}
+			}
+
 			// Wrist card: on the left hand while first person is active and the profile reads hud.wrist,
 			// fading in while its face points at the head. PCSX2_VR_FAKE_HANDS shows it on the fake left
 			// hand whatever the angle (turned to the eye; NO DATA without first person), so it can be
@@ -1720,6 +1751,8 @@ namespace VR::XRCompositor
 						HudCards::RasterBlink(raster.pixels);
 					else if (i == HudCards::kLaser)
 						HudCards::RasterLaser(raster.pixels);
+					else if (i == HudCards::kVignette)
+						HudCards::RasterVignette(raster.pixels);
 					raster.content = wv.content;
 					raster.valid = true;
 				}
@@ -1859,6 +1892,18 @@ namespace VR::XRCompositor
 					quad.pose.orientation = {laser_quat[0], laser_quat[1], laser_quat[2], laser_quat[3]};
 					quad.pose.position = {laser_pos[0], laser_pos[1], laser_pos[2]};
 					quad.size = {HudCards::kLaserWidthM, HudCards::kLaserLengthM};
+				}
+				else if (i == HudCards::kVignette)
+				{
+					// Just ahead of the eyes, its ring centred on the line of sight and its opaque border past any
+					// field of view.
+					float pos[3];
+					float q[4];
+					HudCards::VignettePose(pos, q);
+					quad.space = s.view_space;
+					quad.pose.orientation = {q[0], q[1], q[2], q[3]};
+					quad.pose.position = {pos[0], pos[1], pos[2]};
+					quad.size = {HudCards::kVignetteSizeM, HudCards::kVignetteSizeM};
 				}
 				const XrCompositionLayerBaseHeader* layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
 				if (i == HudCards::kLaser && under_from < layer_count)
@@ -2079,6 +2124,7 @@ namespace VR::XRCompositor
 		s.hud_wrist_logged = false;
 		s.hud_laser_opacity = 0.0f;
 		s.hud_laser_logged = false;
+		s.hud_vignette_logged = false;
 		s.fp_switch_due_ms = 0;
 
 		if (!XRSession::HasSession())
@@ -2438,9 +2484,9 @@ namespace VR::XRCompositor
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}, {XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR},
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}, {XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR},
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}};
-		// Worst case 12 layers: four for the screen (split screen in stereo, two viewports per eye; five slots
-		// kept), two lever cards, two hands and the four HUD cards (laser, wrist, toast, blink). SteamVR takes at
-		// most 16 a frame.
+		// Worst case 13 layers: four for the screen (split screen in stereo, two viewports per eye; five slots
+		// kept), two lever cards, two hands and the five HUD cards (laser, wrist, vignette, toast, blink), in a
+		// capacity of 14. SteamVR takes at most 16 a frame.
 		constexpr u32 kLayerCapacity = 5 + ControlQuads::kSlots + kHandSlots + HudCards::kCardCount;
 		static_assert(kLayerCapacity <= 16, "more composition layers than SteamVR takes in a frame");
 		XrCompositionLayerQuad lever_quads[ControlQuads::kSlots] = {
