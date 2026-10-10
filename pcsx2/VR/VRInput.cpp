@@ -151,20 +151,142 @@ namespace VR
 
 			return state.currentState;
 		}
+
+		// Scripted test input (XRInput::SetTestInput, from PINE's thread). It lapses on its own: a test
+		// runner that dies mid-scenario must not leave a held stick or grip behind.
+		constexpr std::uint64_t kTestInputMaxTtlMs = 500;
+		std::mutex s_test_mutex;
+		XRInput::TestInput s_test_input;
+		std::uint64_t s_test_expiry_ms = 0; // 0: none
+
+		bool LiveTestInput(XRInput::TestInput* out)
+		{
+			std::lock_guard lock{s_test_mutex};
+			if (s_test_expiry_ms == 0)
+				return false;
+			if (NowMs() >= s_test_expiry_ms)
+			{
+				s_test_expiry_ms = 0;
+				Console.WriteLn("(VR) Test input (PINE) expired; the real controllers are back.");
+				return false;
+			}
+			*out = s_test_input;
+			return true;
+		}
+
+		void SanitizePose(VRPose* pose)
+		{
+			if (!pose->valid)
+				return;
+			float n2 = 0.f;
+			for (const float c : pose->orientation_xyzw)
+				n2 += c * c;
+			bool finite = std::isfinite(n2) && n2 > 1e-8f;
+			for (const float c : pose->position_xyz)
+				finite = finite && std::isfinite(c);
+			if (!finite)
+			{
+				*pose = VRPose{};
+				return;
+			}
+			const float inv = 1.f / std::sqrt(n2);
+			for (float& c : pose->orientation_xyzw)
+				c *= inv;
+		}
+
+		float SanitizeAxis(float v, float lo, float hi)
+		{
+			return std::isfinite(v) ? std::clamp(v, lo, hi) : 0.f;
+		}
+
+		// A head-relative pose placed from the head's position and floor yaw: the same frame HeadAnchor
+		// and PlaceControl put the zones in, so a hand sent at a zone's offset lands in that zone.
+		VRPose FromHead(const VRPose& in, const std::array<float, 3>& origin, float yaw)
+		{
+			if (!in.valid)
+				return in;
+			const float c = std::cos(yaw), s = std::sin(yaw);
+			const float hc = std::cos(yaw * 0.5f), hs = std::sin(yaw * 0.5f);
+			const std::array<float, 3>& p = in.position_xyz;
+			const std::array<float, 4>& q = in.orientation_xyzw;
+			VRPose out;
+			out.position_xyz = {origin[0] + p[0] * c + p[2] * s, origin[1] + p[1], origin[2] - p[0] * s + p[2] * c};
+			// yaw(0, hs, 0, hc) * q
+			out.orientation_xyzw = {hc * q[0] + hs * q[2], hc * q[1] + hs * q[3], hc * q[2] - hs * q[0], hc * q[3] - hs * q[1]};
+			out.valid = true;
+			return out;
+		}
+
+		void OverlayTestInput(VRInputSnapshot& snap)
+		{
+			XRInput::TestInput t;
+			if (!LiveTestInput(&t))
+				return;
+
+			snap.actions_active = true;
+			snap.generation = std::max<std::uint64_t>(snap.generation, 1);
+			if (t.head_pose.valid)
+				snap.head_pose = t.head_pose;
+
+			// The head's forward (-Z) flattened onto the floor, as SpatialControls::HeadAnchor takes it.
+			std::array<float, 3> origin = {0.f, 0.f, 0.f};
+			float yaw = 0.f;
+			if (snap.head_pose.valid)
+			{
+				const std::array<float, 4>& q = snap.head_pose.orientation_xyzw;
+				const float fx = -2.0f * (q[3] * q[1] + q[2] * q[0]);
+				const float fz = -(1.0f - 2.0f * (q[0] * q[0] + q[1] * q[1]));
+				if ((fx * fx + fz * fz) > 1.0e-4f)
+					yaw = std::atan2(-fx, -fz);
+				origin = snap.head_pose.position_xyz;
+			}
+
+			for (int hand = 0; hand < 2; ++hand)
+			{
+				const XRInput::TestInput::Hand& in = t.hands[hand];
+				if (!in.supplied)
+					continue;
+				VRHandState& out = snap.hands[hand];
+				out = VRHandState{};
+				const auto bit = [&in](int i) { return (in.buttons & (1u << i)) != 0; };
+				out.a = bit(0);
+				out.b = bit(1);
+				out.x = bit(2);
+				out.y = bit(3);
+				out.menu = bit(4);
+				out.thumbstick_click = bit(5);
+				out.dpad_up = bit(6);
+				out.dpad_down = bit(7);
+				out.dpad_left = bit(8);
+				out.dpad_right = bit(9);
+				out.bumper = bit(10);
+				out.view = bit(11);
+				out.trigger = in.trigger;
+				out.grip = in.grip;
+				out.thumbstick_x = in.thumbstick_x;
+				out.thumbstick_y = in.thumbstick_y;
+				out.aim_pose = in.head_relative ? FromHead(in.aim_pose, origin, yaw) : in.aim_pose;
+				out.grip_pose = in.head_relative ? FromHead(in.grip_pose, origin, yaw) : in.grip_pose;
+			}
+		}
 	}
 
 	VRInputSnapshot GetInputSnapshot()
 	{
-		std::lock_guard lock{s_snapshot_mutex};
-		VRInputSnapshot snap = s_snapshot;
-		if (snap.generation != 0 && snap.actions_active && NowMs() - snap.published_ms > kSnapshotMaxAgeMs)
+		VRInputSnapshot snap;
 		{
-			// Producer went quiet: report neutral, keep the generation so "live" is unchanged.
-			const std::uint64_t generation = snap.generation;
-			snap = VRInputSnapshot{};
-			snap.generation = generation;
-			snap.published_ms = s_snapshot.published_ms;
+			std::lock_guard lock{s_snapshot_mutex};
+			snap = s_snapshot;
+			if (snap.generation != 0 && snap.actions_active && NowMs() - snap.published_ms > kSnapshotMaxAgeMs)
+			{
+				// Producer went quiet: report neutral, keep the generation so "live" is unchanged.
+				const std::uint64_t generation = snap.generation;
+				snap = VRInputSnapshot{};
+				snap.generation = generation;
+				snap.published_ms = s_snapshot.published_ms;
+			}
 		}
+		OverlayTestInput(snap);
 		return snap;
 	}
 
@@ -745,7 +867,16 @@ namespace VR
 		{
 			if (hand < 0 || hand >= 2)
 				return;
-			s_pulse_request[hand].store(PackPulse(amplitude, seconds), std::memory_order_release);
+			// One slot per hand, taken once a frame: a weaker cue queued in the same frame (a zone tick, a
+			// heartbeat) must not replace a stronger one still waiting (a bite), so the stronger one stays.
+			const int packed = PackPulse(amplitude, seconds);
+			int pending = s_pulse_request[hand].load(std::memory_order_acquire);
+			while (pending < 0 || (pending & 0xFFFF) < (packed & 0xFFFF))
+			{
+				if (s_pulse_request[hand].compare_exchange_weak(pending, packed, std::memory_order_acq_rel,
+						std::memory_order_acquire))
+					break;
+			}
 		}
 
 		bool TakePendingPulseForTest(int hand, float* amplitude, float* seconds)
@@ -770,6 +901,60 @@ namespace VR
 		void ResetSnapshotForTest()
 		{
 			ResetSnapshot();
+		}
+
+		void SetTestInput(const TestInput& input)
+		{
+			TestInput t = input;
+			SanitizePose(&t.head_pose);
+			for (TestInput::Hand& hand : t.hands)
+			{
+				SanitizePose(&hand.aim_pose);
+				SanitizePose(&hand.grip_pose);
+				hand.trigger = SanitizeAxis(hand.trigger, 0.f, 1.f);
+				hand.grip = SanitizeAxis(hand.grip, 0.f, 1.f);
+				hand.thumbstick_x = SanitizeAxis(hand.thumbstick_x, -1.f, 1.f);
+				hand.thumbstick_y = SanitizeAxis(hand.thumbstick_y, -1.f, 1.f);
+			}
+
+			const std::uint64_t now = NowMs();
+			std::lock_guard lock{s_test_mutex};
+			const bool was_live = s_test_expiry_ms != 0 && now < s_test_expiry_ms;
+			if (t.ttl_ms == 0)
+			{
+				s_test_expiry_ms = 0;
+				if (was_live)
+					Console.WriteLn("(VR) Test input (PINE) cleared; the real controllers are back.");
+				return;
+			}
+			s_test_input = t;
+			s_test_expiry_ms = now + std::min<std::uint64_t>(t.ttl_ms, kTestInputMaxTtlMs);
+			if (!was_live)
+			{
+				Console.Warning("(VR) TEST INPUT ACTIVE (PINE): scripted head %s, left hand %s, right hand %s.",
+					t.head_pose.valid ? "on" : "off", t.hands[0].supplied ? "on" : "off", t.hands[1].supplied ? "on" : "off");
+			}
+		}
+
+		bool TestHeadPose(HeadPose::Snapshot* out)
+		{
+			TestInput t;
+			if (!LiveTestInput(&t) || !t.head_pose.valid)
+				return false;
+			HeadPose::Snapshot p;
+			p.orientation_x = t.head_pose.orientation_xyzw[0];
+			p.orientation_y = t.head_pose.orientation_xyzw[1];
+			p.orientation_z = t.head_pose.orientation_xyzw[2];
+			p.orientation_w = t.head_pose.orientation_xyzw[3];
+			p.position_x = t.head_pose.position_xyz[0];
+			p.position_y = t.head_pose.position_xyz[1];
+			p.position_z = t.head_pose.position_xyz[2];
+			p.position_valid = true;
+			p.valid = true;
+			// Taken now, like a fresh headset pose, so the camera's prediction horizon measures from here.
+			p.publish_ms = NowMs();
+			*out = p;
+			return true;
 		}
 	}
 }

@@ -641,6 +641,7 @@ namespace VR::SpatialControls
 			"Pressed",
 			"LeftTriggerPress", "RightTriggerPress", "LeftGripPress", "RightGripPress",
 			"DpadUp", "DpadDown", "DpadLeft", "DpadRight", "LeftBumper", "RightBumper", "View",
+			"RightStickUp", "RightStickDown",
 		};
 		static_assert(std::size(kControlNames) == kControlCount);
 
@@ -726,6 +727,8 @@ namespace VR::SpatialControls
 			{ControlId::LeftBumper, "LeftBumper", ControlType::Button},
 			{ControlId::RightBumper, "RightBumper", ControlType::Button},
 			{ControlId::View, "View", ControlType::Button},
+			{ControlId::RightStickUp, "RightStickUp", ControlType::Button},
+			{ControlId::RightStickDown, "RightStickDown", ControlType::Button},
 		};
 		constexpr ControlDef kZoneControls[] = {
 			{ControlId::Pressed, "Pressed", ControlType::Button},
@@ -1038,6 +1041,135 @@ namespace VR::SpatialControls
 			out_x = std::clamp(x * scale, -1.0f, 1.0f);
 			out_y = std::clamp(y * scale, -1.0f, 1.0f);
 		}
+
+		std::atomic_bool s_sprint_blocked{false};
+
+		constexpr float kSprintOn = 0.5f; // stick magnitude (after the deadzone) the click must come with
+		constexpr float kSprintHold = 0.25f; // the latch holds while the stick is pushed past this
+		constexpr float kSprintCentredS = 0.15f; // and drops once it has been centred this long
+		constexpr float kFlickOn = 0.75f;
+		constexpr float kFlickOff = 0.4f;
+		constexpr float kFlickMinPressS = 0.12f; // a 30 fps game polls every 33 ms: hold a quick flick long enough
+
+		// One flick button: presses on `press`, lets go on `released` once held kFlickMinPressS.
+		void StepFlick(bool press, bool released, float dt, bool& on, float& held_s)
+		{
+			if (on)
+			{
+				held_s += dt;
+				if (released && held_s >= kFlickMinPressS)
+					on = false;
+			}
+			else if (press)
+			{
+				on = true;
+				held_s = 0.0f;
+			}
+		}
+
+		// ComposeGamepad with the cross-thread inputs passed in, so the self-test is deterministic.
+		ControlValues ComposeGamepadWith(const VRInputSnapshot& snapshot, const GamepadParams& p, GamepadState& st,
+			float dt, int suppressed, bool sprint_blocked)
+		{
+			ControlValues v{};
+			if (snapshot.generation == 0 || !snapshot.actions_active)
+			{
+				st.Reset();
+				return v;
+			}
+			dt = std::clamp(Finite(dt), 0.0f, 0.25f);
+			const VRHandState& l = snapshot.hands[VRInputSnapshot::LEFT];
+			const VRHandState& r = snapshot.hands[VRInputSnapshot::RIGHT];
+			const auto button = [](bool b) { return b ? 1.0f : 0.0f; };
+			const auto axis = [](float f) { return std::clamp(Finite(f), -1.0f, 1.0f); };
+			At(v, ControlId::ButtonA) = button(r.a);
+			At(v, ControlId::ButtonB) = button(r.b);
+			// X, Y and Menu are on the left Touch controller but the right Steam Frame one.
+			At(v, ControlId::ButtonX) = button(l.x || r.x);
+			At(v, ControlId::ButtonY) = button(l.y || r.y);
+			At(v, ControlId::Menu) = button(l.menu || r.menu);
+			At(v, ControlId::LeftStickClick) = button(l.thumbstick_click);
+			At(v, ControlId::RightStickClick) = button(r.thumbstick_click);
+			At(v, ControlId::LeftTrigger) = Clamp01(Finite(l.trigger));
+			At(v, ControlId::RightTrigger) = Clamp01(Finite(r.trigger));
+			At(v, ControlId::LeftGrip) = Clamp01(Finite(l.grip));
+			At(v, ControlId::RightGrip) = Clamp01(Finite(r.grip));
+			float lx = 0.0f, ly = 0.0f, rx = 0.0f, ry = 0.0f;
+			if (suppressed != VRInputSnapshot::LEFT)
+				GamepadStick(l.thumbstick_x, l.thumbstick_y, lx, ly);
+			if (suppressed != VRInputSnapshot::RIGHT)
+				GamepadStick(r.thumbstick_x, r.thumbstick_y, rx, ry);
+			At(v, ControlId::LeftStickX) = lx;
+			At(v, ControlId::LeftStickY) = ly;
+			At(v, ControlId::RightStickX) = rx;
+			At(v, ControlId::RightStickY) = ry;
+			static constexpr float kPressAt = 0.5f;
+			At(v, ControlId::LeftTriggerPress) = button(At(v, ControlId::LeftTrigger) >= kPressAt);
+			At(v, ControlId::RightTriggerPress) = button(At(v, ControlId::RightTrigger) >= kPressAt);
+			At(v, ControlId::LeftGripPress) = button(At(v, ControlId::LeftGrip) >= kPressAt);
+			At(v, ControlId::RightGripPress) = button(At(v, ControlId::RightGrip) >= kPressAt);
+			At(v, ControlId::DpadUp) = button(l.dpad_up || r.dpad_up);
+			At(v, ControlId::DpadDown) = button(l.dpad_down || r.dpad_down);
+			At(v, ControlId::DpadLeft) = button(l.dpad_left || r.dpad_left);
+			At(v, ControlId::DpadRight) = button(l.dpad_right || r.dpad_right);
+			At(v, ControlId::LeftBumper) = button(l.bumper);
+			At(v, ControlId::RightBumper) = button(r.bumper);
+			At(v, ControlId::View) = button(l.view || r.view);
+
+			// Ad-lib flicks from the raw stick (the deadzone rescale would move the thresholds); a stick the
+			// camera driver is walking with flicks nothing. Up and down can't both be pressed.
+			float fx = 0.0f, fy = 0.0f;
+			if (suppressed != VRInputSnapshot::RIGHT)
+			{
+				fx = axis(r.thumbstick_x);
+				fy = axis(r.thumbstick_y);
+			}
+			const bool vertical = std::fabs(fy) > 2.0f * std::fabs(fx);
+			StepFlick(vertical && fy > kFlickOn && !st.flick_down, fy < kFlickOff, dt, st.flick_up, st.flick_up_s);
+			StepFlick(vertical && -fy > kFlickOn && !st.flick_up, -fy < kFlickOff, dt, st.flick_down, st.flick_down_s);
+			At(v, ControlId::RightStickUp) = button(st.flick_up);
+			At(v, ControlId::RightStickDown) = button(st.flick_down);
+
+			// Sprint latch, on the stick as the game gets it (deadzone and suppression applied): walk-and-shoot's
+			// stick reads 0, so it neither latches nor holds the latch.
+			if (static_cast<u32>(p.sprint_latch) < kControlCount)
+			{
+				const bool click = l.thumbstick_click;
+				const float mag = std::sqrt(lx * lx + ly * ly);
+				if (sprint_blocked)
+				{
+					st.sprint = false;
+				}
+				else if (!st.sprint)
+				{
+					// A fresh click only: a click held through a block, or from before the push, doesn't latch.
+					if (click && !st.click_prev && mag > kSprintOn)
+					{
+						st.sprint = true;
+						st.centred_s = 0.0f;
+					}
+				}
+				else if (mag > kSprintHold)
+				{
+					st.centred_s = 0.0f;
+				}
+				else
+				{
+					st.centred_s += dt;
+					if (st.centred_s >= kSprintCentredS)
+						st.sprint = false;
+				}
+				st.click_prev = click;
+				if (st.sprint)
+				{
+					// ORed into the latch control: one binding (ButtonB: Cross) carries both, so a tap of B can't
+					// release the run the way two bindings on one PS2 button would (the latest change wins there).
+					At(v, ControlId::LeftStickClick) = 0.0f;
+					At(v, p.sprint_latch) = 1.0f;
+				}
+			}
+			return v;
+		}
 	}
 
 	void SetMoveStickSuppressed(int hand)
@@ -1045,50 +1177,164 @@ namespace VR::SpatialControls
 		s_suppressed_move_hand.store(hand, std::memory_order_release);
 	}
 
-	ControlValues ComposeGamepad(const VRInputSnapshot& snapshot)
+	void SetSprintBlocked(bool blocked)
 	{
-		ControlValues v{};
-		if (snapshot.generation == 0 || !snapshot.actions_active)
+		s_sprint_blocked.store(blocked, std::memory_order_release);
+	}
+
+	ControlValues ComposeGamepad(const VRInputSnapshot& snapshot, const GamepadParams& p, GamepadState& st, float dt)
+	{
+		return ComposeGamepadWith(snapshot, p, st, dt, s_suppressed_move_hand.load(std::memory_order_acquire),
+			s_sprint_blocked.load(std::memory_order_acquire));
+	}
+
+	bool SelfTestGamepad(const char** failed)
+	{
+		const char* first = nullptr;
+		const auto check = [&first](bool ok, const char* name) {
+			if (!ok && !first)
+				first = name;
+		};
+		const auto on = [](const ControlValues& v, ControlId id) { return v[static_cast<u32>(id)] > 0.5f; };
+		VRInputSnapshot s;
+		s.generation = 1;
+		s.actions_active = true;
+		VRHandState& l = s.hands[VRInputSnapshot::LEFT];
+		VRHandState& r = s.hands[VRInputSnapshot::RIGHT];
+		// `polls` polls at 60 Hz; the last one's values.
+		const auto run = [&s](const GamepadParams& p, GamepadState& st, int polls, bool blocked, int suppressed) {
+			ControlValues v{};
+			for (int i = 0; i < polls; ++i)
+				v = ComposeGamepadWith(s, p, st, 1.0f / 60.0f, suppressed, blocked);
 			return v;
-		const VRHandState& l = snapshot.hands[VRInputSnapshot::LEFT];
-		const VRHandState& r = snapshot.hands[VRInputSnapshot::RIGHT];
-		const auto button = [](bool b) { return b ? 1.0f : 0.0f; };
-		const auto axis = [](float f) { return std::clamp(Finite(f), -1.0f, 1.0f); };
-		At(v, ControlId::ButtonA) = button(r.a);
-		At(v, ControlId::ButtonB) = button(r.b);
-		// X, Y and Menu are on the left Touch controller but the right Steam Frame one.
-		At(v, ControlId::ButtonX) = button(l.x || r.x);
-		At(v, ControlId::ButtonY) = button(l.y || r.y);
-		At(v, ControlId::Menu) = button(l.menu || r.menu);
-		At(v, ControlId::LeftStickClick) = button(l.thumbstick_click);
-		At(v, ControlId::RightStickClick) = button(r.thumbstick_click);
-		At(v, ControlId::LeftTrigger) = Clamp01(Finite(l.trigger));
-		At(v, ControlId::RightTrigger) = Clamp01(Finite(r.trigger));
-		At(v, ControlId::LeftGrip) = Clamp01(Finite(l.grip));
-		At(v, ControlId::RightGrip) = Clamp01(Finite(r.grip));
-		const int suppressed = s_suppressed_move_hand.load(std::memory_order_acquire);
-		float lx = 0.0f, ly = 0.0f, rx = 0.0f, ry = 0.0f;
-		if (suppressed != VRInputSnapshot::LEFT)
-			GamepadStick(l.thumbstick_x, l.thumbstick_y, lx, ly);
-		if (suppressed != VRInputSnapshot::RIGHT)
-			GamepadStick(r.thumbstick_x, r.thumbstick_y, rx, ry);
-		At(v, ControlId::LeftStickX) = lx;
-		At(v, ControlId::LeftStickY) = ly;
-		At(v, ControlId::RightStickX) = rx;
-		At(v, ControlId::RightStickY) = ry;
-		static constexpr float kPressAt = 0.5f;
-		At(v, ControlId::LeftTriggerPress) = button(At(v, ControlId::LeftTrigger) >= kPressAt);
-		At(v, ControlId::RightTriggerPress) = button(At(v, ControlId::RightTrigger) >= kPressAt);
-		At(v, ControlId::LeftGripPress) = button(At(v, ControlId::LeftGrip) >= kPressAt);
-		At(v, ControlId::RightGripPress) = button(At(v, ControlId::RightGrip) >= kPressAt);
-		At(v, ControlId::DpadUp) = button(l.dpad_up || r.dpad_up);
-		At(v, ControlId::DpadDown) = button(l.dpad_down || r.dpad_down);
-		At(v, ControlId::DpadLeft) = button(l.dpad_left || r.dpad_left);
-		At(v, ControlId::DpadRight) = button(l.dpad_right || r.dpad_right);
-		At(v, ControlId::LeftBumper) = button(l.bumper);
-		At(v, ControlId::RightBumper) = button(r.bumper);
-		At(v, ControlId::View) = button(l.view || r.view);
-		return v;
+		};
+		constexpr int kNone = -1;
+
+		// Without sprintLatch the click and B pass straight through, as before the latch existed.
+		{
+			const GamepadParams off{};
+			GamepadState st;
+			l.thumbstick_y = 1.0f;
+			l.thumbstick_click = true;
+			ControlValues v = run(off, st, 3, false, kNone);
+			check(on(v, ControlId::LeftStickClick) && !on(v, ControlId::ButtonB), "no sprintLatch: the click passes, B untouched");
+			check(std::fabs(v[static_cast<u32>(ControlId::LeftStickY)] - 1.0f) < 1.0e-4f, "no sprintLatch: the stick passes");
+			l.thumbstick_click = false;
+			v = run(off, st, 3, false, kNone);
+			check(!on(v, ControlId::LeftStickClick) && !on(v, ControlId::ButtonB) && !st.sprint, "no sprintLatch: nothing held after the click");
+			r.b = true;
+			v = run(off, st, 1, false, kNone);
+			check(on(v, ControlId::ButtonB), "no sprintLatch: B passes");
+			r.b = false;
+			v = run(off, st, 1, false, kNone);
+			check(!on(v, ControlId::ButtonB), "no sprintLatch: B lets go");
+		}
+
+		// sprintLatch: ButtonB.
+		{
+			GamepadParams p;
+			p.sprint_latch = ControlId::ButtonB;
+			GamepadState st;
+			l = VRHandState{};
+			r = VRHandState{};
+			l.thumbstick_y = 1.0f;
+			ControlValues v = run(p, st, 2, false, kNone);
+			check(!on(v, ControlId::ButtonB), "latch: pushing alone does not run");
+			l.thumbstick_click = true;
+			v = run(p, st, 1, false, kNone);
+			check(on(v, ControlId::ButtonB) && !on(v, ControlId::LeftStickClick), "latch: a click while pushed holds B, the click is not passed");
+			l.thumbstick_click = false;
+			v = run(p, st, 60, false, kNone);
+			check(on(v, ControlId::ButtonB), "latch: stays on while pushed");
+			r.b = true;
+			run(p, st, 3, false, kNone);
+			r.b = false;
+			v = run(p, st, 3, false, kNone);
+			check(on(v, ControlId::ButtonB), "latch: a tap of B does not release it");
+			l.thumbstick_y = 0.4f; // 0.33 after the deadzone: past the 0.25 hold
+			v = run(p, st, 30, false, kNone);
+			check(on(v, ControlId::ButtonB), "latch: holds with the stick past a quarter");
+			l.thumbstick_y = 0.0f;
+			v = run(p, st, 6, false, kNone);
+			check(on(v, ControlId::ButtonB), "latch: survives 0.1 s centred");
+			v = run(p, st, 6, false, kNone);
+			check(!on(v, ControlId::ButtonB) && !st.sprint, "latch: drops after 0.15 s centred");
+
+			l.thumbstick_click = true; // stick centred
+			v = run(p, st, 2, false, kNone);
+			check(!on(v, ControlId::ButtonB) && on(v, ControlId::LeftStickClick), "latch: a click with the stick centred does not latch");
+			l.thumbstick_y = 1.0f; // still clicked, now pushed: no fresh click
+			v = run(p, st, 2, false, kNone);
+			check(!on(v, ControlId::ButtonB), "latch: a click held from before the push does not latch");
+			l.thumbstick_click = false;
+			run(p, st, 1, false, kNone);
+
+			l.thumbstick_click = true;
+			run(p, st, 1, false, kNone);
+			l.thumbstick_click = false;
+			v = run(p, st, 1, true, kNone);
+			check(!on(v, ControlId::ButtonB) && !st.sprint, "latch: drops at once when blocked");
+			v = run(p, st, 3, false, kNone);
+			check(!on(v, ControlId::ButtonB), "latch: unblocking does not latch again");
+			l.thumbstick_click = true;
+			v = run(p, st, 1, true, kNone);
+			check(!on(v, ControlId::ButtonB), "latch: cannot latch while blocked");
+			l.thumbstick_click = false;
+			run(p, st, 1, false, kNone);
+
+			GamepadState walking;
+			run(p, walking, 1, false, VRInputSnapshot::LEFT);
+			l.thumbstick_click = true;
+			v = run(p, walking, 1, false, VRInputSnapshot::LEFT);
+			check(!on(v, ControlId::ButtonB), "latch: a stick the camera driver walks with does not latch");
+			l.thumbstick_click = false;
+		}
+
+		// Ad-lib flicks.
+		{
+			const GamepadParams off{};
+			GamepadState st;
+			l = VRHandState{};
+			r = VRHandState{};
+			r.thumbstick_y = 1.0f;
+			ControlValues v = run(off, st, 1, false, kNone);
+			check(on(v, ControlId::RightStickUp) && !on(v, ControlId::RightStickDown), "flick: straight up presses RightStickUp");
+			r.thumbstick_y = 0.0f;
+			v = run(off, st, 3, false, kNone);
+			check(on(v, ControlId::RightStickUp), "flick: a quick flick is held for the minimum press");
+			v = run(off, st, 9, false, kNone);
+			check(!on(v, ControlId::RightStickUp), "flick: lets go after 0.12 s");
+			r.thumbstick_x = 0.3f;
+			r.thumbstick_y = -0.9f;
+			v = run(off, st, 1, false, kNone);
+			check(on(v, ControlId::RightStickDown) && !on(v, ControlId::RightStickUp), "flick: down within 2:1 presses RightStickDown");
+			r = VRHandState{};
+			v = run(off, st, 12, false, kNone);
+			check(!on(v, ControlId::RightStickDown), "flick: down lets go");
+			r.thumbstick_x = 0.7f;
+			r.thumbstick_y = 0.7f;
+			v = run(off, st, 3, false, kNone);
+			check(!on(v, ControlId::RightStickUp) && !on(v, ControlId::RightStickDown), "flick: a diagonal turns, no ad-lib");
+			r.thumbstick_x = 0.5f;
+			r.thumbstick_y = 0.9f;
+			v = run(off, st, 3, false, kNone);
+			check(!on(v, ControlId::RightStickUp), "flick: needs twice as far up as sideways");
+			r.thumbstick_x = 0.0f;
+			r.thumbstick_y = 0.7f;
+			v = run(off, st, 3, false, kNone);
+			check(!on(v, ControlId::RightStickUp), "flick: needs 0.75");
+			r = VRHandState{};
+			run(off, st, 1, false, kNone);
+			r.thumbstick_y = 1.0f;
+			v = run(off, st, 1, false, VRInputSnapshot::RIGHT);
+			check(!on(v, ControlId::RightStickUp), "flick: not while the right stick is suppressed");
+			v = run(off, st, 1, false, kNone);
+			check(on(v, ControlId::RightStickUp), "flick: presses once the stick is no longer suppressed");
+		}
+
+		if (failed)
+			*failed = first;
+		return first == nullptr;
 	}
 
 	bool HeadAnchor(const VRInputSnapshot& snapshot, ZoneState& st, Anchor* out)

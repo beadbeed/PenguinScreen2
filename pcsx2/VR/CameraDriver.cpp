@@ -8,6 +8,7 @@
 #include "VR/PadLook.h"
 #include "VR/VRManager.h"
 #include "VR/SplitState.h"
+#include "VR/VRInput.h"
 #include "VR/VRInputState.h"
 #include "VR/VRProfileDB.h"
 
@@ -371,6 +372,11 @@ namespace VR::CameraDriver
 			ran = true;
 			RunMatrixSelfTest();
 			RunHookSelfTest();
+			const char* gamepad_fail = nullptr;
+			if (SpatialControls::SelfTestGamepad(&gamepad_fail))
+				Console.WriteLn("(VR) Gamepad self-test: passed (sprint latch, ad-lib flicks, unchanged without sprintLatch).");
+			else
+				Console.WriteLn("(VR) Gamepad self-test FAIL: %s", gamepad_fail ? gamepad_fail : "?");
 		}
 
 		u32 s_delta_crc = 0;
@@ -796,6 +802,36 @@ namespace VR::CameraDriver
 			return GuardListPass(cam.guards);
 		}
 
+		u32 ReadSized(u32 address, u8 width)
+		{
+			switch (width)
+			{
+				case 1: return memRead8(address);
+				case 2: return memRead16(address);
+				default: return memRead32(address);
+			}
+		}
+
+		bool RecordChecksPass(const std::vector<ProfileDB::RecordCheck>& checks, u32 base)
+		{
+			for (const ProfileDB::RecordCheck& c : checks)
+			{
+				const s64 a = static_cast<s64>(base) + c.offset;
+				if (a < 0 || a + c.width > static_cast<s64>(Ps2MemSize::MainRam) || (a % c.width) != 0)
+					return false;
+				if ((ReadSized(static_cast<u32>(a), c.width) == c.equals) == c.not_equals)
+					return false;
+			}
+			return true;
+		}
+
+		// Online-safe: the VR setting, or any time the network adapter is on. Nothing that changes what the
+		// game simulates (code patches, writes to the character) is done then.
+		bool OnlineSafeNow()
+		{
+			return EmuConfig.VR.OnlineSafe || EmuConfig.DEV9.EthEnable;
+		}
+
 		bool s_silence_applied = false;
 		u32 s_silence_crc = 0;
 		std::vector<u8> s_silence_patched; // per entry: the word holds value_on because of us
@@ -806,11 +842,14 @@ namespace VR::CameraDriver
 		// is patched again, and a word holding neither value (other code is resident) is left alone.
 		// An entry with a `when` guard is only touched while that guard passes. Only words we patched
 		// are ever restored, except for a one-shot repair of guarded entries after a savestate load.
-		void ApplySilence(const ProfileDB::CameraProfile& cam, u32 crc)
+		// An entry with activeWhen (checks on the base record) or offlineOnly is only patched while those
+		// hold; otherwise the word is put back at once (e.g. the aim servo runs again when the gun is lowered).
+		void ApplySilence(const ProfileDB::CameraProfile& cam, u32 crc, const std::optional<u32>& base)
 		{
 			if (s_silence_crc != crc || s_silence_patched.size() != cam.silence.size())
 				s_silence_patched.assign(cam.silence.size(), 0);
 			size_t patched = 0;
+			size_t restored = 0;
 			for (size_t i = 0; i < cam.silence.size(); i++)
 			{
 				const ProfileDB::CameraSilence& sil = cam.silence[i];
@@ -822,6 +861,18 @@ namespace VR::CameraDriver
 				if (sil.value_on == sil.value_off)
 					continue;
 				const u32 cur = static_cast<u32>(memRead32(sil.ee_address));
+				const bool active = !(sil.offline_only && OnlineSafeNow()) &&
+				                    (sil.active_when.empty() || (base.has_value() && RecordChecksPass(sil.active_when, base.value())));
+				if (!active)
+				{
+					if (cur == sil.value_on && (s_silence_patched[i] || s_silence_repair))
+					{
+						memWrite32(sil.ee_address, sil.value_off);
+						restored++;
+					}
+					s_silence_patched[i] = 0;
+					continue;
+				}
 				if (cur == sil.value_off)
 				{
 					memWrite32(sil.ee_address, sil.value_on);
@@ -833,6 +884,8 @@ namespace VR::CameraDriver
 			}
 			if (patched > 0)
 				DevCon.WriteLn("(VR) CameraDriver: game camera writer silenced (%zu patch(es)).", patched);
+			if (restored > 0)
+				DevCon.WriteLn("(VR) CameraDriver: game code restored while its silence is inactive (%zu patch(es)).", restored);
 			s_silence_applied = true;
 			s_silence_crc = crc;
 			s_silence_repair = false;
@@ -978,6 +1031,7 @@ namespace VR::CameraDriver
 		bool s_snap_ready = false;
 		std::chrono::steady_clock::time_point s_turn_last{};
 		bool s_aim_moving = false; // this vsync's ApplyLookAt is moving the character from the stick
+		bool s_weapon_raised = false; // this vsync's ApplyLookAt saw the aim stance (telemetry)
 
 		float WrapPi(float a)
 		{
@@ -1013,6 +1067,12 @@ namespace VR::CameraDriver
 			w = ow;
 		}
 
+		u64 NowMs()
+		{
+			return static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count());
+		}
+
 		// Seconds since the previous call, for smooth turning; 0 after a gap (pause, disarm, first call).
 		float TurnDt()
 		{
@@ -1020,16 +1080,6 @@ namespace VR::CameraDriver
 			const float dt = std::chrono::duration<float>(now - s_turn_last).count();
 			s_turn_last = now;
 			return (dt > 0.0f && dt < 0.1f) ? dt : 0.0f;
-		}
-
-		u32 ReadSized(u32 address, u8 width)
-		{
-			switch (width)
-			{
-				case 1: return memRead8(address);
-				case 2: return memRead16(address);
-				default: return memRead32(address);
-			}
 		}
 
 		void WriteSized(u32 address, u8 width, u32 value)
@@ -1042,32 +1092,50 @@ namespace VR::CameraDriver
 			}
 		}
 
-		bool RecordChecksPass(const std::vector<ProfileDB::CameraLookAt::RecordCheck>& checks, u32 base)
-		{
-			for (const ProfileDB::CameraLookAt::RecordCheck& c : checks)
-			{
-				const s64 a = static_cast<s64>(base) + c.offset;
-				if (a < 0 || a + c.width > static_cast<s64>(Ps2MemSize::MainRam) || (a % c.width) != 0)
-					return false;
-				if ((ReadSized(static_cast<u32>(a), c.width) == c.equals) == c.not_equals)
-					return false;
-			}
-			return true;
-		}
-
 		// What camera.lookAt wrote this vsync, for matching against the game's view matrix later.
 		struct LookAtWrite
 		{
 			float dir[3] = {0.0f, 0.0f, 1.0f};
 			float eye[3] = {0.0f, 0.0f, 0.0f};
-			float base_yaw = 0.0f; // game yaw minus yawSign * the head's room yaw (base yaw - yawSign * recenter yaw)
+			float base_yaw = 0.0f; // game yaw minus yawSign * the head's room yaw (base yaw - yawSign * recenter yaw),
+			                       // of the camera as written (ahead of the true one while lookAt.predict leads a turn)
 			float yaw_sign = 1.0f;
+			u64 ms = 0; // when it was written (NowMs)
 		};
 
 		// The base yaw camera.lookAt is using right now, for the compositor: a frame rendered at another
 		// base yaw (stick turning since) is turned by the difference so artificial turns look as smooth as
 		// head turns instead of stepping at the game's frame rate.
 		std::atomic<float> s_base_yaw_now{0.0f};
+
+		// When s_base_yaw_now was last written (NowMs).
+		std::atomic<u64> s_base_yaw_ms{0};
+
+		// Prediction horizons in seconds (< 0 until the first sample), measured on the GS thread in RenderPose
+		// as each frame is about to be shown and smoothed:
+		// - s_predict_h: how long after its head pose was taken (HeadPose publish_ms) a frame is shown. The
+		//   runtime's own lead to display time applies to both ends and cancels out. For head prediction.
+		// - s_predict_stick_h: how long after the frame's lookAt write the latest write is. The compositor turns
+		//   a frame by its base yaw against the latest write's, so this is the lead that leaves a smooth stick
+		//   turn's frames needing no turning. It comes out about one vsync shorter than s_predict_h: the wait
+		//   from a pose's publish to the vsync that uses it and from the latest vsync to the present add up to one.
+		std::atomic<float> s_predict_h{-1.0f};
+		std::atomic<float> s_predict_stick_h{-1.0f};
+		constexpr float kPredictMaxS = 0.12f;
+		float s_prediction_s = 0.0f; // the stick lead this vsync's lookAt write used (telemetry)
+
+		float PredictHorizon(const std::atomic<float>& h)
+		{
+			const float v = h.load(std::memory_order_relaxed);
+			return (v > 0.0f) ? std::min(v, kPredictMaxS) : 0.0f;
+		}
+
+		// GS thread only (one writer), so load + store is enough.
+		void FoldHorizonSample(std::atomic<float>& h, float sample)
+		{
+			const float v = h.load(std::memory_order_relaxed);
+			h.store((v < 0.0f) ? sample : (v + 0.05f * (sample - v)), std::memory_order_relaxed);
+		}
 
 		// camera.lookAt: put the game's eye/target camera at the character's head. Game yaw 0 faces
 		// +Z, forward = (sin y, cos y) on the x/z floor plane, y up. Head yaw (OpenXR, CCW positive) is
@@ -1078,6 +1146,7 @@ namespace VR::CameraDriver
 			const HeadPose::Snapshot& pose, LookAtWrite* out)
 		{
 			s_aim_moving = false;
+			s_weapon_raised = false;
 			if (!base.has_value() || (!la.when.empty() && !GuardListPass(la.when)))
 				return false;
 			const s64 pa = static_cast<s64>(base.value()) + la.position_offset;
@@ -1111,6 +1180,7 @@ namespace VR::CameraDriver
 			if (want_input)
 				input = GetInputSnapshot();
 			const float turn_dt = TurnDt();
+			float stick_rate = 0.0f; // smooth stick turn in progress, game yaw radians per second
 			if (la.yaw_anchor)
 			{
 				if (!s_yaw_anchor_valid)
@@ -1123,7 +1193,10 @@ namespace VR::CameraDriver
 				}
 				if (la.snap_stick_hand >= 0 && input.actions_active)
 				{
-					const float sx = input.hands[la.snap_stick_hand].thumbstick_x;
+					// A mostly vertical push is an ad-lib flick (the Gamepad's RightStickUp/Down), not a turn.
+					const float stick_x = input.hands[la.snap_stick_hand].thumbstick_x;
+					const float stick_y = input.hands[la.snap_stick_hand].thumbstick_y;
+					const float sx = (std::abs(stick_y) > std::abs(stick_x)) ? 0.0f : stick_x;
 					// A right push turns the view right: -yawSign converts "clockwise" into game yaw.
 					const float dir = (sx > 0.0f) ? 1.0f : -1.0f;
 					if (smooth)
@@ -1134,6 +1207,7 @@ namespace VR::CameraDriver
 						{
 							const float rate = la.smooth_turn_deg_s * t * (0.5f + 0.5f * t);
 							s_yaw_anchor = WrapPi(s_yaw_anchor - la.yaw_sign * dir * rate * turn_dt * (PI_F / 180.0f));
+							stick_rate = -la.yaw_sign * dir * rate * (PI_F / 180.0f);
 						}
 						s_snap_ready = false;
 					}
@@ -1151,9 +1225,22 @@ namespace VR::CameraDriver
 				base_yaw = s_yaw_anchor;
 			}
 
-			const float yaw = base_yaw + la.yaw_sign * e.yaw;
+			// lookAt.predict: the camera is written where a smooth stick turn will have taken the view by the
+			// time this frame is on screen, so the turn's leading edge shows no black band. Only the camera
+			// leads: the heading, aim and walking below keep the true yaw.
+			float cam_base = base_yaw;
+			if (la.predict > 0.0f)
+			{
+				const float horizon = PredictHorizon(s_predict_stick_h);
+				s_prediction_s = horizon;
+				if (stick_rate != 0.0f && horizon > 0.0f)
+					cam_base = WrapPi(base_yaw + stick_rate * horizon);
+			}
+
+			const float yaw_true = base_yaw + la.yaw_sign * e.yaw;
+			const float yaw_cam = cam_base + la.yaw_sign * e.yaw;
 			const float pitch = std::clamp(la.pitch_sign * e.pitch, -1.45f, 1.45f);
-			const float sy = std::sin(yaw), cy = std::cos(yaw);
+			const float sy = std::sin(yaw_cam), cy = std::cos(yaw_cam);
 			const float sp = std::sin(pitch), cp = std::cos(pitch);
 
 			float eye[3] = {p[0] + la.eye_forward * sy, p[1] + la.eye_height, p[2] + la.eye_forward * cy};
@@ -1170,12 +1257,12 @@ namespace VR::CameraDriver
 				const float rs = std::sin(s_ref_yaw), rc = std::cos(s_ref_yaw);
 				const float fwd = -dx * rs - dz * rc;
 				const float right = dx * rc - dz * rs;
-				// Game: forward at base_yaw; "right" is a quarter turn clockwise, i.e. -yawSign * 90 deg.
-				const float right_yaw = base_yaw - la.yaw_sign * (PI_F * 0.5f);
+				// Game: forward at the camera's base yaw; "right" is a quarter turn clockwise, i.e. -yawSign * 90 deg.
+				const float right_yaw = cam_base - la.yaw_sign * (PI_F * 0.5f);
 				const float u = la.units_per_meter;
-				eye[0] += u * (fwd * std::sin(base_yaw) + right * std::sin(right_yaw));
+				eye[0] += u * (fwd * std::sin(cam_base) + right * std::sin(right_yaw));
 				eye[1] += u * dy;
-				eye[2] += u * (fwd * std::cos(base_yaw) + right * std::cos(right_yaw));
+				eye[2] += u * (fwd * std::cos(cam_base) + right * std::cos(right_yaw));
 			}
 
 			// Point-to-aim: while the stance says the weapon is raised, face where the aim hand points
@@ -1200,7 +1287,8 @@ namespace VR::CameraDriver
 						const EulerAngles h = QuaternionToEulerYXZ(aim.orientation_xyzw[0], aim.orientation_xyzw[1],
 							aim.orientation_xyzw[2], aim.orientation_xyzw[3]);
 						memWrite16(heading_addr, ToBinaryAngle(base_yaw + la.yaw_sign * WrapPi(h.yaw - s_ref_yaw)));
-						if (la.has_aim_pitch)
+						// Online-safe: no pitch write. The servo is not silenced then and would fight it every frame.
+						if (la.has_aim_pitch && !OnlineSafeNow())
 						{
 							const s64 pa2 = static_cast<s64>(base.value()) + la.aim_pitch_offset;
 							if (pa2 >= 0 && pa2 + 2 <= static_cast<s64>(Ps2MemSize::MainRam))
@@ -1215,14 +1303,14 @@ namespace VR::CameraDriver
 			}
 			// The first-person hands show the pistol in the right hand while the weapon is raised.
 			HandModel::SetGunHeld(weapon_raised);
+			s_weapon_raised = weapon_raised;
 
 			// Walk while aiming: with the weapon up Outbreak only turns and tilts the aim with the stick. The
 			// body is hidden in first person, so the move stick shifts the character's position directly
 			// (the game's collision still pushes it back out of walls), and the game doesn't get that stick.
 			// Stick up goes where the camera looks, like normal walking.
 			// Online-safe (the setting, or any time the network adapter is on): no moving the character.
-			const bool online_safe = EmuConfig.VR.OnlineSafe || EmuConfig.DEV9.EthEnable;
-			if (weapon_raised && la.aim_move_speed > 0.0f && la.aim_move_hand >= 0 && !online_safe)
+			if (weapon_raised && la.aim_move_speed > 0.0f && la.aim_move_hand >= 0 && !OnlineSafeNow())
 			{
 				s_aim_moving = true;
 				const float mx = input.hands[la.aim_move_hand].thumbstick_x;
@@ -1233,9 +1321,9 @@ namespace VR::CameraDriver
 				{
 					const float speed = la.aim_move_speed * std::min((mag - kDeadzone) / (0.95f - kDeadzone), 1.0f);
 					const float step = speed * turn_dt / mag;
-					const float move_right_yaw = yaw - la.yaw_sign * (PI_F * 0.5f);
-					const float nx = p[0] + step * (my * std::sin(yaw) + mx * std::sin(move_right_yaw));
-					const float nz = p[2] + step * (my * std::cos(yaw) + mx * std::cos(move_right_yaw));
+					const float move_right_yaw = yaw_true - la.yaw_sign * (PI_F * 0.5f);
+					const float nx = p[0] + step * (my * std::sin(yaw_true) + mx * std::sin(move_right_yaw));
+					const float nz = p[2] + step * (my * std::cos(yaw_true) + mx * std::cos(move_right_yaw));
 					if (std::isfinite(nx) && std::isfinite(nz))
 					{
 						memWrite32(static_cast<u32>(pa), std::bit_cast<u32>(nx));
@@ -1247,7 +1335,7 @@ namespace VR::CameraDriver
 			// Body follows view: standing idle with the stick centred, the character turns to face where the
 			// camera looks, so picking up, checking and opening things work on what the player looks at.
 			if (!la.body_follow.empty() && heading_addr != 0 && RecordChecksPass(la.body_follow, base.value()))
-				memWrite16(heading_addr, ToBinaryAngle(yaw));
+				memWrite16(heading_addr, ToBinaryAngle(yaw_true));
 
 			const float target[3] = {eye[0] + la.distance * sy * cp, eye[1] + la.distance * sp,
 				eye[2] + la.distance * cy * cp};
@@ -1269,13 +1357,18 @@ namespace VR::CameraDriver
 				memWrite32(la.roll_address, static_cast<u32>(roll));
 			}
 			// The game view is yaw_offset + yawSign * the head's room yaw: a stick turn and a recenter both change
-			// it, so frames already on their way are placed right across either.
+			// it, so frames already on their way are placed right across either. The frame records the offset it
+			// was rendered at (ahead of the true one with lookAt.predict) and the compositor compares it with the
+			// true offset at display, so a predicted frame needs about no turning when it is shown.
 			const float yaw_offset = WrapPi(base_yaw - la.yaw_sign * s_ref_yaw);
+			const u64 now_ms = NowMs();
 			s_base_yaw_now.store(yaw_offset, std::memory_order_release);
+			s_base_yaw_ms.store(now_ms, std::memory_order_release);
 			if (out)
 			{
-				out->base_yaw = yaw_offset;
+				out->base_yaw = WrapPi(cam_base - la.yaw_sign * s_ref_yaw);
 				out->yaw_sign = la.yaw_sign;
+				out->ms = now_ms;
 				out->dir[0] = sy * cp;
 				out->dir[1] = sp;
 				out->dir[2] = cy * cp;
@@ -1364,12 +1457,6 @@ namespace VR::CameraDriver
 		bool s_fov_saved = false;
 		u32 s_fov_saved_raw = 0;
 
-		u64 NowMs()
-		{
-			return static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
-				std::chrono::steady_clock::now().time_since_epoch()).count());
-		}
-
 		struct StampedPose
 		{
 			u64 ms = 0;
@@ -1406,6 +1493,7 @@ namespace VR::CameraDriver
 			HeadPose::Snapshot pose;
 			float base_yaw = 0.0f;
 			float yaw_sign = 1.0f;
+			u64 write_ms = 0; // when the write the frame was built from was made (NowMs)
 		};
 		std::array<FramePose, 8> s_frame_poses{};
 		std::array<u32, 8> s_frame_age{}; // how many writes back the match was (for the sync log)
@@ -1421,6 +1509,7 @@ namespace VR::CameraDriver
 		std::mutex s_gs_render_mutex;
 		FramePose s_gs_render_pose;
 		bool s_gs_render_valid = false;
+		u32 s_gs_render_shows = 0; // how many times RenderPose has handed out the current pose
 
 		void PublishRenderPose(bool valid, const FramePose& pose)
 		{
@@ -1431,6 +1520,7 @@ namespace VR::CameraDriver
 				std::lock_guard<std::mutex> lock(s_gs_render_mutex);
 				s_gs_render_valid = valid;
 				s_gs_render_pose = pose;
+				s_gs_render_shows = 0;
 			});
 		}
 
@@ -1498,7 +1588,7 @@ namespace VR::CameraDriver
 			// Within about 3 deg and 30 units; anything else is a frame the game built from its own camera.
 			if (!hit || !(best < 0.0025f))
 				return;
-			s_frame_poses[s_frame_next] = FramePose{hit->pose, hit->w.base_yaw, hit->w.yaw_sign};
+			s_frame_poses[s_frame_next] = FramePose{hit->pose, hit->w.base_yaw, hit->w.yaw_sign, hit->w.ms};
 			s_frame_age[s_frame_next] = hit_age;
 			s_frame_next = (s_frame_next + 1) % s_frame_poses.size();
 			s_frame_count = std::min(s_frame_count + 1, s_frame_poses.size());
@@ -1565,7 +1655,39 @@ namespace VR::CameraDriver
 			p.orientation_y = sy * cp;
 			p.orientation_z = -sy * sp;
 			p.valid = true;
+			p.publish_ms = NowMs(); // taken now, so the prediction horizon measures from here
 			return p;
+		}
+
+		// Telemetry: taken on the CPU thread as Apply() leaves, read from any thread (PINE's).
+		std::mutex s_telemetry_mutex;
+		Telemetry s_telemetry;
+		DisarmReason s_disarm_reason = DisarmReason::NoVM;
+		bool s_pause_hit = false;
+		bool s_test_head = false;
+		bool s_online_safe = false;
+
+		void PublishTelemetry()
+		{
+			Telemetry t;
+			t.vsync = s_vsync_counter;
+			t.armed = s_armed_logged;
+			t.disarm_reason = s_armed_logged ? DisarmReason::Armed : s_disarm_reason;
+			t.guard_fail_vsyncs = s_guard_fail_vsyncs;
+			t.look_at_active = s_lookat_active.load(std::memory_order_relaxed);
+			t.pause_when_hit = s_armed_logged && s_pause_hit;
+			t.weapon_raised = s_armed_logged && s_weapon_raised;
+			t.aim_moving = s_armed_logged && s_aim_moving;
+			t.yaw_anchor_valid = s_yaw_anchor_valid;
+			t.yaw_anchor = s_yaw_anchor;
+			t.base_yaw_now = s_base_yaw_now.load(std::memory_order_relaxed);
+			t.match_age = (s_frame_count > 0) ? s_frame_age[(s_frame_next + s_frame_age.size() - 1) % s_frame_age.size()] : 0;
+			t.frames_matched = static_cast<u32>(s_frame_seq);
+			t.online_safe = s_online_safe;
+			t.test_head = s_test_head;
+			t.prediction_ms = s_armed_logged ? s_prediction_s * 1000.0f : 0.0f;
+			std::lock_guard<std::mutex> lock(s_telemetry_mutex);
+			s_telemetry = t;
 		}
 	}
 
@@ -1616,8 +1738,19 @@ namespace VR::CameraDriver
 
 	void Apply()
 	{
+		// Telemetry is taken on every way out, so a reader always sees this vsync's outcome.
+		struct PublishOnExit
+		{
+			~PublishOnExit() { PublishTelemetry(); }
+		};
+		PublishOnExit publish_on_exit;
+
 		s_vsync_counter++;
 		MaybeRunSelfTest();
+		s_pause_hit = false;
+		s_test_head = false;
+		s_prediction_s = 0.0f;
+		s_online_safe = OnlineSafeNow();
 
 		const bool switched_on = EffectiveVREnabled(EmuConfig.VR.Enable) && EmuConfig.VR.HeadCamera &&
 		                         !SplitState::Active();
@@ -1626,8 +1759,10 @@ namespace VR::CameraDriver
 		const bool vm_live = (vm_state == VMState::Running || vm_state == VMState::Paused);
 		if (!vm_live)
 		{
+			s_disarm_reason = DisarmReason::NoVM;
 			SetLookAtActive(false);
 			SpatialControls::SetMoveStickSuppressed(-1);
+			SpatialControls::SetSprintBlocked(false);
 			RestoreHolds(nullptr, false);
 			s_written_count = 0;
 			s_frame_count = 0;
@@ -1653,8 +1788,10 @@ namespace VR::CameraDriver
 		const ProfileDB::Profile* profile = ProfileDB::Lookup(VMManager::GetDiscSerial(), crc);
 		if (!profile || !profile->camera.has_value())
 		{
+			s_disarm_reason = DisarmReason::NoProfile;
 			SetLookAtActive(false);
 			SpatialControls::SetMoveStickSuppressed(-1);
+			SpatialControls::SetSprintBlocked(false); // no first person here to keep the latch out of
 			RestoreHolds(nullptr, false);
 			ResetRenderSync();
 			s_fov_saved = false;
@@ -1674,8 +1811,17 @@ namespace VR::CameraDriver
 		}
 		const ProfileDB::CameraProfile& cam = profile->camera.value();
 
+		// The env fake head first, then a scripted head from PINE test input, then the headset. The test
+		// head also reaches the input snapshot, so the zones and SpatialControls::HeadAnchor see it too.
 		std::optional<HeadPose::Snapshot> fake = MaybeFakePose();
-		const HeadPose::Snapshot pose = fake.has_value() ? fake.value() : HeadPose::Get();
+		HeadPose::Snapshot pose_in;
+		if (fake.has_value())
+			pose_in = fake.value();
+		else if (XRInput::TestHeadPose(&pose_in))
+			s_test_head = true;
+		else
+			pose_in = HeadPose::Get();
+		const HeadPose::Snapshot pose = pose_in;
 
 		if (GuardsPass(cam))
 			s_guard_fail_vsyncs = 0;
@@ -1684,6 +1830,11 @@ namespace VR::CameraDriver
 		const bool guards_hold = (s_guard_fail_vsyncs == 0) ||
 		                         (s_armed_logged && s_guard_fail_vsyncs <= cam.disarm_after_vsyncs);
 		const bool armed = switched_on && (vm_state == VMState::Running) && pose.valid && guards_hold;
+		s_disarm_reason = armed                          ? DisarmReason::Armed :
+		                  !switched_on                   ? DisarmReason::SwitchedOff :
+		                  (vm_state != VMState::Running) ? DisarmReason::NotRunning :
+		                  !pose.valid                    ? DisarmReason::NoHeadPose :
+		                                                   DisarmReason::GuardFailed;
 
 		if (armed != s_armed_logged)
 		{
@@ -1710,7 +1861,10 @@ namespace VR::CameraDriver
 		{
 			SetLookAtActive(false);
 			SpatialControls::SetMoveStickSuppressed(-1);
+			// First person is off (a door, cutscene, pause): a latched run must not hold its button into it.
+			SpatialControls::SetSprintBlocked(cam.look_at.has_value());
 			s_aim_moving = false;
+			s_weapon_raised = false;
 			// While the VM is paused nothing can change; holds keep their saved originals for the resume.
 			if (vm_state == VMState::Running)
 			{
@@ -1755,10 +1909,11 @@ namespace VR::CameraDriver
 			return;
 		}
 
-		ApplySilence(cam, crc);
+		// The base first: silence entries with activeWhen check the record it points at.
+		const std::optional<u32> base = GetBase(cam, crc);
+		ApplySilence(cam, crc, base);
 		ApplyCodeHooks(cam, crc);
 
-		const std::optional<u32> base = GetBase(cam, crc);
 		if (cam.base.has_value() && !base.has_value())
 		{
 			s_base_unresolved_vsyncs++;
@@ -1906,6 +2061,8 @@ namespace VR::CameraDriver
 				// A menu, the map or pause: the camera keeps its last view (its writers stay silenced) and the
 				// world screen shows the menu in front of the player.
 				s_aim_moving = false;
+				s_weapon_raised = false;
+				s_pause_hit = true;
 				ResetRenderSync();
 				SetLookAtActive(false);
 			}
@@ -1936,6 +2093,12 @@ namespace VR::CameraDriver
 			(cam.look_at.has_value() && s_aim_moving && s_lookat_active.load(std::memory_order_relaxed)) ?
 				static_cast<int>(cam.look_at->aim_move_hand) :
 				-1);
+		// The Gamepad's sprint latch holds Cross only while first person walks: it lets go as a menu, the item
+		// screen or a cutscene takes over (lookAt inactive), so Cross is never left held in them, and when the
+		// weapon is raised (walk-and-shoot moves the character itself; online-safe the game aims with the stick).
+		// Same grace as above: lookAt keeps its flag while the guard byte flickers, so the run isn't dropped then.
+		SpatialControls::SetSprintBlocked(cam.look_at.has_value() &&
+			(!s_lookat_active.load(std::memory_order_relaxed) || s_aim_moving || s_weapon_raised));
 
 		WriteCodeHookScratch(cam, euler, pose);
 
@@ -1971,6 +2134,9 @@ namespace VR::CameraDriver
 		s_hold_repair = true;
 		s_holds_after_load = true;
 		ResetRenderSync();
+		// The loaded state has its own heading; `armed` does not toggle across a load, so without this the
+		// view would keep facing the way it did before the load.
+		s_yaw_anchor_valid = false;
 	}
 
 	bool RenderPose(HeadPose::Snapshot* out, float* turn_yaw)
@@ -1981,9 +2147,56 @@ namespace VR::CameraDriver
 		*out = s_gs_render_pose.pose;
 		// The game camera's yaw is base + yawSign * head yaw. Showing a frame rendered at base B_r while
 		// the base is now B_n means placing it yawSign * (B_r - B_n) further round in the room.
+		const float turn = s_gs_render_pose.yaw_sign *
+		                   WrapPi(s_gs_render_pose.base_yaw - s_base_yaw_now.load(std::memory_order_acquire));
 		if (turn_yaw)
-			*turn_yaw = s_gs_render_pose.yaw_sign *
-			            WrapPi(s_gs_render_pose.base_yaw - s_base_yaw_now.load(std::memory_order_acquire));
+			*turn_yaw = turn;
+
+		// Prediction horizons (see s_predict_h). Only the first few showings of a pose count: a view that stops
+		// changing (nothing moving) or a stall keeps showing the last pose, which only ages.
+		constexpr u32 kPredictMaxShows = 4;
+		constexpr u64 kPredictMaxSampleMs = 250;
+		const u64 now = NowMs();
+		if (s_gs_render_shows < kPredictMaxShows)
+		{
+			const u64 taken = s_gs_render_pose.pose.publish_ms;
+			if (taken != 0 && now >= taken && now - taken <= kPredictMaxSampleMs)
+				FoldHorizonSample(s_predict_h, static_cast<float>(now - taken) * 0.001f);
+			const u64 written = s_gs_render_pose.write_ms;
+			const u64 latest = s_base_yaw_ms.load(std::memory_order_acquire);
+			if (written != 0 && latest >= written && latest - written <= kPredictMaxSampleMs)
+				FoldHorizonSample(s_predict_stick_h, static_cast<float>(latest - written) * 0.001f);
+			s_gs_render_shows++;
+		}
+
+		// PCSX2_VR_SYNCLOG: once a second, how far frames still had to be turned when shown (about 0 through a
+		// smooth turn while lookAt.predict leads it) and the horizons.
+		static const bool s_synclog = (std::getenv("PCSX2_VR_SYNCLOG") != nullptr);
+		if (s_synclog)
+		{
+			static u64 s_log_ms = 0;
+			static float s_turn_sum = 0.0f, s_turn_abs = 0.0f, s_turn_max = 0.0f;
+			static u32 s_turn_n = 0;
+			if (s_log_ms == 0)
+				s_log_ms = now;
+			const float deg = turn * (180.0f / PI_F);
+			s_turn_sum += deg;
+			s_turn_abs += std::abs(deg);
+			s_turn_max = std::max(s_turn_max, std::abs(deg));
+			s_turn_n++;
+			if (now - s_log_ms >= 1000)
+			{
+				const float n = static_cast<float>(s_turn_n);
+				Console.WriteLn("(VR) predict: turn at display mean %+.2f deg (abs %.2f, max %.2f) over %u frame(s); "
+								"horizon %.0f ms (head pose to present), %.0f ms (stick lead).",
+					s_turn_sum / n, s_turn_abs / n, s_turn_max, s_turn_n,
+					std::max(s_predict_h.load(std::memory_order_relaxed), 0.0f) * 1000.0f,
+					std::max(s_predict_stick_h.load(std::memory_order_relaxed), 0.0f) * 1000.0f);
+				s_log_ms = now;
+				s_turn_sum = s_turn_abs = s_turn_max = 0.0f;
+				s_turn_n = 0;
+			}
+		}
 		return true;
 	}
 
@@ -2024,6 +2237,12 @@ namespace VR::CameraDriver
 	void RequestRecenter()
 	{
 		s_recenter_requested.store(true, std::memory_order_release);
+	}
+
+	Telemetry GetTelemetry()
+	{
+		std::lock_guard<std::mutex> lock(s_telemetry_mutex);
+		return s_telemetry;
 	}
 
 	bool SelfTestAssembler()

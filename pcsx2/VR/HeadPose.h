@@ -24,6 +24,10 @@ namespace VR::HeadPose
 		bool valid = false;
 
 		u64 frame = 0;
+
+		// Steady-clock milliseconds when the pose was taken (CameraDriver::SteadyNowMs's clock), so the GS
+		// thread can tell how old a frame's pose is by the time the frame is shown. 0 = unknown.
+		u64 publish_ms = 0;
 	};
 
 	void Publish(const Snapshot& pose);

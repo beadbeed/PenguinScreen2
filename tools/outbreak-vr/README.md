@@ -6,7 +6,8 @@ and test the first-person camera. They talk to a running PenguinScreen2 through 
 
 | File | What it does |
 |---|---|
-| `pine.py` | PINE client: read/write EE RAM, full 32 MB dump (~1.3 s, stalls the game briefly: offline only), savestates, MemWatch (fork's write/read watch, reports the writer PC and GPRs). |
+| `pine.py` | PINE client: read/write EE RAM, full 32 MB dump (~1.3 s, stalls the game briefly: offline only), savestates, MemWatch (fork's write/read watch, reports the writer PC and GPRs), scripted VR controllers (`fake_input`, `FakeController`; needs `PCSX2_VR_TEST_INPUT=1`, refused while online-safe or the network adapter is on) and first-person camera telemetry (`telemetry`). |
+| `vrtest.py` | Headset-free first-person test runner for File #1: drives the VR input path with scripted controllers and checks memory and telemetry (arm, smooth turn, holster, point-to-aim, walk-and-shoot and aim pitch with their online-safe variants, belt, body-follow, savestate yaw). PASS/FAIL per scenario, exit code, optional JUnit XML and HTML report with Headset Window captures. |
 | `vpad.py` / `padd.py` | Virtual Xbox 360 pad through ViGEm (`pip install vgamepad`); `padd.py` keeps one plugged in and takes JSON commands on 127.0.0.1:28100, so the game can be driven without focusing its window. |
 | `drive.py` | Find the emulator window, screenshot it in the background (PrintWindow), keyboard fallback. |
 | `act.py` | `act.py <name> '<json cmd>' ...`: send pad commands, then screenshot. |

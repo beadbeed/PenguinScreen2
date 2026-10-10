@@ -58,6 +58,16 @@ SLPM-65428:
       - { address: 0x5A9340, on: 0x00000000, off: 0x0C0D013C, when: [{ address: 0x540004, equals: 3 }] }   # door follow camera eye write
       - { address: 0x5A9410, on: 0x00000000, off: 0x0C0D013C, when: [{ address: 0x540004, equals: 3 }] }   # door follow camera eye write
       - { address: 0x630B00, on: 0x00000000, off: 0xA2220FAA, when: [{ address: 0x540004, equals: 3 }] }   # stick latch on camera-cut lines (would freeze gaze steering)
+      # Aim pitch (see lookAt.aim): the gun-elevation servo's easing calls and stores to +0xBC8 are NOP'd only while
+      # your weapon is raised (stance 2) and never online-safe, so the pitch written from the controller holds. They
+      # are put back as soon as the weapon is lowered. The servo is shared, so partners' aim pitch holds still while you aim.
+      - { address: 0x556968, on: 0x00000000, off: 0x0C0D1AEC, when: [{ address: 0x540004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: easing call
+      - { address: 0x556980, on: 0x00000000, off: 0x0C0D1AEC, when: [{ address: 0x540004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: easing call
+      - { address: 0x556998, on: 0x00000000, off: 0x0C0D1AEC, when: [{ address: 0x540004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: easing call
+      - { address: 0x5569CC, on: 0x00000000, off: 0xA6200BC8, when: [{ address: 0x540004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: sh zero, 0xBC8(s1)
+      - { address: 0x5569D8, on: 0x00000000, off: 0xA6230BC8, when: [{ address: 0x540004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: sh v1, 0xBC8(s1)
+      - { address: 0x5569E4, on: 0x00000000, off: 0xA6230BC8, when: [{ address: 0x540004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: sh v1, 0xBC8(s1)
+      - { address: 0x5569E8, on: 0x00000000, off: 0xA6200BC8, when: [{ address: 0x540004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: sh zero, 0xBC8(s1)
     lookAt:
       eye: 0x306338
       target: 0x306344
@@ -105,12 +115,19 @@ SLPM-65428:
       # back, 6-11 px at 0, 1 or 3, 10 px with the old 40 ms guess).
       viewMatrix: 0x3062E0
       syncFramesBack: 2
+      # A smooth stick turn is rendered ahead by how late frames reach the screen (measured, at most
+      # 120 ms), so its leading edge shows no black band; heading, aim and walking keep the true yaw.
+      # 0 turns it off. 0.8 is also the damping for head prediction (not used yet).
+      predict: 0.8
       # Weapon raised (stance 2, R1 or the hip holster): the character faces where the right
-      # controller points. Aim pitch (+0xBC8, needs the servo silenced) is not enabled yet.
+      # controller points, and aims as far up or down as it points (s16 +0xBC8, 0x10000 = 360 deg;
+      # positive is up, checked: stick up while aiming drives it toward +8192). Offline only: it needs the
+      # servo silenced (the offlineOnly silence entries above); online-safe the game keeps its own pitch.
+      # pitchClamp 8000 (about 44 deg) stays under the game's own 8192 clamp so its clamp stores don't fire.
       # Walk and shoot: with the weapon up the left stick moves you at 70 cm/s (where you look, like
       # walking); the game itself would only turn and tilt the aim with it. Checked on File #1: walls
       # still stop you (the game's collision pushes the position back out).
-      aim: { stance: 0x08, equals: 2, hand: right, move: 70, moveStick: left }
+      aim: { stance: 0x08, equals: 2, hand: right, move: 70, moveStick: left, pitch: 0xBC8, pitchSign: 1, pitchClamp: 8000 }
     fov: { address: 0x306380, encoding: f32, scale: 100.0 }   # vertical FOV, degrees (about 115 horizontal at 4:3)
   # VR controllers (only when launched with --vr; flat play is untouched).
   # A pad bound in Settings -> Controllers (e.g. a DualSense) keeps working alongside;
@@ -123,8 +140,13 @@ SLPM-65428:
   # Select (pause/options) stays off the controllers on purpose: online it doesn't pause.
   # Steam Frame: A, B, X, Y and Menu are on the right controller, the D-pad and View on the left.
   # Touch-style controllers: A/B right, X/Y and Menu left. Y (the top button) opens the map on both.
-  # The right stick turns the view (camera.lookAt), so it is not passed to the game: the PS2 right
-  # stick's up/down plays ad-lib shouts in Outbreak.
+  # The right stick turns the view (camera.lookAt), so it is not passed to the game as a stick. A quick
+  # flick of it straight up or down (RightStickUp/Down) presses the PS2 right stick's up/down, the
+  # ad-lib shouts; a mostly vertical push doesn't turn the view.
+  # Running: click the left stick while walking and you keep running (Cross held) until the stick
+  # is centred, so the right thumb stays free to turn. The latch is ORed into ButtonB (params
+  # sprintLatch), so a tap of B can't let it go; it lets go as the item screen, a menu, a cutscene
+  # or the raised weapon takes over.
   #
   # The grips are for gestures only, so a squeeze at the hip can't also do something
   # else (Outbreak doesn't use L2). Zones are placed from the head (metres: side + right, height + up, forward +
@@ -135,6 +157,7 @@ SLPM-65428:
     - device: Gamepad
       id: controllers
       pad: 1
+      params: { sprintLatch: ButtonB }
       bind:
         RightTriggerPress: Circle
         ButtonA: Circle
@@ -151,6 +174,8 @@ SLPM-65428:
         RightStickClick: R3
         LeftStickX: LeftStickX
         LeftStickY: LeftStickY
+        RightStickUp: RUp
+        RightStickDown: RDown
     - device: Zone
       id: holster
       notes: "Right hip holster: squeeze the grip there to ready the weapon (R1, lock-on); keep squeezing to stay aimed."

@@ -237,6 +237,15 @@ namespace VR::ProfileDB
 		u32 validate_equals = 0;
 	};
 
+	// A value at the camera base (e.g. the local character record) + offset; all checks of a list must hold.
+	struct RecordCheck
+	{
+		s64 offset = 0;
+		u32 equals = 0;
+		u8 width = 1;
+		bool not_equals = false;
+	};
+
 	struct CameraSilence
 	{
 		u32 ee_address = 0;
@@ -244,6 +253,11 @@ namespace VR::ProfileDB
 		u32 value_off = 0;
 		// Optional: only patch/restore while these pass (e.g. the overlay holding the code is resident).
 		std::vector<CameraGuard> when;
+		// Optional: only patched while these pass too (e.g. the weapon is raised). While they fail, a word we
+		// patched is put back at once, so the game's own code runs again.
+		std::vector<RecordCheck> active_when;
+		// Never patched while online-safe (the VR setting, or the network adapter on); a patched word is put back.
+		bool offline_only = false;
 	};
 
 	struct CameraCodeHook
@@ -322,18 +336,16 @@ namespace VR::ProfileDB
 		// Used unless the VR SnapTurn setting is on or this is 0; then snap_turn_deg applies.
 		float smooth_turn_deg_s = 0.0f;
 
+		// Write the camera for when its frame is on screen (0 = off). While above 0, a smooth stick turn is
+		// rendered ahead by the measured frame latency (needs view_matrix_address to measure it), so
+		// the turn's leading edge shows no black band; heading, aim and walking keep the true yaw. The
+		// value itself is the damping for head prediction (0-1).
+		float predict = 0.0f;
+
 		// While these all pass (a menu, the map, pause), the camera holds its last view, the head no
 		// longer steers it and first person counts as inactive, so the world screen is shown.
 		std::vector<CameraGuard> pause_when;
 
-		// A value at base + offset; all checks of a list must hold.
-		struct RecordCheck
-		{
-			s64 offset = 0;
-			u32 equals = 0;
-			u8 width = 1;
-			bool not_equals = false;
-		};
 		// Body follows view: while every check holds (standing idle, stick centred), the heading is
 		// written to the camera yaw, so picking up and checking things faces where the player looks.
 		std::vector<RecordCheck> body_follow;
@@ -427,6 +439,8 @@ namespace VR::ProfileDB
 		float zone_radius = 0.15f;
 		SpatialControls::ZoneHand zone_hand = SpatialControls::ZoneHand::Either;
 		bool zone_require_grip = true;
+		// Gamepad params sprintLatch: the button the left-stick-click running latch holds (Count = none).
+		SpatialControls::ControlId sprint_latch = SpatialControls::ControlId::Count;
 		std::string preset;
 		std::vector<CameraGuard> when;
 		struct Bind
