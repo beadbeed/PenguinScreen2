@@ -187,7 +187,7 @@ class Pine:
     def fake_input(self, head=IDENTITY_POSE, hands=(None, None), ttl_ms=400, recenter=False):
         """Scripted VR controllers (MsgVRFakeInput, version 1). head: a pose, or None to keep the real
         head. hands: (left, right), each None (the real hand stays) or a dict from fake_hand(). The input
-        lapses after ttl_ms (the emulator caps it at 500 ms; 0 drops it now), so keep re-sending
+        lapses after ttl_ms (the emulator caps it at 1000 ms; 0 drops it now), so keep re-sending
         (FakeController does). recenter: recenter the view on this head once it is applied.
         Raises PineError when refused: PCSX2_VR_TEST_INPUT not set, or online-safe / network adapter on."""
         def pack_pose(p):
@@ -236,7 +236,7 @@ class FakeController:
             time.sleep(0.5)
     """
 
-    def __init__(self, pine, head=IDENTITY_POSE, rate_hz=20.0, ttl_ms=400, recenter=True):
+    def __init__(self, pine, head=IDENTITY_POSE, rate_hz=20.0, ttl_ms=900, recenter=True):
         self.pine = pine
         self.head = head
         self.hands = [None, None]

@@ -1316,6 +1316,64 @@ namespace VR::XRCompositor
 			ei.layers = nullptr;
 			xrEndFrame(session, &ei);
 		}
+
+		// OpenXR yaw (CCW positive) of a quaternion's forward (-Z) direction, as the first-person placement uses.
+		float ForwardYaw(float x, float y, float z, float w)
+		{
+			const float fx = -2.0f * (x * z + w * y);
+			const float fz = -(1.0f - 2.0f * (x * x + y * y));
+			return std::atan2(-fx, -fz);
+		}
+
+		// PCSX2_VR_SYNCLOG: how far the first-person frame's yaw is from where the head is as it is shown,
+		// which is how wide the black band on a turn's leading edge gets. The head is the one the camera
+		// follows: the env fake head (evaluated now), else PINE's scripted head, else the headset.
+		// Logged once a second as RMS and max, with the horizon lookAt.predict leads the head by.
+		void LogEdgeError(float placed_yaw)
+		{
+			static const bool s_edgelog = (std::getenv("PCSX2_VR_SYNCLOG") != nullptr);
+			if (!s_edgelog)
+				return;
+			const u64 now = CameraDriver::SteadyNowMs();
+			float head_yaw = 0.0f;
+			if (!CameraDriver::FakeHeadYawAt(now, &head_yaw))
+			{
+				HeadPose::Snapshot test_head;
+				if (XRInput::TestHeadPose(&test_head))
+					head_yaw = ForwardYaw(test_head.orientation_x, test_head.orientation_y, test_head.orientation_z,
+						test_head.orientation_w);
+				else
+					head_yaw = ForwardYaw(s.head_pose.orientation.x, s.head_pose.orientation.y,
+						s.head_pose.orientation.z, s.head_pose.orientation.w);
+			}
+			const float err_deg = std::remainder(placed_yaw - head_yaw, 2.0f * 3.14159265f) * (180.0f / 3.14159265f);
+
+			static u64 s_edge_log_ms = 0;
+			static double s_edge_sq = 0.0;
+			static float s_edge_max = 0.0f;
+			static u32 s_edge_n = 0;
+			if (s_edge_log_ms == 0)
+				s_edge_log_ms = now;
+			if (std::isfinite(err_deg))
+			{
+				s_edge_sq += static_cast<double>(err_deg) * static_cast<double>(err_deg);
+				s_edge_max = std::max(s_edge_max, std::abs(err_deg));
+				s_edge_n++;
+			}
+			if (now - s_edge_log_ms >= 1000)
+			{
+				if (s_edge_n > 0)
+				{
+					Console.WriteLn("(VR) edge: rms %.2f deg max %.2f deg, H %.0f ms",
+						std::sqrt(s_edge_sq / static_cast<double>(s_edge_n)), s_edge_max,
+						CameraDriver::HeadPredictionHorizon() * 1000.0f);
+				}
+				s_edge_log_ms = now;
+				s_edge_sq = 0.0;
+				s_edge_max = 0.0f;
+				s_edge_n = 0;
+			}
+		}
 	}
 
 	bool Initialize()
@@ -1567,7 +1625,10 @@ namespace VR::XRCompositor
 
 		if (s.view_space != XR_NULL_HANDLE)
 		{
+			// The head's angular velocity rides along on the same locate, for camera.lookAt head prediction.
+			XrSpaceVelocity vel = {XR_TYPE_SPACE_VELOCITY};
 			XrSpaceLocation loc = {XR_TYPE_SPACE_LOCATION};
+			loc.next = &vel;
 			if (XR_SUCCEEDED(xrLocateSpace(s.view_space, XRSession::GetSpace(), fs.predictedDisplayTime, &loc)) &&
 				(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
 			{
@@ -1582,6 +1643,26 @@ namespace VR::XRCompositor
 					p.position_y = loc.pose.position.y;
 					p.position_z = loc.pose.position.z;
 					p.position_valid = true;
+				}
+				// Expressed in the base space (the room), which is the frame the prediction rotates in.
+				const bool angular = (vel.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) != 0;
+				if (angular && std::isfinite(vel.angularVelocity.x) && std::isfinite(vel.angularVelocity.y) &&
+					std::isfinite(vel.angularVelocity.z))
+				{
+					p.angular_velocity[0] = vel.angularVelocity.x;
+					p.angular_velocity[1] = vel.angularVelocity.y;
+					p.angular_velocity[2] = vel.angularVelocity.z;
+					p.angular_valid = true;
+				}
+				// Once: whether this runtime reports the head's velocity (SteamVR's null driver reports zeros).
+				static bool s_velocity_logged = false;
+				if (!s_velocity_logged)
+				{
+					s_velocity_logged = true;
+					Console.WriteLn("(VR) Head pose: runtime velocityFlags 0x%llX (angular %s, linear %s), angular (%.3f, %.3f, %.3f) rad/s.",
+						static_cast<unsigned long long>(vel.velocityFlags), angular ? "valid" : "not valid",
+						(vel.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) ? "valid" : "not valid",
+						vel.angularVelocity.x, vel.angularVelocity.y, vel.angularVelocity.z);
 				}
 				p.valid = true;
 				HeadPose::Publish(p);
@@ -1731,18 +1812,22 @@ namespace VR::XRCompositor
 				HeadPose::Snapshot stamped;
 				float turn_yaw = 0.0f;
 				const u64 lag = static_cast<u64>(sp.fp_pose_lag_ms);
+				bool placed = false;
 				if (CameraDriver::RenderPose(&stamped, &turn_yaw) ||
 					CameraDriver::FirstPersonPoseAt(CameraDriver::SteadyNowMs() - lag, &stamped))
 				{
 					q = {stamped.orientation_x, stamped.orientation_y, stamped.orientation_z, stamped.orientation_w};
 					if (stamped.position_valid)
 						fp_head = {stamped.position_x, stamped.position_y, stamped.position_z};
+					placed = true;
 				}
 				const float fx = -2.0f * (q.x * q.z + q.w * q.y);
 				const float fy = -2.0f * (q.y * q.z - q.w * q.x);
 				const float fz = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
 				const float hyaw = std::atan2(-fx, -fz) + turn_yaw;
 				const float hpitch = std::asin(std::clamp(fy, -1.0f, 1.0f));
+				if (placed)
+					LogEdgeError(hyaw);
 				const float sy2 = std::sin(hyaw * 0.5f), cy2 = std::cos(hyaw * 0.5f);
 				const float sp2 = std::sin(hpitch * 0.5f), cp2 = std::cos(hpitch * 0.5f);
 				fp_pose.orientation = {cy2 * sp2, sy2 * cp2, -sy2 * sp2, cy2 * cp2};

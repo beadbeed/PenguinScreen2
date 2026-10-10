@@ -134,7 +134,8 @@ SLPM-65428:
       syncFramesBack: 2
       # A smooth stick turn is rendered ahead by how late frames reach the screen (measured, at most
       # 120 ms), so its leading edge shows no black band; heading, aim and walking keep the true yaw.
-      # 0 turns it off. 0.8 is also the damping for head prediction (not used yet).
+      # The head is led too, by its angular velocity times that latency times this damping (0.8).
+      # 0 turns both off.
       predict: 0.8
       # Weapon raised (stance 2, R1 or the hip holster): the character faces where the right
       # controller points, and aims as far up or down as it points (s16 +0xBC8, 0x10000 = 360 deg;

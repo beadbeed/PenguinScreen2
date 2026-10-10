@@ -122,7 +122,7 @@ namespace VR
 
 			VRPose head_pose; // replaces the real head while .valid
 			std::array<Hand, 2> hands;
-			u32 ttl_ms = 0; // capped at 500 ms; 0 drops any test input now
+			u32 ttl_ms = 0; // capped at 1000 ms; 0 drops any test input now
 		};
 
 		void SetTestInput(const TestInput& input);

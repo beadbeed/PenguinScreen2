@@ -39,6 +39,15 @@ namespace VR::CameraDriver
 	// turn that lookAt.predict renders ahead. Each call also measures the prediction horizon.
 	bool RenderPose(HeadPose::Snapshot* out, float* turn_yaw);
 
+	// The measured head-pose-to-present horizon in seconds (clamped to 0-0.12, 0 until measured): how far
+	// ahead lookAt.predict leads the head. Any thread.
+	float HeadPredictionHorizon();
+
+	// PCSX2_VR_FAKE_HEADPOSE: the fake head's yaw (radians, OpenXR, CCW positive) at time_ms on the
+	// SteadyNowMs() clock, so the compositor can compare where a frame is placed with where the fake head is
+	// when it is shown. False (yaw untouched) when the fake head is off. Any thread.
+	bool FakeHeadYawAt(u64 time_ms, float* yaw);
+
 	void RequestRecenter();
 
 	// CPU thread, after Apply: true while first person is armed (guards holding, head pose valid) and this

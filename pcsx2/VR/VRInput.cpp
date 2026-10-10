@@ -154,7 +154,8 @@ namespace VR
 
 		// Scripted test input (XRInput::SetTestInput, from PINE's thread). It lapses on its own: a test
 		// runner that dies mid-scenario must not leave a held stick or grip behind.
-		constexpr std::uint64_t kTestInputMaxTtlMs = 500;
+		// 1 s: long enough that a script's re-send hiccup (a GIL stall, a slow PINE reply) doesn't drop the input.
+		constexpr std::uint64_t kTestInputMaxTtlMs = 1000;
 		std::mutex s_test_mutex;
 		XRInput::TestInput s_test_input;
 		std::uint64_t s_test_expiry_ms = 0; // 0: none
