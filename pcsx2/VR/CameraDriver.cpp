@@ -1046,6 +1046,7 @@ namespace VR::CameraDriver
 
 		// camera.base as resolved this vsync while armed, for GameFeedback (CPU thread, read after Apply).
 		bool s_local_record_valid = false;
+		bool s_local_guards_now = false; // and this vsync's camera guards held (no disarm grace)
 		u32 s_local_record_base = 0;
 
 		std::atomic_bool s_recenter_requested{false};
@@ -2062,6 +2063,7 @@ namespace VR::CameraDriver
 		// Every early return below (no VM, no camera profile, disarmed) leaves it cleared; it is set again
 		// only once armed, from this vsync's GetBase.
 		s_local_record_valid = false;
+		s_local_guards_now = false;
 
 		const bool switched_on = EffectiveVREnabled(EmuConfig.VR.Enable) && EmuConfig.VR.HeadCamera &&
 		                         !SplitState::Active();
@@ -2254,6 +2256,7 @@ namespace VR::CameraDriver
 		else
 			s_base_unresolved_vsyncs = 0;
 		s_local_record_valid = base.has_value();
+		s_local_guards_now = (s_guard_fail_vsyncs == 0);
 		s_local_record_base = base.value_or(0u);
 
 		const bool recenter_asked = s_recenter_requested.exchange(false, std::memory_order_acq_rel);
@@ -2598,12 +2601,14 @@ namespace VR::CameraDriver
 		return s_telemetry;
 	}
 
-	bool LocalRecord(u32* base)
+	bool LocalRecord(u32* base, bool* guards_now)
 	{
 		if (!s_local_record_valid)
 			return false;
 		if (base)
 			*base = s_local_record_base;
+		if (guards_now)
+			*guards_now = s_local_guards_now;
 		return true;
 	}
 

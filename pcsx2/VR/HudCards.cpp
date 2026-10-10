@@ -419,7 +419,12 @@ namespace VR::HudCards
 		}
 
 		// Reads only. Each part is shown only when its values look like what they claim to be.
-		void ReadWrist(const ProfileDB::HudWristParams& w, u32 record, WristData* d)
+		// The last virus value read while the guards held, shown through a disarm grace instead of reading a
+		// table that may already be gone (CPU thread only).
+		bool s_virus_last_has = false;
+		float s_virus_last_pct = 0.0f;
+
+		void ReadWrist(const ProfileDB::HudWristParams& w, u32 record, bool guards_now, WristData* d)
 		{
 			const u64 rec = record;
 			if (w.has_hp)
@@ -434,10 +439,15 @@ namespace VR::HudCards
 					d->hp_max = hp_max;
 				}
 			}
-			if (w.has_virus)
+			if (w.has_virus && !guards_now)
 			{
-				// The per-character table is overlay data, resident only with the GAME overlay; Poll reads it
-				// only while first person is armed, whose guards check exactly that.
+				d->has_virus = s_virus_last_has;
+				d->virus_pct = s_virus_last_pct;
+			}
+			else if (w.has_virus)
+			{
+				// The per-character table is overlay data, resident only with the GAME overlay: read only while
+				// the camera guards (which check exactly that) hold this vsync.
 				u32 counter = 0;
 				u32 id = 0;
 				u32 vmax = 0;
@@ -448,6 +458,8 @@ namespace VR::HudCards
 					d->has_virus = true;
 					d->virus_pct = static_cast<float>(std::min(100.0, 100.0 * static_cast<double>(counter) / static_cast<double>(vmax)));
 				}
+				s_virus_last_has = d->has_virus;
+				s_virus_last_pct = d->virus_pct;
 			}
 			if (w.has_bleed)
 			{
@@ -601,19 +613,23 @@ namespace VR::HudCards
 		// GS thread must not touch EmuConfig.
 		s_blink_enabled.store(EmuConfig.VR.ComfortBlink, std::memory_order_relaxed);
 
-		// LocalRecord is true only while first person is armed (its guards hold, so the GAME overlay and the
-		// virus table in it are resident) with the record resolved this vsync; flat play never gets past it.
+		// LocalRecord is true only while first person is armed with the record resolved this vsync (flat play
+		// never gets past it); guards_now says the camera guards held too, so the GAME overlay's virus table is
+		// resident (during a disarm grace the last value read is shown instead).
 		WristData d;
 		bool active = false;
 		u32 record = 0;
-		if (CameraDriver::LocalRecord(&record))
+		bool guards_now = false;
+		if (!CameraDriver::LocalRecord(&record, &guards_now))
+			s_virus_last_has = false;
+		else
 		{
 			const std::string serial = VMManager::GetDiscSerial();
 			const ProfileDB::Profile* profile = serial.empty() ? nullptr : ProfileDB::Lookup(serial, VMManager::GetDiscCRC());
 			if (profile && profile->hud.has_value() && profile->hud->wrist.has_value())
 			{
 				active = true;
-				ReadWrist(profile->hud->wrist.value(), record, &d);
+				ReadWrist(profile->hud->wrist.value(), record, guards_now, &d);
 			}
 		}
 		if (active != s_wrist_logged)

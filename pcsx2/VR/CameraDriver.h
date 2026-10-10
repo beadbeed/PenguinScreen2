@@ -54,7 +54,9 @@ namespace VR::CameraDriver
 
 	// CPU thread, after Apply: true while first person is armed (guards holding, head pose valid) and this
 	// vsync resolved camera.base; *base (may be null) is that record, the local character's in Outbreak.
-	bool LocalRecord(u32* base);
+	// guards_now (optional): this vsync's camera guards held too, not just the disarm grace after they failed
+	// (overlay data such as the GAME overlay's tables is only resident then).
+	bool LocalRecord(u32* base, bool* guards_now = nullptr);
 
 	void OnStateLoaded();
 
