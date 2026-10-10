@@ -445,6 +445,7 @@ namespace VR::ProfileDB
 		std::optional<float> fp_screen_distance;
 		std::optional<float> fp_screen_height;
 		std::optional<float> fp_screen_arc_deg;
+		std::optional<float> fp_screen_pose_lag_ms;
 		std::optional<CameraProfile> camera;
 		std::optional<SplitParams> split;
 		std::vector<SpatialControlSpec> controls;

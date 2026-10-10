@@ -19,16 +19,18 @@ SLPM-65692:
   notes: "Fixed/rail cameras over real-time 3D rooms. First person: camera.lookAt puts the eye at the local character's head."
   # World-locked screen for menus, the item screen, cutscenes and doors. While first person drives the
   # camera, the firstPerson screen is used instead: locked to the head, sized to the game camera's FOV
-  # (camera.fov below, 80 deg vertical: height = 2 * distance * tan(40 deg)), flat so perspective holds.
-  screen: { distance: 2.0, height: 1.4, firstPerson: { distance: 1.5, height: 2.52, arc: 0 } }
+  # (camera.fov below, 100 deg vertical: height = 2 * distance * tan(50 deg)), flat so perspective holds.
+  # It is placed where the shown frame was rendered from (the head pose about poseLagMs ago), so the
+  # runtime can reproject it as the head turns instead of the old frame being glued to the face.
+  screen: { distance: 2.0, height: 1.4, firstPerson: { distance: 1.5, height: 3.575, arc: 0, poseLagMs: 40 } }
   stereo:
     separation: 0.012
     convergence: 55.0
     zDrivenDepth: true
-    # Head-locked first-person screen (1.5 m away, 3.36 m wide): about orthostereo, so the screen plane
-    # sits at 1.5 m (convergence = 150 game units at 100 units/m) and far content gets an IPD of
-    # separation (0.063 m / 3.36 m). A starting point to tune in the headset.
-    firstPerson: { separation: 0.0188, convergence: 150 }
+    # First-person screen (1.5 m away, 4.77 m wide): about orthostereo, so the screen plane sits at
+    # 1.5 m (convergence = 150 game units at 100 units/m) and far content gets an IPD of separation
+    # (0.063 m / 4.77 m). A starting point to tune in the headset.
+    firstPerson: { separation: 0.0132, convergence: 150 }
   # First-person camera (only with --vr and the VR 'Head-Tracked Camera' setting, on by default).
   # Outbreak builds its view from an eye and a target vector. During normal room play (GAME overlay
   # resident, scenario in game, room camera in normal mode) the room camera's three cut handlers and the
@@ -76,7 +78,7 @@ SLPM-65692:
       # Weapon raised (stance 2, R1 or the hip holster): the character faces where the right
       # controller points. Aim pitch (+0xBC8, needs the servo silenced) is not enabled yet.
       aim: { stance: 0x08, equals: 2, hand: right }
-    fov: { address: 0x313590, encoding: f32, scale: 80.0 }   # vertical FOV, degrees
+    fov: { address: 0x313590, encoding: f32, scale: 100.0 }   # vertical FOV, degrees (about 115 horizontal at 4:3)
   # VR controllers (only when launched with --vr; flat play is untouched).
   # A pad bound in Settings -> Controllers (e.g. a DualSense) keeps working alongside;
   # when both touch the same button, the latest change wins.

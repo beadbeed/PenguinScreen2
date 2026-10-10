@@ -16,6 +16,7 @@
 #include "common/Console.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -23,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -1160,6 +1162,24 @@ namespace VR::CameraDriver
 				std::chrono::steady_clock::now().time_since_epoch()).count());
 		}
 
+		struct StampedPose
+		{
+			u64 ms = 0;
+			HeadPose::Snapshot pose;
+		};
+		std::mutex s_pose_mutex;
+		std::array<StampedPose, 64> s_pose_ring;
+		size_t s_pose_next = 0;
+		size_t s_pose_count = 0;
+
+		void PushStampedPose(const HeadPose::Snapshot& pose)
+		{
+			std::lock_guard<std::mutex> lock(s_pose_mutex);
+			s_pose_ring[s_pose_next] = StampedPose{NowMs(), pose};
+			s_pose_next = (s_pose_next + 1) % s_pose_ring.size();
+			s_pose_count = std::min(s_pose_count + 1, s_pose_ring.size());
+		}
+
 		void SetLookAtActive(bool active)
 		{
 			if (active)
@@ -1508,7 +1528,10 @@ namespace VR::CameraDriver
 			const EulerAngles head = QuaternionToEulerYXZ(pose.orientation_x, pose.orientation_y,
 				pose.orientation_z, pose.orientation_w);
 			const EulerAngles look{WrapPi(head.yaw - s_ref_yaw), head.pitch, head.roll};
-			SetLookAtActive(ApplyLookAt(cam.look_at.value(), base, look, pose));
+			const bool wrote = ApplyLookAt(cam.look_at.value(), base, look, pose);
+			if (wrote)
+				PushStampedPose(pose);
+			SetLookAtActive(wrote);
 		}
 		else if (s_lookat_active.load(std::memory_order_relaxed))
 			SetLookAtActive(true);
@@ -1542,6 +1565,33 @@ namespace VR::CameraDriver
 		ResetDeltaState();
 		s_silence_repair = true;
 		s_fov_saved = false;
+	}
+
+	u64 SteadyNowMs()
+	{
+		return NowMs();
+	}
+
+	bool FirstPersonPoseAt(u64 time_ms, HeadPose::Snapshot* out)
+	{
+		std::lock_guard<std::mutex> lock(s_pose_mutex);
+		if (s_pose_count == 0)
+			return false;
+		// Walk back from the newest entry to the first one stamped at or before time_ms; if every
+		// entry is newer, the oldest one is the best we have.
+		const StampedPose* best = nullptr;
+		for (size_t i = 0; i < s_pose_count; i++)
+		{
+			const StampedPose& e = s_pose_ring[(s_pose_next + s_pose_ring.size() - 1 - i) % s_pose_ring.size()];
+			best = &e;
+			if (e.ms <= time_ms)
+				break;
+		}
+		const StampedPose& newest = s_pose_ring[(s_pose_next + s_pose_ring.size() - 1) % s_pose_ring.size()];
+		if (!best || (time_ms > newest.ms && time_ms - newest.ms > 500))
+			return false;
+		*out = best->pose;
+		return true;
 	}
 
 	bool LookAtActive()

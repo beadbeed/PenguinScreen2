@@ -56,6 +56,7 @@ namespace VR::XRCompositor
 			float fp_distance = 1.5f;
 			float fp_height = 2.5f;
 			float fp_arc_deg = 0.0f;
+			float fp_pose_lag_ms = 40.0f;
 		};
 		bool s_fp_screen_was_active = false;
 		std::mutex s_screen_mutex;
@@ -1286,16 +1287,28 @@ namespace VR::XRCompositor
 						s.world_anchor_z = s.head_pose.position.z;
 					}
 				}
-				Console.WriteLn("(VR) Screen: %s.", fp_screen ? "first person (head-locked, roll-level)" : "world-locked");
+				Console.WriteLn("(VR) Screen: %s.", fp_screen ? "first person (placed at the render pose, roll-level)" : "world-locked");
 				s_fp_screen_was_active = fp_screen;
 			}
 
-			// First-person screen: in front of the head along its yaw and pitch, never its roll, so
-			// tilting the head tilts the view against a level world instead of dragging the world along.
+			// First-person screen: placed in the room (base space) in front of the head pose the shown
+			// frame was rendered from (the pose camera.lookAt used about poseLagMs ago), along its yaw and
+			// pitch but never its roll. The runtime then reprojects it for the head's motion since, so the
+			// world holds still while the head turns instead of an old frame being glued to the face.
 			XrPosef fp_pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+			XrVector3f fp_head = {0.0f, 0.0f, 0.0f};
 			if (fp_screen)
 			{
-				const XrQuaternionf& q = s.head_pose.orientation;
+				XrQuaternionf q = s.head_pose.orientation;
+				fp_head = s.head_position_valid ? s.head_pose.position : XrVector3f{0.0f, 0.0f, 0.0f};
+				HeadPose::Snapshot stamped;
+				const u64 lag = static_cast<u64>(sp.fp_pose_lag_ms);
+				if (CameraDriver::FirstPersonPoseAt(CameraDriver::SteadyNowMs() - lag, &stamped))
+				{
+					q = {stamped.orientation_x, stamped.orientation_y, stamped.orientation_z, stamped.orientation_w};
+					if (stamped.position_valid)
+						fp_head = {stamped.position_x, stamped.position_y, stamped.position_z};
+				}
 				const float fx = -2.0f * (q.x * q.z + q.w * q.y);
 				const float fy = -2.0f * (q.y * q.z - q.w * q.x);
 				const float fz = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
@@ -1305,9 +1318,8 @@ namespace VR::XRCompositor
 				const float sp2 = std::sin(hpitch * 0.5f), cp2 = std::cos(hpitch * 0.5f);
 				fp_pose.orientation = {cy2 * sp2, sy2 * cp2, -sy2 * sp2, cy2 * cp2};
 				const float d = sp.fp_distance;
-				const XrVector3f head = s.head_position_valid ? s.head_pose.position : XrVector3f{0.0f, 0.0f, 0.0f};
-				fp_pose.position = {head.x - d * std::sin(hyaw) * std::cos(hpitch), head.y + d * std::sin(hpitch),
-					head.z - d * std::cos(hyaw) * std::cos(hpitch)};
+				fp_pose.position = {fp_head.x - d * std::sin(hyaw) * std::cos(hpitch), fp_head.y + d * std::sin(hpitch),
+					fp_head.z - d * std::cos(hyaw) * std::cos(hpitch)};
 			}
 			const float distance = fp_screen ? sp.fp_distance : sp.distance;
 			const float height = fp_screen ? sp.fp_height : sp.height;
@@ -1340,7 +1352,7 @@ namespace VR::XRCompositor
 					if (fp_screen)
 					{
 						cyl.pose.orientation = fp_pose.orientation;
-						cyl.pose.position = s.head_position_valid ? s.head_pose.position : XrVector3f{0.0f, 0.0f, 0.0f};
+						cyl.pose.position = fp_head;
 					}
 					else if (follow)
 					{
@@ -1686,13 +1698,14 @@ namespace VR::XRCompositor
 		s_screen_params.follow_head = follow_head;
 	}
 
-	void UpdateFirstPersonScreen(bool enabled, float distance_m, float height_m, float arc_deg)
+	void UpdateFirstPersonScreen(bool enabled, float distance_m, float height_m, float arc_deg, float pose_lag_ms)
 	{
 		std::lock_guard<std::mutex> lock(s_screen_mutex);
 		s_screen_params.has_fp = enabled;
 		s_screen_params.fp_distance = distance_m;
 		s_screen_params.fp_height = height_m;
 		s_screen_params.fp_arc_deg = arc_deg;
+		s_screen_params.fp_pose_lag_ms = pose_lag_ms;
 	}
 
 	void RequestScreenReanchor()

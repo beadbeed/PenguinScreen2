@@ -2346,7 +2346,7 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 		{
 			// Head-locked screen used only while camera.lookAt drives the camera.
 			const ryml::ConstNodeRef fp = scr["firstPerson"];
-			warnUnknownKeys(serial, fp, "screen.firstPerson", {"distance", "height", "arc"});
+			warnUnknownKeys(serial, fp, "screen.firstPerson", {"distance", "height", "arc", "poseLagMs"});
 			const std::optional<float> d = fp.has_child("distance") ? StringUtil::FromChars<float>(nodeVal(fp["distance"])) : std::nullopt;
 			const std::optional<float> h = fp.has_child("height") ? StringUtil::FromChars<float>(nodeVal(fp["height"])) : std::nullopt;
 			if (d.has_value() && h.has_value() && d.value() > 0.1f && h.value() > 0.1f)
@@ -2359,6 +2359,12 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 					const std::optional<float> a = StringUtil::FromChars<float>(nodeVal(fp["arc"]));
 					if (a.has_value())
 						out.fp_screen_arc_deg = std::clamp(a.value(), 0.0f, 270.0f);
+				}
+				if (fp.has_child("poseLagMs"))
+				{
+					const std::optional<float> l = StringUtil::FromChars<float>(nodeVal(fp["poseLagMs"]));
+					if (l.has_value() && std::isfinite(l.value()))
+						out.fp_screen_pose_lag_ms = std::clamp(l.value(), 0.0f, 250.0f);
 				}
 			}
 			else
