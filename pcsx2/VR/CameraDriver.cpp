@@ -792,29 +792,47 @@ namespace VR::CameraDriver
 		bool s_silence_applied = false;
 		u32 s_silence_crc = 0;
 
+		// Silence patches often sit in code the game reloads from disc (overlays), so they are checked
+		// every armed vsync rather than written once: a word still holding the game's original value
+		// is patched again, and a word holding neither value (other code is resident) is left alone.
+		// An entry with a `when` guard is only touched while that guard passes, both ways.
 		void ApplySilence(const ProfileDB::CameraProfile& cam, u32 crc)
 		{
-			if (s_silence_applied && s_silence_crc == crc)
-				return;
+			size_t patched = 0;
 			for (const ProfileDB::CameraSilence& sil : cam.silence)
-				memWrite32(sil.ee_address, sil.value_on);
-			if (!cam.silence.empty())
-				DevCon.WriteLn("(VR) CameraDriver: game camera writer silenced (%zu patch(es)).", cam.silence.size());
+			{
+				if (!sil.when.empty() && !GuardListPass(sil.when))
+					continue;
+				if (sil.value_on != sil.value_off && static_cast<u32>(memRead32(sil.ee_address)) == sil.value_off)
+				{
+					memWrite32(sil.ee_address, sil.value_on);
+					patched++;
+				}
+			}
+			if (patched > 0)
+				DevCon.WriteLn("(VR) CameraDriver: game camera writer silenced (%zu patch(es)).", patched);
 			s_silence_applied = true;
 			s_silence_crc = crc;
 		}
 
 		void RestoreSilence(const ProfileDB::CameraProfile& cam, u32 crc)
 		{
-			if (!s_silence_applied || s_silence_crc != crc)
-			{
-				s_silence_applied = false;
-				return;
-			}
+			const bool ours = s_silence_applied && s_silence_crc == crc;
+			size_t restored = 0;
 			for (const ProfileDB::CameraSilence& sil : cam.silence)
-				memWrite32(sil.ee_address, sil.value_off);
-			if (!cam.silence.empty())
-				DevCon.WriteLn("(VR) CameraDriver: game camera writer restored.");
+			{
+				// Unguarded entries are only restored after we patched them this session; guarded ones
+				// also undo a patch that came back in a savestate.
+				if (sil.when.empty() ? !ours : !GuardListPass(sil.when))
+					continue;
+				if (sil.value_on != sil.value_off && static_cast<u32>(memRead32(sil.ee_address)) == sil.value_on)
+				{
+					memWrite32(sil.ee_address, sil.value_off);
+					restored++;
+				}
+			}
+			if (restored > 0)
+				DevCon.WriteLn("(VR) CameraDriver: game camera writer restored (%zu patch(es)).", restored);
 			s_silence_applied = false;
 		}
 
@@ -913,6 +931,8 @@ namespace VR::CameraDriver
 		bool s_has_reference = false;
 		u32 s_reference_crc = 0;
 		float s_ref_x = 0.0f, s_ref_y = 0.0f, s_ref_z = 0.0f, s_ref_w = 1.0f;
+		// Head position and yaw at the last recenter, for camera.lookAt head translation.
+		float s_ref_px = 0.0f, s_ref_py = 0.0f, s_ref_pz = 0.0f, s_ref_yaw = 0.0f;
 
 		void QuatMultiply(float ax, float ay, float az, float aw, float bx, float by, float bz, float bw,
 			float& ox, float& oy, float& oz, float& ow)
@@ -933,6 +953,72 @@ namespace VR::CameraDriver
 			y = oy;
 			z = oz;
 			w = ow;
+		}
+
+		// camera.lookAt: put the game's eye/target camera at the character's head. Heading 0 faces
+		// +Z, forward = (sin h, cos h) on the x/z floor plane, y up; head yaw (CCW positive, like the
+		// heading) adds to it and head pitch tilts the target. Head translation since the last
+		// recenter is mapped onto the character's heading (forward/right/up) and scaled to game units.
+		void ApplyLookAt(const ProfileDB::CameraLookAt& la, const std::optional<u32>& base, const EulerAngles& e,
+			const HeadPose::Snapshot& pose)
+		{
+			if (!base.has_value() || (!la.when.empty() && !GuardListPass(la.when)))
+				return;
+			const s64 pa = static_cast<s64>(base.value()) + la.position_offset;
+			if (pa < 0 || pa + 12 > static_cast<s64>(Ps2MemSize::MainRam))
+				return;
+			float p[3];
+			for (int i = 0; i < 3; i++)
+			{
+				p[i] = std::bit_cast<float>(static_cast<u32>(memRead32(static_cast<u32>(pa) + i * 4)));
+				if (!std::isfinite(p[i]))
+					return;
+			}
+			float heading = 0.0f;
+			if (la.has_heading)
+			{
+				const s64 ha = static_cast<s64>(base.value()) + la.heading_offset;
+				if (ha < 0 || ha + 2 > static_cast<s64>(Ps2MemSize::MainRam))
+					return;
+				heading = static_cast<float>(static_cast<s16>(static_cast<u16>(memRead16(static_cast<u32>(ha))))) *
+				          (2.0f * PI_F / 65536.0f);
+			}
+
+			const float yaw = heading + la.yaw_sign * e.yaw;
+			const float pitch = std::clamp(la.pitch_sign * e.pitch, -1.45f, 1.45f);
+			const float sy = std::sin(yaw), cy = std::cos(yaw);
+			const float sp = std::sin(pitch), cp = std::cos(pitch);
+
+			float eye[3] = {p[0] + la.eye_forward * sy, p[1] + la.eye_height, p[2] + la.eye_forward * cy};
+			if (la.units_per_meter != 0.0f)
+			{
+				const float dx = pose.position_x - s_ref_px;
+				const float dy = pose.position_y - s_ref_py;
+				const float dz = pose.position_z - s_ref_pz;
+				// OpenXR: right +X, up +Y, forward -Z, rotated by the recenter yaw.
+				const float rs = std::sin(s_ref_yaw), rc = std::cos(s_ref_yaw);
+				const float fwd = -dx * rs - dz * rc;
+				const float right = dx * rc - dz * rs;
+				// Game: forward (sin h, cos h), right (-cos h, sin h) on x/z.
+				const float sh = std::sin(heading), ch = std::cos(heading);
+				const float u = la.units_per_meter;
+				eye[0] += u * (fwd * sh - right * ch);
+				eye[1] += u * dy;
+				eye[2] += u * (fwd * ch + right * sh);
+			}
+			const float target[3] = {eye[0] + la.distance * sy * cp, eye[1] + la.distance * sp,
+				eye[2] + la.distance * cy * cp};
+
+			for (u32 i = 0; i < 3; i++)
+			{
+				memWrite32(la.eye_address + i * 4, std::bit_cast<u32>(eye[i]));
+				memWrite32(la.target_address + i * 4, std::bit_cast<u32>(target[i]));
+			}
+			if (la.roll_address != 0)
+			{
+				const s32 roll = static_cast<s32>(std::lround(la.roll_sign * e.roll * (65536.0f / (2.0f * PI_F)))) & 0xFFFF;
+				memWrite32(la.roll_address, static_cast<u32>(roll));
+			}
 		}
 
 		std::optional<HeadPose::Snapshot> MaybeFakePose()
@@ -1055,8 +1141,8 @@ namespace VR::CameraDriver
 		{
 			if (armed)
 				Console.WriteLn(Color_StrongGreen,
-					"(VR) CameraDriver: ARMED (CRC %08X) — %zu write op(s), %zu matrix op(s).",
-					crc, cam.writes.size(), cam.matrix_writes.size());
+					"(VR) CameraDriver: ARMED (CRC %08X) — %zu write op(s), %zu matrix op(s)%s.",
+					crc, cam.writes.size(), cam.matrix_writes.size(), cam.look_at.has_value() ? ", first-person lookAt" : "");
 			else
 			{
 				const char* reason =
@@ -1130,6 +1216,10 @@ namespace VR::CameraDriver
 			s_ref_y = pose.orientation_y;
 			s_ref_z = pose.orientation_z;
 			s_ref_w = pose.orientation_w;
+			s_ref_px = pose.position_x;
+			s_ref_py = pose.position_y;
+			s_ref_pz = pose.position_z;
+			s_ref_yaw = QuaternionToEulerYXZ(s_ref_x, s_ref_y, s_ref_z, s_ref_w).yaw;
 			s_has_reference = true;
 			s_reference_crc = crc;
 			ResetDeltaState( true);
@@ -1228,6 +1318,9 @@ namespace VR::CameraDriver
 			}
 			ApplyMatrixOp(op, i, address, taddress, euler);
 		}
+
+		if (cam.look_at.has_value())
+			ApplyLookAt(cam.look_at.value(), base, euler, pose);
 
 		WriteCodeHookScratch(cam, euler, pose);
 

@@ -918,6 +918,9 @@ static bool parseAobPattern(std::string_view str, std::vector<u8>& pattern, std:
 	return !pattern.empty();
 }
 
+static void warnUnknownKeys(const std::string_view serial, const ryml::ConstNodeRef& node,
+	const char* where, std::initializer_list<const char*> known);
+
 static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string_view serial, const ryml::ConstNodeRef& cnode)
 {
 	using namespace VR::ProfileDB;
@@ -1258,7 +1261,10 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 				Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a camera silence address {:#x} outside main RAM; skipping it.", serial, addr.value());
 				continue;
 			}
-			cam.silence.push_back(CameraSilence{addr.value(), von.value(), voff.value()});
+			CameraSilence sil{addr.value(), von.value(), voff.value()};
+			if (sn.has_child("when") && sn["when"].is_seq())
+				parseGuardList(serial, sn["when"], "camera silence when", sil.when);
+			cam.silence.push_back(std::move(sil));
 		}
 	}
 
@@ -1365,7 +1371,82 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 		}
 	}
 
-	if (cam.writes.empty() && cam.matrix_writes.empty() && cam.code_hooks.empty() && !cam.fov.has_value() && !cam.pad_look.has_value())
+	if (cnode.has_child("lookAt") && cnode["lookAt"].is_map())
+	{
+		const ryml::ConstNodeRef ln = cnode["lookAt"];
+		warnUnknownKeys(serial, ln, "camera.lookAt",
+			{"eye", "target", "position", "heading", "eyeHeight", "eyeForward", "distance", "unitsPerMeter",
+				"yawSign", "pitchSign", "roll", "rollSign", "when", "notes"});
+		const std::optional<u32> eye = ln.has_child("eye") ? parseAddress(nodeVal(ln["eye"])) : std::nullopt;
+		const std::optional<u32> tgt = ln.has_child("target") ? parseAddress(nodeVal(ln["target"])) : std::nullopt;
+		const std::optional<s64> pos = ln.has_child("position") ? parseSignedOffset(nodeVal(ln["position"])) : std::nullopt;
+		if (!eye.has_value() || !tgt.has_value() || !pos.has_value())
+		{
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt needs eye, target and position; ignoring it.", serial);
+		}
+		else if (!inMainRam(eye.value(), 12) || !inMainRam(tgt.value(), 12))
+		{
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt eye/target is outside main RAM; ignoring it.", serial);
+		}
+		else if (!cam.base.has_value())
+		{
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt reads the character position relative to "
+							   "camera.base, but the camera block has no usable base; ignoring it.", serial);
+		}
+		else
+		{
+			CameraLookAt la;
+			la.eye_address = eye.value();
+			la.target_address = tgt.value();
+			la.position_offset = pos.value();
+			bool ok = true;
+			if (ln.has_child("heading"))
+			{
+				const std::optional<s64> h = parseSignedOffset(nodeVal(ln["heading"]));
+				if (h.has_value())
+				{
+					la.has_heading = true;
+					la.heading_offset = h.value();
+				}
+				else
+				{
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt heading is not an offset; ignoring it.", serial);
+					ok = false;
+				}
+			}
+			if (ln.has_child("roll"))
+			{
+				const std::optional<u32> r = parseAddress(nodeVal(ln["roll"]));
+				if (r.has_value() && inMainRam(r.value(), 4))
+					la.roll_address = r.value();
+				else
+				{
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt roll is not a main-RAM address; ignoring it.", serial);
+					ok = false;
+				}
+			}
+			readOptionalFloat(serial, ln, "eyeHeight", "camera.lookAt eyeHeight", la.eye_height);
+			readOptionalFloat(serial, ln, "eyeForward", "camera.lookAt eyeForward", la.eye_forward);
+			readOptionalFloat(serial, ln, "distance", "camera.lookAt distance", la.distance);
+			readOptionalFloat(serial, ln, "unitsPerMeter", "camera.lookAt unitsPerMeter", la.units_per_meter);
+			readOptionalFloat(serial, ln, "yawSign", "camera.lookAt yawSign", la.yaw_sign);
+			readOptionalFloat(serial, ln, "pitchSign", "camera.lookAt pitchSign", la.pitch_sign);
+			readOptionalFloat(serial, ln, "rollSign", "camera.lookAt rollSign", la.roll_sign);
+			if (!std::isfinite(la.distance) || la.distance <= 0.0f || !std::isfinite(la.eye_height) ||
+				!std::isfinite(la.eye_forward) || !std::isfinite(la.units_per_meter))
+			{
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt has a non-finite value or distance <= 0; ignoring it.", serial);
+				ok = false;
+			}
+			if (ln.has_child("when") && ln["when"].is_seq())
+				parseGuardList(serial, ln["when"], "camera.lookAt when", la.when);
+			if (ok)
+				cam.look_at = std::move(la);
+		}
+	}
+
+	if (cam.writes.empty() && cam.matrix_writes.empty() && cam.code_hooks.empty() && !cam.fov.has_value() &&
+		!cam.pad_look.has_value() && !cam.look_at.has_value())
 	{
 		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a camera block with no usable ops; ignoring it.", serial);
 		return std::nullopt;

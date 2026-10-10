@@ -237,6 +237,8 @@ namespace VR::ProfileDB
 		u32 ee_address = 0;
 		u32 value_on = 0;
 		u32 value_off = 0;
+		// Optional: only patch/restore while these pass (e.g. the overlay holding the code is resident).
+		std::vector<CameraGuard> when;
 	};
 
 	struct CameraCodeHook
@@ -266,6 +268,28 @@ namespace VR::ProfileDB
 		float stick_floor = 0.0f;
 	};
 
+	// First-person look-at camera for games whose renderer builds its view from an eye and a
+	// target vector (e.g. Outbreak). Each vsync: eye = character position (read at base +
+	// position_offset) + eye height + head translation; target = eye + distance * forward, where
+	// forward's yaw is the character's heading plus head yaw and its pitch is head pitch.
+	struct CameraLookAt
+	{
+		u32 eye_address = 0;
+		u32 target_address = 0;
+		s64 position_offset = 0;
+		bool has_heading = false;
+		s64 heading_offset = 0;
+		float eye_height = 160.0f;
+		float eye_forward = 0.0f;
+		float distance = 100.0f;
+		float units_per_meter = 0.0f;
+		float yaw_sign = 1.0f;
+		float pitch_sign = 1.0f;
+		u32 roll_address = 0;
+		float roll_sign = 1.0f;
+		std::vector<CameraGuard> when;
+	};
+
 	struct CameraProfile
 	{
 		std::vector<CameraWriteOp> writes;
@@ -276,6 +300,7 @@ namespace VR::ProfileDB
 		std::vector<CameraSilence> silence;
 		std::vector<CameraCodeHook> code_hooks;
 		std::optional<CameraPadLook> pad_look;
+		std::optional<CameraLookAt> look_at;
 	};
 
 	struct SpatialControlSpec

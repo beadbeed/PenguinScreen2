@@ -16,12 +16,45 @@ SLPM-65428:
   name: "Biohazard Outbreak (Japan, English patch)"
   crcs: [0x32088394, 0x198EFDC1, 0x03C8F393, 0x32097C02, 0x03C90C05]
   tier: stereo
-  notes: "Fixed/rail cameras over real-time 3D rooms. Head-driven camera needs a lookAt op (not yet implemented)."
-  screen: { distance: 2.0, height: 1.4 }
+  notes: "Fixed/rail cameras over real-time 3D rooms. First person: camera.lookAt puts the eye at the local character's head."
+  # First person: the picture is locked to the head and sized to the game camera's FOV (camera.fov below,
+  # 80 deg vertical: height = 2 * distance * tan(40 deg)), flat (arc 0) so the perspective stays right.
+  screen: { distance: 1.5, height: 2.52, follow: head, arc: 0 }
   stereo:
     separation: 0.012
     convergence: 55.0
     zDrivenDepth: true
+  # First-person camera (only with --vr and the VR 'Head-Tracked Camera' setting, on by default).
+  # Outbreak builds its view from an eye and a target vector. During normal room play (GAME overlay
+  # resident, scenario in game, room camera in normal mode) the room camera's three cut handlers and the
+  # door follow camera's eye writes are NOP'd, so nothing overwrites them; the view build after them still
+  # runs. camera.lookAt then writes the eye at the local character's head every vsync, looking along the
+  # character's heading (+0x92) plus head yaw, tilted by head pitch, moved by head translation (cm units).
+  # File #1 addresses checked against our GAME.BIN; heading +0x92 from the camera/ModernCam research.
+  # Research notes: tools/outbreak-vr and D:/Games/PS2/research on the test PC.
+  camera:
+    base: { indexed: 0x476DD0, indexAddr: 0x48BF7D, indexWidth: 1, stride: 0x10E0 }   # local character record
+    guards:
+      - { address: 0x540004, equals: 3 }             # GAME overlay resident
+      - { address: 0x48BF60, equals: 2, width: 1 }   # scenario status: in game
+      - { address: 0x3AEF75, equals: 0, width: 1 }   # room camera in normal mode (not a scripted shot)
+    silence:
+      - { address: 0x58EAEC, on: 0x00000000, off: 0x0C163B1C, when: [{ address: 0x540004, equals: 3 }] }   # fixed-cut handler
+      - { address: 0x58EAFC, on: 0x00000000, off: 0x0C163C8C, when: [{ address: 0x540004, equals: 3 }] }   # spline cut handler
+      - { address: 0x58EB0C, on: 0x00000000, off: 0x0C163B60, when: [{ address: 0x540004, equals: 3 }] }   # rail cut handler
+      - { address: 0x5A91E0, on: 0x00000000, off: 0x0C0D013C, when: [{ address: 0x540004, equals: 3 }] }   # door follow camera eye write
+      - { address: 0x5A9340, on: 0x00000000, off: 0x0C0D013C, when: [{ address: 0x540004, equals: 3 }] }   # door follow camera eye write
+      - { address: 0x5A9410, on: 0x00000000, off: 0x0C0D013C, when: [{ address: 0x540004, equals: 3 }] }   # door follow camera eye write
+    lookAt:
+      eye: 0x306338
+      target: 0x306344
+      position: 0x38      # f32 x, y (up), z
+      heading: 0x92       # s16, 0x10000 = 360 deg, 0 faces +Z
+      eyeHeight: 155
+      eyeForward: 10
+      distance: 100
+      unitsPerMeter: 100
+    fov: { address: 0x306380, encoding: f32, scale: 80.0 }   # vertical FOV, degrees
   # VR controllers (only when launched with --vr; flat play is untouched).
   # A pad bound in Settings -> Controllers (e.g. a DualSense) keeps working alongside;
   # when both touch the same button, the latest change wins.
@@ -58,16 +91,16 @@ SLPM-65428:
     - device: Zone
       id: holster
       notes: "Right hip holster: squeeze the grip there to ready the weapon (R1, lock-on); keep squeezing to stay aimed."
-      placement: { side: 0.22, height: -0.62, forward: 0.0 }
-      params: { radius: 0.15, hand: right, grip: true }
+      placement: { side: 0.22, height: -0.50, forward: 0.12 }   # seated thigh/hip; standing hip is -0.62 / 0.0
+      params: { radius: 0.20, hand: right, grip: true }
       pad: 1
       bind:
         Pressed: R1
     - device: Zone
       id: backpack
       notes: "Over the right shoulder: reach back past your ear and squeeze the grip to open the item screen (Start)."
-      placement: { side: 0.15, height: -0.10, forward: -0.15 }
-      params: { radius: 0.13, hand: right, grip: true }
+      placement: { side: 0.15, height: -0.05, forward: -0.08 }   # a chair back blocks reaching further
+      params: { radius: 0.15, hand: right, grip: true }
       pad: 1
       bind:
         Pressed: Start
