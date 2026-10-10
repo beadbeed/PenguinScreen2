@@ -1060,7 +1060,7 @@ namespace VR::CameraDriver
 		{
 			float dir[3] = {0.0f, 0.0f, 1.0f};
 			float eye[3] = {0.0f, 0.0f, 0.0f};
-			float base_yaw = 0.0f; // game yaw the head yaw was added to (the anchor, or the heading)
+			float base_yaw = 0.0f; // game yaw minus yawSign * the head's room yaw (base yaw - yawSign * recenter yaw)
 			float yaw_sign = 1.0f;
 		};
 
@@ -1220,7 +1220,9 @@ namespace VR::CameraDriver
 			// body is hidden in first person, so the move stick shifts the character's position directly
 			// (the game's collision still pushes it back out of walls), and the game doesn't get that stick.
 			// Stick up goes where the camera looks, like normal walking.
-			if (weapon_raised && la.aim_move_speed > 0.0f && la.aim_move_hand >= 0)
+			// Online-safe (the setting, or any time the network adapter is on): no moving the character.
+			const bool online_safe = EmuConfig.VR.OnlineSafe || EmuConfig.DEV9.EthEnable;
+			if (weapon_raised && la.aim_move_speed > 0.0f && la.aim_move_hand >= 0 && !online_safe)
 			{
 				s_aim_moving = true;
 				const float mx = input.hands[la.aim_move_hand].thumbstick_x;
@@ -1266,10 +1268,13 @@ namespace VR::CameraDriver
 				const s32 roll = static_cast<s32>(std::lround(la.roll_sign * e.roll * (65536.0f / (2.0f * PI_F)))) & 0xFFFF;
 				memWrite32(la.roll_address, static_cast<u32>(roll));
 			}
-			s_base_yaw_now.store(base_yaw, std::memory_order_release);
+			// The game view is yaw_offset + yawSign * the head's room yaw: a stick turn and a recenter both change
+			// it, so frames already on their way are placed right across either.
+			const float yaw_offset = WrapPi(base_yaw - la.yaw_sign * s_ref_yaw);
+			s_base_yaw_now.store(yaw_offset, std::memory_order_release);
 			if (out)
 			{
-				out->base_yaw = base_yaw;
+				out->base_yaw = yaw_offset;
 				out->yaw_sign = la.yaw_sign;
 				out->dir[0] = sy * cp;
 				out->dir[1] = sp;
@@ -1288,6 +1293,13 @@ namespace VR::CameraDriver
 		std::vector<HoldState> s_hold_state;
 		u32 s_hold_crc = 0;
 		bool s_hold_repair = false; // one-shot after a savestate load: undo holds saved in the state
+		bool s_holds_after_load = false; // the next save of the holds' originals comes from loaded memory
+
+		// What a hold puts back: the value at restoreFrom when the profile names one, else the saved original.
+		u32 HoldOriginal(const ProfileDB::CameraLookAt::Hold& h, const HoldState& st)
+		{
+			return (h.restore_from != 0) ? ReadSized(h.restore_from, h.width) : st.original;
+		}
 
 		void ApplyHolds(const ProfileDB::CameraLookAt& la, u32 crc)
 		{
@@ -1305,12 +1317,15 @@ namespace VR::CameraDriver
 				const u32 cur = ReadSized(h.address, h.width);
 				if (!st.saved)
 				{
-					st.original = (cur == h.value && h.has_restore) ? h.restore : cur;
+					// Our value already there right after a load means the state was saved while held: the
+					// profile's restore value is the real original. Otherwise whatever is there is.
+					st.original = (s_holds_after_load && cur == h.value && h.has_restore) ? h.restore : cur;
 					st.saved = true;
 				}
 				if (cur != h.value)
 					WriteSized(h.address, h.width, h.value);
 			}
+			s_holds_after_load = false;
 		}
 
 		void RestoreHolds(const ProfileDB::CameraLookAt* la, bool write)
@@ -1324,7 +1339,7 @@ namespace VR::CameraDriver
 					if (!st.saved || (!h.when.empty() && !GuardListPass(h.when)))
 						continue;
 					if (ReadSized(h.address, h.width) == h.value)
-						WriteSized(h.address, h.width, st.original);
+						WriteSized(h.address, h.width, HoldOriginal(h, st));
 				}
 			}
 			for (HoldState& st : s_hold_state)
@@ -1337,10 +1352,10 @@ namespace VR::CameraDriver
 		{
 			for (const ProfileDB::CameraLookAt::Hold& h : la.holds)
 			{
-				if (!h.has_restore || (!h.when.empty() && !GuardListPass(h.when)))
+				if ((!h.has_restore && h.restore_from == 0) || (!h.when.empty() && !GuardListPass(h.when)))
 					continue;
 				if (ReadSized(h.address, h.width) == h.value)
-					WriteSized(h.address, h.width, h.restore);
+					WriteSized(h.address, h.width, (h.restore_from != 0) ? ReadSized(h.restore_from, h.width) : h.restore);
 			}
 		}
 
@@ -1612,7 +1627,7 @@ namespace VR::CameraDriver
 		if (!vm_live)
 		{
 			SetLookAtActive(false);
-			SpatialControls::SetMoveStickSuppressed(false);
+			SpatialControls::SetMoveStickSuppressed(-1);
 			RestoreHolds(nullptr, false);
 			s_written_count = 0;
 			s_frame_count = 0;
@@ -1639,7 +1654,7 @@ namespace VR::CameraDriver
 		if (!profile || !profile->camera.has_value())
 		{
 			SetLookAtActive(false);
-			SpatialControls::SetMoveStickSuppressed(false);
+			SpatialControls::SetMoveStickSuppressed(-1);
 			RestoreHolds(nullptr, false);
 			ResetRenderSync();
 			s_fov_saved = false;
@@ -1694,7 +1709,7 @@ namespace VR::CameraDriver
 		if (!armed)
 		{
 			SetLookAtActive(false);
-			SpatialControls::SetMoveStickSuppressed(false);
+			SpatialControls::SetMoveStickSuppressed(-1);
 			s_aim_moving = false;
 			// While the VM is paused nothing can change; holds keep their saved originals for the resume.
 			if (vm_state == VMState::Running)
@@ -1703,6 +1718,7 @@ namespace VR::CameraDriver
 				if (s_hold_repair && cam.look_at.has_value())
 					RepairHolds(cam.look_at.value());
 				s_hold_repair = false;
+				s_holds_after_load = false;
 			}
 			ResetRenderSync();
 			s_render_sync_logged = false;
@@ -1914,8 +1930,12 @@ namespace VR::CameraDriver
 		}
 		else if (s_lookat_active.load(std::memory_order_relaxed))
 			SetLookAtActive(true);
-		SpatialControls::SetMoveStickSuppressed(guards_now && cam.look_at.has_value() && s_aim_moving &&
-		                                        s_lookat_active.load(std::memory_order_relaxed));
+		// Kept through the disarm grace like the active flag: the guard byte flickers about 12 times a second,
+		// and dropping the suppression for those vsyncs would hand the held stick to the game.
+		SpatialControls::SetMoveStickSuppressed(
+			(cam.look_at.has_value() && s_aim_moving && s_lookat_active.load(std::memory_order_relaxed)) ?
+				static_cast<int>(cam.look_at->aim_move_hand) :
+				-1);
 
 		WriteCodeHookScratch(cam, euler, pose);
 
@@ -1949,6 +1969,7 @@ namespace VR::CameraDriver
 		// The loaded memory has its own values: holds save them afresh, and no frame matches old writes.
 		RestoreHolds(nullptr, false);
 		s_hold_repair = true;
+		s_holds_after_load = true;
 		ResetRenderSync();
 	}
 

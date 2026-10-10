@@ -1526,7 +1526,8 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 				{
 					if (!hn.is_map())
 						continue;
-					warnUnknownKeys(serial, hn, "camera.lookAt.hold", {"address", "value", "f32", "width", "restore", "restoreF32", "when", "notes"});
+					warnUnknownKeys(serial, hn, "camera.lookAt.hold",
+						{"address", "value", "f32", "width", "restore", "restoreF32", "restoreFrom", "when", "notes"});
 					const std::optional<u32> addr = hn.has_child("address") ? parseAddress(nodeVal(hn["address"])) : std::nullopt;
 					CameraLookAt::Hold h;
 					bool have_value = false;
@@ -1543,13 +1544,23 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 					}
 					else if (hn.has_child("value"))
 					{
-						const std::optional<u32> v = parseHexU32(nodeVal(hn["value"]));
+						const std::string_view raw = nodeVal(hn["value"]);
+						const std::optional<u32> v = parseHexU32(raw);
 						if (v.has_value())
 						{
 							h.value = v.value();
 							parseWidth(hn, h.width);
+							warnHexTrap(serial, raw, h.value, "camera.lookAt.hold value");
 							have_value = true;
 						}
+					}
+					// A value wider than the field would be truncated on every write and never match on restore.
+					const u64 width_max = (h.width >= 4) ? 0xFFFFFFFFull : ((1ull << (h.width * 8)) - 1);
+					if (have_value && h.value > width_max)
+					{
+						Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt.hold value {:#x} does not fit width {}; "
+										   "skipping it.", serial, h.value, h.width);
+						continue;
 					}
 					if (!addr.has_value() || !have_value || !inMainRam(addr.value(), h.width) || (addr.value() % h.width) != 0)
 					{
@@ -1569,12 +1580,26 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 					}
 					else if (hn.has_child("restore"))
 					{
-						const std::optional<u32> r = parseHexU32(nodeVal(hn["restore"]));
-						if (r.has_value())
+						const std::string_view raw = nodeVal(hn["restore"]);
+						const std::optional<u32> r = parseHexU32(raw);
+						if (r.has_value() && r.value() <= width_max)
 						{
+							warnHexTrap(serial, raw, r.value(), "camera.lookAt.hold restore");
 							h.restore = r.value();
 							h.has_restore = true;
 						}
+						else
+							Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt.hold restore is invalid or does not fit "
+											   "width {}; ignoring it.", serial, h.width);
+					}
+					if (hn.has_child("restoreFrom"))
+					{
+						const std::optional<u32> rf = parseAddress(nodeVal(hn["restoreFrom"]));
+						if (rf.has_value() && inMainRam(rf.value(), h.width) && (rf.value() % h.width) == 0)
+							h.restore_from = rf.value();
+						else
+							Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt.hold restoreFrom is not an aligned main-RAM "
+											   "address; ignoring it.", serial);
 					}
 					if (hn.has_child("when") && hn["when"].is_seq())
 						parseGuardList(serial, hn["when"], "camera.lookAt.hold when", h.when);

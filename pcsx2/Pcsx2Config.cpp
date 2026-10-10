@@ -1930,6 +1930,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(StereoConvergence);
 	SettingsWrapEntry(HeadCamera);
 	SettingsWrapEntry(SnapTurn);
+	SettingsWrapEntry(OnlineSafe);
 	SettingsWrapEntry(XrSeatRuntimeDirs);
 	SettingsWrapEntry(XrSeatRuntimeJsons);
 
@@ -1950,7 +1951,7 @@ bool Pcsx2Config::VROptions::operator==(const VROptions& right) const
 	       OpEqu(ScreenVerticalOffset) &&
 	       OpEqu(ScreenArcDeg) && OpEqu(StereoMode) && OpEqu(StereoUseProfile) &&
 	       OpEqu(StereoSeparation) && OpEqu(StereoConvergence) &&
-	       OpEqu(HeadCamera) && OpEqu(SnapTurn);
+	       OpEqu(HeadCamera) && OpEqu(SnapTurn) && OpEqu(OnlineSafe);
 }
 
 bool Pcsx2Config::VROptions::operator!=(const VROptions& right) const

@@ -64,7 +64,8 @@ SLPM-65428:
       position: 0x38      # f32 x, y (up), z
       heading: 0x92       # s16, 0x10000 = 360 deg, 0 faces +Z
       eyeHeight: 155
-      eyeForward: 10      # about where the eyes are; the body is hidden (see hold) so the head model can't show
+      eyeForward: 10      # about where the eyes are; the body is hidden (see hold) while your head stays within about
+                          # 19 cm above / 50 cm around where you recentered: recenter if it ever shows
       distance: 100
       roll: 0x30638C         # camera roll (s32 holding a 16-bit angle): written level (rollSign 0) so a cut's
       rollSign: 0          # roll can't stay latched; the first-person screen itself stays roll-level
@@ -89,12 +90,14 @@ SLPM-65428:
         - { offset: 0x54F, equals: 0, width: 1 }    # action: idle (1 walk, 3 run, 128 aiming)
         - { offset: 0xF98, equals: 0, width: 2 }    # stick magnitude: centred
       # Hide your own body: the room's near-camera cull (models whose feet + 100 up are nearer the eye
-      # than their class radius) spares only the camera's focus character. Point the focus at an empty
-      # slot and the cull hides the local character; its class-1 radius goes from 80 to 70 so zombies and
-      # partners stay visible down to about 0.43 m away.
+      # than their class radius) spares only the camera's focus character. Point the focus at another
+      # slot (3, empty offline; 0 if you are slot 3 online) and the cull hides the local character; it is
+      # put back from the local slot byte. The class-1 radius goes from 80 to 75 so zombies and partners
+      # stay visible down to about 0.5 m away.
       hold:
-        - { address: 0x3AEF74, value: 3, width: 1, restore: 0, notes: "camera focus slot (normally the local slot)" }
-        - { address: 0x6D6CF4, f32: 70.0, restoreF32: 80.0, when: [{ address: 0x540004, equals: 3 }], notes: "near-cull radius, characters" }
+        - { address: 0x3AEF74, value: 3, width: 1, restoreFrom: 0x48BF7D, when: [{ address: 0x48BF7D, notEquals: 3, width: 1 }], notes: "camera focus slot" }
+        - { address: 0x3AEF74, value: 0, width: 1, restoreFrom: 0x48BF7D, when: [{ address: 0x48BF7D, equals: 3, width: 1 }], notes: "camera focus slot (you are slot 3)" }
+        - { address: 0x6D6CF4, f32: 75.0, restoreF32: 80.0, when: [{ address: 0x540004, equals: 3 }], notes: "near-cull radius, characters" }
       # The view matrix the game builds from eye/target (row vectors). Matching it against what was
       # written says which head pose each displayed frame came from, so the first-person screen is
       # placed exactly there (no judder). The frame on screen is two view updates behind the newest one

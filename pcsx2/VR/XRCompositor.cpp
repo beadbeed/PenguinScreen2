@@ -74,6 +74,11 @@ namespace VR::XRCompositor
 	namespace
 	{
 		constexpr int64_t ONE_SECOND_NS = 1000000000;
+		// Longest the GS thread waits for the runtime to hand back a swapchain image. A healthy compositor
+		// has one free at once; when it stops consuming frames (headset asleep, streaming link idle) a long
+		// wait here stalls the GS thread and with it the emulator, which online means being dropped. On a
+		// timeout the copy is skipped and retried on the next present; the headset keeps the last image.
+		constexpr int64_t kSwapchainWaitNs = 5000000;
 		constexpr u32 NUM_CMD_BUFFERS = 2;
 		// First-person hands: one impostor quad per hand (HandModel::kLeft / kRight).
 		constexpr int kHandSlots = 2;
@@ -427,14 +432,19 @@ namespace VR::XRCompositor
 			}
 
 			XrSwapchainImageWaitInfo wi = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-			wi.timeout = ONE_SECOND_NS;
+			wi.timeout = kSwapchainWaitNs;
 			XrResult res = xrWaitSwapchainImage(chain.swapchain, &wi);
 			if (res == XR_TIMEOUT_EXPIRED)
 			{
-				if (!s.warned_wait_timeout)
+				// The image stays acquired (wait_pending); the next present waits on it again.
+				static u64 s_wait_timeouts = 0;
+				s_wait_timeouts++;
+				if (!s.warned_wait_timeout || (s_wait_timeouts % 600) == 0)
 				{
 					s.warned_wait_timeout = true;
-					Console.Warning("(VR) xrWaitSwapchainImage timed out; skipping copy this frame.");
+					Console.Warning("(VR) xrWaitSwapchainImage timed out (%llu so far): the runtime isn't taking frames "
+									"(headset asleep?); skipping copies, emulation keeps running.",
+						static_cast<unsigned long long>(s_wait_timeouts));
 				}
 				return CopyResult::TimeoutZeroLayer;
 			}
@@ -706,8 +716,10 @@ namespace VR::XRCompositor
 					lc.wait_pending = true;
 				}
 				XrSwapchainImageWaitInfo wi = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-				wi.timeout = ONE_SECOND_NS;
-				if (XR_FAILED(xrWaitSwapchainImage(lc.swapchain, &wi)))
+				wi.timeout = kSwapchainWaitNs;
+				// XR_TIMEOUT_EXPIRED is a success code: the image isn't ours yet, so wait again next frame.
+				const XrResult lwr = xrWaitSwapchainImage(lc.swapchain, &wi);
+				if (lwr == XR_TIMEOUT_EXPIRED || XR_FAILED(lwr))
 					continue;
 				lc.wait_pending = false;
 
@@ -1026,7 +1038,7 @@ namespace VR::XRCompositor
 			// PCSX2_VR_HANDS_GRIP_ORIENT: orient the hands by the grip pose instead of the aim pose.
 			static const bool s_grip_orient = (std::getenv("PCSX2_VR_HANDS_GRIP_ORIENT") != nullptr);
 			// Hands are optional: never hold the frame long for one of their images.
-			constexpr int64_t kHandWaitNs = 20000000;
+			constexpr int64_t kHandWaitNs = kSwapchainWaitNs;
 
 			if (s.hands_disabled || !s.head_pose_valid)
 				return 0;

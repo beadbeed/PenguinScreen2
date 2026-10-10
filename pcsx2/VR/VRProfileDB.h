@@ -348,6 +348,9 @@ namespace VR::ProfileDB
 			// The value to put back when the one found already equals ours (a savestate made while held).
 			bool has_restore = false;
 			u32 restore = 0;
+			// Put back the value read from this address instead of the one saved (e.g. the local player slot
+			// for a camera-focus byte), whatever was there when first person took over. 0 = unused.
+			u32 restore_from = 0;
 			// Only held (and put back) while these pass, e.g. the overlay holding the data is resident.
 			std::vector<CameraGuard> when;
 		};

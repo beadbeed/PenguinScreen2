@@ -1,7 +1,8 @@
 """Switch SteamVR to its built-in null (simulated) headset for headset-free VR tests, and back.
 
-  python null_driver.py on    # back up steamvr.vrsettings, then enable the null HMD
-  python null_driver.py off   # put the backed-up file back exactly
+  python null_driver.py on          # back up steamvr.vrsettings, then enable the null HMD
+  python null_driver.py on-standby  # same, but the HMD goes to standby after 15 s idle (like a headset taken off)
+  python null_driver.py off         # put the backed-up file back exactly
 
 SteamVR must not be running (it rewrites the file on exit); this script closes it first.
 The null HMD needs standby and the dashboard off, or the compositor parks the app.
@@ -29,7 +30,7 @@ def close_steamvr():
     time.sleep(2)
 
 
-def on():
+def on(standby=False):
     close_steamvr()
     shutil.copy2(SETTINGS, BACKUP)
     d = json.load(open(SETTINGS, encoding="utf-8"))
@@ -39,7 +40,8 @@ def on():
                         "windowX": 100, "windowY": 100, "windowWidth": 1280, "windowHeight": 720,
                         "renderWidth": 1512, "renderHeight": 1680, "secondsFromVsyncToPhotons": 0.01111111,
                         "displayFrequency": 90.0}
-    d.setdefault("power", {}).update({"turnOffScreensTimeout": 86400, "pauseCompositorOnStandby": False})
+    d.setdefault("power", {}).update({"turnOffScreensTimeout": 15 if standby else 86400,
+                                      "pauseCompositorOnStandby": bool(standby)})
     d.setdefault("dashboard", {}).update({"enableDashboard": False})
     json.dump(d, open(SETTINGS, "w", encoding="utf-8"), indent=3)
     print("null HMD on; original saved to", BACKUP)
@@ -54,4 +56,4 @@ def off():
 
 
 if __name__ == "__main__":
-    {"on": on, "off": off}[sys.argv[1]]()
+    {"on": on, "on-standby": lambda: on(True), "off": off}[sys.argv[1]]()

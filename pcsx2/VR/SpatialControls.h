@@ -535,9 +535,10 @@ namespace VR::SpatialControls
 	// exist only on gamepad-shaped controllers such as the Steam Frame and stay 0 elsewhere.
 	ControlValues ComposeGamepad(const VRInputSnapshot& snapshot);
 
-	// While set, the Gamepad device's LeftStickX/LeftStickY read 0: the camera driver is using the left
-	// stick to move the character itself (walking while aiming), so the game must not see it. Any thread.
-	void SetMoveStickSuppressed(bool suppressed);
+	// While a hand is given, the Gamepad device's stick on that hand (VRInputSnapshot::LEFT/RIGHT) reads 0:
+	// the camera driver is using it to move the character itself (walking while aiming), so the game must
+	// not see it. -1 = none. Any thread.
+	void SetMoveStickSuppressed(int hand);
 
 	// Zone: a spot on the body that a hand reaches into, such as a hip holster or over the
 	// shoulder. It is placed from the head and turns with the head's yaw only, so it follows

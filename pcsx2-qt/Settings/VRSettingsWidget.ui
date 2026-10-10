@@ -247,6 +247,13 @@
         </property>
        </widget>
       </item>
+      <item>
+       <widget class="QCheckBox" name="onlineSafe">
+        <property name="text">
+         <string>Online-Safe First Person (camera only; on whenever the network adapter is on)</string>
+        </property>
+       </widget>
+      </item>
      </layout>
     </widget>
    </item>
@@ -286,6 +293,7 @@
   <tabstop>profileBrowser</tabstop>
   <tabstop>headCamera</tabstop>
   <tabstop>snapTurn</tabstop>
+  <tabstop>onlineSafe</tabstop>
  </tabstops>
  <resources/>
  <connections/>

@@ -1018,12 +1018,31 @@ namespace VR::SpatialControls
 
 	namespace
 	{
-		std::atomic_bool s_move_stick_suppressed{false};
+		std::atomic_int s_suppressed_move_hand{-1};
+
+		// Radial deadzone with the travel above it rescaled to the full range: a stick resting slightly off
+		// centre reads exactly 0, so it isn't re-sent every poll over another pad bound to the same stick.
+		void GamepadStick(float x, float y, float& out_x, float& out_y)
+		{
+			constexpr float kDeadzone = 0.1f;
+			x = std::clamp(Finite(x), -1.0f, 1.0f);
+			y = std::clamp(Finite(y), -1.0f, 1.0f);
+			const float mag = std::sqrt(x * x + y * y);
+			if (!(mag > kDeadzone))
+			{
+				out_x = 0.0f;
+				out_y = 0.0f;
+				return;
+			}
+			const float scale = std::min((mag - kDeadzone) / (1.0f - kDeadzone), 1.0f) / mag;
+			out_x = std::clamp(x * scale, -1.0f, 1.0f);
+			out_y = std::clamp(y * scale, -1.0f, 1.0f);
+		}
 	}
 
-	void SetMoveStickSuppressed(bool suppressed)
+	void SetMoveStickSuppressed(int hand)
 	{
-		s_move_stick_suppressed.store(suppressed, std::memory_order_release);
+		s_suppressed_move_hand.store(hand, std::memory_order_release);
 	}
 
 	ControlValues ComposeGamepad(const VRInputSnapshot& snapshot)
@@ -1047,11 +1066,16 @@ namespace VR::SpatialControls
 		At(v, ControlId::RightTrigger) = Clamp01(Finite(r.trigger));
 		At(v, ControlId::LeftGrip) = Clamp01(Finite(l.grip));
 		At(v, ControlId::RightGrip) = Clamp01(Finite(r.grip));
-		const bool move_stick = !s_move_stick_suppressed.load(std::memory_order_acquire);
-		At(v, ControlId::LeftStickX) = move_stick ? axis(l.thumbstick_x) : 0.0f;
-		At(v, ControlId::LeftStickY) = move_stick ? axis(l.thumbstick_y) : 0.0f;
-		At(v, ControlId::RightStickX) = axis(r.thumbstick_x);
-		At(v, ControlId::RightStickY) = axis(r.thumbstick_y);
+		const int suppressed = s_suppressed_move_hand.load(std::memory_order_acquire);
+		float lx = 0.0f, ly = 0.0f, rx = 0.0f, ry = 0.0f;
+		if (suppressed != VRInputSnapshot::LEFT)
+			GamepadStick(l.thumbstick_x, l.thumbstick_y, lx, ly);
+		if (suppressed != VRInputSnapshot::RIGHT)
+			GamepadStick(r.thumbstick_x, r.thumbstick_y, rx, ry);
+		At(v, ControlId::LeftStickX) = lx;
+		At(v, ControlId::LeftStickY) = ly;
+		At(v, ControlId::RightStickX) = rx;
+		At(v, ControlId::RightStickY) = ry;
 		static constexpr float kPressAt = 0.5f;
 		At(v, ControlId::LeftTriggerPress) = button(At(v, ControlId::LeftTrigger) >= kPressAt);
 		At(v, ControlId::RightTriggerPress) = button(At(v, ControlId::RightTrigger) >= kPressAt);

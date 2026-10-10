@@ -638,15 +638,20 @@ void VRInputSource::Emit(Instance& in, const SC::ControlValues& values)
 			axis_scale = pad->GetAxisScale();
 	}
 
+	// A held stick or trigger is sent again every poll, not only when it changes: another pad bound to the
+	// same PS2 input (a DualSense, Steam Input's virtual pad for the VR controllers) sends its resting value
+	// whenever its stick jitters, and the latest event wins, so a steadily held VR stick kept dropping to
+	// centre. Buttons are only sent on change (a repeated press would re-toggle Analog, toggle macros,
+	// compound Pressure and re-fire chorded hotkeys; another pad's buttons don't jitter anyway). Resting
+	// values go out once, so the other pad keeps working, and nothing repeats while a binding is being
+	// captured (it would end up in the new binding).
+	const bool capturing = InputManager::HasHook();
 	for (const SC::ControlDef& c : in.def->controls)
 	{
 		const u32 i = static_cast<u32>(c.id);
-		// A held (non-zero) control is sent again every poll, not only when it changes: another pad bound
-		// to the same PS2 input (a DualSense, Steam Input's virtual pad for the VR controllers) sends its
-		// resting value whenever its stick jitters, and the latest event wins, so a steadily held VR stick
-		// kept dropping to centre. Resting values still go out once, so the other pad keeps working.
 		const bool changed = (values[i] != in.last[i]);
-		if (!changed && values[i] == 0.0f)
+		const bool repeat_held = !capturing && values[i] != 0.0f && SC::ControlTypeOf(c.id) != SC::ControlType::Button;
+		if (!changed && !repeat_held)
 			continue;
 		in.last[i] = values[i];
 		in.ever_emitted = true;
