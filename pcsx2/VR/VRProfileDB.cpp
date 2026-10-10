@@ -1602,7 +1602,8 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 			if (ln.has_child("aim") && ln["aim"].is_map())
 			{
 				const ryml::ConstNodeRef an = ln["aim"];
-				warnUnknownKeys(serial, an, "camera.lookAt.aim", {"stance", "equals", "width", "hand", "pitch", "pitchSign", "pitchClamp"});
+				warnUnknownKeys(serial, an, "camera.lookAt.aim", {"stance", "equals", "width", "hand", "pitch", "pitchSign", "pitchClamp",
+					"move", "moveStick"});
 				const std::optional<s64> so = an.has_child("stance") ? parseSignedOffset(nodeVal(an["stance"])) : std::nullopt;
 				const std::optional<u32> se = an.has_child("equals") ? parseHexU32(nodeVal(an["equals"])) : std::nullopt;
 				if (!so.has_value() || !se.has_value() || !la.yaw_anchor)
@@ -1634,6 +1635,9 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 					readOptionalFloat(serial, an, "pitchSign", "camera.lookAt.aim pitchSign", la.aim_pitch_sign);
 					readOptionalFloat(serial, an, "pitchClamp", "camera.lookAt.aim pitchClamp", la.aim_pitch_clamp);
 					la.aim_pitch_clamp = std::clamp(std::isfinite(la.aim_pitch_clamp) ? la.aim_pitch_clamp : 0.0f, 0.0f, 32767.0f);
+					readOptionalFloat(serial, an, "move", "camera.lookAt.aim move", la.aim_move_speed);
+					la.aim_move_speed = std::clamp(std::isfinite(la.aim_move_speed) ? la.aim_move_speed : 0.0f, 0.0f, 1000.0f);
+					parseHand(an, "moveStick", la.aim_move_hand);
 				}
 			}
 			if (ok)

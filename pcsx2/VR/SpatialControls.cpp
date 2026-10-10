@@ -4,6 +4,7 @@
 #include "VR/SpatialControls.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <iterator>
@@ -1015,6 +1016,16 @@ namespace VR::SpatialControls
 		return v;
 	}
 
+	namespace
+	{
+		std::atomic_bool s_move_stick_suppressed{false};
+	}
+
+	void SetMoveStickSuppressed(bool suppressed)
+	{
+		s_move_stick_suppressed.store(suppressed, std::memory_order_release);
+	}
+
 	ControlValues ComposeGamepad(const VRInputSnapshot& snapshot)
 	{
 		ControlValues v{};
@@ -1036,8 +1047,9 @@ namespace VR::SpatialControls
 		At(v, ControlId::RightTrigger) = Clamp01(Finite(r.trigger));
 		At(v, ControlId::LeftGrip) = Clamp01(Finite(l.grip));
 		At(v, ControlId::RightGrip) = Clamp01(Finite(r.grip));
-		At(v, ControlId::LeftStickX) = axis(l.thumbstick_x);
-		At(v, ControlId::LeftStickY) = axis(l.thumbstick_y);
+		const bool move_stick = !s_move_stick_suppressed.load(std::memory_order_acquire);
+		At(v, ControlId::LeftStickX) = move_stick ? axis(l.thumbstick_x) : 0.0f;
+		At(v, ControlId::LeftStickY) = move_stick ? axis(l.thumbstick_y) : 0.0f;
 		At(v, ControlId::RightStickX) = axis(r.thumbstick_x);
 		At(v, ControlId::RightStickY) = axis(r.thumbstick_y);
 		static constexpr float kPressAt = 0.5f;

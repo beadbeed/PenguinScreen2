@@ -78,7 +78,10 @@ SLPM-65692:
       snapStick: right
       # Weapon raised (stance 2, R1 or the hip holster): the character faces where the right
       # controller points. Aim pitch (+0xBC8, needs the servo silenced) is not enabled yet.
-      aim: { stance: 0x08, equals: 2, hand: right }
+      # Walk and shoot: with the weapon up the left stick moves you at 70 cm/s (where you look, like
+      # walking); the game itself would only turn and tilt the aim with it. Checked on File #1: walls
+      # still stop you (the game's collision pushes the position back out).
+      aim: { stance: 0x08, equals: 2, hand: right, move: 70, moveStick: left }
       # Checked live on File #2 (Training Ground): item screen flag, near-cull table, view matrix and the
       # stick magnitude (+0xFA8: the record is 0x20 longer than File #1's). No File #1-style action byte
       # was found, so body-follow uses stance + stick only.

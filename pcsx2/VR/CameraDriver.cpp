@@ -3,6 +3,7 @@
 
 #include "VR/CameraDriver.h"
 #include "VR/HandModel.h"
+#include "VR/SpatialControls.h"
 #include "VR/HeadPose.h"
 #include "VR/PadLook.h"
 #include "VR/VRManager.h"
@@ -976,6 +977,7 @@ namespace VR::CameraDriver
 		float s_yaw_anchor = 0.0f;
 		bool s_snap_ready = false;
 		std::chrono::steady_clock::time_point s_turn_last{};
+		bool s_aim_moving = false; // this vsync's ApplyLookAt is moving the character from the stick
 
 		float WrapPi(float a)
 		{
@@ -1075,6 +1077,7 @@ namespace VR::CameraDriver
 		bool ApplyLookAt(const ProfileDB::CameraLookAt& la, const std::optional<u32>& base, const EulerAngles& e,
 			const HeadPose::Snapshot& pose, LookAtWrite* out)
 		{
+			s_aim_moving = false;
 			if (!base.has_value() || (!la.when.empty() && !GuardListPass(la.when)))
 				return false;
 			const s64 pa = static_cast<s64>(base.value()) + la.position_offset;
@@ -1212,6 +1215,32 @@ namespace VR::CameraDriver
 			}
 			// The first-person hands show the pistol in the right hand while the weapon is raised.
 			HandModel::SetGunHeld(weapon_raised);
+
+			// Walk while aiming: with the weapon up Outbreak only turns and tilts the aim with the stick. The
+			// body is hidden in first person, so the move stick shifts the character's position directly
+			// (the game's collision still pushes it back out of walls), and the game doesn't get that stick.
+			// Stick up goes where the camera looks, like normal walking.
+			if (weapon_raised && la.aim_move_speed > 0.0f && la.aim_move_hand >= 0)
+			{
+				s_aim_moving = true;
+				const float mx = input.hands[la.aim_move_hand].thumbstick_x;
+				const float my = input.hands[la.aim_move_hand].thumbstick_y;
+				const float mag = std::sqrt(mx * mx + my * my);
+				constexpr float kDeadzone = 0.2f;
+				if (std::isfinite(mag) && mag > kDeadzone)
+				{
+					const float speed = la.aim_move_speed * std::min((mag - kDeadzone) / (0.95f - kDeadzone), 1.0f);
+					const float step = speed * turn_dt / mag;
+					const float move_right_yaw = yaw - la.yaw_sign * (PI_F * 0.5f);
+					const float nx = p[0] + step * (my * std::sin(yaw) + mx * std::sin(move_right_yaw));
+					const float nz = p[2] + step * (my * std::cos(yaw) + mx * std::cos(move_right_yaw));
+					if (std::isfinite(nx) && std::isfinite(nz))
+					{
+						memWrite32(static_cast<u32>(pa), std::bit_cast<u32>(nx));
+						memWrite32(static_cast<u32>(pa) + 8, std::bit_cast<u32>(nz));
+					}
+				}
+			}
 
 			// Body follows view: standing idle with the stick centred, the character turns to face where the
 			// camera looks, so picking up, checking and opening things work on what the player looks at.
@@ -1583,6 +1612,7 @@ namespace VR::CameraDriver
 		if (!vm_live)
 		{
 			SetLookAtActive(false);
+			SpatialControls::SetMoveStickSuppressed(false);
 			RestoreHolds(nullptr, false);
 			s_written_count = 0;
 			s_frame_count = 0;
@@ -1609,6 +1639,7 @@ namespace VR::CameraDriver
 		if (!profile || !profile->camera.has_value())
 		{
 			SetLookAtActive(false);
+			SpatialControls::SetMoveStickSuppressed(false);
 			RestoreHolds(nullptr, false);
 			ResetRenderSync();
 			s_fov_saved = false;
@@ -1663,6 +1694,8 @@ namespace VR::CameraDriver
 		if (!armed)
 		{
 			SetLookAtActive(false);
+			SpatialControls::SetMoveStickSuppressed(false);
+			s_aim_moving = false;
 			// While the VM is paused nothing can change; holds keep their saved originals for the resume.
 			if (vm_state == VMState::Running)
 			{
@@ -1856,6 +1889,7 @@ namespace VR::CameraDriver
 			{
 				// A menu, the map or pause: the camera keeps its last view (its writers stay silenced) and the
 				// world screen shows the menu in front of the player.
+				s_aim_moving = false;
 				ResetRenderSync();
 				SetLookAtActive(false);
 			}
@@ -1880,6 +1914,8 @@ namespace VR::CameraDriver
 		}
 		else if (s_lookat_active.load(std::memory_order_relaxed))
 			SetLookAtActive(true);
+		SpatialControls::SetMoveStickSuppressed(guards_now && cam.look_at.has_value() && s_aim_moving &&
+		                                        s_lookat_active.load(std::memory_order_relaxed));
 
 		WriteCodeHookScratch(cam, euler, pose);
 

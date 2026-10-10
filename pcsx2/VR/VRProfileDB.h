@@ -313,6 +313,10 @@ namespace VR::ProfileDB
 		s64 aim_pitch_offset = 0; // s16 binary angle (0x10000 = 360 deg)
 		float aim_pitch_sign = 1.0f;
 		float aim_pitch_clamp = 8192.0f; // s16 units
+		// Walk while aiming: while the weapon is raised, this hand's stick moves the character directly
+		// (game units per second, 0 = off) and is kept from the game, which would turn and tilt the aim.
+		float aim_move_speed = 0.0f;
+		s8 aim_move_hand = 0;
 
 		// Smooth turning on the turn stick, degrees per second at full deflection (needs yaw_anchor).
 		// Used unless the VR SnapTurn setting is on or this is 0; then snap_turn_deg applies.

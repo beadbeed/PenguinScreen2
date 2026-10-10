@@ -104,7 +104,10 @@ SLPM-65428:
       syncFramesBack: 2
       # Weapon raised (stance 2, R1 or the hip holster): the character faces where the right
       # controller points. Aim pitch (+0xBC8, needs the servo silenced) is not enabled yet.
-      aim: { stance: 0x08, equals: 2, hand: right }
+      # Walk and shoot: with the weapon up the left stick moves you at 70 cm/s (where you look, like
+      # walking); the game itself would only turn and tilt the aim with it. Checked on File #1: walls
+      # still stop you (the game's collision pushes the position back out).
+      aim: { stance: 0x08, equals: 2, hand: right, move: 70, moveStick: left }
     fov: { address: 0x306380, encoding: f32, scale: 100.0 }   # vertical FOV, degrees (about 115 horizontal at 4:3)
   # VR controllers (only when launched with --vr; flat play is untouched).
   # A pad bound in Settings -> Controllers (e.g. a DualSense) keeps working alongside;
