@@ -53,6 +53,7 @@ SLPM-65428:
       - { address: 0x5A91E0, on: 0x00000000, off: 0x0C0D013C, when: [{ address: 0x540004, equals: 3 }] }   # door follow camera eye write
       - { address: 0x5A9340, on: 0x00000000, off: 0x0C0D013C, when: [{ address: 0x540004, equals: 3 }] }   # door follow camera eye write
       - { address: 0x5A9410, on: 0x00000000, off: 0x0C0D013C, when: [{ address: 0x540004, equals: 3 }] }   # door follow camera eye write
+      - { address: 0x630B00, on: 0x00000000, off: 0xA2220FAA, when: [{ address: 0x540004, equals: 3 }] }   # stick latch on camera-cut lines (would freeze gaze steering)
     lookAt:
       eye: 0x306338
       target: 0x306344
