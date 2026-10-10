@@ -1057,7 +1057,14 @@ namespace VR::CameraDriver
 		{
 			float dir[3] = {0.0f, 0.0f, 1.0f};
 			float eye[3] = {0.0f, 0.0f, 0.0f};
+			float base_yaw = 0.0f; // game yaw the head yaw was added to (the anchor, or the heading)
+			float yaw_sign = 1.0f;
 		};
+
+		// The base yaw camera.lookAt is using right now, for the compositor: a frame rendered at another
+		// base yaw (stick turning since) is turned by the difference so artificial turns look as smooth as
+		// head turns instead of stepping at the game's frame rate.
+		std::atomic<float> s_base_yaw_now{0.0f};
 
 		// camera.lookAt: put the game's eye/target camera at the character's head. Game yaw 0 faces
 		// +Z, forward = (sin y, cos y) on the x/z floor plane, y up. Head yaw (OpenXR, CCW positive) is
@@ -1224,8 +1231,11 @@ namespace VR::CameraDriver
 				const s32 roll = static_cast<s32>(std::lround(la.roll_sign * e.roll * (65536.0f / (2.0f * PI_F)))) & 0xFFFF;
 				memWrite32(la.roll_address, static_cast<u32>(roll));
 			}
+			s_base_yaw_now.store(base_yaw, std::memory_order_release);
 			if (out)
 			{
+				out->base_yaw = base_yaw;
+				out->yaw_sign = la.yaw_sign;
 				out->dir[0] = sy * cp;
 				out->dir[1] = sp;
 				out->dir[2] = cy * cp;
@@ -1341,7 +1351,13 @@ namespace VR::CameraDriver
 		std::array<WrittenPose, 16> s_written{};
 		size_t s_written_next = 0;
 		size_t s_written_count = 0;
-		std::array<HeadPose::Snapshot, 8> s_frame_poses{};
+		struct FramePose
+		{
+			HeadPose::Snapshot pose;
+			float base_yaw = 0.0f;
+			float yaw_sign = 1.0f;
+		};
+		std::array<FramePose, 8> s_frame_poses{};
 		std::array<u32, 8> s_frame_age{}; // how many writes back the match was (for the sync log)
 		size_t s_frame_next = 0;
 		size_t s_frame_count = 0;
@@ -1353,10 +1369,10 @@ namespace VR::CameraDriver
 		bool s_render_sync_logged = false;
 
 		std::mutex s_gs_render_mutex;
-		HeadPose::Snapshot s_gs_render_pose;
+		FramePose s_gs_render_pose;
 		bool s_gs_render_valid = false;
 
-		void PublishRenderPose(bool valid, const HeadPose::Snapshot& pose)
+		void PublishRenderPose(bool valid, const FramePose& pose)
 		{
 			s_render_published = valid;
 			if (!MTGS::IsOpen())
@@ -1374,7 +1390,7 @@ namespace VR::CameraDriver
 			s_frame_count = 0;
 			s_view_prev_valid = false;
 			if (s_render_published)
-				PublishRenderPose(false, HeadPose::Snapshot{});
+				PublishRenderPose(false, FramePose{});
 		}
 
 		void PushWritten(const LookAtWrite& w, const HeadPose::Snapshot& pose)
@@ -1432,7 +1448,7 @@ namespace VR::CameraDriver
 			// Within about 3 deg and 30 units; anything else is a frame the game built from its own camera.
 			if (!hit || !(best < 0.0025f))
 				return;
-			s_frame_poses[s_frame_next] = hit->pose;
+			s_frame_poses[s_frame_next] = FramePose{hit->pose, hit->w.base_yaw, hit->w.yaw_sign};
 			s_frame_age[s_frame_next] = hit_age;
 			s_frame_next = (s_frame_next + 1) % s_frame_poses.size();
 			s_frame_count = std::min(s_frame_count + 1, s_frame_poses.size());
@@ -1894,12 +1910,17 @@ namespace VR::CameraDriver
 		ResetRenderSync();
 	}
 
-	bool RenderPose(HeadPose::Snapshot* out)
+	bool RenderPose(HeadPose::Snapshot* out, float* turn_yaw)
 	{
 		std::lock_guard<std::mutex> lock(s_gs_render_mutex);
 		if (!s_gs_render_valid)
 			return false;
-		*out = s_gs_render_pose;
+		*out = s_gs_render_pose.pose;
+		// The game camera's yaw is base + yawSign * head yaw. Showing a frame rendered at base B_r while
+		// the base is now B_n means placing it yawSign * (B_r - B_n) further round in the room.
+		if (turn_yaw)
+			*turn_yaw = s_gs_render_pose.yaw_sign *
+			            WrapPi(s_gs_render_pose.base_yaw - s_base_yaw_now.load(std::memory_order_acquire));
 		return true;
 	}
 

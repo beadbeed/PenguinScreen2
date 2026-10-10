@@ -1303,8 +1303,9 @@ namespace VR::XRCompositor
 				XrQuaternionf q = s.head_pose.orientation;
 				fp_head = s.head_position_valid ? s.head_pose.position : XrVector3f{0.0f, 0.0f, 0.0f};
 				HeadPose::Snapshot stamped;
+				float turn_yaw = 0.0f;
 				const u64 lag = static_cast<u64>(sp.fp_pose_lag_ms);
-				if (CameraDriver::RenderPose(&stamped) ||
+				if (CameraDriver::RenderPose(&stamped, &turn_yaw) ||
 					CameraDriver::FirstPersonPoseAt(CameraDriver::SteadyNowMs() - lag, &stamped))
 				{
 					q = {stamped.orientation_x, stamped.orientation_y, stamped.orientation_z, stamped.orientation_w};
@@ -1314,7 +1315,7 @@ namespace VR::XRCompositor
 				const float fx = -2.0f * (q.x * q.z + q.w * q.y);
 				const float fy = -2.0f * (q.y * q.z - q.w * q.x);
 				const float fz = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
-				const float hyaw = std::atan2(-fx, -fz);
+				const float hyaw = std::atan2(-fx, -fz) + turn_yaw;
 				const float hpitch = std::asin(std::clamp(fy, -1.0f, 1.0f));
 				const float sy2 = std::sin(hyaw * 0.5f), cy2 = std::cos(hyaw * 0.5f);
 				const float sp2 = std::sin(hpitch * 0.5f), cp2 = std::cos(hpitch * 0.5f);
