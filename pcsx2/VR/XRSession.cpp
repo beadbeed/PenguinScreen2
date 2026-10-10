@@ -4,6 +4,7 @@
 #include "VR/XRSession.h"
 #include <cstdlib>
 #include "VR/CameraDriver.h"
+#include "VR/HudCards.h"
 #include "VR/VRInput.h"
 #include "VR/VRManager.h"
 #include "VR/XRCompositor.h"
@@ -558,8 +559,10 @@ namespace VR::XRSession
 		if (s_recenter_pending && std::chrono::steady_clock::now() >= s_recenter_due)
 		{
 			s_recenter_pending = false;
-			CameraDriver::RequestRecenter();
+			// Announced here as the runtime's recenter, so CameraDriver's own toast stays quiet.
+			CameraDriver::RequestRecenter(false);
 			XRCompositor::RequestScreenReanchor();
+			HudCards::Toast("Recentered (SteamVR)");
 		}
 	}
 

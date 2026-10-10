@@ -3,6 +3,7 @@
 
 #include "VR/CameraDriver.h"
 #include "VR/HandModel.h"
+#include "VR/HudCards.h"
 #include "VR/SpatialControls.h"
 #include "VR/HeadPose.h"
 #include "VR/PadLook.h"
@@ -1021,6 +1022,11 @@ namespace VR::CameraDriver
 		u32 s_local_record_base = 0;
 
 		std::atomic_bool s_recenter_requested{false};
+		// The pending recenter's caller shows its own toast (RequestRecenter(false)).
+		std::atomic_bool s_recenter_quiet{false};
+		// The game (CRC) the online-safe toast was last shown for: once per game, on first person's first arm.
+		bool s_online_toast_shown = false;
+		u32 s_online_toast_crc = 0;
 		bool s_has_reference = false;
 		u32 s_reference_crc = 0;
 		float s_ref_x = 0.0f, s_ref_y = 0.0f, s_ref_z = 0.0f, s_ref_w = 1.0f;
@@ -1849,9 +1855,20 @@ namespace VR::CameraDriver
 			// way the character faces.
 			s_yaw_anchor_valid = false;
 			if (armed)
+			{
 				Console.WriteLn(Color_StrongGreen,
 					"(VR) CameraDriver: ARMED (CRC %08X) — %zu write op(s), %zu matrix op(s)%s.",
 					crc, cam.writes.size(), cam.matrix_writes.size(), cam.look_at.has_value() ? ", first-person lookAt" : "");
+				// Online-safe turns walk-and-shoot off; say so in the headset the first time first person
+				// arms in a game, so the player knows why the stick won't walk while aiming.
+				if (cam.look_at.has_value() && cam.look_at->aim_move_speed > 0.0f && OnlineSafeNow() &&
+					!(s_online_toast_shown && s_online_toast_crc == crc))
+				{
+					s_online_toast_shown = true;
+					s_online_toast_crc = crc;
+					HudCards::Toast("Online-safe: walk-and-shoot off", 3.0f);
+				}
+			}
 			else
 			{
 				const char* reason =
@@ -1939,8 +1956,8 @@ namespace VR::CameraDriver
 		s_local_record_valid = base.has_value();
 		s_local_record_base = base.value_or(0u);
 
-		if (s_recenter_requested.exchange(false, std::memory_order_acq_rel) || !s_has_reference ||
-			s_reference_crc != crc)
+		const bool recenter_asked = s_recenter_requested.exchange(false, std::memory_order_acq_rel);
+		if (recenter_asked || !s_has_reference || s_reference_crc != crc)
 		{
 			s_ref_x = pose.orientation_x;
 			s_ref_y = pose.orientation_y;
@@ -1961,6 +1978,9 @@ namespace VR::CameraDriver
 			ResetDeltaState( true);
 			s_padlook.gate = 0;
 			DevCon.WriteLn("(VR) CameraDriver: view recentered.");
+			// Only for a recenter someone asked for, not a game's first reference.
+			if (recenter_asked && !s_recenter_quiet.exchange(false, std::memory_order_acq_rel))
+				HudCards::Toast("Recentered");
 		}
 
 		if (s_delta_crc != crc || s_delta_prev.size() != cam.writes.size())
@@ -2243,8 +2263,10 @@ namespace VR::CameraDriver
 		       NowMs() - s_lookat_stamp_ms.load(std::memory_order_acquire) < 150;
 	}
 
-	void RequestRecenter()
+	void RequestRecenter(bool toast)
 	{
+		// Before the request itself, so the vsync that takes the request sees the matching quiet flag.
+		s_recenter_quiet.store(!toast, std::memory_order_release);
 		s_recenter_requested.store(true, std::memory_order_release);
 	}
 

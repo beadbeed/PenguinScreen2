@@ -39,7 +39,9 @@ namespace VR::CameraDriver
 	// turn that lookAt.predict renders ahead. Each call also measures the prediction horizon.
 	bool RenderPose(HeadPose::Snapshot* out, float* turn_yaw);
 
-	void RequestRecenter();
+	// Any thread. The recenter happens on the next armed vsync, which then shows a "Recentered" toast
+	// unless toast is false (for a caller that announces it itself, like the runtime-recenter follow).
+	void RequestRecenter(bool toast = true);
 
 	// CPU thread, after Apply: true while first person is armed (guards holding, head pose valid) and this
 	// vsync resolved camera.base; *base (may be null) is that record, the local character's in Outbreak.

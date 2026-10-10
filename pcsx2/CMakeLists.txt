@@ -1066,6 +1066,7 @@ set(pcsx2VRSources
 	VR/ControlQuads.cpp
 	VR/GameFeedback.cpp
 	VR/HandModel.cpp
+	VR/HudCards.cpp
 	VR/SplitState.cpp
 	VR/SeatCast.cpp
 	VR/SeatSession.cpp
@@ -1089,6 +1090,7 @@ set(pcsx2VRHeaders
 	VR/ControlQuads.h
 	VR/GameFeedback.h
 	VR/HandModel.h
+	VR/HudCards.h
 	VR/SplitState.h
 	VR/SeatCast.h
 	VR/SeatSession.h
