@@ -1306,6 +1306,18 @@ struct Pcsx2Config
 		// adapter is enabled, so it holds for online play without having to remember it.
 		bool OnlineSafe = false;
 
+		// Headset brightness: scales the gamma of the presentation lift (1.0 = neutral) on top of the
+		// profile's own. Applied only while a VR session runs, so flat play is never touched.
+		float Brightness = 1.0f;
+		static constexpr float MIN_BRIGHTNESS = 0.8f;
+		static constexpr float MAX_BRIGHTNESS = 1.8f;
+
+		// Forward the game's DualShock rumble to the VR controllers, for profiles whose feedback block asks
+		// for it, on the pad port of the profile's VR Gamepad.
+		bool GameRumble = true;
+		// Scales the game-feedback haptics (forwarded rumble, hit, shot and heartbeat cues); 0 turns them off.
+		float HapticStrength = 1.0f;
+
 		VROptions();
 		void LoadSave(SettingsWrapper& wrap);
 

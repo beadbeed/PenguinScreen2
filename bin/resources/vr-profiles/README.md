@@ -40,6 +40,8 @@ SLUS-20851:              # the disc serial; must match the file name
   crcs: [0x39B574F0]     # optional: only apply to these disc CRCs (hex)
   tier: stereo           # screen | stereo | immersive
   screen: { ... }        # where the virtual screen sits
+  presentation: { ... }  # optional: brighter picture in the headset only
+  feedback: { ... }      # optional: controller vibration from the game
   stereo: { ... }        # depth tuning
 ```
 
@@ -60,6 +62,42 @@ rejects the profile.
 A `distance`, `height` or `arc` written here wins over the matching slider in
 the settings window for that game. Leave a key out to keep it adjustable from
 the settings window.
+
+## `presentation`: brightness in the headset
+
+Some games are too dark to read on a headset's display. `presentation`
+brightens the picture only while a VR session is running (the desktop window
+mirrors it then); playing without VR never changes. `1.0` is neutral for both
+numbers.
+
+| Key | Meaning |
+|---|---|
+| `gamma` | raises dark and middle tones while black stays black and white stays white. `1.2` is a mild lift; accepted range `0.5` to `2.5` |
+| `brightness` | multiplies every colour, which can clip bright areas; prefer `gamma`. Accepted range `0.5` to `2.0` |
+| `firstPersonOnly` | `true` (the default) applies the lift only while the head-tracked first-person camera is active, so menus and item screens keep their own levels; `false` applies it all the time |
+
+The Headset Brightness setting in the settings window, and the VR brightness
+hotkeys, scale `gamma` on top of this, in every scene and for every game.
+While the graphics option Shade Boost is on, its own values are used instead
+and neither this block nor the setting has any effect.
+
+## `feedback`: controller vibration
+
+`feedback` makes the VR controllers vibrate from what happens in the game. It
+only reads the game's memory, so it changes nothing other players could see,
+and it does nothing without a running VR session.
+
+| Key | Meaning |
+|---|---|
+| `padRumble` | `true` sends the game's own controller vibration to the VR controllers: the large motor to both hands, the small one to the right. Only for the controller port of the profile's `Gamepad` control, and only while the Forward Game Rumble setting is on |
+| `hurt` | `{ offset, max, width }`: where the character's HP (`offset`) and maximum HP (`max`) are, as offsets into the record `camera.base` finds, each `width` bytes (`1`, `2` or `4`, default `2`). Losing HP pulses both hands, harder and longer the bigger the hit |
+| `fire` | `{ address, width, hand }`: a counter the game raises by one per shot, at a fixed `address`. Each rise of 1 to 5 kicks `hand` (`left` or `right`; default the aiming hand of `camera.lookAt`, otherwise right). Bigger jumps are ignored |
+| `danger` | `{ below }`: while HP is above zero and below this fraction of maximum HP (default `0.25`), the left hand feels a heartbeat, faster below a tenth. Needs `hurt` |
+
+The `hurt`, `fire` and `danger` cues run only while the head-tracked
+first-person camera is active, so they stay quiet on title screens, in
+cutscenes and with first person off. The Haptic Strength setting scales all
+of this vibration, and `0` turns it off.
 
 ## `stereo`: depth
 

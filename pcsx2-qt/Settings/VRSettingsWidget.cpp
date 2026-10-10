@@ -24,6 +24,7 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.screenDistance, "VR", "ScreenDistance", 2.0f);
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.screenHeight, "VR", "ScreenHeight", 1.4f);
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.screenArc, "VR", "ScreenArcDeg", 100.0f);
+	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.brightness, "VR", "Brightness", 1.0f);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.stereoMode, "VR", "StereoMode", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.stereoUseProfile, "VR", "StereoUseProfile", true);
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.stereoSeparation, "VR", "StereoSeparation", 0.02f);
@@ -31,6 +32,8 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.headCamera, "VR", "HeadCamera", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.snapTurn, "VR", "SnapTurn", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.onlineSafe, "VR", "OnlineSafe", false);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.gameRumble, "VR", "GameRumble", true);
+	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.hapticStrength, "VR", "HapticStrength", 1.0f);
 
 	dialog()->registerWidgetHelp(m_ui.enable, tr("Enable VR (OpenXR)"), tr("Unchecked"),
 		tr("Renders the emulated display on a virtual screen inside a connected OpenXR headset. Requires the Vulkan "
@@ -48,6 +51,13 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 		tr("Curves the virtual screen into a cylinder section wrapping around you, in degrees of arc. 0 keeps the screen "
 		   "flat. The arc governs the screen's width (height follows the aspect ratio); Screen Distance becomes the "
 		   "cylinder radius. Requires runtime support (falls back to the flat screen otherwise). Takes effect immediately."));
+
+	dialog()->registerWidgetHelp(m_ui.brightness, tr("Headset Brightness"), tr("1.00"),
+		tr("Brightens the picture for dark scenes that are hard to read on a headset's display. It raises dark and "
+		   "middle tones while keeping black black and white white, on top of any lift the game's VR profile asks for. "
+		   "1.00 leaves the picture unchanged; values below 1.00 darken it. Applies only while a VR session is running "
+		   "(the desktop window mirrors it then), so playing without VR is never affected, and not while the graphics "
+		   "option Shade Boost is on. Takes effect immediately; the VR brightness hotkeys change it in steps of 0.1."));
 
 	dialog()->registerWidgetHelp(m_ui.stereoMode, tr("Enable Stereoscopic 3D"), tr("Checked"),
 		tr("Renders the game with per-eye depth on the virtual screen, like a 3D movie. The right values for Separation "
@@ -77,6 +87,16 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 		tr("First-person profiles change only what you see (camera, screen, your own body) and nothing other players "
 		   "would see, such as walking while aiming. Always on while the network adapter is enabled, whatever this box "
 		   "says. Takes effect immediately."));
+
+	dialog()->registerWidgetHelp(m_ui.gameRumble, tr("Forward Game Rumble to the VR Controllers"), tr("Checked"),
+		tr("Sends the game's own controller vibration to the VR controllers: the large motor to both hands, the small "
+		   "one to the right. Only for games whose VR profile asks for it, and only for the controller port the VR "
+		   "controllers play as; a gamepad bound to that port keeps its own vibration. Takes effect immediately."));
+
+	dialog()->registerWidgetHelp(m_ui.hapticStrength, tr("Haptic Strength"), tr("1.00"),
+		tr("Scales the controller vibration that comes from the game: forwarded rumble and, in games whose VR profile "
+		   "has them, the pulses for being hit, for each shot and the heartbeat at low health. 0.00 turns all of it "
+		   "off. Takes effect immediately."));
 
 	dialog()->registerWidgetHelp(m_ui.profileBrowser, tr("Per-Game Profiles"), tr("N/A"),
 		tr("Browses the profiles bundled in vr-profiles.yaml. Profiles apply automatically to the matching game — this "

@@ -492,6 +492,38 @@ namespace VR::ProfileDB
 		bool stereo_on = true;
 	};
 
+	// presentation: a headset-only lift through the ShadeBoost shader (1.0 = neutral) for games whose dark
+	// rooms are unreadable on a headset's LCD. Never applied without a running VR session.
+	struct PresentationParams
+	{
+		float gamma = 1.0f;
+		float brightness = 1.0f;
+		// Only while camera.lookAt drives the camera, so menus and the item screen keep their own levels.
+		bool first_person_only = true;
+	};
+
+	// feedback: controller haptics from game memory (reads only) plus the game's own rumble. The cues
+	// run only while first person is armed with camera.base resolved (the local character record).
+	struct FeedbackParams
+	{
+		// Forward the DualShock rumble of the VR Gamepad's pad port to both controllers (VR GameRumble).
+		bool pad_rumble = false;
+		// HP at camera.base + hurt_offset and max HP at camera.base + hurt_max_offset, unsigned, hurt_width
+		// bytes. A drop pulses both hands, harder and longer the bigger it is.
+		bool has_hurt = false;
+		u32 hurt_offset = 0;
+		u32 hurt_max_offset = 0;
+		u8 hurt_width = 2;
+		// A shot counter at an absolute address: a rise of 1-5 kicks the aim hand; bigger jumps are resets.
+		bool has_fire = false;
+		u32 fire_address = 0;
+		u8 fire_width = 2;
+		s8 fire_hand = -1; // 0 left, 1 right, -1 camera.lookAt's aim hand (right without one)
+		// Heartbeat in the left hand while HP is below danger_below * max (needs hurt).
+		bool has_danger = false;
+		float danger_below = 0.25f;
+	};
+
 	struct Profile
 	{
 		std::string serial;
@@ -509,6 +541,8 @@ namespace VR::ProfileDB
 		std::optional<float> fp_screen_height;
 		std::optional<float> fp_screen_arc_deg;
 		std::optional<float> fp_screen_pose_lag_ms;
+		std::optional<PresentationParams> presentation;
+		std::optional<FeedbackParams> feedback;
 		std::optional<CameraProfile> camera;
 		std::optional<SplitParams> split;
 		std::vector<SpatialControlSpec> controls;

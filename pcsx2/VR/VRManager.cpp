@@ -20,6 +20,7 @@
 #include "Input/VRInputSource.h"
 #include "USB/USB.h"
 
+#include "GS/GSVector.h"
 #include "GS/Renderers/Common/GSTexture.h"
 #include "GS/Renderers/Vulkan/GSDeviceVK.h"
 
@@ -30,6 +31,9 @@
 
 #include <openxr/openxr.h>
 
+#include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -201,6 +205,14 @@ namespace VR
 		int s_scene_pending = -1;
 		u32 s_scene_pending_count = 0;
 		constexpr u32 SCENE_DEBOUNCE_VSYNCS = 3;
+
+		// Presentation lift, published every vsync by ApplySceneStereo (CPU thread) for PresentationLift
+		// (GS thread), which must not touch the profile DB or EmuConfig.
+		std::atomic<bool> s_lift_has_profile{false};
+		std::atomic<bool> s_lift_fp_only{true};
+		std::atomic<float> s_lift_gamma{1.0f};
+		std::atomic<float> s_lift_brightness{1.0f};
+		std::atomic<float> s_lift_user_gamma{1.0f};
 
 		void CopyResolvedMap(StereoState::Params& dst, const ProfileDB::StereoResolvedMap& src)
 		{
@@ -418,9 +430,55 @@ namespace VR
 
 	static constexpr int kFirstPersonScene = -2;
 
+	// The lift doesn't depend on stereo, so this runs ahead of the stereo gate. The profile is looked up
+	// only while a session runs: flat play does no extra work and always reads neutral.
+	static void PublishPresentation(const Pcsx2Config::VROptions& cfg)
+	{
+		const bool running = XRSession::IsSessionRunning();
+		const ProfileDB::Profile* profile = nullptr;
+		if (running)
+		{
+			const std::string serial = VMManager::GetDiscSerial();
+			profile = serial.empty() ? nullptr : ProfileDB::Lookup(serial, VMManager::GetDiscCRC());
+		}
+
+		const bool has = profile && profile->presentation.has_value();
+		const float user = std::isfinite(cfg.Brightness) ? cfg.Brightness : 1.0f;
+		s_lift_gamma.store(has ? profile->presentation->gamma : 1.0f, std::memory_order_relaxed);
+		s_lift_brightness.store(has ? profile->presentation->brightness : 1.0f, std::memory_order_relaxed);
+		s_lift_fp_only.store(has ? profile->presentation->first_person_only : true, std::memory_order_relaxed);
+		s_lift_user_gamma.store(running ? user : 1.0f, std::memory_order_relaxed);
+		s_lift_has_profile.store(has, std::memory_order_release);
+	}
+
+	bool PresentationLift(GSVector4* params)
+	{
+		// Neutral without a running session, so flat play stays bit-identical.
+		if (!XRSession::IsSessionRunning())
+			return false;
+
+		// The VR Brightness setting scales gamma everywhere in the headset; the profile's own lift applies
+		// only in first person unless it says firstPersonOnly: false.
+		float gamma = s_lift_user_gamma.load(std::memory_order_relaxed);
+		float brightness = 1.0f;
+		if (s_lift_has_profile.load(std::memory_order_acquire) &&
+			(!s_lift_fp_only.load(std::memory_order_relaxed) || CameraDriver::LookAtActive()))
+		{
+			gamma *= s_lift_gamma.load(std::memory_order_relaxed);
+			brightness = s_lift_brightness.load(std::memory_order_relaxed);
+		}
+
+		if (std::abs(gamma - 1.0f) < 0.001f && std::abs(brightness - 1.0f) < 0.001f)
+			return false;
+
+		*params = GSVector4(brightness, 1.0f, 1.0f, std::clamp(gamma, 0.5f, 3.0f));
+		return true;
+	}
+
 	void ApplySceneStereo()
 	{
 		const Pcsx2Config::VROptions& cfg = EmuConfig.VR;
+		PublishPresentation(cfg);
 		if (!StereoGateOpen(cfg.Enable, LaunchRequestedVR(), StereoRenderArmed(), cfg.StereoMode,
 				cfg.StereoUseProfile))
 		{

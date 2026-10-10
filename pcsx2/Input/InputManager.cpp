@@ -9,6 +9,9 @@
 #include "USB/USB.h"
 #include "VMManager.h"
 #include "LayeredSettingsInterface.h"
+#ifdef ENABLE_VR
+#include "VR/GameFeedback.h"
+#endif
 
 #include "common/Assertions.h"
 #include "common/Console.h"
@@ -1369,6 +1372,11 @@ void InputManager::SetUSBVibrationIntensity(u32 port, float large_or_single_moto
 
 void InputManager::SetPadVibrationIntensity(u32 pad_index, float large_or_single_motor_intensity, float small_motor_intensity)
 {
+#ifdef ENABLE_VR
+	// Ahead of the bindings and independent of them, so a pad bound to the same port keeps its own rumble.
+	VR::GameFeedback::OnPadRumble(pad_index, large_or_single_motor_intensity, small_motor_intensity);
+#endif
+
 	for (PadVibrationBinding& pad : s_pad_vibration_array)
 	{
 		if (pad.pad_index != pad_index)
@@ -1415,6 +1423,10 @@ void InputManager::SetPadVibrationIntensity(u32 pad_index, float large_or_single
 
 void InputManager::PauseVibration()
 {
+#ifdef ENABLE_VR
+	VR::GameFeedback::PauseRumble();
+#endif
+
 	for (PadVibrationBinding& binding : s_pad_vibration_array)
 	{
 		for (u32 motor_index = 0; motor_index < MAX_MOTORS_PER_PAD; motor_index++)

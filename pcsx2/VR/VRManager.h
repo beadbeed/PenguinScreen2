@@ -6,6 +6,7 @@
 #include <string>
 
 class GSTexture;
+class GSVector4;
 
 namespace VR
 {
@@ -55,6 +56,11 @@ namespace VR
 	bool IsSessionActive();
 
 	void EnsureFrameSubmitted();
+
+	// GS thread: the headset's dark-room lift as ShadeBoost params (brightness, contrast, saturation,
+	// gamma; 1.0 neutral), from the profile's presentation block and the VR Brightness setting. False
+	// (leave the frame alone) without a running session or when the lift is neutral.
+	bool PresentationLift(GSVector4* params);
 
 	void EndOfFrame(GSTexture* current);
 }
