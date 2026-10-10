@@ -3,13 +3,16 @@
 
 #include "VR/XRSession.h"
 #include <cstdlib>
+#include "VR/CameraDriver.h"
 #include "VR/VRInput.h"
 #include "VR/VRManager.h"
+#include "VR/XRCompositor.h"
 
 #include "common/Assertions.h"
 #include "common/Console.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <iterator>
 #include <vector>
@@ -34,6 +37,13 @@ namespace VR::XRSession
 		// SteamVR only accepts bindings for its Steam Frame controller profile with this enabled.
 		constexpr const char* kFrameControllerExtension = "XR_VALVE_frame_controller_interaction";
 		bool s_frame_controller_supported = false;
+
+		// SteamVR's own recenter (Steam button / dashboard) moves the LOCAL space. First person and the screens
+		// follow it a moment after the change takes effect, as if the player had used the recenter chord.
+		// Changes in the first seconds of a session are the runtime settling, not the player.
+		std::chrono::steady_clock::time_point s_session_began{};
+		bool s_recenter_pending = false;
+		std::chrono::steady_clock::time_point s_recenter_due{};
 
 #ifdef ENABLE_VULKAN
 		PFN_xrGetVulkanGraphicsRequirements2KHR s_xrGetVulkanGraphicsRequirements2KHR = nullptr;
@@ -85,6 +95,7 @@ namespace VR::XRSession
 					{
 						Console.WriteLn("(VR) Session began.");
 						s_session_running.store(true, std::memory_order_release);
+						s_session_began = std::chrono::steady_clock::now();
 					}
 					else
 					{
@@ -516,7 +527,20 @@ namespace VR::XRSession
 
 				case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING:
 				{
-					Console.WriteLn("(VR) Reference space recentered.");
+					const auto& e = *reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&event);
+					const auto now = std::chrono::steady_clock::now();
+					const bool settling = (now - s_session_began) < std::chrono::seconds(2);
+					if (e.session == s_session && e.referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL && !settling)
+					{
+						// The pose is only in the new frame once the change has happened; give it a moment.
+						s_recenter_pending = true;
+						s_recenter_due = now + std::chrono::milliseconds(300);
+						Console.WriteLn("(VR) Reference space recentered by the runtime; first person and the screens will follow.");
+					}
+					else
+					{
+						Console.WriteLn("(VR) Reference space change (%s).", settling ? "session settling, ignored" : "not the LOCAL space");
+					}
 					break;
 				}
 
@@ -529,6 +553,13 @@ namespace VR::XRSession
 				default:
 					break;
 			}
+		}
+
+		if (s_recenter_pending && std::chrono::steady_clock::now() >= s_recenter_due)
+		{
+			s_recenter_pending = false;
+			CameraDriver::RequestRecenter();
+			XRCompositor::RequestScreenReanchor();
 		}
 	}
 
