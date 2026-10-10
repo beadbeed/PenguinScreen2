@@ -1756,8 +1756,15 @@ void Host::OnInputDeviceDisconnected(const InputBindingKey key, const std::strin
 {
 	emit g_emu_thread->onInputDeviceDisconnected(identifier.empty() ? QString() : QString::fromUtf8(identifier.data(), identifier.size()));
 
+	// VR controllers come and go with the headset session; pausing for them online (network adapter on, or the
+	// VR online-safe setting) would get the player dropped from the server, so never pause for those.
+#ifdef ENABLE_VR
+	const bool vr_online = (key.source_type == InputSourceType::VR) && (EmuConfig.DEV9.EthEnable || EmuConfig.VR.OnlineSafe);
+#else
+	constexpr bool vr_online = false;
+#endif
 	if (VMManager::GetState() == VMState::Running && Host::GetBoolSettingValue("UI", "PauseOnControllerDisconnection", false) &&
-		InputManager::HasAnyBindingsForSource(key))
+		InputManager::HasAnyBindingsForSource(key) && !vr_online)
 	{
 		std::string message =
 			fmt::format(TRANSLATE_FS("QtHost", "System paused because controller {} was disconnected."), identifier);
