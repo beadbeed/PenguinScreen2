@@ -17,9 +17,10 @@ SLPM-65428:
   crcs: [0x32088394, 0x198EFDC1, 0x03C8F393, 0x32097C02, 0x03C90C05]
   tier: stereo
   notes: "Fixed/rail cameras over real-time 3D rooms. First person: camera.lookAt puts the eye at the local character's head."
-  # First person: the picture is locked to the head and sized to the game camera's FOV (camera.fov below,
-  # 80 deg vertical: height = 2 * distance * tan(40 deg)), flat (arc 0) so the perspective stays right.
-  screen: { distance: 1.5, height: 2.52, follow: head, arc: 0 }
+  # World-locked screen for menus, the item screen, cutscenes and doors. While first person drives the
+  # camera, the firstPerson screen is used instead: locked to the head, sized to the game camera's FOV
+  # (camera.fov below, 80 deg vertical: height = 2 * distance * tan(40 deg)), flat so perspective holds.
+  screen: { distance: 2.0, height: 1.4, firstPerson: { distance: 1.5, height: 2.52, arc: 0 } }
   stereo:
     separation: 0.012
     convergence: 55.0

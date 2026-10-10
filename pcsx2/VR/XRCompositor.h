@@ -20,6 +20,9 @@ namespace VR::XRCompositor
 	void UpdateScreenParams(float distance_m, float height_m, float arc_deg, float vertical_offset_m,
 		bool follow_head = false);
 
+	// Head-locked screen used while CameraDriver::LookAtActive() (profile screen.firstPerson).
+	void UpdateFirstPersonScreen(bool enabled, float distance_m, float height_m, float arc_deg);
+
 	void RequestScreenReanchor();
 
 	bool IsReanchorRequested();

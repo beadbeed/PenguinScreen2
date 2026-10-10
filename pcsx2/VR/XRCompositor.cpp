@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/XRCompositor.h"
+#include "VR/CameraDriver.h"
 #include "VR/SplitState.h"
 #include "VR/ControlQuads.h"
 #include "VR/SpatialControls.h"
@@ -50,7 +51,13 @@ namespace VR::XRCompositor
 			float arc_deg = 0.0f;
 			float voffset = 0.0f;
 			bool follow_head = false;
+			// Head-locked screen used while the first-person camera drives the game camera.
+			bool has_fp = false;
+			float fp_distance = 1.5f;
+			float fp_height = 2.5f;
+			float fp_arc_deg = 0.0f;
 		};
+		bool s_fp_screen_was_active = false;
 		std::mutex s_screen_mutex;
 		ScreenParams s_screen_params;
 
@@ -1232,10 +1239,20 @@ namespace VR::XRCompositor
 				std::lock_guard<std::mutex> lock(s_screen_mutex);
 				sp = s_screen_params;
 			}
-			const float distance = sp.distance;
-			const float height = sp.height;
-			const float arc_deg = sp.arc_deg;
-			const float voffset = sp.voffset;
+			// First person: head-locked screen sized to the game camera's FOV. Anything else (menus,
+			// item screen, cutscenes, doors) goes back to the world screen, re-anchored in front of the
+			// head each time first person hands over so it never appears behind the player.
+			const bool fp_screen = sp.has_fp && CameraDriver::LookAtActive();
+			if (fp_screen != s_fp_screen_was_active)
+			{
+				if (!fp_screen)
+					s_reanchor_requested.store(true, std::memory_order_release);
+				s_fp_screen_was_active = fp_screen;
+			}
+			const float distance = fp_screen ? sp.fp_distance : sp.distance;
+			const float height = fp_screen ? sp.fp_height : sp.height;
+			const float arc_deg = fp_screen ? sp.fp_arc_deg : sp.arc_deg;
+			const float voffset = fp_screen ? 0.0f : sp.voffset;
 			const float aspect = ComputeAspect();
 			const bool curved = (arc_deg >= 5.0f) && XRSession::HasCylinderLayer();
 
@@ -1244,7 +1261,7 @@ namespace VR::XRCompositor
 			const XrQuaternionf anchor_quat = {
 				0.0f, std::sin(s.screen_anchor_yaw * 0.5f), 0.0f, std::cos(s.screen_anchor_yaw * 0.5f)};
 
-			const bool follow = sp.follow_head && (s.view_space != XR_NULL_HANDLE);
+			const bool follow = (fp_screen || sp.follow_head) && (s.view_space != XR_NULL_HANDLE);
 			const XrSpace layer_space = follow ? s.view_space : XRSession::GetSpace();
 			const XrQuaternionf follow_quat = {0.0f, 0.0f, 0.0f, 1.0f};
 
@@ -1595,7 +1612,20 @@ namespace VR::XRCompositor
 		bool follow_head)
 	{
 		std::lock_guard<std::mutex> lock(s_screen_mutex);
-		s_screen_params = {distance_m, height_m, arc_deg, vertical_offset_m, follow_head};
+		s_screen_params.distance = distance_m;
+		s_screen_params.height = height_m;
+		s_screen_params.arc_deg = arc_deg;
+		s_screen_params.voffset = vertical_offset_m;
+		s_screen_params.follow_head = follow_head;
+	}
+
+	void UpdateFirstPersonScreen(bool enabled, float distance_m, float height_m, float arc_deg)
+	{
+		std::lock_guard<std::mutex> lock(s_screen_mutex);
+		s_screen_params.has_fp = enabled;
+		s_screen_params.fp_distance = distance_m;
+		s_screen_params.fp_height = height_m;
+		s_screen_params.fp_arc_deg = arc_deg;
 	}
 
 	void RequestScreenReanchor()

@@ -2320,6 +2320,28 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 			else
 				Console.WarningFmt("(VR) ProfileDB: Serial '{}' has an invalid screen.arc; ignoring it.", serial);
 		}
+		if (scr.has_child("firstPerson") && scr["firstPerson"].is_map())
+		{
+			// Head-locked screen used only while camera.lookAt drives the camera.
+			const ryml::ConstNodeRef fp = scr["firstPerson"];
+			warnUnknownKeys(serial, fp, "screen.firstPerson", {"distance", "height", "arc"});
+			const std::optional<float> d = fp.has_child("distance") ? StringUtil::FromChars<float>(nodeVal(fp["distance"])) : std::nullopt;
+			const std::optional<float> h = fp.has_child("height") ? StringUtil::FromChars<float>(nodeVal(fp["height"])) : std::nullopt;
+			if (d.has_value() && h.has_value() && d.value() > 0.1f && h.value() > 0.1f)
+			{
+				out.fp_screen_distance = d.value();
+				out.fp_screen_height = h.value();
+				out.fp_screen_arc_deg = 0.0f;
+				if (fp.has_child("arc"))
+				{
+					const std::optional<float> a = StringUtil::FromChars<float>(nodeVal(fp["arc"]));
+					if (a.has_value())
+						out.fp_screen_arc_deg = std::clamp(a.value(), 0.0f, 270.0f);
+				}
+			}
+			else
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' screen.firstPerson needs distance and height (> 0.1 m); ignoring it.", serial);
+		}
 	}
 
 	if (node.has_child("camera") && node["camera"].is_map())

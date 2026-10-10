@@ -435,6 +435,11 @@ namespace VR::ProfileDB
 		std::optional<float> screen_height;
 		std::optional<float> screen_arc_deg;
 		std::optional<bool> screen_follow_head;
+		// screen.firstPerson: head-locked screen while camera.lookAt drives the camera (sized to the game
+		// camera's FOV); the keys above apply the rest of the time (menus, item screen, cutscenes).
+		std::optional<float> fp_screen_distance;
+		std::optional<float> fp_screen_height;
+		std::optional<float> fp_screen_arc_deg;
 		std::optional<CameraProfile> camera;
 		std::optional<SplitParams> split;
 		std::vector<SpatialControlSpec> controls;

@@ -20,6 +20,9 @@ namespace VR::CameraDriver
 
 	void Apply();
 
+	// True while camera.lookAt is driving the game camera (any thread).
+	bool LookAtActive();
+
 	void RequestRecenter();
 
 	void OnStateLoaded();

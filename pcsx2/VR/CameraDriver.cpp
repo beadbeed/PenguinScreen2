@@ -980,20 +980,20 @@ namespace VR::CameraDriver
 		// added times yawSign (-1 for a game whose yaw grows clockwise), head pitch tilts the target,
 		// and head translation since the last recenter moves the eye (forward/right/up, scaled to game
 		// units). The base yaw is the character's heading, or with yawAnchor the camera's own yaw.
-		void ApplyLookAt(const ProfileDB::CameraLookAt& la, const std::optional<u32>& base, const EulerAngles& e,
+		bool ApplyLookAt(const ProfileDB::CameraLookAt& la, const std::optional<u32>& base, const EulerAngles& e,
 			const HeadPose::Snapshot& pose)
 		{
 			if (!base.has_value() || (!la.when.empty() && !GuardListPass(la.when)))
-				return;
+				return false;
 			const s64 pa = static_cast<s64>(base.value()) + la.position_offset;
 			if (pa < 0 || pa + 12 > static_cast<s64>(Ps2MemSize::MainRam))
-				return;
+				return false;
 			float p[3];
 			for (int i = 0; i < 3; i++)
 			{
 				p[i] = std::bit_cast<float>(static_cast<u32>(memRead32(static_cast<u32>(pa) + i * 4)));
 				if (!std::isfinite(p[i]))
-					return;
+					return false;
 			}
 			float heading = 0.0f;
 			u32 heading_addr = 0;
@@ -1001,7 +1001,7 @@ namespace VR::CameraDriver
 			{
 				const s64 ha = static_cast<s64>(base.value()) + la.heading_offset;
 				if (ha < 0 || ha + 2 > static_cast<s64>(Ps2MemSize::MainRam))
-					return;
+					return false;
 				heading_addr = static_cast<u32>(ha);
 				heading = static_cast<float>(static_cast<s16>(static_cast<u16>(memRead16(heading_addr)))) *
 				          (2.0f * PI_F / 65536.0f);
@@ -1105,7 +1105,10 @@ namespace VR::CameraDriver
 				const s32 roll = static_cast<s32>(std::lround(la.roll_sign * e.roll * (65536.0f / (2.0f * PI_F)))) & 0xFFFF;
 				memWrite32(la.roll_address, static_cast<u32>(roll));
 			}
+			return true;
 		}
+
+		std::atomic_bool s_lookat_active{false};
 
 		std::optional<HeadPose::Snapshot> MaybeFakePose()
 		{
@@ -1187,6 +1190,7 @@ namespace VR::CameraDriver
 		const bool vm_live = (vm_state == VMState::Running || vm_state == VMState::Paused);
 		if (!vm_live)
 		{
+			s_lookat_active.store(false, std::memory_order_release);
 			s_armed_logged = false;
 			s_silence_applied = false;
 			s_hooks_installed = false;
@@ -1202,6 +1206,7 @@ namespace VR::CameraDriver
 		const ProfileDB::Profile* profile = ProfileDB::Lookup(VMManager::GetDiscSerial(), crc);
 		if (!profile || !profile->camera.has_value())
 		{
+			s_lookat_active.store(false, std::memory_order_release);
 			s_armed_logged = false;
 			s_silence_applied = false;
 			s_hooks_installed = false;
@@ -1252,6 +1257,7 @@ namespace VR::CameraDriver
 
 		if (!armed)
 		{
+			s_lookat_active.store(false, std::memory_order_release);
 			RestoreSilence(cam, crc);
 			RestoreCodeHooks(cam, crc);
 			if (vm_state == VMState::Running)
@@ -1415,8 +1421,8 @@ namespace VR::CameraDriver
 			ApplyMatrixOp(op, i, address, taddress, euler);
 		}
 
-		if (cam.look_at.has_value())
-			ApplyLookAt(cam.look_at.value(), base, euler, pose);
+		s_lookat_active.store(cam.look_at.has_value() && ApplyLookAt(cam.look_at.value(), base, euler, pose),
+			std::memory_order_release);
 
 		WriteCodeHookScratch(cam, euler, pose);
 
@@ -1438,6 +1444,11 @@ namespace VR::CameraDriver
 	void OnStateLoaded()
 	{
 		ResetDeltaState();
+	}
+
+	bool LookAtActive()
+	{
+		return s_lookat_active.load(std::memory_order_acquire);
 	}
 
 	void RequestRecenter()
