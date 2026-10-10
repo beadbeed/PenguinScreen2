@@ -867,7 +867,16 @@ namespace VR
 		{
 			if (hand < 0 || hand >= 2)
 				return;
-			s_pulse_request[hand].store(PackPulse(amplitude, seconds), std::memory_order_release);
+			// One slot per hand, taken once a frame: a weaker cue queued in the same frame (a zone tick, a
+			// heartbeat) must not replace a stronger one still waiting (a bite), so the stronger one stays.
+			const int packed = PackPulse(amplitude, seconds);
+			int pending = s_pulse_request[hand].load(std::memory_order_acquire);
+			while (pending < 0 || (pending & 0xFFFF) < (packed & 0xFFFF))
+			{
+				if (s_pulse_request[hand].compare_exchange_weak(pending, packed, std::memory_order_acq_rel,
+						std::memory_order_acquire))
+					break;
+			}
 		}
 
 		bool TakePendingPulseForTest(int hand, float* amplitude, float* seconds)
