@@ -372,6 +372,11 @@ namespace VR::CameraDriver
 			ran = true;
 			RunMatrixSelfTest();
 			RunHookSelfTest();
+			const char* gamepad_fail = nullptr;
+			if (SpatialControls::SelfTestGamepad(&gamepad_fail))
+				Console.WriteLn("(VR) Gamepad self-test: passed (sprint latch, ad-lib flicks, unchanged without sprintLatch).");
+			else
+				Console.WriteLn("(VR) Gamepad self-test FAIL: %s", gamepad_fail ? gamepad_fail : "?");
 		}
 
 		u32 s_delta_crc = 0;
@@ -1188,7 +1193,10 @@ namespace VR::CameraDriver
 				}
 				if (la.snap_stick_hand >= 0 && input.actions_active)
 				{
-					const float sx = input.hands[la.snap_stick_hand].thumbstick_x;
+					// A mostly vertical push is an ad-lib flick (the Gamepad's RightStickUp/Down), not a turn.
+					const float stick_x = input.hands[la.snap_stick_hand].thumbstick_x;
+					const float stick_y = input.hands[la.snap_stick_hand].thumbstick_y;
+					const float sx = (std::abs(stick_y) > std::abs(stick_x)) ? 0.0f : stick_x;
 					// A right push turns the view right: -yawSign converts "clockwise" into game yaw.
 					const float dir = (sx > 0.0f) ? 1.0f : -1.0f;
 					if (smooth)
@@ -1754,6 +1762,7 @@ namespace VR::CameraDriver
 			s_disarm_reason = DisarmReason::NoVM;
 			SetLookAtActive(false);
 			SpatialControls::SetMoveStickSuppressed(-1);
+			SpatialControls::SetSprintBlocked(false);
 			RestoreHolds(nullptr, false);
 			s_written_count = 0;
 			s_frame_count = 0;
@@ -1782,6 +1791,7 @@ namespace VR::CameraDriver
 			s_disarm_reason = DisarmReason::NoProfile;
 			SetLookAtActive(false);
 			SpatialControls::SetMoveStickSuppressed(-1);
+			SpatialControls::SetSprintBlocked(false); // no first person here to keep the latch out of
 			RestoreHolds(nullptr, false);
 			ResetRenderSync();
 			s_fov_saved = false;
@@ -1851,6 +1861,8 @@ namespace VR::CameraDriver
 		{
 			SetLookAtActive(false);
 			SpatialControls::SetMoveStickSuppressed(-1);
+			// First person is off (a door, cutscene, pause): a latched run must not hold its button into it.
+			SpatialControls::SetSprintBlocked(cam.look_at.has_value());
 			s_aim_moving = false;
 			s_weapon_raised = false;
 			// While the VM is paused nothing can change; holds keep their saved originals for the resume.
@@ -2081,6 +2093,12 @@ namespace VR::CameraDriver
 			(cam.look_at.has_value() && s_aim_moving && s_lookat_active.load(std::memory_order_relaxed)) ?
 				static_cast<int>(cam.look_at->aim_move_hand) :
 				-1);
+		// The Gamepad's sprint latch holds Cross only while first person walks: it lets go as a menu, the item
+		// screen or a cutscene takes over (lookAt inactive), so Cross is never left held in them, and when the
+		// weapon is raised (walk-and-shoot moves the character itself; online-safe the game aims with the stick).
+		// Same grace as above: lookAt keeps its flag while the guard byte flickers, so the run isn't dropped then.
+		SpatialControls::SetSprintBlocked(cam.look_at.has_value() &&
+			(!s_lookat_active.load(std::memory_order_relaxed) || s_aim_moving || s_weapon_raised));
 
 		WriteCodeHookScratch(cam, euler, pose);
 

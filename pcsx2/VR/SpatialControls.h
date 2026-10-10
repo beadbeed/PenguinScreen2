@@ -373,6 +373,8 @@ namespace VR::SpatialControls
 		LeftBumper,
 		RightBumper,
 		View,
+		RightStickUp,
+		RightStickDown,
 		Count,
 	};
 	static constexpr u32 kControlCount = static_cast<u32>(ControlId::Count);
@@ -533,12 +535,54 @@ namespace VR::SpatialControls
 	// to a digital PS2 button without a resting finger pressing it. ButtonX, ButtonY and Menu
 	// read either hand (left on Touch, right on the Steam Frame); the D-pad, bumpers and View
 	// exist only on gamepad-shaped controllers such as the Steam Frame and stay 0 elsewhere.
-	ControlValues ComposeGamepad(const VRInputSnapshot& snapshot);
+	//
+	// RightStickUp / RightStickDown are flicks of the raw right stick straight up or down (past 0.75, at
+	// least twice as far up as sideways; released below 0.4), held at least 0.12 s so a 30 fps game sees a
+	// quick flick. A first-person profile turns with that stick and passes only these to the game.
+	//
+	// sprint_latch: running without holding a button, for games that run while one is held with the stick
+	// pushed (Outbreak: Cross). Clicking the left stick while it is pushed past half turns the latch on; it
+	// stays on while the stick is pushed past a quarter and drops once the stick has been centred for
+	// 0.15 s, or at once while SetSprintBlocked says so. While on, the latch control reads pressed (ORed
+	// into it, so a tap of the control's own button can't release it) and LeftStickClick reads 0.
+	// ControlId::Count (the default) turns it off, leaving every other output as before.
+	struct GamepadParams
+	{
+		ControlId sprint_latch = ControlId::Count;
+	};
+	struct GamepadState
+	{
+		bool sprint = false;
+		float centred_s = 0.0f;
+		bool click_prev = false;
+		bool flick_up = false;
+		bool flick_down = false;
+		float flick_up_s = 0.0f; // how long each flick has been pressed, for the minimum press
+		float flick_down_s = 0.0f;
+		void Reset()
+		{
+			sprint = false;
+			centred_s = 0.0f;
+			click_prev = false;
+			flick_up = flick_down = false;
+			flick_up_s = flick_down_s = 0.0f;
+		}
+	};
+	ControlValues ComposeGamepad(const VRInputSnapshot& snapshot, const GamepadParams& p, GamepadState& st, float dt);
 
 	// While a hand is given, the Gamepad device's stick on that hand (VRInputSnapshot::LEFT/RIGHT) reads 0:
 	// the camera driver is using it to move the character itself (walking while aiming), so the game must
 	// not see it. -1 = none. Any thread.
 	void SetMoveStickSuppressed(int hand);
+
+	// While set, the Gamepad's sprint latch lets go and can't latch: the camera driver says first person
+	// isn't walking (a menu, the item screen, a cutscene, the weapon raised), so a latched button must not
+	// stay held into it. Any thread.
+	void SetSprintBlocked(bool blocked);
+
+	// The Gamepad's sprint latch and ad-lib flicks on scripted input, and that without sprint_latch the
+	// click and the buttons pass through as before. False with *failed naming the first failed check.
+	bool SelfTestGamepad(const char** failed);
 
 	// Zone: a spot on the body that a hand reaches into, such as a hip holster or over the
 	// shoulder. It is placed from the head and turns with the head's yaw only, so it follows

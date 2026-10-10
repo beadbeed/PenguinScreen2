@@ -18,6 +18,10 @@ on, where the scripted input must be refused, nothing may move the character and
 silenced (both raise the weapon with R1 on padd's virtual pad); every other scenario is skipped then.
 savestate-yaw saves to --scratch-slot (default 9) and overwrites it.
 
+run-latch walks and runs ahead (about 3 m all told): use --slot with open floor in front. The ad-lib byte is not
+known yet: adlib-flick and adlib-diagonal check only the camera unless --adlib names it (an address, or +offset
+into the local record; --adlib-width 1/2/4).
+
 To prove the runner can fail: put a copy of the profile in <data dir>/vrprofiles/ with
 aim: { hand: left }; point-to-aim must then FAIL.
 """
@@ -46,6 +50,10 @@ CUT_HANDLER, FOCUS_SLOT, NEAR_CULL = 0x58EAEC, 0x3AEF74, 0x6D6CF4
 # Aim pitch: s16 record offset (0x10000 = 360 deg, positive up) and the gun-elevation servo words the profile
 # NOPs while the weapon is raised offline: (address, the game's own word).
 AIM_PITCH = 0xBC8
+# Running: u8 action (0 idle, 1 walk, 3 run, 128 aiming) and the input block at +0xF78 (+0 pressed, +8 held), whose
+# held word the sprint latch's Cross must be gone from once the item screen is up.
+ACTION = 0x54F
+INPUT_HELD = 0xF80
 PITCH_SERVO = ((0x556968, 0x0C0D1AEC), (0x556980, 0x0C0D1AEC), (0x556998, 0x0C0D1AEC), (0x5569CC, 0xA6200BC8),
                (0x5569D8, 0xA6230BC8), (0x5569E4, 0xA6230BC8), (0x5569E8, 0xA6200BC8))
 PITCH_SERVO_STORES = (0x5569CC, 0x5569D8, 0x5569E4, 0x5569E8)
@@ -125,6 +133,21 @@ class Runner:
     def aim_pitch(self):
         return s16(self.p.read16(self.record() + AIM_PITCH))
 
+    def action(self):
+        return self.p.read8(self.record() + ACTION)
+
+    def held(self):
+        return self.p.read32(self.record() + INPUT_HELD)
+
+    def adlib(self):
+        """The --adlib value (None without it): an absolute address, or '+offset' into the local record."""
+        spec = self.args.adlib
+        if not spec:
+            return None
+        addr = self.record() + int(spec[1:], 0) if spec.startswith("+") else int(spec, 0)
+        width = self.args.adlib_width
+        return self.p.read8(addr) if width == 1 else self.p.read16(addr) if width == 2 else self.p.read32(addr)
+
     def servo_words(self):
         """The servo words that do not hold the game's own value, as 'address=word' strings."""
         found = ((a, own, self.p.read32(a)) for a, own in PITCH_SERVO)
@@ -165,6 +188,68 @@ class Runner:
         fc.set_hand(LEFT, grip=pose(pos=BELT), head_relative=True, squeeze=1.0)
         time.sleep(0.3)
         fc.set_hand(LEFT, grip=pose(pos=BELT), head_relative=True, squeeze=0.0)
+
+    def speed(self, seconds):
+        """Speed over the floor across `seconds` (game units per second)."""
+        x0, _, z0 = self.position()
+        t0 = time.time()
+        time.sleep(seconds)
+        x1, _, z1 = self.position()
+        return math.hypot(x1 - x0, z1 - z0) / (time.time() - t0)
+
+    def click_left(self, fc, stick, until, timeout):
+        """Clicks the left stick with it held at `stick`, waits up to `timeout` for until(), then lets the click
+        go (the stick stays). Returns the seconds it took, or None."""
+        fc.set_hand(LEFT, stick=stick, buttons=("thumbstick_click",))
+        took = wait_until(until, timeout)
+        time.sleep(0.05)  # held for at least a few polls either way
+        fc.set_hand(LEFT, stick=stick)
+        return took
+
+    def latch_run(self, fc):
+        """Walk (left stick up), then click the left stick: the sprint latch. Returns the seconds from the
+        click to action 3 (run), or None."""
+        fc.set_hand(LEFT, stick=(0.0, 1.0))
+        time.sleep(0.3)
+        return self.click_left(fc, (0.0, 1.0), lambda: self.action() == 3, 0.3)
+
+    def cross_mask(self, fc):
+        """The held-word bits B (Cross) sets standing idle; 0 if none showed."""
+        before = self.held()
+        fc.set_hand(RIGHT, buttons=("b",))
+        time.sleep(0.25)
+        during = self.held()
+        fc.clear_hand(RIGHT)
+        time.sleep(0.25)
+        return during & ~before & 0xFFFFFFFF
+
+    def sample(self, seconds, actions=(), dt=0.02):
+        """Runs actions [(t, fn), ...] at their times while sampling for `seconds`. Returns the unwrapped camera
+        yaw change (degrees), its spread, and how often the --adlib value left its starting value (None
+        without --adlib)."""
+        pending = sorted(actions, key=lambda a: a[0])
+        prev = self.cam_yaw()
+        total, lo, hi = 0.0, 0.0, 0.0
+        start = last = self.adlib()
+        flips = 0
+        t0 = time.time()
+        while True:
+            t = time.time() - t0
+            while pending and pending[0][0] <= t:
+                pending.pop(0)[1]()
+            if t >= seconds:
+                break
+            time.sleep(dt)
+            y = self.cam_yaw()
+            total += wrap(y - prev)
+            prev = y
+            lo, hi = min(lo, total), max(hi, total)
+            v = self.adlib()
+            if v is not None:
+                if v != start and last == start:
+                    flips += 1
+                last = v
+        return total, hi - lo, (flips if start is not None else None)
 
     def track_yaw(self, seconds, dt=0.05):
         """Unwrapped change of the camera yaw over `seconds` (degrees), and the samples' spread."""
@@ -492,6 +577,139 @@ def sc_savestate_yaw(r):
     return "camera %.1f vs saved heading %.1f (off by %.2f)" % (after, saved_heading, err)
 
 
+def sc_run_latch(r):
+    """Sprint latch: the stick alone walks (action 1); a click of the left stick while it is pushed runs (action 3,
+    about twice the speed) with the click let go; centring the stick stops (action 0); a click with the stick
+    centred does not latch."""
+    with r.controller() as fc:
+        r.wait_armed()
+        time.sleep(0.3)
+        check(r.action() == 0, "action %d before walking, expected 0 (idle)" % r.action())
+        fc.set_hand(LEFT, stick=(0.0, 1.0))
+        check(wait_until(lambda: r.action() == 1, 0.5) is not None,
+              "action %d with the stick up and no click, expected 1 (walk)" % r.action())
+        time.sleep(0.2)
+        walk = r.speed(0.4)
+        check(r.action() == 1, "action %d walking without a click, expected 1 (nothing latched)" % r.action())
+        took = r.click_left(fc, (0.0, 1.0), lambda: r.action() == 3, 0.3)
+        check(took is not None, "action %d 0.3 s after clicking the left stick while walking, expected 3 (run)" % r.action())
+        time.sleep(0.2)
+        run = r.speed(0.4)
+        check(r.action() == 3, "action %d 0.6 s after the click was let go, expected 3 (did the latch let go?)" % r.action())
+        r.shot("running")
+        ratio = run / walk if walk > 1.0 else 0.0
+        check(1.5 <= ratio <= 3.0, "running %.0f units/s against walking %.0f (x%.2f), expected about twice (a wall in "
+              "the way? use --slot)" % (run, walk, ratio))
+        fc.set_hand(LEFT, stick=(0.0, 0.0))
+        stopped = wait_until(lambda: r.action() == 0, 0.2)
+        check(stopped is not None, "action %d 0.2 s after centring the stick, expected 0 (idle)" % r.action())
+        time.sleep(0.3)  # well past the latch's 150 ms
+        # A click with the stick centred must not latch: pushing afterwards only walks.
+        fc.set_hand(LEFT, stick=(0.0, 0.0), buttons=("thumbstick_click",))
+        time.sleep(0.15)
+        fc.set_hand(LEFT, stick=(0.0, 0.0))
+        time.sleep(0.1)
+        fc.set_hand(LEFT, stick=(0.0, 1.0))
+        time.sleep(0.5)
+        after = r.action()
+        fc.clear_hand(LEFT)
+        time.sleep(0.3)
+    check(after == 1, "action %d walking after a click with the stick centred, expected 1 (a centred click latched)" % after)
+    return "run x%.2f walk (%.0f vs %.0f units/s), latched %.2f s after the click, idle %.2f s after centring" % (
+        ratio, run, walk, took, stopped)
+
+
+def sc_run_b_tap(r):
+    """Latched running survives a tap of B: the latch is ORed into ButtonB, so B's release can't let Cross go."""
+    with r.controller() as fc:
+        r.wait_armed()
+        took = r.latch_run(fc)
+        check(took is not None, "the latch did not start running (action %d)" % r.action())
+        time.sleep(0.2)
+        fc.set_hand(RIGHT, buttons=("b",))
+        time.sleep(0.15)
+        fc.clear_hand(RIGHT)
+        time.sleep(0.2)
+        actions = []
+        t0 = time.time()
+        while time.time() - t0 < 0.5:
+            actions.append(r.action())
+            time.sleep(0.05)
+        fc.set_hand(LEFT, stick=(0.0, 0.0))
+        time.sleep(0.3)
+        fc.clear_hand(LEFT)
+    bad = [a for a in actions if a != 3]
+    check(not bad, "action %s after a B tap while latched, expected 3 throughout (B's release let Cross go)" % actions)
+    return "still running after the B tap (%d samples of action 3)" % len(actions)
+
+
+def sc_run_belt(r):
+    """Latched running, then a squeeze at the belt with the stick still pushed: the item screen opens and Cross is
+    not held in it (the camera blocks the latch while pauseWhen holds), so the screen stays open."""
+    with r.controller() as fc:
+        r.wait_armed()
+        check(r.p.read8(MENU_OPEN) == 0, "the item screen is already open")
+        mask = r.cross_mask(fc)
+        took = r.latch_run(fc)
+        check(took is not None, "the latch did not start running (action %d)" % r.action())
+        time.sleep(0.2)
+        held, stayed = None, False
+        fc.set_hand(LEFT, grip=pose(pos=BELT), head_relative=True, squeeze=0.0, stick=(0.0, 1.0))
+        time.sleep(0.2)
+        fc.set_hand(LEFT, grip=pose(pos=BELT), head_relative=True, squeeze=1.0, stick=(0.0, 1.0))
+        try:
+            opened = wait_until(lambda: r.p.read8(MENU_OPEN) == 1, 2.0)
+            check(opened is not None, "item screen flag %d after squeezing at the belt, expected 1" % r.p.read8(MENU_OPEN))
+            fc.set_hand(LEFT, grip=pose(pos=BELT), head_relative=True, squeeze=0.0, stick=(0.0, 1.0))
+            time.sleep(0.3)
+            held = r.held()
+            r.shot("menu")
+            # Cross is cancel in the item screen: held into it, it would close it.
+            stayed = wait_until(lambda: r.p.read8(MENU_OPEN) != 1, 1.0) is None
+        finally:
+            fc.set_hand(LEFT, stick=(0.0, 0.0))
+            time.sleep(0.3)
+            if r.p.read8(MENU_OPEN) == 1:
+                r.squeeze_belt(fc)
+            wait_until(lambda: r.p.read8(MENU_OPEN) == 0, 2.5)
+    check(stayed, "the item screen closed with the latched stick still pushed: Cross held into it?")
+    if mask:
+        check(held & mask == 0, "Cross (held bit(s) 0x%X) still held in the input block with the item screen open "
+              "(+0x%X = 0x%08X)" % (mask, INPUT_HELD, held))
+    return "item screen opened after %.2f s and stayed open; held word 0x%08X, Cross mask %s" % (
+        opened, held, ("0x%X" % mask) if mask else "not learnt (B showed no held bit standing idle)")
+
+
+def sc_adlib_flick(r):
+    """Right stick straight up for 0.3 s: the view does not turn (a vertical push is an ad-lib flick, not a turn)
+    and, with --adlib, the ad-lib value changes once."""
+    with r.controller() as fc:
+        r.wait_armed()
+        time.sleep(0.3)
+        total, spread, flips = r.sample(1.3, [(0.0, lambda: fc.set_hand(RIGHT, stick=(0.0, 1.0))),
+                                              (0.3, lambda: fc.clear_hand(RIGHT))])
+        r.shot("flick")
+    check(spread < 0.5, "camera yaw moved %.2f deg (net %.2f) for a flick straight up, expected no turn" % (spread, total))
+    if flips is not None:
+        check(flips == 1, "the ad-lib value left its start %d times, expected once" % flips)
+    return "camera held (%.2f deg); ad-lib %s" % (spread, ("changed %d time(s)" % flips) if flips is not None else
+                                                   "not checked (pass --adlib ADDR once the byte is known)")
+
+
+def sc_adlib_diagonal(r):
+    """Right stick (0.7, 0.7) for 1 s: a diagonal is a turn (the view turns right) and no ad-lib."""
+    with r.controller() as fc:
+        r.wait_armed()
+        time.sleep(0.3)
+        total, _, flips = r.sample(1.3, [(0.0, lambda: fc.set_hand(RIGHT, stick=(0.7, 0.7))),
+                                         (1.0, lambda: fc.clear_hand(RIGHT))])
+        r.shot("diagonal")
+    check(total <= -20.0, "camera yaw changed %.1f deg for a diagonal push right, expected a right turn (<= -20)" % total)
+    if flips is not None:
+        check(flips == 0, "the ad-lib value changed %d time(s) for a diagonal push, expected none" % flips)
+    return "turned %.1f deg; ad-lib %s" % (total, ("changed %d time(s)" % flips) if flips is not None else "not checked")
+
+
 SCENARIOS = [
     ("arm", sc_arm),
     ("smooth-turn", sc_smooth_turn),
@@ -504,6 +722,11 @@ SCENARIOS = [
     ("belt", sc_belt),
     ("body-follow", sc_body_follow),
     ("savestate-yaw", sc_savestate_yaw),
+    ("run-latch", sc_run_latch),
+    ("run-latch-b-tap", sc_run_b_tap),
+    ("run-latch-belt", sc_run_belt),
+    ("adlib-flick", sc_adlib_flick),
+    ("adlib-diagonal", sc_adlib_diagonal),
 ]
 
 # The only ones that run with online-safe on (and skip without it).
@@ -554,6 +777,9 @@ def main():
     ap.add_argument("--settle", type=float, default=3.0, help="seconds to wait after loading a state")
     ap.add_argument("--junit", help="write a JUnit XML file here")
     ap.add_argument("--report", help="write report.html and captures into this folder")
+    ap.add_argument("--adlib", help="the ad-lib byte, once known: an address, or +offset into the local record; "
+                                    "adlib-flick then expects it to change once, adlib-diagonal not at all")
+    ap.add_argument("--adlib-width", type=int, default=1, choices=(1, 2, 4))
     args = ap.parse_args()
 
     if args.list or not args.scenarios:

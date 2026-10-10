@@ -320,6 +320,7 @@ void VRInputSource::Instance::ResetState()
 	shifter_state.Reset();
 	stick_state.Reset();
 	zone_state.Reset();
+	gamepad_state.Reset();
 	at_stop = {};
 	break_away_flash_s = {};
 }
@@ -504,6 +505,9 @@ void VRInputSource::BuildInstance(Instance& in) const
 			in.zone.radius = s.zone_radius;
 			in.zone.hand = s.zone_hand;
 			in.zone.require_grip = s.zone_require_grip;
+			break;
+		case SC::DeviceKind::Gamepad:
+			in.gamepad.sprint_latch = s.sprint_latch;
 			break;
 		default:
 			break;
@@ -801,7 +805,7 @@ void VRInputSource::PollEvents()
 				values = SC::ComposeLightGun(in.gun, hands);
 				break;
 			case SC::DeviceKind::Gamepad:
-				values = SC::ComposeGamepad(snap);
+				values = SC::ComposeGamepad(snap, in.gamepad, in.gamepad_state, dt);
 				break;
 			case SC::DeviceKind::Zone:
 			{

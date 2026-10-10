@@ -140,8 +140,13 @@ SLPM-65428:
   # Select (pause/options) stays off the controllers on purpose: online it doesn't pause.
   # Steam Frame: A, B, X, Y and Menu are on the right controller, the D-pad and View on the left.
   # Touch-style controllers: A/B right, X/Y and Menu left. Y (the top button) opens the map on both.
-  # The right stick turns the view (camera.lookAt), so it is not passed to the game: the PS2 right
-  # stick's up/down plays ad-lib shouts in Outbreak.
+  # The right stick turns the view (camera.lookAt), so it is not passed to the game as a stick. A quick
+  # flick of it straight up or down (RightStickUp/Down) presses the PS2 right stick's up/down, the
+  # ad-lib shouts; a mostly vertical push doesn't turn the view.
+  # Running: click the left stick while walking and you keep running (Cross held) until the stick
+  # is centred, so the right thumb stays free to turn. The latch is ORed into ButtonB (params
+  # sprintLatch), so a tap of B can't let it go; it lets go as the item screen, a menu, a cutscene
+  # or the raised weapon takes over.
   #
   # The grips are for gestures only, so a squeeze at the hip can't also do something
   # else (Outbreak doesn't use L2). Zones are placed from the head (metres: side + right, height + up, forward +
@@ -152,6 +157,7 @@ SLPM-65428:
     - device: Gamepad
       id: controllers
       pad: 1
+      params: { sprintLatch: ButtonB }
       bind:
         RightTriggerPress: Circle
         ButtonA: Circle
@@ -168,6 +174,8 @@ SLPM-65428:
         RightStickClick: R3
         LeftStickX: LeftStickX
         LeftStickY: LeftStickY
+        RightStickUp: RUp
+        RightStickDown: RDown
     - device: Zone
       id: holster
       notes: "Right hip holster: squeeze the grip there to ready the weapon (R1, lock-on); keep squeezing to stay aimed."

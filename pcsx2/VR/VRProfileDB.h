@@ -439,6 +439,8 @@ namespace VR::ProfileDB
 		float zone_radius = 0.15f;
 		SpatialControls::ZoneHand zone_hand = SpatialControls::ZoneHand::Either;
 		bool zone_require_grip = true;
+		// Gamepad params sprintLatch: the button the left-stick-click running latch holds (Count = none).
+		SpatialControls::ControlId sprint_latch = SpatialControls::ControlId::Count;
 		std::string preset;
 		std::vector<CameraGuard> when;
 		struct Bind

@@ -2082,7 +2082,8 @@ static std::optional<VR::ProfileDB::SpatialControlSpec> parseControlEntry(const 
 			{"travel", "grabRadius", "release", "springRate", "oneWay", "detented", "power", "engage", "steerFullLock",
 				"steerDeadband", "steerCurve", "steerSign", "outputFloor", "lockToLockDeg", "rimRadius", "gears", "reverse",
 				"neutral", "travelX", "travelY", "twist", "twistRangeDeg", "aim", "aimHand", "preset", "mode", "leverSign",
-				"grabMode", "breakAway", "grabLength", "sweep", "armLength", "upright", "radius", "hand", "grip"});
+				"grabMode", "breakAway", "grabLength", "sweep", "armLength", "upright", "radius", "hand", "grip",
+				"sprintLatch"});
 		readOptionalFloat(serial, p, "travel", "controls travel", spec.travel);
 		readOptionalFloat(serial, p, "sweep", "controls sweep", spec.sweep_deg);
 		readOptionalFloat(serial, p, "armLength", "controls armLength", spec.arm_length);
@@ -2190,6 +2191,36 @@ static std::optional<VR::ProfileDB::SpatialControlSpec> parseControlEntry(const 
 				spec.zone_hand = ZoneHand::Right;
 			else
 				return reject(fmt::format("hand '{}' is not one of either, left, right", v));
+		}
+		if (p.has_child("sprintLatch"))
+		{
+			const std::string_view v = nodeVal(p["sprintLatch"]);
+			if (def->kind != DeviceKind::Gamepad)
+			{
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' {}: `sprintLatch` is a Gamepad parameter (the left stick's "
+								   "running latch); a {} has no stick to latch. Ignored.",
+					serial, site, spec.device);
+			}
+			else
+			{
+				// A misspelt name would quietly leave running on the held button, so it drops the control like
+				// an unknown bind name does.
+				const ControlDef* latch = FindControl(*def, v);
+				if (!latch || latch->type != ControlType::Button)
+				{
+					std::string buttons;
+					for (const ControlDef& d : def->controls)
+					{
+						if (d.type != ControlType::Button)
+							continue;
+						if (!buttons.empty())
+							buttons += ", ";
+						buttons += d.name;
+					}
+					return reject(fmt::format("sprintLatch '{}' is not one of the Gamepad's buttons ({})", v, buttons));
+				}
+				spec.sprint_latch = latch->id;
+			}
 		}
 		if (p.has_child("preset"))
 		{
