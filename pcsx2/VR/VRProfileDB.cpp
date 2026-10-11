@@ -2808,7 +2808,7 @@ static std::optional<VR::ProfileDB::MenuPointerParams> parseMenuPointer(const st
 						   "point-to-select.", serial, why);
 		return std::nullopt;
 	};
-	warnUnknownKeys(serial, node, "menuPointer", {"when", "suspendWhen", "cursor", "cells", "hand", "coop", "pressVsyncs",
+	warnUnknownKeys(serial, node, "menuPointer", {"when", "suspendWhen", "liveWhen", "cursor", "cells", "hand", "coop", "pressVsyncs",
 		"gapVsyncs", "settleVsyncs", "maxPresses", "dwellMs", "armDelayMs", "enterInset"});
 	MenuPointerParams mp;
 
@@ -2826,6 +2826,9 @@ static std::optional<VR::ProfileDB::MenuPointerParams> parseMenuPointer(const st
 		return reject("needs a when list of valid guards (the menu its cells belong to is up)");
 	if (!guards("suspendWhen", "menuPointer suspendWhen guard", mp.suspend_when))
 		return reject("has a suspendWhen that is not a list of valid guards");
+	// liveWhen narrows when; a list whose entries all dropped would lose the check, so every entry must parse.
+	if (!guards("liveWhen", "menuPointer liveWhen guard", mp.live_when) || (node.has_child("liveWhen") && mp.live_when.empty()))
+		return reject("has a liveWhen that is not a non-empty list of valid guards");
 
 	if (!node.has_child("cursor") || !node["cursor"].is_map())
 		return reject("needs cursor: { node, index, x, y } (the game's cursor struct)");

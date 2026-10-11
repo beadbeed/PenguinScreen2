@@ -19,6 +19,13 @@ namespace VR::ProfileDB
 // has, or never reaches the game, and nothing but the D-pad is ever pressed for the player. Online it steers only where
 // the profile says coop: true (first person, and so menu mode, runs online only in private co-op). The beam, the dot and
 // the pointing hands are XRCompositor's; this module only reads, decides and steers.
+//
+// Submenus (the profile's suspendWhen: an item's command submenu, EQUIP/USE/PLACE/...): while one is open nothing is
+// pressed (a press under way is let go that poll), the trigger is the player's (a fresh pull passes straight through to
+// the submenu; one already held back stays back only until it is let go, so it never turns into a submenu confirm the
+// player did not make), and once it has closed, steering waits for the dot to reach another cell, so closing it never
+// yanks the cursor. After any confirm reaches the game steering also waits kAfterConfirmMs, so a submenu that confirm
+// opens has its flag up before another press could go out.
 namespace VR::MenuPointer
 {
 	using GuestReader = bool (*)(u32 address, u8 width, u32* value);
@@ -55,7 +62,7 @@ namespace VR::MenuPointer
 		bool gate = false;             // point-to-select is running (the menu is up, allowed and switched on)
 		bool in_flight = false;        // a steer toward target is under way
 		bool confirm_held = false;     // the confirm controls are held back
-		bool suspended = false;        // a suspendWhen guard, or the latch after a confirm, holds steering
+		bool suspended = false;        // a suspendWhen guard (a submenu), the wait or the latch after a confirm, holds steering
 		bool selfcheck_failed = false; // the cursor struct disagreed with a cell this opening of the menu
 		bool refused_online = false;   // online, and the profile does not say coop: true
 		s8 hovered = -1;
@@ -86,6 +93,17 @@ namespace VR::MenuPointer
 	// Offline always; online only in menu mode with the profile's coop: true. Pure.
 	bool SteeringAllowed(bool online_locked, bool menu_mode, bool coop);
 
+	// The menu proper (the profile's liveWhen). The when guards can pass on another screen too (File #1's item-screen
+	// cursor struct keeps reading 1 after the screen closes, and the menu flag is also up for the map and pause), so the
+	// menu counts as up only once a liveWhen guard has passed (live_now) since when_up last rose; *seen carries that
+	// between polls. when_up false clears *seen and returns false. Pure.
+	bool LiveGate(bool when_up, bool live_now, bool* seen);
+
+	// A steer stopped because the cursor did not answer a press this many times in one opening of the menu turns
+	// point-to-select off until the menu opens again: a cursor that does not answer is not this menu's (a stale cursor
+	// struct under another screen, or a wrong table), and every press it ignores may be moving something else.
+	constexpr u32 kMaxUnansweredPresses = 2;
+
 	// One poll of point-to-select, everything it depends on passed in, so the self-test can drive it with a scripted game.
 	struct StepIn
 	{
@@ -109,9 +127,14 @@ namespace VR::MenuPointer
 		float right_stick = 0.0f; // how far each stick is pushed
 		float left_stick = 0.0f;
 		float grip = 0.0f;     // the more squeezed grip
-		bool suspend = false;  // one of the profile's suspendWhen guards passes
+		bool suspend = false;  // one of the profile's suspendWhen guards passes (a submenu is open)
 		float dt_ms = 1000.0f / 60.0f;
 	};
+
+	// With suspendWhen, steering waits this long after a confirm reaches the game: a submenu the confirm opens has its
+	// flag up well within it (a 30 fps game shows it within two or three frames), so no press can slip in before the
+	// flag is seen.
+	constexpr float kAfterConfirmMs = 400.0f;
 
 	struct StepOut
 	{
@@ -123,6 +146,7 @@ namespace VR::MenuPointer
 		u32 presses = 0; // toward target
 		bool in_flight = false;
 		bool suspended = false;
+		bool submenu = false; // a suspendWhen guard passes, or did within its tail
 		bool selfcheck_failed = false;
 		// What happened this poll.
 		bool opened = false;
@@ -141,6 +165,7 @@ namespace VR::MenuPointer
 		bool latched = false;           // and paused steering (no suspendWhen)
 		bool confirm_swallowed = false; // a confirm that will never reach the game
 		bool selfcheck_failed_now = false;
+		bool unresponsive_now = false; // kMaxUnansweredPresses reached this poll: off for the rest of the opening
 	};
 
 	struct State
@@ -149,17 +174,25 @@ namespace VR::MenuPointer
 		bool open = false;
 		float open_ms = 0.0f;
 		bool selfcheck_failed = false;
+		u32 unanswered = 0;        // steers stopped because the cursor did not answer a press
+		bool unresponsive = false; // unanswered reached kMaxUnansweredPresses
 		int last_cell = -1;
 		int under = -1; // the cell under the pointer, with HoverCell's hysteresis
 		float under_ms = 0.0f;
 		int ignore = -2;        // the hover the menu opened with, ignored until it changes (-2: none)
 		bool disarmed = false;  // after an override or an abort: no steering until the hover changes
 		int disarm_under = -1;  // the hover then
+		// After a submenu (suspendWhen): only the hover reaching a cell other than disarm_under arms again, not the dot
+		// leaving the cells and coming back, so the cursor never follows the dot left where the submenu closed.
+		bool disarm_strict = false;
 		// A confirm reached the game (no suspendWhen): no steering until Cross, the cursor reaching another cell or the
 		// menu closing. It lives as long as the menu, not the gate: a gate drop with the menu still up keeps it.
 		bool latched = false;
 		int latch_cell = -1;
 		u32 suspend_polls = 0;  // the suspendWhen tail
+		// With suspendWhen: the wait after a confirm reached the game (kAfterConfirmMs), counting down every poll. It is
+		// not part of an opening: only the menu closing clears it.
+		float after_confirm_ms = 0.0f;
 		// Steering.
 		int target = -1;
 		int phase = 0; // 0 idle (ready to plan the next press), 1 pressing, 2 released

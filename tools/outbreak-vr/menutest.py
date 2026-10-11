@@ -1,8 +1,8 @@
 """Headset-free tests for the VR menu pointer on File #1's item screen (SLPM-65428), over PINE: the pointer's hit on
-the menu screen, steering the game's own cursor to each cell, the fast click, the confirm latch, overrides, closing
-the screen mid-steer, the menu tablet and the cell rects. Reads the menu pointer with MsgVRMenuPointer op 0
-(pine.menu_pointer()) and the game's cursor struct at 0x720B80. Prints PASS / FAIL / SKIP per scenario; exits 1 if
-any failed.
+the menu screen, steering the game's own cursor to each cell, the fast click, the pause after a confirm, the command
+submenu (suspendWhen), overrides, closing the screen mid-steer, the menu tablet and the cell rects. Reads the menu
+pointer with MsgVRMenuPointer op 0 (pine.menu_pointer()), the game's cursor struct at 0x720B80 and its command-submenu
+flag at 0x720BA0. Prints PASS / FAIL / SKIP per scenario; exits 1 if any failed.
 
 Offline only: it loads savestates and sends scripted input, which must never happen online (it refuses with the
 network adapter on). Start the emulator with PCSX2_VR_TEST_INPUT=1 in its environment and PINE on (slot 28011): in VR
@@ -10,8 +10,9 @@ on SteamVR's null headset (python null_driver.py on, then launch_vr.ps1; run nul
 no OpenXR runtime at all for --test-uv. Be standing idle in a room with first person armed (J's Bar), or pass --slot
 (File #1 slot 6: J's Bar, gun equipped, calm), which is loaded before every scenario.
 
-  python menutest.py all --slot 6 --report out/   # pointer-hit, cells, fast-click, latch, override,
-                                                   # close-in-flight, tablet
+  python menutest.py all --slot 6 --report out/   # pointer-hit, cells, fast-click, latch, submenu, override,
+                                                   # close-in-flight, map-after-items, tablet
+  python menutest.py map-after-items --test-uv --slot 6   # point-to-select stays off on the map and pause
   python menutest.py cells --test-uv --slot 6      # no OpenXR runtime: point with PINE test hits (op 1)
   python menutest.py rects --test-uv --slot 6 --report out/   # the cell rects against captures of the window
   python menutest.py --tablet-ini on               # emulator closed: [VR] MenuTablet = true (ini backed up)
@@ -20,13 +21,19 @@ no OpenXR runtime at all for --test-uv. Be standing idle in a room with first pe
 Scenarios: pointer-hit (the hit maths at 9 points, a turned-away aim misses, the left hand alone hits), cells (cells
 1, 3, 2, 0, the equipped box and 0 again, each within 0.8 s, presses <= path + 1, a landing tick per cell),
 fast-click (aim at cell 3 and pull the trigger at once: held back, passed only once the cursor is there), latch
-(after a confirm, pointing elsewhere presses nothing until B), override (the right stick stops a steer, nothing
+(after a confirm, pointing elsewhere presses nothing until B), submenu (a confirm on the cursor's cell with the dot
+moving straight on: the submenu's flag rises, nothing is pressed while it is up wherever the dot goes, and after B
+closes it the cursor stays until the dot moves to another cell), override (the right stick stops a steer, nothing
 pressed for 1 s), close-in-flight (closing the screen mid-steer: no D-pad from the poll it closes, the character does
-not move), tablet (needs MenuTablet on: its size, tilt and the hit maths), rects (each cell's white highlight box,
-found in a capture, lies in the profile's rect).
+not move), map-after-items (after a visit to the item screen its cursor struct still reads 1 and matches a cell, and
+the menu flag is up for the map and pause too: with the map (Y) and then pause (Select, sent as Backspace through
+drive.py, so Pad 1 needs its keyboard bindings) up, pointing at every cell for 0.6 s runs no point-to-select and
+presses nothing; SKIP with the map's result if pause cannot be opened), tablet (needs MenuTablet on: its size, tilt
+and the hit maths), rects (each cell's white highlight box, found in a capture, lies in the profile's rect).
 
-Menu safety: the only confirm sent is one trigger pull on a cell (fast-click, latch), which opens that cell's command
-submenu; the runner then backs out with B (Cross) and never confirms a submenu entry.
+Menu safety: the only confirm sent is one trigger pull on a cell (fast-click, latch, submenu), which opens that cell's
+command submenu; the runner then backs out with B (Cross) and never confirms a submenu entry. map-after-items sends
+no confirm at all: Y opens the map, Select opens pause, and B (Cross) closes each.
 """
 import argparse
 import html
@@ -50,6 +57,8 @@ SERIAL = "SLPM-65428"
 MENU_OPEN = 0x48BF7E                     # u8 1 while the item screen, the map or pause is open
 ITEM_UP = 0x720B80                       # u32 1 while the item screen is up
 NODE, INDEX, CUR_X, CUR_Y = 0x720B84, 0x720B8C, 0x720B8E, 0x720B90   # the cursor struct
+SUBMENU = 0x720BA0                       # u8 1 while an item's command submenu is open (the profile's suspendWhen)
+OWN_GRID = 0x723F94                      # u8 1 while the cursor is in the own item grid (the profile's liveWhen)
 RECORDS, RECORD_STRIDE, LOCAL_SLOT, POSITION = 0x476DD0, 0x10E0, 0x48BF7D, 0x38
 
 # The profile's cells: name, node, index, x, y, rect (u0, v0, u1, v1 of the game picture), and the neighbours (up, down,
@@ -472,18 +481,70 @@ def sc_latch(r):
         time.sleep(0.3)
         m1 = r.mp()
         check(m1["confirms_passed"] == m0["confirms_passed"] + 1, "the confirm on the cursor's own cell did not pass")
-        check(m1["suspended"], "steering is not paused after a confirm (no latch)")
+        # File #1's profile has suspendWhen (the submenu flag), so the pause is the submenu's; without it, the latch.
+        check(m1["suspended"], "steering is not paused after a confirm (no submenu suspension, no latch)")
         r.shot("submenu")
         r.point(fc, other)
         time.sleep(1.0)
         m2 = r.mp()
-        check(m2["presses"] == m1["presses"], "latched, pointing at %s still pressed the D-pad %d time(s)" % (
+        check(m2["presses"] == m1["presses"], "paused, pointing at %s still pressed the D-pad %d time(s)" % (
             CELLS[other][0], m2["presses"] - m1["presses"]))
         r.press_b(fc)
         m3 = r.mp()
-        check(not (m3["gate"] and m3["suspended"]), "the latch did not let go after B")
+        check(not (m3["gate"] and m3["suspended"]), "the pause did not let go after B")
         r.close_items(fc)
-    return "a confirm on %s latched; pointing at %s pressed nothing for 1 s; B let go" % (CELLS[own][0], CELLS[other][0])
+    return "a confirm on %s paused steering; pointing at %s pressed nothing for 1 s; B let go" % (CELLS[own][0],
+                                                                                               CELLS[other][0])
+
+
+def sc_submenu(r):
+    """A confirm on the cursor's own cell opens its command submenu; the dot moves straight on to another cell (the
+    race the wait after a confirm covers). While the submenu's flag (0x720BA0) is up the pointer is suspended and presses
+    nothing wherever the dot goes; after B (Cross) closes it, the cursor stays put with the dot still on another cell,
+    until the dot moves to a different cell."""
+    with r.controller() as fc:
+        r.wait_armed()
+        r.open_items(fc)
+        own = r.cell()
+        check(own >= 0, "the cursor is on no mapped cell (%s)" % (r.cursor(),))
+        check(r.p.read8(SUBMENU) == 0, "the submenu flag reads %d with no submenu open" % r.p.read8(SUBMENU))
+        other = 1 if own != 1 else 2
+        third = next(c for c in (3, 2, 4) if c not in (own, other))
+        r.point(fc, own)
+        time.sleep(0.2)
+        m0 = r.mp()
+        r.point(fc, own, trigger=1.0)  # a confirm on the cursor's own cell: its command submenu
+        time.sleep(0.05)
+        r.point(fc, other, trigger=1.0)  # the dot goes straight on before the submenu's flag can be seen
+        time.sleep(0.15)
+        r.point(fc, other, trigger=0.0)
+        check(wait_until(lambda: r.p.read8(SUBMENU) == 1, 1.0) is not None,
+              "the command submenu's flag (0x720BA0) did not rise after the confirm")
+        m1 = r.mp()
+        check(m1["confirms_passed"] == m0["confirms_passed"] + 1, "the confirm on the cursor's own cell did not pass")
+        check(m1["suspended"] and m1["hovered"] < 0, "steering is not suspended with the submenu open (suspended %s, "
+              "hovered %d)" % (m1["suspended"], m1["hovered"]))
+        r.shot("submenu")
+        for cell in (other, third):
+            r.point(fc, cell)
+            time.sleep(0.6)
+        m2 = r.mp()
+        check(m2["presses"] == m0["presses"], "with the submenu open the pointer pressed the D-pad %d time(s)" % (
+            m2["presses"] - m0["presses"]))
+        check(r.cell() == own, "the cursor left %s with the submenu open (cursor %s)" % (CELLS[own][0], r.cursor()))
+        r.press_b(fc)  # Cross backs out of the submenu; the dot stays on the third cell
+        check(wait_until(lambda: r.p.read8(SUBMENU) == 0, 1.0) is not None, "B did not close the submenu")
+        time.sleep(1.0)
+        m3 = r.mp()
+        check(m3["presses"] == m2["presses"] and r.cell() == own,
+              "closing the submenu steered toward the dot (%d press(es), cursor on cell %d)" % (
+                  m3["presses"] - m2["presses"], r.cell()))
+        took, presses, _ = r.steer_to(fc, other)
+        check(took is not None, "the dot moving to another cell did not steer again (cursor %s, presses %d)" % (
+            r.cursor(), presses))
+        r.close_items(fc)
+    return ("a confirm on %s opened its submenu; nothing pressed while it was up; after B the cursor stayed until the "
+            "dot moved, then went to %s in %.2f s" % (CELLS[own][0], CELLS[other][0], took))
 
 
 def sc_override(r):
@@ -546,6 +607,74 @@ def sc_close_in_flight(r):
         moved = math.hypot(after[0] - before[0], after[2] - before[2])
         check(moved < 1.0, "the character moved %.2f units after closing mid-steer" % moved)
     return "closed mid-steer: no D-pad after, moved %.2f units" % moved
+
+
+def stays_off(r, fc, name):
+    """With a menu other than the item screen up (the map or pause): points at every cell for 0.6 s each; point-to-select
+    must never run (gate down), nothing is pressed, and the item cursor struct does not change. Returns a detail."""
+    if wait_until(lambda: r.mp()["menu_mode"], 2.0) is None:
+        raise Fail("menu mode did not start with the %s up (first person did not stand down): nothing was tested" % name)
+    time.sleep(ARM_DELAY_S)
+    m0 = r.mp()
+    cur0 = r.cursor()
+    grid = r.p.read8(OWN_GRID)
+    gate_polls = 0
+    dpad_polls = 0
+    for cell in range(len(CELLS)):
+        r.point(fc, cell)
+        t0 = time.time()
+        while time.time() - t0 < 0.6:
+            m = r.mp()
+            gate_polls += 1 if m["gate"] else 0
+            dpad_polls += 1 if m["dpad"] is not None else 0
+            time.sleep(0.01)
+    r.point_clear(fc)
+    time.sleep(0.2)
+    m1 = r.mp()
+    check(gate_polls == 0, "point-to-select ran with the %s up in %d sample(s) (0x723F94 = %d, 0x720B80 = %d, cursor %s): "
+          "the gate must stay down off the item screen" % (name, gate_polls, grid, r.p.read32(ITEM_UP), cur0))
+    check(m1["presses"] == m0["presses"] and dpad_polls == 0, "%d D-pad press(es) (%d sample(s) pressed) with the %s up" % (
+        m1["presses"] - m0["presses"], dpad_polls, name))
+    check(r.cursor() == cur0, "the item cursor struct changed with the %s up (%s -> %s)" % (name, cur0, r.cursor()))
+    return "%s: gate down, nothing pressed (0x723F94 = %d)" % (name, grid)
+
+
+def sc_map_after_items(r):
+    """The item screen's cursor struct still reads 1 (0x720B80) after the screen closes and still matches the cell it was
+    left on, and the menu flag (0x48BF7E) is up for the map and pause too, so the when list alone would run
+    point-to-select there and press the D-pad. The profile's liveWhen (0x723F94, the cursor in the own grid) must keep it
+    off. Leaves the cursor on cell 1, closes the item screen, then opens the map (Y = Triangle) and pause (Select)."""
+    with r.controller() as fc:
+        r.wait_armed()
+        r.open_items(fc)
+        took, _, _ = r.steer_to(fc, 1)
+        check(took is not None, "the cursor did not reach cell 1 (cursor %s)" % (r.cursor(),))
+        r.close_items(fc)
+        details = ["after closing: 0x720B80 = %d, 0x723F94 = %d, cursor on cell %d" % (
+            r.p.read32(ITEM_UP), r.p.read8(OWN_GRID), r.cell())]
+        r.wait_armed()
+        fc.set_hand(RIGHT, buttons=("y",))  # Y: Triangle, the map
+        time.sleep(0.15)
+        fc.set_hand(RIGHT)
+        check(wait_until(r.menu_open, 3.0) is not None, "the map did not open on Y (Triangle)")
+        details.append(stays_off(r, fc, "map"))
+        r.press_b(fc)
+        check(wait_until(lambda: not r.menu_open(), 3.0) is not None, "the map did not close on B (Cross)")
+        time.sleep(0.5)
+        # Pause: Select is not on the VR controllers (it does not pause online), so it goes in from the keyboard.
+        r.wait_armed()
+        try:
+            import drive
+            drive.press("select")
+        except Exception as e:
+            raise Skip("; ".join(details) + "; pause NOT checked: no keyboard input (%s)" % e)
+        if wait_until(r.menu_open, 3.0) is None:
+            raise Skip("; ".join(details) + "; pause NOT checked: Select (Backspace) did not open it (Pad 1 needs the "
+                       "keyboard bindings, README)")
+        details.append(stays_off(r, fc, "pause"))
+        r.press_b(fc)
+        check(wait_until(lambda: not r.menu_open(), 3.0) is not None, "pause did not close on B (Cross)")
+    return "; ".join(details)
 
 
 def sc_tablet(r):
@@ -713,13 +842,16 @@ SCENARIOS = [
     ("cells", sc_cells),
     ("fast-click", sc_fast_click),
     ("latch", sc_latch),
+    ("submenu", sc_submenu),
     ("override", sc_override),
     ("close-in-flight", sc_close_in_flight),
+    ("map-after-items", sc_map_after_items),
     ("tablet", sc_tablet),
     ("rects", sc_rects),
 ]
 # "all" runs these; rects is run on its own (it captures the emulator window).
-ALL = ("pointer-hit", "cells", "fast-click", "latch", "override", "close-in-flight", "tablet")
+ALL = ("pointer-hit", "cells", "fast-click", "latch", "submenu", "override", "close-in-flight", "map-after-items",
+       "tablet")
 
 
 def tablet_ini(mode, ini=INI):

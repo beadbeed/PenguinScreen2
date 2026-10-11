@@ -57,7 +57,8 @@ SLPM-65428:
   # own pad, closed loop (the cursor struct below is read after every press), with a light tick as it lands; pull
   # the trigger (Circle) to select as usual. Nothing is ever confirmed for you: only the D-pad is pressed, and a
   # trigger pulled before the cursor has arrived reaches the game once it has, or never.
-  # Research (offline PINE reads, File #1 J's Bar, Kevin): u32 0x720B80 is 1 while the item screen is up; u32
+  # Research (offline PINE reads, File #1 J's Bar, Kevin): u32 0x720B80 is 1 while the item screen is up (and stays 1
+  # after it closes, so it is no proof on its own; see liveWhen); u32
   # 0x720B84 points at the cursor's cell node (nodes 0x98 apart); u16 0x720B8C is the cell's index in its panel and
   # u16 0x720B8E / 0x720B90 its x / y, screen units written in DECIMAL (x 498 is 498, not 0x498). Partner panels
   # reuse the same x / y with other nodes, so a cell is node, index, x and y together; any other node (a partner's
@@ -66,19 +67,34 @@ SLPM-65428:
   # captures of cells 1, 2 and the equipped box. up/down/left/right: the cell one press leads to (cell 3 Right goes
   # to a partner's panel, so it is left out and never pressed); cell 2 Right and cell 3 Left and Up are expected,
   # not yet measured.
-  # suspendWhen is empty until the command submenu's flag is measured: after any confirm reaches the game, steering
-  # waits for Cross, a cursor move or the screen closing. Timing: a press held 2 vsyncs and released at least 2 (the
-  # game polls at 30 fps), at most 6 presses per move, 10 vsyncs for the cursor to answer; a cell counts after 60 ms
-  # (entered 12% inside its edges), nothing in the first 300 ms after the screen opens.
+  # suspendWhen: u8 0x720BA0 (the cursor struct + 0x20) is 1 while an item's command submenu (EQUIP/USE/PLACE/...)
+  # is open (offline full-RAM diffs, 2026-10-11; moving inside the submenu leaves the cursor's node alone). While it
+  # is, nothing is pressed, so the submenu's highlight never moves under you and PLACE can't be reached by accident;
+  # the trigger is yours (a fresh pull confirms the submenu entry; one held back before it opened stays back until you
+  # let go). Once it closes, steering waits until the dot moves to another cell, and after any confirm it also waits
+  # 0.4 s, so a submenu that confirm opens has its flag up before another press could go out. Timing: a press held 2
+  # vsyncs and released at least 2 (the game polls at 30 fps), at most 6 presses per move, 10 vsyncs for the cursor to
+  # answer; a cell counts after 60 ms (entered 12% inside its edges), nothing in the first 300 ms after the screen opens.
   # coop: true steers in private co-op too (first person, and with it menu mode, never runs on obsrv): it presses
   # only your own pad's D-pad and reads only your own item screen's cursor. If the first co-op session's log says
   # the cursor struct did not match, set coop: false.
+  # liveWhen: the when list alone also passes on the map and pause after any visit to the item screen (0x48BF7E is up
+  # for all three and the cursor struct's 0x720B80 stays 1 once the item screen closes), and the stale cursor still
+  # matches a cell, so pointing would press the D-pad on the map or pause. u8 0x723F94 is 1 while the cursor is in your
+  # own item grid and 0 once the screen closes (offline reads, 2026-10-11), and the item screen always opens on cell 0,
+  # in the grid; it reads 0 in the equipped box, so it is not checked every poll: the item screen counts as up once it
+  # has read 1 since the when list last started passing, and stops the moment the when list fails (the screen closes).
+  # Expected to read 0 on the map and pause; menutest.py map-after-items checks it. Belt and braces: two presses in one
+  # opening that the cursor does not answer turn point-to-select off until the screen opens again.
   menuPointer:
     when:
       - { address: 0x540004, equals: 3 }             # GAME overlay resident
       - { address: 0x48BF7E, equals: 1, width: 1 }   # item screen, map or pause open
-      - { address: 0x720B80, equals: 1 }             # the item screen is up
-    suspendWhen: []
+      - { address: 0x720B80, equals: 1 }             # the item screen has been up (stays 1 after it closes)
+    liveWhen:
+      - { address: 0x723F94, equals: 1, width: 1 }   # the cursor in your own item grid (where the screen opens)
+    suspendWhen:
+      - { address: 0x720BA0, equals: 1, width: 1 }   # an item's command submenu is open
     cursor: { node: 0x720B84, index: 0x720B8C, x: 0x720B8E, y: 0x720B90 }
     hand: either
     coop: true
@@ -108,6 +124,12 @@ SLPM-65428:
     # to 0.75 m perceived instead of flattening everything nearer onto it; textured, perspective-Q draws
     # only, so 2D overlays stay put. VR NearDepthMetres overrides it (below 0 turns it off).
     firstPerson: { separation: 0.0132, convergence: 150, nearest: 0.75, auto: true }
+    # Menus flat: while the item screen, the map or pause is up (u8 0x48BF7E = 1, the flag camera.lookAt.pauseWhen
+    # reads; first person stands down then, so this rule applies) the picture goes at zero separation, so the menu
+    # lies exactly on the screen's plane, where the menu pointer's dot is drawn. With the base separation the menu's
+    # draws took depth from their Z and floated off the plane, away from the dot.
+    scenes:
+      - { when: { address: 0x48BF7E, equals: 1, width: 1 }, separation: 0, label: menu }
   # First-person camera (only with --vr and the VR 'Head-Tracked Camera' setting, on by default).
   # Outbreak builds its view from an eye and a target vector. During normal room play (GAME overlay
   # resident, scenario in game, room camera in normal mode) the room camera's three cut handlers and the
