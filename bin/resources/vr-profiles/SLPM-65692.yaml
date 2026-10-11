@@ -36,16 +36,15 @@ SLPM-65692:
   # liveWhen (see File #1's notes: the when list alone also passes on the map and pause after an item-screen visit,
   # since 0x4912BE is up for all three and the struct's +0x00 word stays 1): u8 0x76A604 is File #1's 0x723F94 (1 while
   # the cursor is in your own grid) at the same offset from the cursor struct (+0x3414), as the cell nodes and the
-  # equipped box's node were. UNVERIFIED on File #2. If it is wrong the item screen never counts as up, so point-to-
-  # select stays off (the log says "a menu was up without the profile's liveWhen passing" on every item-screen visit);
-  # check with a PINE read of 0x76A604 on the item screen (1 in the grid), closed (0), and on the map (0).
+  # equipped box's node were. Verified offline 2026-10-11 (Training Ground slot 2): 1 on Kevin's cells 0 and 1, 0 in
+  # the equipped box, 0 with the screen closed and 0 on the map, exactly as File #1's 0x723F94.
   menuPointer:
     when:
       - { address: 0x543004, equals: 3 }             # GAME overlay resident
       - { address: 0x4912BE, equals: 1, width: 1 }   # item screen, map or pause open
       - { address: 0x7671F0, equals: 1 }             # the item screen has been up (stays 1 after it closes)
     liveWhen:
-      - { address: 0x76A604, equals: 1, width: 1 }   # the cursor in your own item grid (UNVERIFIED, by File #1's offset)
+      - { address: 0x76A604, equals: 1, width: 1 }   # the cursor in your own item grid (verified on File #2)
     suspendWhen:
       - { address: 0x767210, equals: 1, width: 1 }   # an item's command submenu is open
     cursor: { node: 0x7671F4, index: 0x7671FC, x: 0x7671FE, y: 0x767200 }
