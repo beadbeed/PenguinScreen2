@@ -363,6 +363,10 @@ namespace VR
 			profile ? profile->fp_screen_height.value_or(2.5f) : 2.5f,
 			profile ? profile->fp_screen_arc_deg.value_or(0.0f) : 0.0f,
 			profile ? profile->fp_screen_pose_lag_ms.value_or(40.0f) : 40.0f);
+		XRCompositor::UpdateMenuScreen(profile ? profile->menu_screen_distance.value_or(0.70f) : 0.70f,
+			profile ? profile->menu_screen_height.value_or(0.36f) : 0.36f,
+			profile ? profile->menu_screen_drop.value_or(0.30f) : 0.30f,
+			profile ? profile->menu_screen_tilt_deg.value_or(-1.0f) : -1.0f);
 
 		StereoState::Params stereo;
 		stereo.separation = new_settings.StereoSeparation;

@@ -20,6 +20,7 @@ and test the first-person camera. They talk to a running PenguinScreen2 through 
 | `sync_sweep.sh` / `sway_metric.py` | On the null headset: world wobble in the Headset Window for render-pose sync variants (`time`, or a `syncFramesBack` value). With `PCSX2_VR_SYNCLOG=1` the emulog also gets, once a second, `(VR) predict:` (how far frames still turn when shown, and the horizons) and `(VR) edge: rms/max deg, H ms` (how far the first-person frame sits from the head as it is shown, the leading-edge band that `lookAt.predict` shrinks; against the fake head when `PCSX2_VR_FAKE_HEADPOSE` is set). |
 | `session_recorder.py` | Started by `launch_vr.ps1` and `Launch-PenguinScreen2-SteamVR.cmd`: records game state (~4/s) and a screenshot every 5 s to `D:\Games\PS2\sessions\<time>` until the emulator closes, plus the emulog. Screenshots only when the network adapter is on. |
 | `hmdshot.py`, `input_log.py`, `record_play.py` | Headset Window screenshot; pad input + screenshots while someone plays; memory snapshots + screenshots while someone plays. |
+| `menutest.py` | Headset-free menu pointer tests for File #1's item screen (offline only): pointer hit maths, steering to each cell, fast click, the confirm latch, overrides, closing mid-steer, the menu tablet, and the cell rects checked against captures. `--slot` loads a savestate first, `--report` saves captures, `--test-uv` points with PINE test hits instead of aiming (works with no OpenXR runtime). |
 
 HUD cards on the null headset: `PCSX2_VR_HUD_TEST=1` shows a test toast every 3 s (it cycles through the
 whole font), `PCSX2_VR_FAKE_HANDS` also shows the wrist card on the fake left hand at any angle (NO DATA
@@ -55,6 +56,19 @@ the head, drawn under the hands and over the screen; it fades in over 0.15 s wit
 when it is lowered, and a frame looking straight down the beam goes without it. The first one in a session logs
 `(VR) HUD: laser sight shown (weapon raised in first person).`. `PCSX2_VR_FAKE_HANDS=gun` shows it on the fake
 right hand at any time (with the setting on).
+
+Menu pointer and tablet (VR settings `MenuPointer`, on by default, and `MenuTablet`, off by default): in a menu
+opened from first person (menu mode), the controller's aim casts a 3 mm beam (in the laser's slot, so not while the
+laser shows) to a dot lying on the flat menu screen, and both hands are drawn. On File #1's item screen pointing at
+an item cell or the equipped box steers the game's cursor there with D-pad presses (2 vsyncs pressed, at least 2
+released, checked against the cursor struct at 0x720B80 after each), with a light tick per landing; the trigger stays
+Circle and is held back until the cursor arrives, never pressed for you. `MenuTablet` moves the menu onto a 0.36 m
+screen 0.70 m ahead of and 0.30 m below the eyes (profile `screen.menu`). Logs: `(VR) MenuPointer: item screen open,
+cursor at cell N (...); point-to-select on|off (why).`, `cell A -> B in N press(es), T ms.`, `steering to cell N
+aborted (why) ...`, `confirm passed ...` / `confirm swallowed ...`, `(VR) HUD: menu pointer shown (...)`,
+`(VR) Screen: tablet (menu): ...` and `(VR) Screen transform (menu pointer): ...`. PINE `MsgVRMenuPointer` (0xE5):
+op 0 reads the state (`pine.menu_pointer()`, any time), op 1 sets a test hit (`pine.set_test_screen_hit()`, refused
+like the test input). `PCSX2_VR_SELFTEST` runs `(VR) MenuPointer self-test:` once.
 
 Comfort vignette (VR settings `ComfortVignette`, off by default, and `VignetteStrength`, 0.2-1.0, default 0.6):
 while first person moves the view without the head, a view-locked quad 0.5 m ahead (6 m square, about 161 deg

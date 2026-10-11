@@ -23,6 +23,11 @@ namespace VR::XRCompositor
 	// Head-locked screen used while CameraDriver::LookAtActive() (profile screen.firstPerson).
 	void UpdateFirstPersonScreen(bool enabled, float distance_m, float height_m, float arc_deg, float pose_lag_ms);
 
+	// The menu tablet (VR setting MenuTablet, profile screen.menu): while a menu is up in first-person play it is shown on
+	// a small flat screen distance_m ahead of the eyes and drop_m below them, height_m tall, tilted back tilt_deg (below 0:
+	// to face the eyes exactly). Clamped to 0.3-2.0 m, 0.15-1.0 m, -0.5-0.8 m and 0-89 deg.
+	void UpdateMenuScreen(float distance_m, float height_m, float drop_m, float tilt_deg);
+
 	void RequestScreenReanchor();
 
 	bool IsReanchorRequested();

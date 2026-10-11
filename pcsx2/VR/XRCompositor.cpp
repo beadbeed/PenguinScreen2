@@ -8,6 +8,7 @@
 #include "VR/HandModel.h"
 #include "VR/GameFeedback.h"
 #include "VR/HudCards.h"
+#include "VR/MenuPointer.h"
 #include "VR/SpatialControls.h"
 #include "VR/VRManager.h"
 #include "VR/SeatCast.h"
@@ -64,8 +65,18 @@ namespace VR::XRCompositor
 			float fp_height = 2.5f;
 			float fp_arc_deg = 0.0f;
 			float fp_pose_lag_ms = 40.0f;
+			// Menu tablet (VR setting MenuTablet, profile screen.menu): while a menu is up in first-person play, the menu
+			// goes on a small flat screen this far ahead of the eyes and this far below them, tilted back to face them
+			// (menu_tilt_deg below 0: exactly at the eyes, atan2(drop, distance), about 23 deg).
+			bool has_menu = false;
+			float menu_distance = 0.70f;
+			float menu_height = 0.36f;
+			float menu_drop = 0.30f;
+			float menu_tilt_deg = -1.0f;
 		};
 		bool s_fp_screen_was_active = false;
+		// The menu tablet is the screen in use (GS thread, like s_fp_screen_was_active; never both).
+		bool s_tablet_was_active = false;
 		std::mutex s_screen_mutex;
 		ScreenParams s_screen_params;
 
@@ -129,8 +140,8 @@ namespace VR::XRCompositor
 		constexpr u32 kBackgroundSize = 32;
 
 		// Every layer one present can build: up to five screen slots (split screen in stereo uses four), two lever
-		// cards, two hands and the five HUD cards (laser, wrist, vignette, toast, blink). The submit array adds the
-		// background under them; SteamVR takes at most 16 a frame.
+		// cards, two hands and the six HUD cards (laser or menu beam, wrist, vignette, toast, blink, menu pointer dot).
+		// The submit array adds the background under them; SteamVR takes at most 16 a frame.
 		constexpr u32 kLayerCapacity = 5 + ControlQuads::kSlots + kHandSlots + HudCards::kCardCount;
 		static_assert(kLayerCapacity + 1 <= 16, "more composition layers than SteamVR takes in a frame");
 
@@ -379,6 +390,9 @@ namespace VR::XRCompositor
 			// Laser sight: its fade in (on the same clock), and whether it was logged yet this session.
 			float hud_laser_opacity = 0.0f;
 			bool hud_laser_logged = false;
+			// Menu pointer: the beam's and the dot's fades (the same clock), and whether it was logged yet this session.
+			float hud_beam_opacity = 0.0f, hud_pointer_opacity = 0.0f;
+			bool hud_pointer_logged = false;
 			// Comfort vignette: whether it was logged yet this session (its opacity comes eased from CameraDriver).
 			bool hud_vignette_logged = false;
 			// Comfort blink on a screen-mode change: when (SteadyNowMs) the change waiting for the blink to
@@ -1394,6 +1408,13 @@ namespace VR::XRCompositor
 				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 		}
 
+		// The hands are drawn while camera.lookAt drives the game camera, and while a menu is up in first-person play
+		// (menu mode) on the world screen or the menu tablet, where they point at it.
+		bool HandsWanted()
+		{
+			return CameraDriver::LookAtActive() || (SpatialControls::MenuMode() && !s_fp_screen_was_active);
+		}
+
 		// First-person hands. Each presented frame, while camera.lookAt drives the game camera and a
 		// controller's grip pose is valid, its hand is drawn on the CPU as seen from the head onto a
 		// quad that faces the head, uploaded, and submitted after the screen and lever layers. The quad
@@ -1418,7 +1439,7 @@ namespace VR::XRCompositor
 			if (s.hands_disabled || !s.head_pose_valid)
 				return 0;
 			const bool fake = (s_fake_hands != 0);
-			if (!fake && (!s.head_position_valid || !CameraDriver::LookAtActive()))
+			if (!fake && (!s.head_position_valid || !HandsWanted()))
 				return 0;
 
 			// The head pose was located in XRSession::GetSpace() at this frame's display time, the same
@@ -1693,7 +1714,70 @@ namespace VR::XRCompositor
 				return {HudCards::kLaserImageWidth, HudCards::kLaserImageHeight};
 			if (card == HudCards::kVignette)
 				return {HudCards::kVignetteImageSize, HudCards::kVignetteImageSize};
+			if (card == HudCards::kPointer)
+				return {HudCards::kPointerImageSize, HudCards::kPointerImageSize};
 			return {0, 0};
+		}
+
+		// The menu pointer this frame (BuildHudLayers): a beam from the pointing hand to where its aim meets the flat
+		// screen, and a dot lying on the screen there.
+		struct MenuPointerPlacement
+		{
+			bool beam = false; // a ray's hit: a PINE test hit has no aim pose to start a beam from
+			float beam_pos[3] = {0.0f, 0.0f, 0.0f};
+			float beam_quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+			float beam_length = 0.0f;
+			float dot_pos[3] = {0.0f, 0.0f, 0.0f};
+			float dot_quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+			float dot_size = 0.0f;
+			bool on_cell = false; // MenuPointer counts it as over a cell it can steer to
+			int hand = -1;
+			bool tablet = false;
+			bool test = false;
+		};
+
+		// On while the MenuPointer setting is on, a menu is up in first-person play (menu mode), the first-person screen
+		// is not in use, this present published a flat screen quad and a hand's aim (or a PINE test hit) meets it.
+		bool PlaceMenuPointer(MenuPointerPlacement* out)
+		{
+			if (!HudCards::MenuPointerEnabled() || !SpatialControls::MenuMode() || s_fp_screen_was_active ||
+				!s.head_pose_valid)
+				return false;
+			const VRScreenTransform screen = GetScreenTransform();
+			if (!screen.valid)
+				return false;
+			const VRInputSnapshot snap = GetInputSnapshot();
+			const VRScreenHit& hit = snap.screen_hit;
+			if (!hit.valid || !std::isfinite(hit.point[0]) || !std::isfinite(hit.point[1]) || !std::isfinite(hit.point[2]))
+				return false;
+			const float eye[3] = {s.head_position_valid ? s.head_pose.position.x : 0.0f,
+				s.head_position_valid ? s.head_pose.position.y : 0.0f, s.head_position_valid ? s.head_pose.position.z : 0.0f};
+			const float screen_quat[4] = {screen.center.orientation_xyzw[0], screen.center.orientation_xyzw[1],
+				screen.center.orientation_xyzw[2], screen.center.orientation_xyzw[3]};
+			const float hit_point[3] = {hit.point[0], hit.point[1], hit.point[2]};
+			MenuPointerPlacement mp;
+			HudCards::PlacePointer(hit_point, screen_quat, eye, mp.dot_pos, mp.dot_quat, &mp.dot_size);
+			// The beam runs from just ahead of the aim pose to the hit, along the ray that made it.
+			if (!hit.test && hit.hand >= 0 && hit.hand < 2 && snap.hands[hit.hand].aim_pose.valid)
+			{
+				const auto& o = snap.hands[hit.hand].aim_pose.position_xyz;
+				const float dir[3] = {hit.point[0] - o[0], hit.point[1] - o[1], hit.point[2] - o[2]};
+				const float dir_len = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+				if (std::isfinite(dir_len) && dir_len > 1.0e-4f)
+				{
+					const float start[3] = {o[0] + dir[0] / dir_len * HudCards::kBeamStartM,
+						o[1] + dir[1] / dir_len * HudCards::kBeamStartM, o[2] + dir[2] / dir_len * HudCards::kBeamStartM};
+					mp.beam_length = dir_len - HudCards::kBeamStartM;
+					mp.beam = mp.beam_length > 0.01f &&
+					          HudCards::PlaceBeam(start, dir, mp.beam_length, eye, mp.beam_pos, mp.beam_quat);
+				}
+			}
+			mp.on_cell = MenuPointer::HoveredCell() >= 0;
+			mp.hand = hit.hand;
+			mp.tablet = screen.tablet;
+			mp.test = hit.test;
+			*out = mp;
+			return true;
 		}
 
 		VkDeviceSize HudImageBytes(int card)
@@ -2159,6 +2243,43 @@ namespace VR::XRCompositor
 				}
 			}
 
+			// Menu pointer: with the MenuPointer setting on, while a menu is up in first-person play on a flat screen (the
+			// world screen or the menu tablet), a beam from the pointing hand to where its aim meets the screen, in the
+			// laser's slot only while the laser is not placed (PCSX2_VR_FAKE_HANDS=gun places it even in menus), and a dot
+			// lying on the screen there, warm with a ring over a cell point-to-select can steer to. Each has its own fade.
+			MenuPointerPlacement menu_pointer;
+			const bool pointer_on = PlaceMenuPointer(&menu_pointer);
+			const bool beam_on = pointer_on && menu_pointer.beam && !laser_placed;
+			if (!beam_on)
+				s.hud_beam_opacity = 0.0f;
+			else
+				s.hud_beam_opacity = std::min(1.0f, s.hud_beam_opacity + fade_step);
+			if (!pointer_on)
+				s.hud_pointer_opacity = 0.0f;
+			else
+				s.hud_pointer_opacity = std::min(1.0f, s.hud_pointer_opacity + fade_step);
+			if (beam_on && s.hud_beam_opacity > 0.0f)
+			{
+				Want& wb = want[HudCards::kLaser];
+				wb.on = true;
+				wb.content = 2;
+				wb.level = HudLevel(s.hud_beam_opacity);
+			}
+			if (pointer_on && s.hud_pointer_opacity > 0.0f)
+			{
+				Want& wp = want[HudCards::kPointer];
+				wp.on = true;
+				wp.content = menu_pointer.on_cell ? 2 : 1;
+				wp.level = HudLevel(s.hud_pointer_opacity);
+				if (!s.hud_pointer_logged)
+				{
+					s.hud_pointer_logged = true;
+					Console.WriteLn("(VR) HUD: menu pointer shown (%s hand on the %s screen).",
+						menu_pointer.test ? "PINE test" : (menu_pointer.hand == HandModel::kLeft ? "left" : "right"),
+						menu_pointer.tablet ? "tablet" : "world");
+				}
+			}
+
 			bool any = false;
 			for (const Want& wv : want)
 				any = any || (wv.on && wv.level > 0);
@@ -2187,10 +2308,14 @@ namespace VR::XRCompositor
 						HudCards::RasterWrist(raster.pixels, wrist, wrist_no_data);
 					else if (i == HudCards::kBlink)
 						HudCards::RasterBlink(raster.pixels);
+					else if (i == HudCards::kLaser && wv.content == 2)
+						HudCards::RasterBeam(raster.pixels);
 					else if (i == HudCards::kLaser)
 						HudCards::RasterLaser(raster.pixels);
 					else if (i == HudCards::kVignette)
 						HudCards::RasterVignette(raster.pixels);
+					else if (i == HudCards::kPointer)
+						HudCards::RasterPointer(raster.pixels, wv.content == 2);
 					raster.content = wv.content;
 					raster.valid = true;
 				}
@@ -2277,9 +2402,9 @@ namespace VR::XRCompositor
 				const auto& hc = s.hud_chains[i];
 				if (!wv.on || wv.level <= 0 || !hc.ever_released || layer_count >= layer_capacity)
 					continue;
-				// The toast's image must hold this toast's text (the previous one's would be wrong); being a
-				// fade step behind is fine.
-				if (i == HudCards::kToast && hc.shown_content != wv.content)
+				// The toast's image must hold this toast's text (the previous one's would be wrong), and the laser's slot
+				// the laser or the menu beam it is placed as; being a fade step behind is fine.
+				if ((i == HudCards::kToast || i == HudCards::kLaser) && hc.shown_content != wv.content)
 					continue;
 				const HudCardSize sz = HudSize(i);
 				XrCompositionLayerQuad& quad = hud_quads[i];
@@ -2317,6 +2442,15 @@ namespace VR::XRCompositor
 					quad.pose.position = {pos[0], pos[1], pos[2]};
 					quad.size = {HudCards::kBlinkSizeM, HudCards::kBlinkSizeM};
 				}
+				else if (i == HudCards::kLaser && wv.content == 2)
+				{
+					// The menu beam: in the base space with the hands, from just ahead of the pointing hand to the dot.
+					quad.space = XRSession::GetSpace();
+					quad.pose.orientation = {menu_pointer.beam_quat[0], menu_pointer.beam_quat[1], menu_pointer.beam_quat[2],
+						menu_pointer.beam_quat[3]};
+					quad.pose.position = {menu_pointer.beam_pos[0], menu_pointer.beam_pos[1], menu_pointer.beam_pos[2]};
+					quad.size = {HudCards::kBeamWidthM, menu_pointer.beam_length};
+				}
 				else if (i == HudCards::kLaser)
 				{
 					// In the base space with the hands, its long side along the beam (+Y toward the far end).
@@ -2324,6 +2458,15 @@ namespace VR::XRCompositor
 					quad.pose.orientation = {laser_quat[0], laser_quat[1], laser_quat[2], laser_quat[3]};
 					quad.pose.position = {laser_pos[0], laser_pos[1], laser_pos[2]};
 					quad.size = {HudCards::kLaserWidthM, HudCards::kLaserLengthM};
+				}
+				else if (i == HudCards::kPointer)
+				{
+					// The menu pointer's dot: in the base space with the screen it lies on.
+					quad.space = XRSession::GetSpace();
+					quad.pose.orientation = {menu_pointer.dot_quat[0], menu_pointer.dot_quat[1], menu_pointer.dot_quat[2],
+						menu_pointer.dot_quat[3]};
+					quad.pose.position = {menu_pointer.dot_pos[0], menu_pointer.dot_pos[1], menu_pointer.dot_pos[2]};
+					quad.size = {menu_pointer.dot_size, menu_pointer.dot_size};
 				}
 				else if (i == HudCards::kVignette)
 				{
@@ -2338,17 +2481,21 @@ namespace VR::XRCompositor
 					quad.size = {HudCards::kVignetteSizeM, HudCards::kVignetteSizeM};
 				}
 				const XrCompositionLayerBaseHeader* layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
-				if (i == HudCards::kLaser && under_from < layer_count)
+				if ((i == HudCards::kLaser || i == HudCards::kPointer) && under_from < layer_count)
 				{
 					// In under the hands: the layers from under_from move up one (layer_count < capacity, checked above).
+					// under_from then moves past it, so the dot goes in over the beam and both stay under the hands.
 					for (u32 k = layer_count; k > under_from; k--)
 						layers[k] = layers[k - 1];
 					layers[under_from] = layer;
 					layer_count++;
+					under_from++;
 				}
 				else
 				{
 					layers[layer_count++] = layer;
+					if (i == HudCards::kLaser || i == HudCards::kPointer)
+						under_from = layer_count;
 				}
 				appended++;
 			}
@@ -4140,6 +4287,9 @@ namespace VR::XRCompositor
 		s.hud_wrist_logged = false;
 		s.hud_laser_opacity = 0.0f;
 		s.hud_laser_logged = false;
+		s.hud_beam_opacity = 0.0f;
+		s.hud_pointer_opacity = 0.0f;
+		s.hud_pointer_logged = false;
 		s.hud_vignette_logged = false;
 		s.fp_switch_due_ms = 0;
 
@@ -4572,10 +4722,10 @@ namespace VR::XRCompositor
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}, {XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR},
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}, {XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR},
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}};
-		// Worst case 13 layers: four for the screen (split screen in stereo, two viewports per eye; five slots
-		// kept), two lever cards, two hands and the five HUD cards (laser, wrist, vignette, toast, blink), in a
-		// capacity of 14 (kLayerCapacity). The background goes under them in the submit array; SteamVR takes at
-		// most 16 a frame.
+		// Worst case 14 layers: four for the screen (split screen in stereo, two viewports per eye; five slots
+		// kept), two lever cards, two hands and the six HUD cards (laser or menu beam, wrist, vignette, toast, blink,
+		// menu pointer dot), in a capacity of 15 (kLayerCapacity). The background goes under them in the submit array;
+		// SteamVR takes at most 16 a frame.
 		XrCompositionLayerQuad lever_quads[ControlQuads::kSlots] = {
 			{XR_TYPE_COMPOSITION_LAYER_QUAD}, {XR_TYPE_COMPOSITION_LAYER_QUAD}};
 		XrCompositionLayerQuad hand_quads[kHandSlots] = {
@@ -4587,6 +4737,9 @@ namespace VR::XRCompositor
 		const XrCompositionLayerBaseHeader* layers[kLayerCapacity] = {};
 		u32 layer_count = 0;
 		bool cl_split = false;
+		// The flat screen quad the menu pointer aims at this present (VR::PublishScreenTransform); invalid unless one is
+		// placed below.
+		VRScreenTransform pub{};
 		if (!force_zero_layers)
 		{
 			ScreenParams sp;
@@ -4596,13 +4749,24 @@ namespace VR::XRCompositor
 			}
 			// First person: head-locked screen sized to the game camera's FOV. Anything else (menus,
 			// item screen, cutscenes, doors) goes back to the world screen, re-anchored in front of the
-			// head each time first person hands over so it never appears behind the player.
+			// head each time first person hands over so it never appears behind the player. With the VR
+			// MenuTablet setting on, a menu that comes up in first-person play (menu mode) goes on the menu
+			// tablet instead: a small flat screen ahead of the chest, tilted back to the eyes, anchored the same way.
 			// With the comfort blink on, a change of screen waits until the blink has gone black
 			// (kBlinkRiseMs), so the jump in placement is never seen; the blink then holds black while the
 			// frames from the new camera, about 85-100 ms behind the change, reach the screen.
+			// The screen modes: 0 the world screen, 1 the menu tablet, 2 first person.
 			const bool fp_want = sp.has_fp && CameraDriver::LookAtActive() && s.head_pose_valid;
+			const bool tablet_want = !fp_want && sp.has_menu && HudCards::MenuTabletEnabled() &&
+			                         SpatialControls::MenuMode() && !SplitState::Active() && s.head_pose_valid;
+			const int mode_want = fp_want ? 2 : (tablet_want ? 1 : 0);
+			const int mode_was = s_fp_screen_was_active ? 2 : (s_tablet_was_active ? 1 : 0);
+			// The tablet's tilt back toward the eyes; below 0, exactly at them.
+			const float tablet_tilt_deg = (sp.menu_tilt_deg >= 0.0f) ?
+			                                  sp.menu_tilt_deg :
+			                                  std::atan2(sp.menu_drop, sp.menu_distance) * (180.0f / 3.14159265f);
 			bool switch_now = false;
-			if (fp_want == s_fp_screen_was_active)
+			if (mode_want == mode_was)
 			{
 				// Wanted back before the change was made (a flicker): nothing to change; the blink plays out.
 				s.fp_switch_due_ms = 0;
@@ -4616,8 +4780,8 @@ namespace VR::XRCompositor
 			{
 				// Wait only for a blink that can be drawn: with the HUD cards off for the session (or no VIEW
 				// space) the delay would just show the old placement with the new camera for 40 ms.
-				if (!s.hud_disabled && s.view_space != XR_NULL_HANDLE &&
-					HudCards::Blink(fp_want ? "first-person screen" : "world screen"))
+				static constexpr const char* kModeBlink[3] = {"world screen", "menu tablet", "first-person screen"};
+				if (!s.hud_disabled && s.view_space != XR_NULL_HANDLE && HudCards::Blink(kModeBlink[mode_want]))
 					s.fp_switch_due_ms = CameraDriver::SteadyNowMs() + HudCards::kBlinkRiseMs;
 				else
 					switch_now = true;
@@ -4629,7 +4793,8 @@ namespace VR::XRCompositor
 			if (switch_now)
 			{
 				s.fp_switch_due_ms = 0;
-				if (!fp_want && s.head_pose_valid)
+				// Both world modes are placed in front of the head as they take over.
+				if (mode_want != 2 && s.head_pose_valid)
 				{
 					const XrQuaternionf& q = s.head_pose.orientation;
 					const float fx = -2.0f * (q.w * q.y + q.z * q.x);
@@ -4643,12 +4808,22 @@ namespace VR::XRCompositor
 						s.world_anchor_z = s.head_pose.position.z;
 					}
 				}
-				Console.WriteLn("(VR) Screen: %s.", fp_want ? "first person (placed at the render pose, roll-level)" : "world-locked");
-				s_fp_screen_was_active = fp_want;
-				if (fp_want)
+				if (mode_want == 1)
+				{
+					Console.WriteLn("(VR) Screen: tablet (menu): %.2f m ahead, %.2f m below the eyes, %.2f m tall, tilted %.0f deg.",
+						sp.menu_distance, sp.menu_drop, sp.menu_height, tablet_tilt_deg);
+				}
+				else
+				{
+					Console.WriteLn("(VR) Screen: %s.", (mode_want == 2) ? "first person (placed at the render pose, roll-level)" : "world-locked");
+				}
+				s_fp_screen_was_active = (mode_want == 2);
+				s_tablet_was_active = (mode_want == 1);
+				if (mode_want == 2)
 					LogFirstPersonScreen(sp);
 			}
 			const bool fp_screen = s_fp_screen_was_active;
+			const bool tablet = !fp_screen && s_tablet_was_active;
 			pub_fp_screen = fp_screen;
 
 			// First-person screen: placed in the room (base space) in front of the head pose the shown
@@ -4690,10 +4865,11 @@ namespace VR::XRCompositor
 				fp_pose.position = {fp_head.x - d * std::sin(hyaw) * std::cos(hpitch), fp_head.y + d * std::sin(hpitch),
 					fp_head.z - d * std::cos(hyaw) * std::cos(hpitch)};
 			}
-			const float distance = fp_screen ? sp.fp_distance : sp.distance;
-			const float height = fp_screen ? sp.fp_height : sp.height;
-			const float arc_deg = fp_screen ? sp.fp_arc_deg : sp.arc_deg;
-			const float voffset = fp_screen ? 0.0f : sp.voffset;
+			// The menu tablet is always a flat quad, without the vertical offset.
+			const float distance = fp_screen ? sp.fp_distance : (tablet ? sp.menu_distance : sp.distance);
+			const float height = fp_screen ? sp.fp_height : (tablet ? sp.menu_height : sp.height);
+			const float arc_deg = fp_screen ? sp.fp_arc_deg : (tablet ? 0.0f : sp.arc_deg);
+			const float voffset = (fp_screen || tablet) ? 0.0f : sp.voffset;
 			const float aspect = ComputeAspect();
 			const bool curved = (arc_deg >= 5.0f) && XRSession::HasCylinderLayer();
 
@@ -4702,7 +4878,16 @@ namespace VR::XRCompositor
 			const XrQuaternionf anchor_quat = {
 				0.0f, std::sin(s.world_anchor_yaw * 0.5f), 0.0f, std::cos(s.world_anchor_yaw * 0.5f)};
 
-			const bool follow = !fp_screen && sp.follow_head && (s.view_space != XR_NULL_HANDLE);
+			// The menu tablet: anchor + R(yaw) * (0, -drop, -distance), turned anchor_quat * Rx(-tilt) so its face (+Z)
+			// points back up at the eyes (the convention of HudCards::ToastPose).
+			const float tilt_half = -0.5f * tablet_tilt_deg * (3.14159265f / 180.0f);
+			const float tilt_s = std::sin(tilt_half), tilt_c = std::cos(tilt_half);
+			const float yaw_s = std::sin(s.world_anchor_yaw * 0.5f), yaw_c = std::cos(s.world_anchor_yaw * 0.5f);
+			const XrQuaternionf tablet_quat = {yaw_c * tilt_s, yaw_s * tilt_c, -yaw_s * tilt_s, yaw_c * tilt_c};
+			const XrVector3f tablet_pos = {s.world_anchor_x - sp.menu_distance * ayaw_sin, s.world_anchor_y - sp.menu_drop,
+				s.world_anchor_z - sp.menu_distance * ayaw_cos};
+
+			const bool follow = !fp_screen && !tablet && sp.follow_head && (s.view_space != XR_NULL_HANDLE);
 			const XrSpace layer_space = follow ? s.view_space : XRSession::GetSpace();
 			const XrQuaternionf follow_quat = {0.0f, 0.0f, 0.0f, 1.0f};
 
@@ -4747,6 +4932,11 @@ namespace VR::XRCompositor
 					quad.subImage = sub_image;
 					if (fp_screen)
 						quad.pose = fp_pose;
+					else if (tablet)
+					{
+						quad.pose.orientation = tablet_quat;
+						quad.pose.position = tablet_pos;
+					}
 					else if (follow)
 					{
 						quad.pose.orientation = follow_quat;
@@ -4839,6 +5029,32 @@ namespace VR::XRCompositor
 				layer_count++;
 			};
 
+			// The flat quad the menu pointer aims at: the world screen or the menu tablet, world-locked in the base space
+			// (never the first-person, curved or head-following screen). Each eye's quad has the same pose. Logged as the
+			// pointer's screen changes (0: none logged since the last present without one, 1 world, 2 tablet).
+			static int s_pub_logged = 0;
+			const auto publish_quad = [&]() {
+				if (fp_screen || curved || follow || layer_count == 0)
+					return;
+				const XrCompositionLayerQuad& q = quads[layer_count - 1];
+				pub.center.orientation_xyzw = {q.pose.orientation.x, q.pose.orientation.y, q.pose.orientation.z,
+					q.pose.orientation.w};
+				pub.center.position_xyz = {q.pose.position.x, q.pose.position.y, q.pose.position.z};
+				pub.center.valid = true;
+				pub.half_width = 0.5f * q.size.width;
+				pub.half_height = 0.5f * q.size.height;
+				pub.tablet = tablet;
+				pub.valid = true;
+				const int logged = tablet ? 2 : 1;
+				if (s_pub_logged != logged)
+				{
+					s_pub_logged = logged;
+					Console.WriteLn("(VR) Screen transform (menu pointer): %s centred at (%.2f, %.2f, %.2f), %.2f x %.2f m.",
+						tablet ? "menu tablet" : "world screen", q.pose.position.x, q.pose.position.y, q.pose.position.z,
+						q.size.width, q.size.height);
+				}
+			};
+
 			const bool l0 = s.chains[0].ever_released;
 			const bool l1 = s.chains[1].ever_released;
 			if (split_snap.split_active && (l0 || l1))
@@ -4914,11 +5130,15 @@ namespace VR::XRCompositor
 			{
 				make_layer(0, XR_EYE_VISIBILITY_LEFT);
 				make_layer(1, XR_EYE_VISIBILITY_RIGHT);
+				publish_quad();
 			}
 			else if (l0 || l1)
 			{
 				make_layer(l0 ? 0 : 1, XR_EYE_VISIBILITY_BOTH);
+				publish_quad();
 			}
+			if (!pub.valid)
+				s_pub_logged = 0;
 		}
 
 		if (s_chainlog)
@@ -4939,6 +5159,8 @@ namespace VR::XRCompositor
 				branch, layer_count);
 		}
 
+		// Every present, valid or not, so the menu pointer never aims at a screen that has gone.
+		VR::PublishScreenTransform(pub);
 		if (!force_zero_layers)
 			BuildLeverLayers(lever_quads, layers, layer_count, kLayerCapacity, cl_split);
 
@@ -5194,6 +5416,17 @@ namespace VR::XRCompositor
 		s_screen_params.fp_height = height_m;
 		s_screen_params.fp_arc_deg = arc_deg;
 		s_screen_params.fp_pose_lag_ms = pose_lag_ms;
+	}
+
+	void UpdateMenuScreen(float distance_m, float height_m, float drop_m, float tilt_deg)
+	{
+		const auto finite_or = [](float v, float fallback) { return std::isfinite(v) ? v : fallback; };
+		std::lock_guard<std::mutex> lock(s_screen_mutex);
+		s_screen_params.has_menu = true;
+		s_screen_params.menu_distance = std::clamp(finite_or(distance_m, 0.70f), 0.3f, 2.0f);
+		s_screen_params.menu_height = std::clamp(finite_or(height_m, 0.36f), 0.15f, 1.0f);
+		s_screen_params.menu_drop = std::clamp(finite_or(drop_m, 0.30f), -0.5f, 0.8f);
+		s_screen_params.menu_tilt_deg = (std::isfinite(tilt_deg) && tilt_deg >= 0.0f) ? std::min(tilt_deg, 89.0f) : -1.0f;
 	}
 
 	void RequestScreenReanchor()

@@ -254,6 +254,65 @@ namespace VR
 			return true;
 		}
 
+		// Scripted menu-pointer hit (XRInput::SetTestScreenHit, from PINE's thread), under s_test_mutex like the test
+		// input, and lapsing the same way.
+		struct TestScreenHit
+		{
+			int hand = VRInputSnapshot::RIGHT;
+			float u = 0.5f;
+			float v = 0.5f;
+		};
+		TestScreenHit s_test_hit;
+		std::uint64_t s_test_hit_expiry_ms = 0; // 0: none
+
+		bool LiveTestScreenHit(TestScreenHit* out)
+		{
+			std::lock_guard lock{s_test_mutex};
+			if (s_test_hit_expiry_ms == 0)
+				return false;
+			if (NowMs() >= s_test_hit_expiry_ms)
+			{
+				s_test_hit_expiry_ms = 0;
+				Console.WriteLn("(VR) Test screen hit (PINE) expired; the aim rays point again.");
+				return false;
+			}
+			*out = s_test_hit;
+			return true;
+		}
+
+		// A live PINE test hit replaces the rays' hit. Its point is placed on the screen quad when one is published, so
+		// the dot can be drawn there; without one (no OpenXR runtime) only u and v mean anything.
+		void OverlayTestScreenHit(VRInputSnapshot& snap, const VRScreenTransform& screen)
+		{
+			TestScreenHit t;
+			if (!LiveTestScreenHit(&t))
+				return;
+			VRScreenHit hit;
+			hit.u = t.u;
+			hit.v = t.v;
+			hit.valid = true;
+			hit.hand = t.hand;
+			hit.test = true;
+			if (screen.valid)
+			{
+				// center + R * (x, y, 0), with R the quad's orientation (unit quaternion xyzw).
+				const float x = (t.u - 0.5f) * 2.0f * screen.half_width;
+				const float y = (0.5f - t.v) * 2.0f * screen.half_height;
+				const std::array<float, 4>& q = screen.center.orientation_xyzw;
+				// v' = v + 2w (q x v) + 2 q x (q x v), with v = (x, y, 0).
+				const float cx = -q[2] * y;
+				const float cy = q[2] * x;
+				const float cz = q[0] * y - q[1] * x;
+				const float ccx = q[1] * cz - q[2] * cy;
+				const float ccy = q[2] * cx - q[0] * cz;
+				const float ccz = q[0] * cy - q[1] * cx;
+				const std::array<float, 3>& c = screen.center.position_xyz;
+				hit.point = {c[0] + x + 2.0f * (q[3] * cx + ccx), c[1] + y + 2.0f * (q[3] * cy + ccy),
+					c[2] + 2.0f * (q[3] * cz + ccz)};
+			}
+			snap.screen_hit = hit;
+		}
+
 		void SanitizePose(VRPose* pose)
 		{
 			if (!pose->valid)
@@ -367,12 +426,124 @@ namespace VR
 			}
 		}
 		OverlayTestInput(snap);
+
+		// The menu pointer: where the right hand's aim ray meets the flat screen quad, else the left's (so PINE test hands
+		// drive it too), then a PINE test hit over it while one is live. Kept tiny (one locked copy, at most two ray-plane
+		// tests): the VR pacer may call this every display frame.
+		const VRScreenTransform screen = GetScreenTransform();
+		snap.screen_hit = VRScreenHit{};
+		if (screen.valid)
+		{
+			constexpr int kHandOrder[2] = {VRInputSnapshot::RIGHT, VRInputSnapshot::LEFT};
+			for (const int hand : kHandOrder)
+			{
+				VRScreenHit hit = RayHitScreen(screen, snap.hands[hand].aim_pose);
+				if (!hit.valid)
+					continue;
+				hit.hand = hand;
+				snap.screen_hit = hit;
+				break;
+			}
+		}
+		OverlayTestScreenHit(snap, screen);
 		return snap;
+	}
+
+	namespace
+	{
+		// The flat screen quad the menu pointer aims at (PublishScreenTransform, GS thread). A leaf lock: only the copy is
+		// made under it, and nothing is called while it is held.
+		std::mutex s_screen_mutex;
+		VRScreenTransform s_screen;
+		// The compositor publishes every present; older than this, the GS is idle (loading, paused) and nothing is aimed at.
+		constexpr std::uint64_t kScreenMaxAgeMs = 250;
 	}
 
 	VRScreenTransform GetScreenTransform()
 	{
-		return VRScreenTransform{};
+		VRScreenTransform t;
+		{
+			std::lock_guard lock{s_screen_mutex};
+			t = s_screen;
+		}
+		if (t.valid && NowMs() - t.published_ms > kScreenMaxAgeMs)
+			t.valid = false;
+		return t;
+	}
+
+	void PublishScreenTransform(const VRScreenTransform& transform)
+	{
+		VRScreenTransform t = transform;
+		t.published_ms = NowMs();
+		std::lock_guard lock{s_screen_mutex};
+		t.generation = s_screen.generation + 1;
+		s_screen = t;
+	}
+
+	VRScreenHit RayHitScreen(const VRScreenTransform& screen, const VRPose& aim)
+	{
+		VRScreenHit hit;
+		if (!screen.valid || !aim.valid || !(screen.half_width > 0.f) || !(screen.half_height > 0.f))
+			return hit;
+
+		const auto norm_quat = [](const std::array<float, 4>& q, std::array<float, 4>& out) {
+			const float n2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+			if (!std::isfinite(n2) || n2 < 1e-8f)
+				return false;
+			const float inv = 1.f / std::sqrt(n2);
+			for (int i = 0; i < 4; ++i)
+				out[i] = q[i] * inv;
+			return true;
+		};
+		// v rotated by the unit quaternion q: v + 2w (q x v) + 2 q x (q x v).
+		const auto rotate = [](const std::array<float, 4>& q, const std::array<float, 3>& v) {
+			const std::array<float, 3> c = {q[1] * v[2] - q[2] * v[1], q[2] * v[0] - q[0] * v[2], q[0] * v[1] - q[1] * v[0]};
+			const std::array<float, 3> cc = {q[1] * c[2] - q[2] * c[1], q[2] * c[0] - q[0] * c[2], q[0] * c[1] - q[1] * c[0]};
+			return std::array<float, 3>{v[0] + 2.f * (q[3] * c[0] + cc[0]), v[1] + 2.f * (q[3] * c[1] + cc[1]),
+				v[2] + 2.f * (q[3] * c[2] + cc[2])};
+		};
+		const auto dot = [](const std::array<float, 3>& a, const std::array<float, 3>& b) {
+			return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+		};
+
+		std::array<float, 4> qa;
+		std::array<float, 4> qs;
+		if (!norm_quat(aim.orientation_xyzw, qa) || !norm_quat(screen.center.orientation_xyzw, qs))
+			return hit;
+		const std::array<float, 3>& o = aim.position_xyz;
+		const std::array<float, 3>& c = screen.center.position_xyz;
+		for (int i = 0; i < 3; ++i)
+		{
+			if (!std::isfinite(o[i]) || !std::isfinite(c[i]))
+				return hit;
+		}
+
+		const std::array<float, 3> dir = rotate(qa, {0.f, 0.f, -1.f});
+		const std::array<float, 3> normal = rotate(qs, {0.f, 0.f, 1.f});
+		// Front face only: the ray must run against the face normal.
+		const float denom = dot(dir, normal);
+		if (!(denom < -1e-3f))
+			return hit;
+		const std::array<float, 3> to_centre = {c[0] - o[0], c[1] - o[1], c[2] - o[2]};
+		const float t = dot(to_centre, normal) / denom;
+		if (!(t >= 0.05f && t <= 10.f))
+			return hit;
+
+		const std::array<float, 3> p = {o[0] + dir[0] * t, o[1] + dir[1] * t, o[2] + dir[2] * t};
+		// Into the quad's own frame: R^T (p - c), the inverse rotation being the conjugate.
+		const std::array<float, 4> qs_inv = {-qs[0], -qs[1], -qs[2], qs[3]};
+		const std::array<float, 3> local = rotate(qs_inv, {p[0] - c[0], p[1] - c[1], p[2] - c[2]});
+		const float u = 0.5f + local[0] / (2.f * screen.half_width);
+		const float v = 0.5f - local[1] / (2.f * screen.half_height);
+		if (!(u >= 0.f && u <= 1.f && v >= 0.f && v <= 1.f))
+			return hit;
+
+		hit.u = u;
+		hit.v = v;
+		hit.valid = true;
+		hit.distance = t;
+		hit.point = p;
+		return hit;
 	}
 
 	VRInput::VRInput() = default;
@@ -1371,6 +1542,29 @@ namespace VR
 			{
 				Console.Warning("(VR) TEST INPUT ACTIVE (PINE): scripted head %s, left hand %s, right hand %s.",
 					t.head_pose.valid ? "on" : "off", t.hands[0].supplied ? "on" : "off", t.hands[1].supplied ? "on" : "off");
+			}
+		}
+
+		void SetTestScreenHit(int hand, float u, float v, u32 ttl_ms)
+		{
+			const std::uint64_t now = NowMs();
+			std::lock_guard lock{s_test_mutex};
+			const bool was_live = s_test_hit_expiry_ms != 0 && now < s_test_hit_expiry_ms;
+			if (ttl_ms == 0 || !std::isfinite(u) || !std::isfinite(v) || u < 0.f)
+			{
+				s_test_hit_expiry_ms = 0;
+				if (was_live)
+					Console.WriteLn("(VR) Test screen hit (PINE) cleared; the aim rays point again.");
+				return;
+			}
+			s_test_hit.hand = (hand == VRInputSnapshot::LEFT) ? VRInputSnapshot::LEFT : VRInputSnapshot::RIGHT;
+			s_test_hit.u = std::clamp(u, 0.f, 1.f);
+			s_test_hit.v = std::clamp(v, 0.f, 1.f);
+			s_test_hit_expiry_ms = now + std::min<std::uint64_t>(ttl_ms, kTestInputMaxTtlMs);
+			if (!was_live)
+			{
+				Console.Warning("(VR) TEST SCREEN HIT ACTIVE (PINE): %s hand at u %.3f, v %.3f.",
+					HAND_NAME_LOWER[s_test_hit.hand], s_test_hit.u, s_test_hit.v);
 			}
 		}
 

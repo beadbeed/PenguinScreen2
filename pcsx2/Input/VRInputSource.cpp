@@ -13,6 +13,7 @@
 
 #include "VR/CameraDriver.h"
 #include "VR/ControlQuads.h"
+#include "VR/MenuPointer.h"
 #include "VR/SplitState.h"
 #include "VR/VRInput.h"
 #include "VR/XRCompositor.h"
@@ -740,6 +741,10 @@ void VRInputSource::PollEvents()
 	bool zone_stop = false; // a stop-first zone is held this poll
 	const bool split = VR::SplitState::Active();
 	const GuestReader reader = s_guest_reader.load(std::memory_order_acquire);
+
+	// Point-to-select menus: decided before the instances compose, so the Gamepad sends this poll's D-pad press and
+	// confirm hold (SpatialControls::SetPointerDpad / SetPointerConfirmHold) at once.
+	VR::MenuPointer::Poll(snap, reader, dt);
 
 	for (Instance& in : m_instances)
 	{

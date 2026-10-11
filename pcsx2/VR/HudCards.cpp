@@ -95,6 +95,19 @@ namespace VR::HudCards
 		// Nearer the beam's line than this, the eye sees the quad edge-on.
 		constexpr float kLaserMinOffAxisM = 0.001f;
 
+		// Menu pointer's dot: radii in image pixels from the centre of the kPointerImageSize image (32 px). Off a cell a
+		// white core with a dark rim (readable on the item screen's white highlight and its dark panels alike); on a cell
+		// a warm white core inside a thin amber ring.
+		constexpr float kDotOuterPx = 29.5f;
+		constexpr float kDotCorePx = 19.0f;
+		constexpr float kDotRingInPx = 23.5f;
+		constexpr float kDotRingOutPx = 27.5f;
+		// Menu pointer's beam: at most this opaque on its centre line, and fading in over this fraction of its length
+		// from the hand.
+		constexpr float kBeamPeakAlpha = 170.0f;
+		constexpr float kBeamStartFade = 0.10f;
+		constexpr float kBeamCoreHalf = 0.4f;
+
 		u64 NowMs()
 		{
 			return static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -419,6 +432,10 @@ namespace VR::HudCards
 		std::atomic<bool> s_blink_enabled{true};
 		// The LaserSight setting, published the same way.
 		std::atomic<bool> s_laser_enabled{true};
+		// The MenuPointer and MenuTablet settings, published the same way (on and off until the first vsync, as their
+		// defaults are).
+		std::atomic<bool> s_menu_pointer_enabled{true};
+		std::atomic<bool> s_menu_tablet_enabled{false};
 		// The comfort vignette's strength (0 while ComfortVignette is off), published the same way; off until the
 		// first vsync, as the setting's default is.
 		std::atomic<float> s_vignette_strength{0.0f};
@@ -638,6 +655,8 @@ namespace VR::HudCards
 		// GS thread must not touch EmuConfig.
 		s_blink_enabled.store(EmuConfig.VR.ComfortBlink, std::memory_order_relaxed);
 		s_laser_enabled.store(EmuConfig.VR.LaserSight, std::memory_order_relaxed);
+		s_menu_pointer_enabled.store(EmuConfig.VR.MenuPointer, std::memory_order_relaxed);
+		s_menu_tablet_enabled.store(EmuConfig.VR.MenuTablet, std::memory_order_relaxed);
 		// Clamped here too, for a value that did not come through LoadSave.
 		float vignette = 0.0f;
 		if (EmuConfig.VR.ComfortVignette)
@@ -765,6 +784,16 @@ namespace VR::HudCards
 		return s_laser_enabled.load(std::memory_order_relaxed);
 	}
 
+	bool MenuPointerEnabled()
+	{
+		return s_menu_pointer_enabled.load(std::memory_order_relaxed);
+	}
+
+	bool MenuTabletEnabled()
+	{
+		return s_menu_tablet_enabled.load(std::memory_order_relaxed);
+	}
+
 	float VignetteStrength()
 	{
 		return s_vignette_strength.load(std::memory_order_relaxed);
@@ -888,6 +917,86 @@ namespace VR::HudCards
 		}
 	}
 
+	void RasterPointer(std::vector<u32>& out, bool on_cell)
+	{
+		constexpr int n = static_cast<int>(kPointerImageSize);
+		out.assign(static_cast<size_t>(kPointerImageSize) * kPointerImageSize, kTransparent);
+		constexpr float half = 0.5f * static_cast<float>(n);
+		// Coverage of the ring r0..r1 at radius r, anti-aliased over a pixel at each edge.
+		const auto band = [](float r, float r0, float r1) {
+			return std::clamp(r - r0 + 0.5f, 0.0f, 1.0f) * std::clamp(r1 - r + 0.5f, 0.0f, 1.0f);
+		};
+		struct Layer
+		{
+			float r, g, b, a;
+		};
+		for (int y = 0; y < n; ++y)
+		{
+			const float dy = (static_cast<float>(y) + 0.5f) - half;
+			for (int x = 0; x < n; ++x)
+			{
+				const float dx = (static_cast<float>(x) + 0.5f) - half;
+				const float r = std::sqrt(dx * dx + dy * dy);
+				const float core = std::clamp(kDotCorePx + 0.5f - r, 0.0f, 1.0f);
+				Layer layers[3] = {};
+				int count = 0;
+				if (!on_cell)
+				{
+					// A white core inside a dark rim out to the edge.
+					layers[count++] = {255.0f, 255.0f, 255.0f, 255.0f * core};
+					layers[count++] = {24.0f, 26.0f, 32.0f, 215.0f * band(r, kDotCorePx, kDotOuterPx)};
+				}
+				else
+				{
+					// A warm white core, a faint gap, then a thin amber ring.
+					layers[count++] = {255.0f, 238.0f, 205.0f, 255.0f * core};
+					layers[count++] = {255.0f, 238.0f, 205.0f, 60.0f * band(r, kDotCorePx, kDotRingInPx)};
+					layers[count++] = {255.0f, 186.0f, 84.0f, 235.0f * band(r, kDotRingInPx, kDotRingOutPx)};
+				}
+				float sum_a = 0.0f, cr = 0.0f, cg = 0.0f, cb = 0.0f;
+				for (int i = 0; i < count; ++i)
+				{
+					sum_a += layers[i].a;
+					cr += layers[i].r * layers[i].a;
+					cg += layers[i].g * layers[i].a;
+					cb += layers[i].b * layers[i].a;
+				}
+				if (sum_a <= 0.0f)
+					continue;
+				const auto channel = [sum_a](float c) {
+					return static_cast<u32>(std::clamp(std::lround(c / sum_a), 0L, 255L));
+				};
+				const u32 a = static_cast<u32>(std::lround(std::min(sum_a, 255.0f)));
+				out[static_cast<size_t>(y) * kPointerImageSize + static_cast<size_t>(x)] =
+					Rgba(channel(cr), channel(cg), channel(cb), a);
+			}
+		}
+	}
+
+	void RasterBeam(std::vector<u32>& out)
+	{
+		constexpr int w = static_cast<int>(kLaserImageWidth);
+		constexpr int h = static_cast<int>(kLaserImageHeight);
+		out.assign(static_cast<size_t>(kLaserImageWidth) * kLaserImageHeight, kTransparent);
+		for (int y = 0; y < h; ++y)
+		{
+			// Row 0 is the quad's top, the beam's far end on the screen: s runs from 0 at the hand to 1 there.
+			const float s = (static_cast<float>(h - 1 - y) + 0.5f) / static_cast<float>(h);
+			const float along = std::min(1.0f, s / kBeamStartFade);
+			for (int x = 0; x < w; ++x)
+			{
+				// t: 0 on the centre line, 1 at the edges.
+				const float t = std::fabs((static_cast<float>(x) + 0.5f) / static_cast<float>(w) - 0.5f) * 2.0f;
+				const float across = (1.0f - t * t) * (1.0f - t * t);
+				const float core = std::clamp(1.0f - t / kBeamCoreHalf, 0.0f, 1.0f);
+				const u32 a = static_cast<u32>(std::lround(std::clamp(kBeamPeakAlpha * across * along, 0.0f, 255.0f)));
+				const u32 r = static_cast<u32>(std::lround(150.0f + 105.0f * core));
+				const u32 g = static_cast<u32>(std::lround(200.0f + 55.0f * core));
+				out[static_cast<size_t>(y) * kLaserImageWidth + static_cast<size_t>(x)] = Rgba(r, g, 255, a);
+			}
+		}
+	}
+
 	void ScaleAlpha(const u32* src, size_t count, float opacity, u32* dst)
 	{
 		const float o = std::isfinite(opacity) ? std::clamp(opacity, 0.0f, 1.0f) : 0.0f;
@@ -977,19 +1086,58 @@ namespace VR::HudCards
 		NormalizeQuat(hand_quat, q);
 		const V3 dir = Rotate(q, V3{0.0f, 0.0f, -1.0f});
 		const V3 muzzle = Add(Load(hand_pos), Rotate(q, V3{kPistolMuzzle[0], kPistolMuzzle[1], kPistolMuzzle[2]}));
-		const V3 centre = Add(muzzle, Mul(dir, kLaserMuzzleGapM + 0.5f * kLaserLengthM));
+		float start[3];
+		float along[3];
+		Store(Add(muzzle, Mul(dir, kLaserMuzzleGapM)), start);
+		Store(dir, along);
+		return PlaceBeam(start, along, kLaserLengthM, eye, out_pos, out_quat);
+	}
+
+	bool PlaceBeam(const float origin[3], const float dir[3], float length, const float eye[3], float out_pos[3],
+		float out_quat[4])
+	{
+		for (int i = 0; i < 3; i++)
+		{
+			if (!std::isfinite(origin[i]) || !std::isfinite(dir[i]) || !std::isfinite(eye[i]))
+				return false;
+		}
+		if (!std::isfinite(length) || !(length > 0.0f))
+			return false;
+		const V3 d = Normalize(Load(dir));
+		if (Dot(d, d) < 0.5f)
+			return false;
+		const V3 centre = Add(Load(origin), Mul(d, 0.5f * length));
 		// The eye's offset from the beam's line, the same from every point along it: turning the quad's face
 		// toward it squares the whole beam to the eye as far as one flat quad can be.
 		const V3 to_eye = Sub(Load(eye), centre);
-		const V3 off_axis = Sub(to_eye, Mul(dir, Dot(to_eye, dir)));
+		const V3 off_axis = Sub(to_eye, Mul(d, Dot(to_eye, d)));
 		const float off_len = std::sqrt(Dot(off_axis, off_axis));
 		if (!(off_len > kLaserMinOffAxisM))
 			return false;
 		const V3 z = Mul(off_axis, 1.0f / off_len);
-		const V3 x = Cross(dir, z);
-		QuatFromBasis(x, dir, z, out_quat);
+		const V3 x = Cross(d, z);
+		QuatFromBasis(x, d, z, out_quat);
 		Store(centre, out_pos);
 		return true;
+	}
+
+	void PlacePointer(const float hit[3], const float screen_quat[4], const float eye[3], float out_pos[3],
+		float out_quat[4], float* out_size)
+	{
+		float q[4];
+		NormalizeQuat(screen_quat, q);
+		const V3 normal = Rotate(q, V3{0.0f, 0.0f, 1.0f});
+		const V3 pos = Add(Load(hit), Mul(normal, kPointerLiftM));
+		Store(pos, out_pos);
+		for (int i = 0; i < 4; i++)
+			out_quat[i] = q[i];
+		if (out_size)
+		{
+			const V3 to_eye = Sub(Load(eye), pos);
+			const float d = std::sqrt(Dot(to_eye, to_eye));
+			const float size = 2.0f * d * std::tan(0.5f * kPointerDeg * (3.14159265f / 180.0f));
+			*out_size = (std::isfinite(size) && size > kPointerMinM) ? size : kPointerMinM;
+		}
 	}
 
 	bool SelfTest()
@@ -1249,6 +1397,96 @@ namespace VR::HudCards
 		const float vignette_half_deg = std::atan((0.5f * kVignetteSizeM) / kVignetteDistanceM) * (180.0f / 3.14159265f);
 		check(vpos[0] == 0.0f && vpos[1] == 0.0f && vpos[2] < 0.0f && vquat[3] == 1.0f && vignette_half_deg > 75.0f,
 			"the vignette covers over 150 degrees straight ahead");
+
+		// Menu pointer's dot: its size, more opaque in the middle than at its edge with clear corners, warm with a ring
+		// on a cell.
+		std::vector<u32> dot_off;
+		std::vector<u32> dot_on;
+		RasterPointer(dot_off, false);
+		RasterPointer(dot_on, true);
+		const size_t dot_px_count = static_cast<size_t>(kPointerImageSize) * kPointerImageSize;
+		check(dot_off.size() == dot_px_count && dot_on.size() == dot_px_count, "pointer dot image size");
+		const auto dot_px = [](const std::vector<u32>& img, u32 x, u32 y) {
+			const size_t i = static_cast<size_t>(y) * kPointerImageSize + x;
+			return (i < img.size()) ? img[i] : 0u;
+		};
+		constexpr u32 kDotMid = kPointerImageSize / 2;
+		check((dot_px(dot_off, kDotMid, kDotMid) >> 24) > (dot_px(dot_off, 0, kDotMid) >> 24) &&
+				  (dot_px(dot_on, kDotMid, kDotMid) >> 24) > (dot_px(dot_on, 0, kDotMid) >> 24),
+			"the pointer dot is more opaque in the middle than at its edge");
+		check((dot_px(dot_off, 0, 0) >> 24) == 0u && (dot_px(dot_on, 0, 0) >> 24) == 0u, "the pointer dot's corners are clear");
+		check(((dot_px(dot_on, kDotMid, kDotMid) >> 16) & 0xFFu) < ((dot_px(dot_off, kDotMid, kDotMid) >> 16) & 0xFFu),
+			"the pointer dot is warmer on a cell");
+		check((dot_px(dot_on, kDotMid + 25, kDotMid) >> 24) > 150u && (dot_px(dot_off, kDotMid + 25, kDotMid) & 0xFFu) < 64u,
+			"the pointer dot has a ring on a cell and a dark rim off one");
+
+		// Menu pointer's beam: the laser's size, more opaque on its centre line, fading in from the hand and even from
+		// there to the screen.
+		std::vector<u32> beam_img;
+		RasterBeam(beam_img);
+		check(beam_img.size() == static_cast<size_t>(kLaserImageWidth) * kLaserImageHeight, "menu beam image size (the laser's)");
+		const auto beam_px = [&beam_img](u32 x, u32 y) {
+			const size_t i = static_cast<size_t>(y) * kLaserImageWidth + x;
+			return (i < beam_img.size()) ? beam_img[i] : 0u;
+		};
+		const u32 beam_mid_a = beam_px(kLaserMidX, kLaserImageHeight / 2) >> 24;
+		check(beam_mid_a > 100u && beam_mid_a > (beam_px(0, kLaserImageHeight / 2) >> 24) * 4u,
+			"the menu beam is more opaque on its centre line than at its edges");
+		check((beam_px(kLaserMidX, kLaserImageHeight - 1) >> 24) < beam_mid_a / 4u &&
+				  (beam_px(kLaserMidX, 0) >> 24) == beam_mid_a,
+			"the menu beam fades in from the hand and stays even to the screen");
+
+		// Beam placement: +Y along the beam, +Z turned about it to the eye, centred half its length out; none
+		// looking straight down it or with no length.
+		const float beam_origin[3] = {0.0f, 1.0f, 0.0f};
+		const float beam_dir[3] = {0.0f, 0.0f, -2.0f}; // not unit length on purpose
+		const float beam_eye[3] = {0.0f, 1.3f, 0.3f};
+		float bmp[3];
+		float bmq[4];
+		const bool beam_ok = PlaceBeam(beam_origin, beam_dir, 2.0f, beam_eye, bmp, bmq);
+		const V3 beam_y = Rotate(bmq, V3{0.0f, 1.0f, 0.0f});
+		const V3 beam_z = Rotate(bmq, V3{0.0f, 0.0f, 1.0f});
+		check(beam_ok && beam_y.z < -0.999f, "the menu beam quad's +Y runs along its direction");
+		check(beam_ok && beam_z.y > 0.999f, "the menu beam quad turns about its length to face the eye");
+		check(beam_ok && std::abs(bmp[0]) < 1.0e-4f && std::abs(bmp[1] - 1.0f) < 1.0e-4f && std::abs(bmp[2] + 1.0f) < 1.0e-4f,
+			"the menu beam's centre is half its length out");
+		const float beam_eye_on_axis[3] = {0.0f, 1.0f, 0.5f};
+		check(!PlaceBeam(beam_origin, beam_dir, 2.0f, beam_eye_on_axis, bmp, bmq) &&
+				  !PlaceBeam(beam_origin, beam_dir, 0.0f, beam_eye, bmp, bmq),
+			"no menu beam looking straight down it or with no length");
+
+		// Dot placement: on the screen's plane just off its face, with the screen's orientation, about 0.6 deg across
+		// from the eye and never under 6 mm.
+		const float dot_screen_q[4] = {0.0f, 0.38268343f, 0.0f, 0.92387953f}; // turned 45 deg about +Y
+		const float dot_hit[3] = {0.5f, 1.2f, -2.0f};
+		const V3 dot_normal = Rotate(dot_screen_q, V3{0.0f, 0.0f, 1.0f});
+		const auto eye_out = [&](float metres, float out[3]) { Store(Add(Load(dot_hit), Mul(dot_normal, metres)), out); };
+		float eye_near[3];
+		float eye_far[3];
+		float eye_close[3];
+		eye_out(1.0f, eye_near);
+		eye_out(3.0f, eye_far);
+		eye_out(0.2f, eye_close);
+		float dpos[3];
+		float dquat[4];
+		float size_far = 0.0f;
+		float size_close = 0.0f;
+		float size_near = 0.0f;
+		PlacePointer(dot_hit, dot_screen_q, eye_far, dpos, dquat, &size_far);
+		PlacePointer(dot_hit, dot_screen_q, eye_close, dpos, dquat, &size_close);
+		PlacePointer(dot_hit, dot_screen_q, eye_near, dpos, dquat, &size_near);
+		const V3 dot_lift = Sub(Load(dpos), Load(dot_hit));
+		const V3 dot_sideways = Sub(dot_lift, Mul(dot_normal, Dot(dot_lift, dot_normal)));
+		check(std::abs(Dot(dot_lift, dot_normal) - kPointerLiftM) < 1.0e-5f && Dot(dot_sideways, dot_sideways) < 1.0e-10f,
+			"the pointer dot lies on the screen, just off its face");
+		bool same_quat = true;
+		for (int i = 0; i < 4; i++)
+			same_quat = same_quat && std::abs(dquat[i] - dot_screen_q[i]) < 1.0e-5f;
+		check(same_quat, "the pointer dot has the screen's orientation");
+		const float dot_expect = 2.0f * (1.0f - kPointerLiftM) * std::tan(0.5f * kPointerDeg * (3.14159265f / 180.0f));
+		check(size_far > size_near && std::abs(size_near - dot_expect) < 1.0e-4f,
+			"the pointer dot grows with distance, about 0.6 deg across");
+		check(size_close == kPointerMinM, "the pointer dot is never smaller than 6 mm");
 
 		Console.WriteLn(fail == 0 ? Color_StrongGreen : Color_StrongRed, "(VR) HUD self-test: %d failure(s).", fail);
 		return fail == 0;

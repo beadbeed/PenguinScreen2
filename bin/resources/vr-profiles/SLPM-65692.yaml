@@ -18,12 +18,15 @@ SLPM-65692:
   tier: stereo
   notes: "Fixed/rail cameras over real-time 3D rooms. First person: camera.lookAt puts the eye at the local character's head."
   # World-locked screen for menus, the item screen, the map, cutscenes and doors: placed straight in front
-  # of the head each time first person hands over, 2.5 m out and 1.3 m tall (about 29 deg). While first
+  # of the head each time first person hands over, 2.5 m out and 1.3 m tall (about 29 deg), kept flat (arc 0)
+  # for the menu pointer whatever the VR Screen Curve setting says. While first
   # person drives the camera, the firstPerson screen is used instead: sized to the game camera's FOV
   # (camera.fov below, 100 deg vertical: height = 2 * distance * tan(50 deg)), flat so perspective holds,
   # and placed where the shown frame was rendered from (camera.lookAt viewMatrix; poseLagMs is the
-  # fallback guess), so the runtime can reproject it as the head turns.
-  screen: { distance: 2.5, height: 1.3, firstPerson: { distance: 1.5, height: 3.575, arc: 0, poseLagMs: 40 } }
+  # fallback guess), so the runtime can reproject it as the head turns. menu: the menu tablet (VR setting Menu
+  # Tablet, off by default), as File #1's. The beam, the dot and the pointing hands work in menus here too.
+  # menuPointer: not mapped yet (the File #2 item-screen cursor struct is unknown).
+  screen: { distance: 2.5, height: 1.3, arc: 0, menu: { distance: 0.70, height: 0.36, drop: 0.30 }, firstPerson: { distance: 1.5, height: 3.575, arc: 0, poseLagMs: 40 } }
   # Headset only: a gamma lift so the dark rooms read on a headset's LCD without washing out the blacks.
   # Applied only while first person drives the camera (firstPersonOnly defaults to true), so menus and the
   # item screen keep their own levels; 1.0 is neutral. Carried over from File #1 until tuned in the headset.

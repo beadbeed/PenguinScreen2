@@ -595,6 +595,47 @@ namespace VR::ProfileDB
 		std::optional<HudWristParams> wrist;
 	};
 
+	// menuPointer: point-and-click menus (VR::MenuPointer). One cell of the game's menu grid: the game's cursor struct
+	// reads node, index, x and y while the cursor is on it (all four must match, or point-to-select stops for that
+	// opening of the menu), and rect is where it shows, in fractions of the game picture.
+	struct MenuPointerCell
+	{
+		u32 node = 0;
+		u16 index = 0;
+		u16 x = 0;
+		u16 y = 0;
+		float rect[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // u0, v0, u1, v1
+		s8 next[4] = {-1, -1, -1, -1};            // the cell one D-pad press up, down, left, right leads to; -1 none
+	};
+
+	struct MenuPointerParams
+	{
+		// The menu is up (all must pass), and steering waits while any one of suspend_when passes (a submenu); with no
+		// suspend_when, a confirm that reaches the game pauses steering until Cross, a cursor move or the menu closes.
+		std::vector<CameraGuard> when;
+		std::vector<CameraGuard> suspend_when;
+		// The cursor struct: u32 node pointer, u16 index, u16 x, u16 y.
+		u32 node_addr = 0;
+		u32 index_addr = 0;
+		u32 x_addr = 0;
+		u32 y_addr = 0;
+		// Steering: each D-pad press is held press_vsyncs polls, then released at least gap_vsyncs; a press the cursor
+		// does not answer within settle_vsyncs, or more than max_presses presses for one cell, stops it.
+		u8 press_vsyncs = 2;
+		u8 gap_vsyncs = 2;
+		u8 settle_vsyncs = 10;
+		u8 max_presses = 6;
+		// Hovering: dwell_ms on a cell before it counts, nothing for arm_delay_ms after the menu opens, and a cell is
+		// entered only inside its rect shrunk by enter_inset of its size on each side (left again only outside it).
+		float dwell_ms = 60.0f;
+		float arm_delay_ms = 300.0f;
+		float enter_inset = 0.12f;
+		s8 hand = -1; // -1 either (right first), 0 left, 1 right
+		// Steering online too (private co-op only, where first person runs); off, it is refused while online.
+		bool coop = false;
+		std::vector<MenuPointerCell> cells; // 1 to 16
+	};
+
 	struct Profile
 	{
 		std::string serial;
@@ -615,6 +656,12 @@ namespace VR::ProfileDB
 		std::optional<PresentationParams> presentation;
 		std::optional<FeedbackParams> feedback;
 		std::optional<HudParams> hud;
+		std::optional<MenuPointerParams> menu_pointer;
+		// screen.menu: the menu tablet's placement (VR setting MenuTablet).
+		std::optional<float> menu_screen_distance;
+		std::optional<float> menu_screen_height;
+		std::optional<float> menu_screen_drop;
+		std::optional<float> menu_screen_tilt_deg;
 		std::optional<CameraProfile> camera;
 		std::optional<SplitParams> split;
 		std::vector<SpatialControlSpec> controls;

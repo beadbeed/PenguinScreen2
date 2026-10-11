@@ -35,6 +35,8 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.comfortVignette, "VR", "ComfortVignette", false);
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.vignetteStrength, "VR", "VignetteStrength", 0.6f);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.laserSight, "VR", "LaserSight", true);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.menuPointer, "VR", "MenuPointer", true);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.menuTablet, "VR", "MenuTablet", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.onlineSafe, "VR", "OnlineSafe", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.privateCoopFirstPerson, "VR", "PrivateCoopFirstPerson", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.gameRumble, "VR", "GameRumble", true);
@@ -108,6 +110,20 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 		   "in your hand straight along where it points, fading out over about 6 metres. It is drawn over the picture "
 		   "and does not stop at walls or enemies. Only changes what you see; the game itself is not touched. Takes "
 		   "effect immediately."));
+
+	dialog()->registerWidgetHelp(m_ui.menuPointer, tr("Menu Pointer and Point-to-Select"), tr("Checked"),
+		tr("In first-person profiles, while a menu such as the item screen is up, the controller casts a thin beam "
+		   "with a dot where it points at the menu screen, and both hands are drawn pointing. Where the game's profile "
+		   "maps the menu (Outbreak File #1's item screen), pointing at one of your item cells moves the game's own "
+		   "cursor there with D-pad presses, with a light tick as it lands; pull the trigger to select it as usual. "
+		   "Nothing is ever selected for you, and the D-pad and right stick keep working. Online it works only in "
+		   "private co-op, where the profile allows it. Takes effect immediately."));
+
+	dialog()->registerWidgetHelp(m_ui.menuTablet, tr("Menu Tablet"), tr("Unchecked"),
+		tr("In first-person profiles, a menu that comes up while you play (the item screen, the map) is shown on a "
+		   "small screen tilted up in front of your chest, like a tablet you hold, instead of on the big screen ahead. "
+		   "Its distance, height and size come from the game's profile. Only changes what you see. Takes effect "
+		   "immediately."));
 
 	dialog()->registerWidgetHelp(m_ui.onlineSafe, tr("Online-Safe First Person"), tr("Unchecked"),
 		tr("Turns off the first-person extras that change gameplay, such as walking while aiming and aim pitch from "

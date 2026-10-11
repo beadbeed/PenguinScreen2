@@ -2770,6 +2770,195 @@ static VR::ProfileDB::HudParams parseHud(const std::string_view serial, const ry
 	return hp;
 }
 
+// A whole number in decimal, or in hex with a 0x prefix, optionally negative; nothing else may follow it. For menuPointer's
+// cells, whose x, y, index and neighbours are screen coordinates and list numbers, not the hex addresses used elsewhere
+// (x 498 must stay 498, not become 0x498).
+static std::optional<s64> parseDecOrHex(std::string_view str)
+{
+	bool neg = false;
+	if (!str.empty() && str[0] == '-')
+	{
+		neg = true;
+		str.remove_prefix(1);
+	}
+	int base = 10;
+	if (str.size() > 2 && str[0] == '0' && (str[1] == 'x' || str[1] == 'X'))
+	{
+		str.remove_prefix(2);
+		base = 16;
+	}
+	if (str.empty())
+		return std::nullopt;
+	std::string_view rest;
+	const std::optional<u32> v = StringUtil::FromChars<u32>(str, base, &rest);
+	if (!v.has_value() || !rest.empty())
+		return std::nullopt;
+	return neg ? -static_cast<s64>(v.value()) : static_cast<s64>(v.value());
+}
+
+// menuPointer: point-and-click menus (VR::MenuPointer). Steering presses only the D-pad and reads only the game's own
+// cursor struct, but a wrong table would steer the cursor wrong, so any bad part drops the whole block with a warning.
+static std::optional<VR::ProfileDB::MenuPointerParams> parseMenuPointer(const std::string_view serial,
+	const ryml::ConstNodeRef& node)
+{
+	using VR::ProfileDB::MenuPointerCell;
+	using VR::ProfileDB::MenuPointerParams;
+	const auto reject = [serial](const std::string& why) -> std::optional<MenuPointerParams> {
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' menuPointer {}; the whole block is IGNORED, so this game gets no "
+						   "point-to-select.", serial, why);
+		return std::nullopt;
+	};
+	warnUnknownKeys(serial, node, "menuPointer", {"when", "suspendWhen", "cursor", "cells", "hand", "coop", "pressVsyncs",
+		"gapVsyncs", "settleVsyncs", "maxPresses", "dwellMs", "armDelayMs", "enterInset"});
+	MenuPointerParams mp;
+
+	// A dropped guard would widen when (or narrow suspendWhen), so every entry must parse.
+	const auto guards = [&](const char* key, const char* what, std::vector<VR::ProfileDB::CameraGuard>& out) {
+		if (!node.has_child(key))
+			return true;
+		const ryml::ConstNodeRef g = node[key];
+		if (!g.is_seq())
+			return false;
+		parseGuardList(serial, g, what, out);
+		return out.size() == g.num_children();
+	};
+	if (!node.has_child("when") || !guards("when", "menuPointer when guard", mp.when) || mp.when.empty())
+		return reject("needs a when list of valid guards (the menu its cells belong to is up)");
+	if (!guards("suspendWhen", "menuPointer suspendWhen guard", mp.suspend_when))
+		return reject("has a suspendWhen that is not a list of valid guards");
+
+	if (!node.has_child("cursor") || !node["cursor"].is_map())
+		return reject("needs cursor: { node, index, x, y } (the game's cursor struct)");
+	const ryml::ConstNodeRef cn = node["cursor"];
+	warnUnknownKeys(serial, cn, "menuPointer.cursor", {"node", "index", "x", "y"});
+	const auto cursor_addr = [&cn](const char* key, u32 width, u32& dst) {
+		if (!cn.has_child(key))
+			return false;
+		const std::optional<u32> a = parseAddress(nodeVal(cn[key]));
+		if (!a.has_value() || !inMainRam(a.value(), width))
+			return false;
+		dst = a.value();
+		return true;
+	};
+	if (!cursor_addr("node", 4, mp.node_addr) || !cursor_addr("index", 2, mp.index_addr) ||
+		!cursor_addr("x", 2, mp.x_addr) || !cursor_addr("y", 2, mp.y_addr))
+		return reject("cursor needs node, index, x and y addresses in main RAM");
+
+	if (node.has_child("hand"))
+	{
+		const std::string_view hv = nodeVal(node["hand"]);
+		if (StringUtil::compareNoCase(hv, "either"))
+			mp.hand = -1;
+		else if (StringUtil::compareNoCase(hv, "left"))
+			mp.hand = 0;
+		else if (StringUtil::compareNoCase(hv, "right"))
+			mp.hand = 1;
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' menuPointer hand '{}' is not either|left|right; using either.", serial, hv);
+	}
+	readOptionalBool(serial, node, "coop", "menuPointer coop", mp.coop);
+
+	const auto read_count = [&](const char* key, s64 lo, s64 hi, u8& dst) {
+		if (!node.has_child(key))
+			return;
+		const std::optional<s64> v = parseDecOrHex(nodeVal(node[key]));
+		if (v.has_value() && v.value() >= lo && v.value() <= hi)
+			dst = static_cast<u8>(v.value());
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' menuPointer {} must be a whole number from {} to {}; keeping {}.",
+				serial, key, lo, hi, static_cast<unsigned>(dst));
+	};
+	read_count("pressVsyncs", 1, 10, mp.press_vsyncs);
+	read_count("gapVsyncs", 1, 10, mp.gap_vsyncs);
+	read_count("settleVsyncs", 2, 120, mp.settle_vsyncs);
+	read_count("maxPresses", 1, 16, mp.max_presses);
+	const auto read_float = [&](const char* key, float lo, float hi, float& dst) {
+		if (!node.has_child(key))
+			return;
+		const std::optional<float> v = StringUtil::FromChars<float>(nodeVal(node[key]));
+		if (v.has_value() && std::isfinite(v.value()) && v.value() >= lo && v.value() <= hi)
+			dst = v.value();
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' menuPointer {} must be from {} to {}; keeping {}.", serial, key,
+				lo, hi, dst);
+	};
+	read_float("dwellMs", 0.0f, 1000.0f, mp.dwell_ms);
+	read_float("armDelayMs", 0.0f, 3000.0f, mp.arm_delay_ms);
+	read_float("enterInset", 0.0f, 0.45f, mp.enter_inset);
+
+	if (!node.has_child("cells") || !node["cells"].is_seq())
+		return reject("needs a cells list");
+	const ryml::ConstNodeRef cells = node["cells"];
+	const size_t count = cells.num_children();
+	if (count < 1 || count > 16)
+		return reject(fmt::format("has {} cells (1 to 16)", count));
+	size_t index = 0;
+	for (const ryml::ConstNodeRef& c : cells.children())
+	{
+		if (!c.is_map())
+			return reject(fmt::format("cell {} is not a map", index));
+		const std::string where = fmt::format("menuPointer.cells[{}]", index);
+		warnUnknownKeys(serial, c, where.c_str(), {"node", "index", "x", "y", "rect", "up", "down", "left", "right"});
+		MenuPointerCell cell;
+		const std::optional<u32> node_addr = c.has_child("node") ? parseAddress(nodeVal(c["node"])) : std::nullopt;
+		if (!node_addr.has_value() || node_addr.value() == 0 || !inMainRam(node_addr.value(), 4))
+			return reject(fmt::format("cell {} needs a node address in main RAM", index));
+		cell.node = node_addr.value();
+		// Decimal unless 0x-prefixed (not the hex of addresses).
+		const auto read_u16 = [&c](const char* key, u16& dst) {
+			if (!c.has_child(key))
+				return false;
+			const std::optional<s64> v = parseDecOrHex(nodeVal(c[key]));
+			if (!v.has_value() || v.value() < 0 || v.value() > 0xFFFF)
+				return false;
+			dst = static_cast<u16>(v.value());
+			return true;
+		};
+		if (!read_u16("index", cell.index) || !read_u16("x", cell.x) || !read_u16("y", cell.y))
+			return reject(fmt::format("cell {} needs index, x and y (decimal unless 0x-prefixed, 0-65535)", index));
+		if (!c.has_child("rect") || !c["rect"].is_seq() || c["rect"].num_children() != 4)
+			return reject(fmt::format("cell {} needs rect: [u0, v0, u1, v1]", index));
+		bool rect_ok = true;
+		int k = 0;
+		for (const ryml::ConstNodeRef& rn : c["rect"].children())
+		{
+			const std::optional<float> v = StringUtil::FromChars<float>(nodeVal(rn));
+			if (k < 4 && v.has_value() && std::isfinite(v.value()) && v.value() >= 0.0f && v.value() <= 1.0f)
+				cell.rect[k] = v.value();
+			else
+				rect_ok = false;
+			k++;
+		}
+		if (!rect_ok || !(cell.rect[0] < cell.rect[2]) || !(cell.rect[1] < cell.rect[3]))
+			return reject(fmt::format("cell {} rect must be four fractions 0-1 with u0 < u1 and v0 < v1", index));
+		static constexpr const char* kDirKeys[4] = {"up", "down", "left", "right"};
+		for (int d = 0; d < 4; d++)
+		{
+			if (!c.has_child(kDirKeys[d]))
+				continue;
+			const std::optional<s64> v = parseDecOrHex(nodeVal(c[kDirKeys[d]]));
+			if (!v.has_value() || v.value() < -1 || v.value() >= static_cast<s64>(count) ||
+				v.value() == static_cast<s64>(index))
+				return reject(fmt::format("cell {} {} must be another cell's number (0-{}) or -1", index, kDirKeys[d], count - 1));
+			cell.next[d] = static_cast<s8>(v.value());
+		}
+		mp.cells.push_back(cell);
+		index++;
+	}
+	// A cell is told apart by its node, index, x and y together: two the same could never be told apart.
+	for (size_t i = 0; i < mp.cells.size(); i++)
+	{
+		for (size_t j = i + 1; j < mp.cells.size(); j++)
+		{
+			const MenuPointerCell& a = mp.cells[i];
+			const MenuPointerCell& b = mp.cells[j];
+			if (a.node == b.node && a.index == b.index && a.x == b.x && a.y == b.y)
+				return reject(fmt::format("cells {} and {} have the same node, index, x and y", i, j));
+		}
+	}
+	return mp;
+}
+
 
 bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::NodeRef& node, Profile& out)
 {
@@ -3025,6 +3214,29 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 			else
 				Console.WarningFmt("(VR) ProfileDB: Serial '{}' screen.firstPerson needs distance and height (> 0.1 m); ignoring it.", serial);
 		}
+		if (scr.has_child("menu") && scr["menu"].is_map())
+		{
+			// The menu tablet (VR setting MenuTablet): metres ahead of the eyes, tall and below them, and optionally its
+			// tilt back toward them in degrees (left out: facing the eyes exactly).
+			const ryml::ConstNodeRef mn = scr["menu"];
+			warnUnknownKeys(serial, mn, "screen.menu", {"distance", "height", "drop", "tilt"});
+			const auto read_menu = [&](const char* key, float lo, float hi, std::optional<float>& dst) {
+				if (!mn.has_child(key))
+					return;
+				const std::optional<float> v = StringUtil::FromChars<float>(nodeVal(mn[key]));
+				if (v.has_value() && std::isfinite(v.value()) && v.value() >= lo && v.value() <= hi)
+					dst = v.value();
+				else
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a screen.menu {} outside {} to {}; ignoring it.", serial,
+						key, lo, hi);
+			};
+			read_menu("distance", 0.3f, 2.0f, out.menu_screen_distance);
+			read_menu("height", 0.15f, 1.0f, out.menu_screen_height);
+			read_menu("drop", -0.5f, 0.8f, out.menu_screen_drop);
+			read_menu("tilt", 0.0f, 89.0f, out.menu_screen_tilt_deg);
+		}
+		else if (scr.has_child("menu"))
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a screen.menu that is not a map; ignoring it.", serial);
 	}
 
 	if (node.has_child("presentation") && node["presentation"].is_map())
@@ -3087,6 +3299,11 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 	}
 	else if (node.has_child("hud"))
 		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a hud that is not a map; ignoring it.", serial);
+
+	if (node.has_child("menuPointer") && node["menuPointer"].is_map())
+		out.menu_pointer = parseMenuPointer(serial, node["menuPointer"]);
+	else if (node.has_child("menuPointer"))
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a menuPointer that is not a map; ignoring it.", serial);
 
 	if (node.has_child("split") && node["split"].is_map())
 		out.split = parseSplit(serial, node["split"]);

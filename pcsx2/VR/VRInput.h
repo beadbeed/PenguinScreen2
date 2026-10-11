@@ -172,6 +172,12 @@ namespace VR
 
 		void SetTestInput(const TestInput& input);
 
+		// A scripted menu-pointer hit for the headset-free tests (PINE MsgVRMenuPointer op 1, only with PCSX2_VR_TEST_INPUT
+		// set and never online): GetInputSnapshot() reports a screen hit at (u, v) (fractions of the game picture) for
+		// `hand` (0 left, 1 right) over the aim rays' until it lapses after ttl_ms (capped at 1000 ms). With a screen
+		// transform published, the hit's point is placed on that quad. u below 0, or ttl_ms 0, drops it now.
+		void SetTestScreenHit(int hand, float u, float v, u32 ttl_ms);
+
 		// The scripted head while test input is live and supplies one.
 		bool TestHeadPose(HeadPose::Snapshot* out);
 	}

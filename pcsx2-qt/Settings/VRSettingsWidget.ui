@@ -338,6 +338,20 @@
        </widget>
       </item>
       <item>
+       <widget class="QCheckBox" name="menuPointer">
+        <property name="text">
+         <string>Menu Pointer and Point-to-Select (beam and dot in menus)</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="menuTablet">
+        <property name="text">
+         <string>Menu Tablet (menus on a small screen in front of the chest)</string>
+        </property>
+       </widget>
+      </item>
+      <item>
        <widget class="QCheckBox" name="onlineSafe">
         <property name="text">
          <string>Online-Safe First Person (camera only; on whenever the network adapter is on)</string>
