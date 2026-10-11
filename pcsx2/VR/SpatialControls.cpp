@@ -1045,6 +1045,9 @@ namespace VR::SpatialControls
 		std::atomic_bool s_sprint_blocked{false};
 		std::atomic_bool s_zone_stop{false};
 		std::atomic_bool s_menu_mode{false};
+		// The menu pointer's steering (MenuPointer::Poll): a D-pad direction to OR in (-1 none) and the confirm held back.
+		std::atomic_int s_pointer_dpad{-1};
+		std::atomic_bool s_pointer_confirm_hold{false};
 
 		constexpr float kSprintOn = 0.5f; // stick magnitude (after the deadzone) the click must come with
 		constexpr float kSprintHold = 0.25f; // the latch holds while the stick is pushed past this
@@ -1149,7 +1152,8 @@ namespace VR::SpatialControls
 
 		// ComposeGamepad with the cross-thread inputs passed in, so the self-test is deterministic.
 		ControlValues ComposeGamepadWith(const VRInputSnapshot& snapshot, const GamepadParams& p, GamepadState& st,
-			float dt, int suppressed, bool sprint_blocked, bool menu_mode = false)
+			float dt, int suppressed, bool sprint_blocked, bool menu_mode = false, int pointer_dpad = -1,
+			bool confirm_hold = false)
 		{
 			ControlValues v{};
 			if (snapshot.generation == 0 || !snapshot.actions_active)
@@ -1231,6 +1235,21 @@ namespace VR::SpatialControls
 				At(v, ControlId::RightStickDown) = button(st.flick_down);
 			}
 
+			// The menu pointer steering the game's cursor: its D-pad press, in menu mode only, ORed in like the stick's; and
+			// the confirm held back while the cursor is on its way. It only ever adds a D-pad press or takes the confirm away.
+			if (menu_mode && pointer_dpad >= 0 && pointer_dpad < 4)
+			{
+				static constexpr ControlId kPointerDpad[4] = {
+					ControlId::DpadUp, ControlId::DpadDown, ControlId::DpadLeft, ControlId::DpadRight};
+				At(v, kPointerDpad[pointer_dpad]) = 1.0f;
+			}
+			if (confirm_hold)
+			{
+				At(v, ControlId::RightTriggerPress) = 0.0f;
+				At(v, ControlId::RightTrigger) = 0.0f;
+				At(v, ControlId::ButtonA) = 0.0f;
+			}
+
 			// Sprint latch, on the stick as the game gets it (deadzone and suppression applied): walk-and-shoot's
 			// stick reads 0, so it neither latches nor holds the latch.
 			if (static_cast<u32>(p.sprint_latch) < kControlCount)
@@ -1293,11 +1312,27 @@ namespace VR::SpatialControls
 		s_menu_mode.store(on, std::memory_order_release);
 	}
 
+	bool MenuMode()
+	{
+		return s_menu_mode.load(std::memory_order_acquire);
+	}
+
+	void SetPointerDpad(int dir)
+	{
+		s_pointer_dpad.store((dir >= 0 && dir < 4) ? dir : -1, std::memory_order_release);
+	}
+
+	void SetPointerConfirmHold(bool hold)
+	{
+		s_pointer_confirm_hold.store(hold, std::memory_order_release);
+	}
+
 	ControlValues ComposeGamepad(const VRInputSnapshot& snapshot, const GamepadParams& p, GamepadState& st, float dt)
 	{
 		const bool zone_stop = s_zone_stop.load(std::memory_order_acquire);
 		ControlValues v = ComposeGamepadWith(snapshot, p, st, dt, s_suppressed_move_hand.load(std::memory_order_acquire),
-			s_sprint_blocked.load(std::memory_order_acquire) || zone_stop, s_menu_mode.load(std::memory_order_acquire));
+			s_sprint_blocked.load(std::memory_order_acquire) || zone_stop, s_menu_mode.load(std::memory_order_acquire),
+			s_pointer_dpad.load(std::memory_order_acquire), s_pointer_confirm_hold.load(std::memory_order_acquire));
 		if (zone_stop)
 		{
 			At(v, ControlId::LeftStickX) = 0.0f;
@@ -1555,6 +1590,43 @@ namespace VR::SpatialControls
 				check(!on(v, ControlId::DpadRight), "menu: a suppressed right stick steps nothing");
 				r = VRHandState{};
 			}
+		}
+
+		// Menu pointer: its D-pad is ORed in, in menu mode only; its confirm hold zeroes the confirm controls; the
+		// defaults change nothing.
+		{
+			const GamepadParams off{};
+			constexpr float kDt = 1.0f / 60.0f;
+			l = VRHandState{};
+			r = VRHandState{};
+			const auto dpad_count = [&on](const ControlValues& v) {
+				return (on(v, ControlId::DpadUp) ? 1 : 0) + (on(v, ControlId::DpadDown) ? 1 : 0) +
+				       (on(v, ControlId::DpadLeft) ? 1 : 0) + (on(v, ControlId::DpadRight) ? 1 : 0);
+			};
+			GamepadState st;
+			ControlValues v = ComposeGamepadWith(s, off, st, kDt, kNone, false, true, 3, false);
+			check(on(v, ControlId::DpadRight) && dpad_count(v) == 1, "pointer: its D-pad direction is pressed in menu mode");
+			l.dpad_up = true;
+			v = ComposeGamepadWith(s, off, st, kDt, kNone, false, true, 1, false);
+			check(on(v, ControlId::DpadUp) && on(v, ControlId::DpadDown) && dpad_count(v) == 2,
+				"pointer: its D-pad is ORed with the real one");
+			l = VRHandState{};
+			v = ComposeGamepadWith(s, off, st, kDt, kNone, false, false, 2, false);
+			check(dpad_count(v) == 0, "pointer: no D-pad out of menu mode");
+			r.trigger = 1.0f;
+			r.a = true;
+			r.b = true;
+			v = ComposeGamepadWith(s, off, st, kDt, kNone, false, true, -1, true);
+			check(!on(v, ControlId::RightTriggerPress) && v[static_cast<u32>(ControlId::RightTrigger)] == 0.0f &&
+					  !on(v, ControlId::ButtonA),
+				"pointer: the confirm hold zeroes RightTriggerPress, RightTrigger and ButtonA");
+			check(on(v, ControlId::ButtonB) && dpad_count(v) == 0, "pointer: the confirm hold leaves the other controls alone");
+			v = ComposeGamepadWith(s, off, st, kDt, kNone, false, true);
+			check(on(v, ControlId::RightTriggerPress) && v[static_cast<u32>(ControlId::RightTrigger)] > 0.99f &&
+					  on(v, ControlId::ButtonA) && on(v, ControlId::ButtonB) && dpad_count(v) == 0,
+				"pointer: the defaults leave the confirm and the D-pad alone");
+			r = VRHandState{};
+			ComposeGamepadWith(s, off, st, kDt, kNone, false, true);
 		}
 
 		if (failed)

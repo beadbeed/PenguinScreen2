@@ -14,24 +14,26 @@
 // placement maths; no XR or Vulkan types, so it stays self-contained. XRCompositor owns the swapchains,
 // uploads the pixels and submits the layers, and only while a VR session runs.
 //
-// Five cards: the toast, a short line of text view-locked below the line of sight (recenters, brightness,
+// Six cards: the toast, a short line of text view-locked below the line of sight (recenters, brightness,
 // controllers paused); the wrist card, on the back of the left wrist in first person, with the
 // character's condition, an HP bar and the virus gauge read from the profile's hud.wrist block; the
 // comfort blink, a black quad over the whole view for snap turns and screen changes; the laser sight,
-// a thin red beam from the pistol's muzzle along the aim while the weapon is raised in first person; and
-// the comfort vignette, a view-locked black ring that closes in on the edges of the view while first
-// person turns or walks the view without the head.
+// a thin red beam from the pistol's muzzle along the aim while the weapon is raised in first person (in a
+// menu the same slot carries the menu pointer's beam instead); the comfort vignette, a view-locked black
+// ring that closes in on the edges of the view while first person turns or walks the view without the head;
+// and the menu pointer's dot, lying on the screen where the controller points while a menu is up.
 namespace VR::HudCards
 {
-	// Card slots, in the order the compositor submits them: the laser first, in under the hands (which are
-	// nearer the eye than the beam), the rest over everything: the vignette over the hands and the wrist
-	// card, the toast over the vignette so it stays readable, the blink last.
+	// Card slots, in the order the compositor submits them: the laser (or the menu beam) and the menu pointer's
+	// dot go in under the hands (which are nearer the eye), the dot over the beam; the rest over everything: the
+	// vignette over the hands and the wrist card, the toast over the vignette so it stays readable, the blink last.
 	static constexpr int kLaser = 0;
 	static constexpr int kWrist = 1;
 	static constexpr int kVignette = 2;
 	static constexpr int kToast = 3;
 	static constexpr int kBlink = 4;
-	static constexpr int kCardCount = 5;
+	static constexpr int kPointer = 5;
+	static constexpr int kCardCount = 6;
 
 	// Toast image and quad: about 1.2 m ahead and 0.25 m below eye level, 0.5 m wide (about 24 deg, so
 	// the image's 1024 pixels give the text 1.1 deg tall letters up to ~23 characters, smaller beyond).
@@ -103,6 +105,18 @@ namespace VR::HudCards
 	static_assert(kVignetteRadiusTan * kVignetteDistanceM < 0.5f * kVignetteSizeM,
 		"the vignette's ring must fit on its quad");
 
+	// Menu pointer (MenuPointer setting, while a menu is up on the world screen or the menu tablet): a dot lying on the
+	// screen where the pointing hand's aim meets it, kPointerDeg across as seen from the eye (diameter 2 d tan(0.3 deg)
+	// at distance d, at least kPointerMinM), kPointerLiftM off the screen's face; and a beam kBeamWidthM wide from
+	// kBeamStartM ahead of the hand's aim pose to the dot. The beam rides the laser's slot and swapchain (16 x 256), so
+	// it shows only while the laser is not placed. The dot looks plain off a cell, and warm with a ring on one.
+	static constexpr u32 kPointerImageSize = 64;
+	static constexpr float kPointerDeg = 0.6f;
+	static constexpr float kPointerMinM = 0.006f;
+	static constexpr float kPointerLiftM = 0.002f;
+	static constexpr float kBeamWidthM = 0.003f;
+	static constexpr float kBeamStartM = 0.02f;
+
 	// Same byte order as the lever cards and hands (ControlQuads::PackRgba): R in the low byte,
 	// unpremultiplied alpha in the high byte, sRGB-encoded colour.
 	constexpr u32 Rgba(u32 r, u32 g, u32 b, u32 a = 255)
@@ -145,6 +159,14 @@ namespace VR::HudCards
 	// GS thread never reads EmuConfig. Any thread.
 	bool LaserSightEnabled();
 
+	// The VR MenuPointer setting (the beam, the dot, the hands in menus and point-to-select) as published by Poll (on
+	// until the first vsync, as its default is). Any thread.
+	bool MenuPointerEnabled();
+
+	// The VR MenuTablet setting (menus on a small tilted screen in front of the chest) as published by Poll (off until
+	// the first vsync, as its default is). Any thread.
+	bool MenuTabletEnabled();
+
 	// The comfort vignette's strength as published by Poll: the VR VignetteStrength setting (clamped to its
 	// range) while ComfortVignette is on, else 0 (off until the first vsync, as its default is), so the GS
 	// thread never reads EmuConfig. Any thread.
@@ -180,8 +202,8 @@ namespace VR::HudCards
 	Condition ConditionOf(const WristData& d);
 
 	// CPU thread, every vsync right after CameraDriver::Apply: reads the record Apply resolved, the same
-	// way GameFeedback does. Reads only, so the same online. Also publishes the ComfortBlink, LaserSight and
-	// comfort vignette (ComfortVignette, VignetteStrength) settings.
+	// way GameFeedback does. Reads only, so the same online. Also publishes the ComfortBlink, LaserSight,
+	// MenuPointer, MenuTablet and comfort vignette (ComfortVignette, VignetteStrength) settings.
 	void Poll();
 
 	// Any thread: true while first person is armed with the record resolved and the profile has a
@@ -198,6 +220,12 @@ namespace VR::HudCards
 	void RasterBlink(std::vector<u32>& out);
 	void RasterLaser(std::vector<u32>& out);
 	void RasterVignette(std::vector<u32>& out);
+	// The menu pointer's dot (kPointerImageSize square): a soft disc, white with a dark rim off a cell, warm white with
+	// a thin outer ring on one.
+	void RasterPointer(std::vector<u32>& out, bool on_cell);
+	// The menu pointer's beam, the laser's size: a cool white-blue core with soft edges, fading in over the first tenth
+	// from the hand (the bottom row) and even from there to the screen (the top row).
+	void RasterBeam(std::vector<u32>& out);
 
 	// dst = src with every pixel's alpha scaled by opacity (0-1), for the fades.
 	void ScaleAlpha(const u32* src, size_t count, float opacity, u32* dst);
@@ -231,8 +259,21 @@ namespace VR::HudCards
 	bool PlaceLaser(const float hand_pos[3], const float hand_quat[4], const float eye[3], float out_pos[3],
 		float out_quat[4]);
 
-	// Condition thresholds, labels, keys, the font, the fades, the blink, the laser, the vignette and the
-	// placement maths. Runs once (the compositor's first HUD frame or the first Poll) when PCSX2_VR_HUD_SELFTEST
-	// is set.
+	// A beam quad in the XR base space from origin along dir (need not be unit length) for length metres: out_pos is its
+	// middle, its +Y runs along the beam (the image's top row at the far end) and its +Z is turned about the beam toward
+	// the eye. PlaceLaser is this from just past the pistol's muzzle. False, and the frame goes without the beam, when
+	// the eye is on the beam's line, the length is not positive or a value is not usable.
+	bool PlaceBeam(const float origin[3], const float dir[3], float length, const float eye[3], float out_pos[3],
+		float out_quat[4]);
+
+	// The menu pointer's dot for a hit on the screen quad whose orientation is screen_quat (+Z its face normal): lying
+	// flat on the screen kPointerLiftM off its face (out_quat is the screen's own), out_size across (metres) so it spans
+	// kPointerDeg from the eye, at least kPointerMinM.
+	void PlacePointer(const float hit[3], const float screen_quat[4], const float eye[3], float out_pos[3],
+		float out_quat[4], float* out_size);
+
+	// Condition thresholds, labels, keys, the font, the fades, the blink, the laser, the vignette, the menu pointer's
+	// dot and beam, and the placement maths. Runs once (the compositor's first HUD frame or the first Poll) when
+	// PCSX2_VR_HUD_SELFTEST is set.
 	bool SelfTest();
 }

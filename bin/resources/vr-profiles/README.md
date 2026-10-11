@@ -64,6 +64,14 @@ A `distance`, `height` or `arc` written here wins over the matching slider in
 the settings window for that game. Leave a key out to keep it adjustable from
 the settings window.
 
+`menu: { distance, height, drop, tilt }` places the menu tablet: with the Menu
+Tablet setting on (off by default), a menu that comes up during first-person
+play is shown on a small flat screen `distance` metres ahead of your eyes
+(`0.3` to `2.0`, default `0.70`) and `drop` metres below them (`-0.5` to `0.8`,
+default `0.30`), `height` metres tall (`0.15` to `1.0`, default `0.36`), tilted
+back to face your eyes. `tilt` (degrees, `0` to `89`) fixes the tilt instead.
+The tablet is always flat. It is placed in front of you each time it appears.
+
 ## `presentation`: brightness in the headset
 
 Some games are too dark to read on a headset's display. `presentation`
@@ -116,6 +124,55 @@ the game's memory and does nothing without a running VR session.
 | `bleed` | `{ offset, width }`: the character is bleeding while this value in the record is not zero |
 
 Each part is optional; the card leaves out whatever it can't read sensibly.
+
+## `menuPointer`: point-and-click menus
+
+With the Menu Pointer setting on (the default), a menu opened during
+first-person play shows a beam from your controller and a dot where it points
+at the menu screen (the world screen, which must be flat, or the menu tablet),
+and both hands are drawn pointing. `menuPointer` maps one of the game's menus
+so that pointing also moves the game's own cursor: when you point at a cell,
+the emulator presses the D-pad on your pad, one press at a time, and reads the
+game's cursor after each press until it lands. The trigger stays your confirm.
+If you pull it before the cursor has arrived, it is held back until the cursor
+gets there, and if you let go first it never reaches the game. Nothing else is
+ever pressed for you.
+
+```yaml
+menuPointer:
+  when: [ ... ]          # guards: all must pass while the mapped menu is up
+  suspendWhen: [ ... ]   # optional guards: steering waits while any one passes
+  cursor: { node: 0x720B84, index: 0x720B8C, x: 0x720B8E, y: 0x720B90 }
+  cells:
+    - { node: 0x720C10, index: 0, x: 498, y: 108, rect: [0.807, 0.184, 0.895, 0.307], right: 1, down: 2 }
+```
+
+| Key | Meaning |
+|---|---|
+| `when` | a list of guards, written like `camera.guards`, that must all pass while the menu is up. Required |
+| `suspendWhen` | guards for a submenu or any state where the D-pad does something else. Steering waits while any one of them passes, and for 6 vsyncs after. Left empty, steering instead waits after every confirm that reaches the game, until Cross, the cursor moving to another cell, or the menu closing |
+| `cursor` | the addresses of the game's cursor: a 4-byte `node` pointer to the cell it is on, and 2-byte `index`, `x` and `y` |
+| `cells` | 1 to 16 cells, each with `node`, `index`, `x`, `y` (the cursor's values on that cell; all four must match), `rect` (where the cell shows: left, top, right and bottom as fractions `0` to `1` of the game picture) and `up`, `down`, `left`, `right` (the number, counting from 0, of the cell one D-pad press in that direction leads to; leave out a direction that leads nowhere, or out of the cells) |
+| `hand` | `either` (the default; the right hand first), `left` or `right` |
+| `coop` | `true` lets it steer online too, which happens only in private co-op. Default `false` |
+| `pressVsyncs`, `gapVsyncs` | each D-pad press is held this many vsyncs, then released at least this many (default `2` and `2`) |
+| `settleVsyncs` | how long to wait for the cursor to move after a press before giving up (default `10`) |
+| `maxPresses` | the most presses for one move (default `6`) |
+| `dwellMs` | how long you must point at a cell before the cursor goes there (default `60`) |
+| `armDelayMs` | nothing moves for this long after the menu opens (default `300`) |
+| `enterInset` | a cell counts only inside its `rect` shrunk by this fraction of its size on each side (default `0.12`); you leave it only outside its full `rect` |
+
+Watch the number formats. `node` and the `cursor` addresses are hex, like every
+address in a profile. A cell's `x`, `y`, `index` and neighbour numbers are
+**decimal** unless written with `0x`: `x: 498` means 498, not `0x498`.
+
+Steering stops if the cursor stops answering, goes outside the mapped cells,
+or needs more than `maxPresses` presses. It also stops the moment you use the
+D-pad, a stick or a grip, or press B or Menu; pointing at another cell starts
+it again. If the cursor's node matches a cell but its index, `x` or `y` do not,
+the layout is not the one mapped, and point-to-select stays off until the menu
+opens again. Any invalid part of the block makes the emulator ignore the whole
+block, with a log line saying why.
 
 ## `stereo`: depth
 

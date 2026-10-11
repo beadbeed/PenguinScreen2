@@ -1935,6 +1935,8 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(SnapTurn);
 	SettingsWrapEntry(ComfortBlink);
 	SettingsWrapEntry(LaserSight);
+	SettingsWrapEntry(MenuPointer);
+	SettingsWrapEntry(MenuTablet);
 	SettingsWrapEntry(ComfortVignette);
 	SettingsWrapEntry(VignetteStrength);
 	SettingsWrapEntry(OnlineSafe);

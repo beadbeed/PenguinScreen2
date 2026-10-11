@@ -46,6 +46,14 @@ struct VRScreenHit
   float u = 0.5f;
   float v = 0.5f;
   bool valid = false;
+  // The hand whose aim ray made the hit (VRInputSnapshot::LEFT / RIGHT); -1 for none.
+  int hand = -1;
+  // Metres along that aim ray from the aim pose to the hit (0 for a PINE test hit).
+  float distance = 0.f;
+  // The hit in the XR base space, the space the hands and the screen quad are in (zero when not known).
+  std::array<float, 3> point{};
+  // A scripted PINE test hit (XRInput::SetTestScreenHit) rather than a ray: it has no aim pose to start a beam from.
+  bool test = false;
 };
 
 struct VRInputSnapshot
@@ -65,10 +73,29 @@ VRInputSnapshot GetInputSnapshot();
 
 struct VRScreenTransform
 {
+  // The screen quad's centre in the XR base space, with its full orientation: +X along its width, +Y up its height, +Z
+  // its face normal (pointing back at the viewer).
   VRPose center;
   float half_width = 0.f;
   float half_height = 0.f;
+  // A flat world-locked quad was placed at the last present (the world screen or the menu tablet); false for the
+  // first-person, curved, head-following or split screen, or none.
+  bool valid = false;
+  // The menu tablet placement rather than the world screen.
+  bool tablet = false;
+  // Monotonic time (ms) of the publish; GetScreenTransform() treats an old one as invalid (the GS is idle).
+  std::uint64_t published_ms = 0;
+  // Counts publishes.
+  std::uint32_t generation = 0;
 };
 
 VRScreenTransform GetScreenTransform();
+
+// The compositor, every present (any thread): the flat screen quad the menu pointer aims at, or an invalid one when there
+// is none. Stamps published_ms and generation.
+void PublishScreenTransform(const VRScreenTransform& transform);
+
+// Pure: where the ray from the aim pose's position along its -Z meets the screen quad's front face, 0.05-10 m out.
+// Valid only on the quad (0 <= u, v <= 1; u runs left to right, v top to bottom, like the game picture); hand is left at -1.
+VRScreenHit RayHitScreen(const VRScreenTransform& screen, const VRPose& aim);
 }

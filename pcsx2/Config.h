@@ -1307,6 +1307,14 @@ struct Pcsx2Config
 		// First person: a thin red beam from the pistol's muzzle along the aim while the weapon is raised.
 		// Drawn in the headset only, so only what this player sees.
 		bool LaserSight = true;
+		// First person, while a menu is up: a beam and a dot where the controller points at the menu screen, the hands
+		// drawn as empty pointing hands, and (for games whose profile maps the menu) the game's own cursor steered to
+		// the cell pointed at with D-pad presses from this player's own pad; the trigger stays the player's confirm,
+		// nothing is ever confirmed for them. Online only in private co-op, and only where the profile allows it.
+		bool MenuPointer = true;
+		// First person, while a menu is up: the menu on a small screen tilted up in front of the chest, like a tablet,
+		// instead of the world screen. Shown in the headset only.
+		bool MenuTablet = false;
 		// First person: darkens the edges of the headset view while the view turns or walks without the head
 		// (smooth stick turns, walking), the more the faster it moves; snap turns keep the blink instead.
 		// Drawn in the headset only, so only what this player sees.

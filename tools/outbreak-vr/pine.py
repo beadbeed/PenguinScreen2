@@ -7,7 +7,9 @@ Wire format: request  = u32 total_len (incl. these 4 bytes) + commands back to b
 
 Fork extensions for headset-free VR tests: fake_input() / FakeController drive the real VR input path
 with scripted controllers (only when the emulator was started with PCSX2_VR_TEST_INPUT=1, and refused
-with online-safe or the network adapter on); telemetry() reads what the first-person camera did.
+with online-safe or the network adapter on); telemetry() reads what the first-person camera did;
+menu_pointer() reads the menu pointer and point-to-select, and set_test_screen_hit() points it without
+an OpenXR runtime (refused like fake_input()).
 """
 import math
 import os
@@ -24,6 +26,7 @@ MSG_VERSION, MSG_SAVESTATE, MSG_LOADSTATE = 0x08, 0x09, 0x0A
 MSG_TITLE, MSG_ID, MSG_UUID, MSG_GAMEVERSION, MSG_STATUS = 0x0B, 0x0C, 0x0D, 0x0E, 0x0F
 MSG_VR_MEMWATCH, MSG_VR_MEMWATCH_POLL = 0xE1, 0xE2
 MSG_VR_FAKE_INPUT, MSG_VR_TELEMETRY = 0xE3, 0xE4
+MSG_VR_MENU_POINTER = 0xE5
 
 MEMCHECK_READ, MEMCHECK_WRITE, MEMCHECK_WRITE_ONCHANGE = 0x01, 0x02, 0x04
 EE_RAM_SIZE = 32 * 1024 * 1024
@@ -227,6 +230,40 @@ class Pine:
                     disarm_reason=DISARM_REASONS[reason] if reason < len(DISARM_REASONS) else "reason %d" % reason,
                     guard_fail_vsyncs=guard_fail, yaw_anchor=math.degrees(yaw_anchor), base_yaw_now=math.degrees(base_yaw),
                     match_age=match_age, frames_matched=frames, vsync=vsync, prediction_ms=prediction)
+
+    def menu_pointer(self):
+        """The menu pointer's state (MsgVRMenuPointer op 0, read-only, allowed any time): the flat screen quad it aims at
+        (centre xyz and quaternion xyzw in the XR base space, half extents in metres), the pointer's hit on it (u, v as
+        fractions of the game picture), point-to-select's cells (indices into the profile's menuPointer.cells, -1 none) and
+        its counters."""
+        body = self._transact(struct.pack("<BB", MSG_VR_MENU_POINTER, 0))
+        size = struct.unpack("<I", body[:4])[0]
+        data = body[4:4 + size]
+        if len(data) < 84 or data[0] < 1:
+            raise PineError("unexpected menu pointer reply (%d bytes)" % len(data))
+        (ver, flags, flags2, hovered, current, target, presses_target, dpad) = struct.unpack_from("<BBBbbbBB", data, 0)
+        u, v, distance = struct.unpack_from("<3f", data, 8)
+        centre = struct.unpack_from("<3f", data, 20)
+        quat = struct.unpack_from("<4f", data, 32)
+        half_width, half_height = struct.unpack_from("<2f", data, 48)
+        node, presses, arrivals, aborts, ticks, passed, swallowed = struct.unpack_from("<7I", data, 56)
+        return dict(version=ver, transform_valid=bool(flags & 0x01), hit_valid=bool(flags & 0x02),
+                    hit_right=bool(flags & 0x04), menu_mode=bool(flags & 0x08), gate=bool(flags & 0x10),
+                    in_flight=bool(flags & 0x20), confirm_held=bool(flags & 0x40), suspended=bool(flags & 0x80),
+                    tablet=bool(flags2 & 0x01), test_hit=bool(flags2 & 0x02), selfcheck_failed=bool(flags2 & 0x04),
+                    refused_online=bool(flags2 & 0x08), hovered=hovered, current=current, target=target,
+                    presses_target=presses_target, dpad=None if dpad == 0xFF else dpad, u=u, v=v, distance=distance,
+                    centre=centre, quat=quat, half_width=half_width, half_height=half_height, node=node,
+                    presses=presses, arrivals=arrivals, aborts=aborts, ticks=ticks, confirms_passed=passed,
+                    confirms_swallowed=swallowed)
+
+    def set_test_screen_hit(self, hand, u, v, ttl_ms=400):
+        """A scripted menu-pointer hit (MsgVRMenuPointer op 1) at (u, v), fractions of the game picture, for hand 0 (left)
+        or 1 (right); it lapses after ttl_ms (capped at 1000 ms), so keep re-sending. u below 0 (or ttl_ms 0) clears it.
+        Lets point-to-select be tested with no OpenXR runtime. Raises PineError when refused, as fake_input() is."""
+        payload = struct.pack("<BBBBHff", MSG_VR_MENU_POINTER, 1, 1, int(hand) & 0xFF, max(0, min(int(ttl_ms), 0xFFFF)),
+                              float(u), float(v))
+        return self._transact(payload)[0] == 1
 
 
 class FakeController:

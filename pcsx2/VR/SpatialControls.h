@@ -552,6 +552,12 @@ namespace VR::SpatialControls
 	// past 0.6 and lets go below 0.35; engaging presses that D-pad direction for 0.10 s, and holding repeats
 	// after 0.40 s, then every 0.15 s. Changing direction needs a release first. The presses are ORed into
 	// DpadUp/Down/Left/Right (stick Y +1 = Up), and the flicks read 0 meanwhile.
+	//
+	// Menu pointer (VR::MenuPointer steering the game's own cursor to the cell the controller points at): in menu mode
+	// the direction SetPointerDpad gives is ORed into DpadUp/Down/Left/Right the same way. While SetPointerConfirmHold
+	// is set, the controls bound to the game's confirm (RightTriggerPress, RightTrigger and ButtonA) read 0, so a
+	// confirm pulled before the cursor has arrived reaches the game only once it has, or never. Nothing is ever pressed
+	// for the player: only the D-pad is added, and the confirm is only ever held back.
 	struct GamepadParams
 	{
 		ControlId sprint_latch = ControlId::Count;
@@ -604,6 +610,17 @@ namespace VR::SpatialControls
 	// While set (the camera driver's pauseWhen is hit: item screen, map, menus), the Gamepad's right stick
 	// drives the D-pad and its flicks read 0. Any thread.
 	void SetMenuMode(bool on);
+
+	// The last SetMenuMode: a menu is up while first person is armed. Any thread.
+	bool MenuMode();
+
+	// The menu pointer's D-pad press for the Gamepad's next compose (0 up, 1 down, 2 left, 3 right; -1 none), ORed in
+	// only in menu mode. MenuPointer::Poll sets it every input poll, before the Gamepad composes. Any thread.
+	void SetPointerDpad(int dir);
+
+	// While set, the Gamepad's RightTriggerPress, RightTrigger and ButtonA (the confirm) read 0: the menu pointer holds a
+	// confirm back while the cursor is on its way, and swallows one that must never reach the game. Any thread.
+	void SetPointerConfirmHold(bool hold);
 
 	// The Gamepad's sprint latch and ad-lib flicks on scripted input, and that without sprint_latch the
 	// click and the buttons pass through as before. False with *failed naming the first failed check.

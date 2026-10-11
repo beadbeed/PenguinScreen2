@@ -14,6 +14,7 @@
 #include "VR/CameraDriver.h"
 #include "VR/DepthHistogram.h"
 #include "VR/MemWatch.h"
+#include "VR/MenuPointer.h"
 #include "VR/VRInput.h"
 #include "fmt/format.h"
 #include <bit>
@@ -149,6 +150,7 @@ namespace PINEServer
 		MsgVRMemWatchPoll = 0xE2,
 		MsgVRFakeInput = 0xE3,
 		MsgVRTelemetry = 0xE4,
+		MsgVRMenuPointer = 0xE5,
 		MsgUnimplemented = 0xFF
 	};
 
@@ -791,6 +793,108 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 				ToResultVector<u64>(ret_buffer, t.vsync, ret_cnt + 24);
 				ToResultVector<float>(ret_buffer, t.prediction_ms, ret_cnt + 32);
 				ret_cnt += kTelemetrySize;
+				break;
+			}
+			case MsgVRMenuPointer:
+			{
+				// The menu pointer (VR::MenuPointer) for the test runner (tools/outbreak-vr/menutest.py). The first byte is
+				// the op.
+				// op 0, read-only, any time. Reply: u32 size, then the payload (little-endian), version 1:
+				//   u8 ver (1), u8 flags (bit0 screen transform valid, bit1 hit valid, bit2 hit by the right hand, bit3 menu
+				//   mode, bit4 point-to-select running, bit5 steering, bit6 confirm held back, bit7 suspended or latched),
+				//   u8 flags2 (bit0 menu tablet, bit1 PINE test hit, bit2 self-check failed, bit3 refused online by
+				//   coop: false), s8 hovered, s8 current, s8 target, u8 presses toward target, u8 D-pad (0xFF none),
+				//   f32 u, v, hit distance, f32 screen centre xyz, quaternion xyzw, half width, half height,
+				//   u32 cursor node, presses, arrivals, aborts, landing ticks, confirms passed, confirms swallowed
+				// Later versions only append, so a reader takes the size and the fields it knows.
+				// op 1: a test hit: u8 ver (1), u8 hand (0 left, 1 right), u16 ttl_ms, f32 u, f32 v (u below 0 clears it).
+				// Reply: u8 1. Refused as MsgVRFakeInput is: only with PCSX2_VR_TEST_INPUT set, and never while online play
+				// is possible.
+				if (!SafetyChecks(buf_cnt, 1, ret_cnt, 0, buf_size)) [[unlikely]]
+					goto error;
+				const u8 op = FromSpan<u8>(buf, buf_cnt);
+				if (op == 0)
+				{
+					constexpr u32 kMenuPointerSize = 84;
+					if (!SafetyChecks(buf_cnt, 1, ret_cnt, kMenuPointerSize + 4, buf_size)) [[unlikely]]
+						goto error;
+					buf_cnt += 1;
+					const VR::MenuPointer::Telemetry t = VR::MenuPointer::GetTelemetry();
+					u32 flags = 0;
+					flags |= t.transform_valid ? 0x01u : 0u;
+					flags |= t.hit_valid ? 0x02u : 0u;
+					flags |= t.hit_right ? 0x04u : 0u;
+					flags |= t.menu_mode ? 0x08u : 0u;
+					flags |= t.gate ? 0x10u : 0u;
+					flags |= t.in_flight ? 0x20u : 0u;
+					flags |= t.confirm_held ? 0x40u : 0u;
+					flags |= t.suspended ? 0x80u : 0u;
+					u32 flags2 = 0;
+					flags2 |= t.tablet ? 0x01u : 0u;
+					flags2 |= t.test_hit ? 0x02u : 0u;
+					flags2 |= t.selfcheck_failed ? 0x04u : 0u;
+					flags2 |= t.refused_online ? 0x08u : 0u;
+					ToResultVector(ret_buffer, kMenuPointerSize, ret_cnt);
+					ret_cnt += 4;
+					ToResultVector<u8>(ret_buffer, 1, ret_cnt + 0);
+					ToResultVector<u8>(ret_buffer, static_cast<u8>(flags), ret_cnt + 1);
+					ToResultVector<u8>(ret_buffer, static_cast<u8>(flags2), ret_cnt + 2);
+					ToResultVector<s8>(ret_buffer, t.hovered, ret_cnt + 3);
+					ToResultVector<s8>(ret_buffer, t.current, ret_cnt + 4);
+					ToResultVector<s8>(ret_buffer, t.target, ret_cnt + 5);
+					ToResultVector<u8>(ret_buffer, t.presses_target, ret_cnt + 6);
+					ToResultVector<u8>(ret_buffer, static_cast<u8>((t.dir < 0) ? 0xFF : t.dir), ret_cnt + 7);
+					ToResultVector<float>(ret_buffer, t.u, ret_cnt + 8);
+					ToResultVector<float>(ret_buffer, t.v, ret_cnt + 12);
+					ToResultVector<float>(ret_buffer, t.hit_distance, ret_cnt + 16);
+					for (u32 i = 0; i < 3; i++)
+						ToResultVector<float>(ret_buffer, t.centre[i], ret_cnt + 20 + i * 4);
+					for (u32 i = 0; i < 4; i++)
+						ToResultVector<float>(ret_buffer, t.quat[i], ret_cnt + 32 + i * 4);
+					ToResultVector<float>(ret_buffer, t.half_width, ret_cnt + 48);
+					ToResultVector<float>(ret_buffer, t.half_height, ret_cnt + 52);
+					ToResultVector<u32>(ret_buffer, t.node_raw, ret_cnt + 56);
+					ToResultVector<u32>(ret_buffer, t.presses_total, ret_cnt + 60);
+					ToResultVector<u32>(ret_buffer, t.arrivals, ret_cnt + 64);
+					ToResultVector<u32>(ret_buffer, t.aborts, ret_cnt + 68);
+					ToResultVector<u32>(ret_buffer, t.ticks, ret_cnt + 72);
+					ToResultVector<u32>(ret_buffer, t.confirms_passed, ret_cnt + 76);
+					ToResultVector<u32>(ret_buffer, t.confirms_swallowed, ret_cnt + 80);
+					ret_cnt += kMenuPointerSize;
+					break;
+				}
+				if (op != 1)
+				{
+					Console.Warning("(PINE) MsgVRMenuPointer: unknown op %u.", static_cast<unsigned>(op));
+					goto error;
+				}
+				constexpr int kTestHitSize = 1 + 12;
+				if (!SafetyChecks(buf_cnt, kTestHitSize, ret_cnt, 1, buf_size)) [[unlikely]]
+					goto error;
+				const char* refusal = nullptr;
+				if (!std::getenv("PCSX2_VR_TEST_INPUT"))
+					refusal = "PCSX2_VR_TEST_INPUT is not set";
+				else if (EmuConfig.VR.OnlineSafe || EmuConfig.DEV9.EthEnable)
+					refusal = "online-safe mode or the network adapter is on";
+				else if (FromSpan<u8>(buf, buf_cnt + 1) != 1)
+					refusal = "unknown version";
+				if (refusal)
+				{
+					// A runner re-sends at 20 Hz; one line per hundred refusals is loud enough.
+					static u32 s_test_hit_refusals = 0;
+					if ((s_test_hit_refusals++ % 100) == 0)
+						Console.Warning("(PINE) MsgVRMenuPointer test hit refused: %s.", refusal);
+					goto error;
+				}
+				const u8 hand = FromSpan<u8>(buf, buf_cnt + 2);
+				const u16 ttl_ms = FromSpan<u16>(buf, buf_cnt + 3);
+				u32 at = buf_cnt + 5;
+				const float hit_u = ReadF32(buf, at);
+				const float hit_v = ReadF32(buf, at);
+				buf_cnt += kTestHitSize;
+				VR::XRInput::SetTestScreenHit(hand, hit_u, hit_v, ttl_ms);
+				ToResultVector<u8>(ret_buffer, 1, ret_cnt);
+				ret_cnt += 1;
 				break;
 			}
 #endif
