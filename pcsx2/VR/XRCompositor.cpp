@@ -19,6 +19,7 @@
 #include "VR/XRSession.h"
 #include "VR/VRVulkanBridge.h"
 #include "Config.h"
+#include "VMManager.h"
 
 #ifdef ENABLE_VULKAN
 #include "GS/GS.h"
@@ -2330,7 +2331,7 @@ namespace VR::XRCompositor
 			const char* env = std::getenv("PCSX2_VR_XRFAULT");
 			if (!env || !*env)
 				return;
-			if (EmuConfig.DEV9.EthEnable)
+			if (VMManager::IsOnlineLocked())
 			{
 				Console.Warning("(VR) PCSX2_VR_XRFAULT=%s refused: the network adapter is on (fault injection is offline only).", env);
 				return;

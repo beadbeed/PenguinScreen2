@@ -484,9 +484,9 @@ namespace VR
 	{
 		const Pcsx2Config::VROptions& cfg = EmuConfig.VR;
 		// GS-thread gates, refreshed every vsync: roll parallax follows the setting, and the stereo dump
-		// is offline only (never while the network adapter is on).
+		// is offline only (never while the network adapter is on, nor under PCSX2_TEST_ONLINE_LOCKS).
 		StereoState::SetRollParallaxEnabled(cfg.RollParallax);
-		StereoState::SetDumpAllowed(!EmuConfig.DEV9.EthEnable);
+		StereoState::SetDumpAllowed(!VMManager::IsOnlineLocked());
 		PublishPresentation(cfg);
 		if (!StereoGateOpen(cfg.Enable, LaunchRequestedVR(), StereoRenderArmed(), cfg.StereoMode,
 				cfg.StereoUseProfile))

@@ -1211,10 +1211,20 @@ namespace VR
 			// Display time a pulse ends at, per hand: until then the continuous rumble (re-triggered every frame)
 			// holds off, or it would cut a hit or shot pulse down to one frame.
 			XrTime s_pulse_end[2] = {0, 0};
+			// Held for each Update. With headset-rate submission Update runs on the VR pacer thread while Initialize
+			// and Shutdown run on the GS thread; a pacer stuck inside the runtime mid-update keeps holding it, and
+			// then Shutdown leaves s_input alone rather than tear its state down under that thread.
+			std::mutex s_update_mutex;
 		}
 
 		bool Initialize()
 		{
+			std::unique_lock<std::mutex> update_lock(s_update_mutex, std::try_to_lock);
+			if (!update_lock.owns_lock())
+			{
+				Console.Warning("(VR) Controller input not initialized: a VR thread is still inside an input update.");
+				return false;
+			}
 			for (std::atomic<int>& r : s_haptic_request)
 				r.store(-1, std::memory_order_relaxed);
 			for (std::atomic<int>& r : s_pulse_request)
@@ -1226,6 +1236,7 @@ namespace VR
 
 		void Update(XrTime display_time)
 		{
+			std::lock_guard<std::mutex> update_lock(s_update_mutex);
 			if (!s_input.IsInitialized())
 				return;
 			s_input.Update(display_time);
@@ -1257,6 +1268,15 @@ namespace VR
 
 		void Shutdown()
 		{
+			std::unique_lock<std::mutex> update_lock(s_update_mutex, std::try_to_lock);
+			if (!update_lock.owns_lock())
+			{
+				// The VR pacer is stuck inside the runtime in the middle of an input update: its XR handles are
+				// left as they are (the runtime is not answering) and the hands read neutral from here on.
+				Console.Warning("(VR) Controller input shutdown skipped: the VR thread is stuck inside an input update.");
+				ResetSnapshot();
+				return;
+			}
 			s_input.Shutdown();
 		}
 
