@@ -4,6 +4,68 @@ Read this first when you resume. It covers what happened after the PC shut off, 
 decisions, what the Mac found, and what to do next. Alex's Mac holds the full reports in
 `~/Documents/github/outbreak-vr/docs/reviews/` (not on GitHub). This file is the short form.
 
+## PC update 2 (Windows PC, 2026-10-11 afternoon): waves 4 and 5
+
+Branch `wave4-integration` holds both waves on top of `pc-firstperson`. Merge it into `pc-firstperson` and
+`coop-firstperson` once its checks pass.
+
+**Wave 4 (the real-headset problems from the 10 Oct logs):**
+- **Frames come from the VR pacer at the headset's rate** (`[VR] HeadsetRateSubmit`, default on). Before, one frame went
+  out per GS present (59.94/s on a 90 Hz display), and nothing at all while the GS was idle, so SteamVR timed the app
+  out and showed Home. The GS publishes layer sets, and the pacer submits every display period, with a stale rule and
+  smooth-turn extrapolation.
+- **An opaque black projection layer** goes under the screens (`OpaqueBackground`), so SteamVR Home no longer shows around
+  the quad.
+- **A bounded queue lock** protects the shared VkQueue. The GS never waits for a pacer inside `xrEndFrame`: the publish
+  is deferred to the next present instead. All of a present's swapchain waits share a 3 ms budget. VR is abandoned only
+  after 500 ms of no answer.
+- **Loss and fault handling:** losing the session falls back to flat play, `PCSX2_VR_XRFAULT` can inject faults, and
+  the Frames, Eyes and First-person screen lines are logged.
+- **Controller presence:**
+  - toasts for an asleep or missing controller;
+  - a binding report naming each hand's interaction profile;
+  - a stale headset pose disarms first person;
+  - the right stick drives the menu D-pad.
+- **Weapon feedback:**
+  - the pistol and laser show only when a weapon is equipped;
+  - shots, dry fire and reloads give haptics, a recoil kick, the slide and a muzzle flash;
+  - the wrist card shows ammo;
+  - hurt and heartbeat cues keep working while grabbed.
+- **Co-op safety:**
+  - pause, state loads and saves, and speed changes are refused at the VMManager chokepoints while the adapter is on;
+  - the local record's identity is checked through `+0x03` (both Files);
+  - the focus hold is given back when its condition fails;
+  - File #1's releaseWhen status range is fixed.
+- **Stereo:** true near depth to 0.75 m, parallax aligned with head roll, and a stereo dump with `stereo_metric.py`.
+
+**Wave 5:**
+- **Hands, laser and wrist card are placed at the display rate** on the pacer (`HandsDisplayRate`).
+- **Menu pointer:** a beam and dot on the world screen, hands drawn in menus, and an optional chest tablet.
+- **Point-to-select on the item screen:** File #1 maps the four cells and the equipped box; File #2 maps the four cells
+  (cursor struct `0x7671F0`). It uses closed-loop D-pad steering and never confirms anything itself.
+- **Auto-orthostereo** from the headset's IPD and the placed screen.
+
+**Measured on the null HMD (offline):**
+- Speed: the legacy path ran the emulation at about 50% speed (its xrWaitFrame blocked the GS). The pacer path with
+  the deferred publish and the wait budget held 96%, even with a null compositor that only takes about 22 frames/s.
+- Earlier wave-4 checks passed: frame submission, the background, the eye and screen lines, the bindings report,
+  shot and hurt haptics, the grab hand-back, online locks, record identity and the focus give-back.
+
+**Caveat about this afternoon's numbers:** from about 13:40 the PC hitched about 300 ms every ~1 s, even in plain flat
+mode with yesterday's build. It isn't CPU, disk, audio or SDL; most likely the monitors were off or the session was
+locked. Timing-sensitive harness checks (smooth turn, walk-and-shoot) failed for that reason, not because of the code.
+
+**New savestates:**
+- File #1 slot 5: gun equipped, a zombie grabs Kevin 5-7 s after loading.
+- File #1 slot 6: calm, gun equipped.
+- File #2 slot 2: Training Ground with the .45 equipped.
+
+**Research results** (offline, 2026-10-11) are in `tools/outbreak-vr/research/`:
+- `2026-10-11-file1-research.md`: record identity, weapon records and shots, the item-screen cursor graph, and R1 lock-on
+  vs point-to-aim (the lock-on doesn't take over the heading);
+- `2026-10-11-file2-research.md`: File #2's equip, held word, action byte, pitch sign, raise step, reload and cursor
+  struct.
+
 ## PC reply (Windows PC session, 2026-10-11)
 
 **Section 0:**
