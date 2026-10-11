@@ -2364,6 +2364,46 @@ namespace VR::MenuPointer
 			check(same(rl.refused, "no such cell") && s.st.request < 0, "a request for a cell the profile does not have is refused");
 		}
 
+		// Pouch requests under suspendWhen (the submenu safety): refused while a submenu's flag is up and through its
+		// tail, and in the wait after a confirm; once clear, a request steers (the strict re-arm after a submenu is the
+		// pointer's, not a squeeze's), and nothing is ever confirmed for the player.
+		{
+			ProfileDB::MenuPointerParams sp = p;
+			sp.suspend_when.push_back(ProfileDB::CameraGuard{});
+			Sim s;
+			s.p = &sp;
+			s.Open();
+			s.ResetCounts();
+			s.in.suspend = true;
+			s.Run(3);
+			RequestLog rl_sub;
+			ask(s, 3, rl_sub);
+			run_noting(s, 30, rl_sub);
+			check(same(rl_sub.refused, "a submenu is open") && rl_sub.started < 0 && s.game.presses == 0 && s.st.request < 0,
+				"suspendWhen: a pouch's request with a submenu open is refused and presses nothing");
+			s.in.suspend = false;
+			s.Poll();
+			RequestLog rl_tail;
+			ask(s, 3, rl_tail);
+			check(same(rl_tail.refused, "a submenu is open") && s.game.presses == 0, "suspendWhen: and in the submenu's tail");
+			s.Run(20);
+			s.in.confirm = true;
+			s.Poll();
+			s.in.confirm = false;
+			RequestLog rl_wait;
+			ask(s, 3, rl_wait);
+			check(s.passed == 1 && same(rl_wait.refused, "a confirm just reached the game") && s.game.presses == 0,
+				"suspendWhen: a pouch's request in the wait after a confirm is refused");
+			s.Run(30);
+			RequestLog rl_clear;
+			ask(s, 3, rl_clear);
+			int guard = 0;
+			while (s.arrivals == 0 && guard++ < 60)
+				s.Poll();
+			check(rl_clear.started == 3 && s.arrivals == 1 && s.game.cell == 3 && s.passed == 1 && s.phantom == 0,
+				"suspendWhen: once clear a pouch's request steers, and nothing is confirmed for the player");
+		}
+
 		if (failures == 0)
 			Console.WriteLn(Color_StrongGreen, "(VR) MenuPointer self-test: passed (%d checks: ray/quad, tablet, hover, plan, "
 											   "online rule, liveWhen, steering, overrides, aborts, confirm, latch, suspendWhen, submenus, "

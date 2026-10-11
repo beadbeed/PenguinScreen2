@@ -246,7 +246,10 @@ pouches:
 
 Steering the cursor uses `menuPointer`, so it follows the Menu Pointer setting
 and the same rules: it waits for `armDelayMs` after the screen opens, never
-runs while steering is suspended, and stops if you take over with the D-pad or
+runs while steering is suspended (a `menuPointer.suspendWhen` submenu and the
+6 vsyncs after it, the 0.4 s wait after a confirm, the latch without
+`suspendWhen`, or a cursor that stopped answering presses: a squeeze then is
+refused with a dull buzz), and stops if you take over with the D-pad or
 a stick. The Zone controls come first: a hand within a zone's reach (its
 `radius` plus 3 cm) is that zone's, never a pouch's, when the zone takes that
 hand, so a pouch overlapping a hip zone never changes what a squeeze at the hip
