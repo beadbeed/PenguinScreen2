@@ -1942,6 +1942,8 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(Brightness);
 	SettingsWrapEntry(GameRumble);
 	SettingsWrapEntry(HapticStrength);
+	SettingsWrapEntry(HeadsetRateSubmit);
+	SettingsWrapEntry(OpaqueBackground);
 	SettingsWrapEntry(XrSeatRuntimeDirs);
 	SettingsWrapEntry(XrSeatRuntimeJsons);
 

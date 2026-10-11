@@ -49,5 +49,17 @@ namespace VR::XRSession
 
 	bool IsLost();
 
+	// Any thread: treat the session as lost (an XR call returned XR_ERROR_SESSION_LOST or XR_ERROR_INSTANCE_LOST,
+	// the runtime failed too often, or it stopped answering). VRManager then shuts VR down and play goes on flat.
+	void MarkLost();
+
+	// The runtime stopped answering (a VR thread is stuck inside it): forgets the session, its space and the instance
+	// without calling into the runtime again, then shuts the controller input down the same way. The handles leak
+	// until the process exits.
+	void ForgetWithoutDestroying();
+
+	// PCSX2_VR_XRFAULT=exit: plays a runtime-requested session state through the normal handler (offline test aid).
+	void InjectStateForTest(XrSessionState state);
+
 	const char* GetStateName();
 }

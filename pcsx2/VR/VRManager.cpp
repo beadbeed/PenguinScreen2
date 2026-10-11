@@ -3,12 +3,14 @@
 
 #include "VR/VRManager.h"
 #include "VR/CameraDriver.h"
+#include "VR/HeadPose.h"
 #include "VR/StereoState.h"
 #include "VR/VRProfileDB.h"
 #include "VR/SplitState.h"
 #include "VR/SeatSession.h"
 #include "VR/XRCompositor.h"
 #include "VR/XRSession.h"
+#include "VR/VRVulkanBridge.h"
 
 #include "BuildVersion.h"
 #include "Config.h"
@@ -741,14 +743,32 @@ namespace VR
 		if (SeatCastArmed() && !SeatSession::Running())
 			SeatSession::Start(SeatCastTarget());
 
-		XRSession::PumpEvents();
+		// With headset-rate submission the VR pacer pumps the events, so state changes are handled while the GS is idle.
+		// A pacer stuck in the runtime pumps nothing: then this thread does, so a loss still reaches the teardown below.
+		if (!XRCompositor::PacerOwnsFrames() || XRCompositor::PacerStalled())
+			XRSession::PumpEvents();
 
 		if (XRSession::IsLost())
 		{
 			Console.Error("(VR) Session/runtime lost — shutting VR down; flat rendering continues.");
+			// First person disarms through its usual path (camera handed back, body shown) on the next vsync.
+			HeadPose::Invalidate();
+			Host::AddKeyedOSDMessage("VRLost", "VR runtime lost: playing flat", 10.0f);
 			XRCompositor::Shutdown();
-			XRSession::DestroySession();
-			XRSession::DestroyInstance();
+			bool abandoned = XRCompositor::Abandoned();
+#ifdef ENABLE_VULKAN
+			abandoned = abandoned || VR::XrQueueLockAbandoned();
+#endif
+			// A VR thread stuck inside the runtime: calling into it again could hang this thread too.
+			if (abandoned)
+			{
+				XRSession::ForgetWithoutDestroying();
+			}
+			else
+			{
+				XRSession::DestroySession();
+				XRSession::DestroyInstance();
+			}
 			return;
 		}
 

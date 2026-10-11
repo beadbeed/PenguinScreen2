@@ -35,4 +35,30 @@ namespace VR::XRCompositor
 		u32 generation = 0;
 	};
 	ScreenAnchor GetScreenAnchor();
+
+	// True after Shutdown had to leave the VR pacer stuck inside the runtime (detached): nothing may call into the
+	// runtime again, so the XR handles are left alive until the process exits. GS thread.
+	bool Abandoned();
+
+	// True while the VR pacer submits the frames at the headset's rate ([VR] HeadsetRateSubmit) and so also pumps
+	// the session events; false with legacy one-frame-per-present submission or no compositor. GS thread.
+	bool PacerOwnsFrames();
+
+	// True while PacerOwnsFrames() but the VR pacer has not come round its loop for about 250 ms (stuck in
+	// xrWaitFrame or another runtime call: the runtime died or stopped pacing), or has exited. VRManager then pumps
+	// the session events itself so a loss still reaches the teardown, and EndOfFrame skips the screen, hand and HUD
+	// uploads.
+	// GS thread.
+	bool PacerStalled();
+
+	// The headset's eyes as the runtime last located them (xrLocateViews): IPD, each eye's field of view in degrees
+	// (left, right, up, down, signed as OpenXR reports them: left and down negative) and the display rate. Any thread.
+	struct EyeInfo
+	{
+		bool valid = false;
+		float ipd_m = 0.0f;
+		float fov_deg[2][4] = {};
+		float display_hz = 0.0f;
+	};
+	EyeInfo GetEyeInfo();
 }

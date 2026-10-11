@@ -13,21 +13,110 @@
 #include "common/Assertions.h"
 #include "common/Console.h"
 
+#include <atomic>
+#include <chrono>
+#include <mutex>
+
 namespace VR
 {
 	namespace
 	{
 		bool s_bootstrap_active = false;
 
+		// The queue the OpenXR session shares with the GS (ScopedXrQueueLock).
+		std::timed_mutex s_xr_queue_mutex;
+		std::atomic<bool> s_xr_queue_lock_enabled{false};
+		std::atomic<bool> s_xr_queue_lock_abandoned{false};
+		std::atomic<u32> s_xr_queue_lock_max_wait_us{0};
+		// This thread holds the lock already, so a nested scope takes nothing (std::timed_mutex is not recursive).
+		thread_local bool t_xr_queue_lock_held = false;
+		constexpr auto kXrQueueLockTimeout = std::chrono::milliseconds(100);
+
+		void NoteXrQueueLockWait(u32 us)
+		{
+			u32 prev = s_xr_queue_lock_max_wait_us.load(std::memory_order_relaxed);
+			while (us > prev &&
+				   !s_xr_queue_lock_max_wait_us.compare_exchange_weak(prev, us, std::memory_order_relaxed))
+			{
+			}
+		}
+
 		void AbortBootstrap()
 		{
 			SeatSession::Stop();
 			XRCompositor::Shutdown();
-			XRSession::DestroySession();
-			XRSession::DestroyInstance();
+			// A VR thread stuck inside the runtime: calling into it again could hang this thread too.
+			if (XRCompositor::Abandoned() || XrQueueLockAbandoned())
+			{
+				XRSession::ForgetWithoutDestroying();
+			}
+			else
+			{
+				XRSession::DestroySession();
+				XRSession::DestroyInstance();
+			}
+			SetXrQueueLockEnabled(false);
 			Internal::GetVulkanHandles().Clear();
 			s_bootstrap_active = false;
 		}
+	}
+
+	ScopedXrQueueLock::ScopedXrQueueLock()
+	{
+		if (t_xr_queue_lock_held)
+			return;
+		if (!s_xr_queue_lock_enabled.load(std::memory_order_acquire) ||
+			s_xr_queue_lock_abandoned.load(std::memory_order_acquire))
+		{
+			return;
+		}
+
+		const auto start = std::chrono::steady_clock::now();
+		const bool locked = s_xr_queue_mutex.try_lock_for(kXrQueueLockTimeout);
+		const long long waited_us =
+			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+		NoteXrQueueLockWait((waited_us <= 0) ? 0u : (waited_us >= 0xFFFFFFFFll) ? 0xFFFFFFFFu : static_cast<u32>(waited_us));
+		if (locked)
+		{
+			m_locked = true;
+			t_xr_queue_lock_held = true;
+			return;
+		}
+
+		// Whoever holds it is stuck inside the runtime. Go on unlocked: emulation must not wait for it.
+		if (!s_xr_queue_lock_abandoned.exchange(true, std::memory_order_acq_rel))
+		{
+			Console.Error("(VR) Vulkan queue lock held over 100 ms (runtime not answering): abandoning VR, emulation continues.");
+			XRSession::MarkLost();
+		}
+	}
+
+	ScopedXrQueueLock::~ScopedXrQueueLock()
+	{
+		if (!m_locked)
+			return;
+		t_xr_queue_lock_held = false;
+		s_xr_queue_mutex.unlock();
+	}
+
+	void SetXrQueueLockEnabled(bool enabled)
+	{
+		if (enabled)
+		{
+			s_xr_queue_lock_abandoned.store(false, std::memory_order_release);
+			s_xr_queue_lock_max_wait_us.store(0, std::memory_order_relaxed);
+		}
+		s_xr_queue_lock_enabled.store(enabled, std::memory_order_release);
+	}
+
+	bool XrQueueLockAbandoned()
+	{
+		return s_xr_queue_lock_abandoned.load(std::memory_order_acquire);
+	}
+
+	u32 TakeXrQueueLockMaxWaitUs()
+	{
+		return s_xr_queue_lock_max_wait_us.exchange(0, std::memory_order_relaxed);
 	}
 
 	namespace Internal
@@ -120,6 +209,9 @@ namespace VR
 			AbortBootstrap();
 			return false;
 		}
+
+		// The session now shares the GS graphics queue: from here on both sides take the queue lock to use it.
+		SetXrQueueLockEnabled(true);
 
 		if (!XRCompositor::Initialize())
 		{
