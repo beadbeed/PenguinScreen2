@@ -617,6 +617,13 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 			{
 				if (!VMManager::HasValidVM())
 					goto error;
+				// Online (network adapter on) a state save/load or a MemWatch pause would stall or desync the room.
+				if (EmuConfig.DEV9.EthEnable)
+				{
+					Console.Warning("(PINE) %s refused: the network adapter is on.", "MsgVRMemWatch");
+					goto error;
+				}
+
 				if (!SafetyChecks(buf_cnt, 4 + 3, ret_cnt, 1, buf_size)) [[unlikely]]
 					goto error;
 				const u32 watch_addr = FromSpan<u32>(buf, buf_cnt);
@@ -802,6 +809,13 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 			{
 				if (!VMManager::HasValidVM())
 					goto error;
+				// Online (network adapter on) a state save/load or a MemWatch pause would stall or desync the room.
+				if (EmuConfig.DEV9.EthEnable)
+				{
+					Console.Warning("(PINE) %s refused: the network adapter is on.", "MsgSaveState");
+					goto error;
+				}
+
 				if (!SafetyChecks(buf_cnt, 1, ret_cnt, 0, buf_size)) [[unlikely]]
 					goto error;
 				Host::RunOnCPUThread([slot = FromSpan<u8>(buf, buf_cnt)] {
@@ -816,6 +830,13 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 			{
 				if (!VMManager::HasValidVM())
 					goto error;
+				// Online (network adapter on) a state save/load or a MemWatch pause would stall or desync the room.
+				if (EmuConfig.DEV9.EthEnable)
+				{
+					Console.Warning("(PINE) %s refused: the network adapter is on.", "MsgLoadState");
+					goto error;
+				}
+
 				if (!SafetyChecks(buf_cnt, 1, ret_cnt, 0, buf_size)) [[unlikely]]
 					goto error;
 				Host::RunOnCPUThread([slot = FromSpan<u8>(buf, buf_cnt)] {
