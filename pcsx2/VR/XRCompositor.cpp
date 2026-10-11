@@ -145,6 +145,18 @@ namespace VR::XRCompositor
 		constexpr u8 kKindQuad = 0;
 		constexpr u8 kKindCylinder = 1;
 
+		// A layer that moves with a controller (a hand impostor, the laser, the wrist card): the controller pose it was placed
+		// for. With [VR] HandsDisplayRate the pacer moves it rigidly with that hand to the pose located for each display frame.
+		struct HandAttach
+		{
+			bool attached = false;
+			u8 hand = 0; // HandModel::kLeft / kRight
+			float ref_pos[3] = {0.0f, 0.0f, 0.0f}; // the grip position
+			float ref_quat[4] = {0.0f, 0.0f, 0.0f, 1.0f}; // the orientation the layer was placed by (aim, or grip)
+			float ref_eye[3] = {0.0f, 0.0f, 0.0f}; // the eye the image was drawn from
+			XrTime ref_time = 0; // the display time that pose was located for; 0 = unknown
+		};
+
 		// The layers the GS built at its last present, copied by value: the pacer submits them every display period
 		// until the next present replaces them (the runtime keeps showing each swapchain's last released image).
 		struct PublishedSet
@@ -155,6 +167,7 @@ namespace VR::XRCompositor
 				u8 role;
 				XrCompositionLayerQuad quad;
 				XrCompositionLayerCylinderKHR cyl;
+				HandAttach att; // not attached unless the layer rides on a controller
 			};
 			Entry e[kLayerCapacity];
 			u32 count;
@@ -192,6 +205,14 @@ namespace VR::XRCompositor
 			// [VR] HeadsetRateSubmit and OpaqueBackground, read once at Initialize.
 			bool headset_rate = true;
 			bool opaque_bg = true;
+			// [VR] HandsDisplayRate and the hands' test aids (PCSX2_VR_HANDS_RERASTER=always, PCSX2_VR_FAKE_HANDS: 1, or 2 for
+			// "gun", PCSX2_VR_FAKE_HANDS_SWEEP, PCSX2_VR_HANDS_GRIP_ORIENT), read once at Initialize before the pacer starts,
+			// so the pacer reads them without a lock.
+			bool hands_display_rate = true;
+			bool hands_reraster_always = false;
+			int fake_hands = 0;
+			bool fake_sweep = false;
+			bool grip_orient = false;
 
 			// Written by the pacer after each xrWaitFrame.
 			std::atomic<XrTime> latest_display_time{0};
@@ -207,6 +228,7 @@ namespace VR::XRCompositor
 				XrPosef pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
 				bool valid = false;
 				bool position_valid = false;
+				XrTime time = 0; // the display time it was located for
 			};
 			std::mutex head_mutex;
 			PacerHead pacer_head;
@@ -238,6 +260,9 @@ namespace VR::XRCompositor
 			std::atomic<u32> stat_gs_frames{0};
 			std::atomic<u32> stat_copy_skipped{0};
 			std::atomic<u32> stat_copy_timeout{0};
+			// Hand images drawn and uploaded (new), and hands shown again from their last image (kept), for the Hands line.
+			std::atomic<u32> stat_hand_new{0};
+			std::atomic<u32> stat_hand_kept{0};
 
 			// Headset rate: SteadyNowMs at the top of every pacer loop and when its xrWaitFrame returns. An old value
 			// means the pacer is stuck in the runtime; the GS thread then pumps the session events (PacerStalled).
@@ -309,6 +334,19 @@ namespace VR::XRCompositor
 			bool hand_fence_submitted = false;
 			// Set when creating any of the above fails: hands stay off until the next Initialize().
 			bool hands_disabled = false;
+			// What a hand swapchain's image shows: the impostor quad and the hand it was drawn for, the eye it was drawn
+			// from, the display time of that hand pose and when (SteadyNowMs) it was drawn. GS thread only.
+			struct HandImage
+			{
+				bool valid = false;
+				HandModel::ImpostorQuad iq;
+				HandModel::HandState hs;
+				float eye[3] = {0.0f, 0.0f, 0.0f};
+				XrTime pose_time = 0;
+				u64 raster_ms = 0;
+			};
+			HandImage hand_image[kHandSlots];         // what each hand swapchain's last RELEASED image shows
+			HandImage hand_image_pending[kHandSlots]; // drawn this present, committed at its release (ReleaseAndPublish)
 
 			// HUD cards (HudCards: the laser sight, the wrist card, the comfort vignette, the toast and the blink):
 			// the same CPU-raster upload path once more, one swapchain per card sharing a staging buffer, command
@@ -365,6 +403,7 @@ namespace VR::XRCompositor
 			XrPosef head_pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
 			bool head_pose_valid = false;
 			bool head_position_valid = false;
+			XrTime head_pose_time = 0; // the display time head_pose was located for (GS thread)
 
 			VkCommandPool cmd_pool = VK_NULL_HANDLE;
 			VkCommandBuffer cmd_buffers[NUM_CMD_BUFFERS] = {};
@@ -1116,6 +1155,37 @@ namespace VR::XRCompositor
 			return appended;
 		}
 
+		// PCSX2_VR_FAKE_HANDS: a test hand held at its offset from the head (HandModel::FakeHandState), swept on the
+		// display clock t with PCSX2_VR_FAKE_HANDS_SWEEP. The GS thread and the pacer both call it (it is pure), so for
+		// the same head and display time both get the same hand.
+		HandModel::HandState FakeHand(int hand, const float eye[3], const float head_quat[4], bool gun, XrTime t)
+		{
+			HandModel::HandState h = HandModel::FakeHandState(hand, eye, head_quat, gun);
+			if (s.fake_sweep && h.valid)
+				HandModel::ApplyFakeSweep(hand, static_cast<s64>(t), &h);
+			return h;
+		}
+
+		// Records in att[slot] that a layer was placed for this hand pose (pos: the grip position; quat: the
+		// orientation it was placed by), drawn from eye, located for display time t.
+		void AttachToHand(HandAttach* att, int slot, int hand, const float pos[3], const float quat[4], const float eye[3],
+			XrTime t)
+		{
+			if (!att)
+				return;
+			HandAttach& a = att[slot];
+			a.attached = true;
+			a.hand = static_cast<u8>(hand);
+			for (int k = 0; k < 3; k++)
+			{
+				a.ref_pos[k] = pos[k];
+				a.ref_eye[k] = eye[k];
+			}
+			for (int k = 0; k < 4; k++)
+				a.ref_quat[k] = quat[k];
+			a.ref_time = t;
+		}
+
 		void DestroyHandResources()
 		{
 			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
@@ -1158,6 +1228,12 @@ namespace VR::XRCompositor
 			s.hand_staging_memory = VK_NULL_HANDLE;
 			s.hand_fence = VK_NULL_HANDLE;
 			s.hand_cmd = VK_NULL_HANDLE;
+			// The swapchains are gone, and with them the images a kept hand would show.
+			for (int i = 0; i < kHandSlots; i++)
+			{
+				s.hand_image[i].valid = false;
+				s.hand_image_pending[i].valid = false;
+			}
 		}
 
 		// Everything the hands need, created together the first time a hand is shown and kept until
@@ -1323,7 +1399,7 @@ namespace VR::XRCompositor
 		// quad that faces the head, uploaded, and submitted after the screen and lever layers. The quad
 		// is flat at the hand's depth, so the runtime's reprojection keeps it in place as the head moves.
 		u32 BuildHandLayers(XrCompositionLayerQuad* hand_quads, const XrCompositionLayerBaseHeader** layers,
-			u32& layer_count, u32 layer_capacity)
+			u32& layer_count, u32 layer_capacity, HandAttach* att)
 		{
 			// PCSX2_VR_FAKE_HANDS (any value): both hands held at fixed offsets from the head and shown
 			// even outside first person, to check them on a headset without controllers (SteamVR's null
@@ -1353,17 +1429,24 @@ namespace VR::XRCompositor
 				s.head_pose.orientation.w};
 
 			HandModel::HandState hs[kHandSlots];
+			// The display time the hands' poses were located for (the head's for the test hands), carried with their
+			// images so the pacer knows which pose each image was drawn for.
+			XrTime pose_time = s.head_pose_time;
 			if (fake)
 			{
 				for (int i = 0; i < kHandSlots; i++)
-					hs[i] = HandModel::FakeHandState(i, eye, head_quat, s_fake_hands == 2);
+					hs[i] = FakeHand(i, eye, head_quat, s_fake_hands == 2, s.head_pose_time);
 			}
 			else
 			{
 				const VRInputSnapshot snap = GetInputSnapshot();
 				if (snap.generation == 0 || !snap.actions_active)
 					return 0;
-				const bool gun = HandModel::GunHeld();
+				if (snap.display_time != 0)
+					pose_time = snap.display_time;
+				// The pistol only in first person: hands shown anywhere else (a menu) are empty, so they get no
+				// recoil, flash or slide either.
+				const bool gun = HandModel::GunHeld() && CameraDriver::LookAtActive();
 				for (int i = 0; i < kHandSlots; i++)
 				{
 					const auto& src = snap.hands[i];
@@ -1409,6 +1492,23 @@ namespace VR::XRCompositor
 			for (int i = 0; i < kHandSlots; i++)
 				want[i] = hs[i].valid && HandModel::PlaceImpostor(i, hs[i], eye, &iq[i]);
 
+			// Headset rate with [VR] HandsDisplayRate: the pacer moves each hand's image with its controller every display
+			// frame, so an image is drawn again only once the view of the hand has drifted from the one it was drawn for,
+			// grip or trigger moved, a shot plays, or it is old; until then its last released image is shown again (kept).
+			// Otherwise every visible hand is drawn every present, its image going out at this present's pose.
+			const bool keep_images = s.headset_rate && s.hands_display_rate && !s.hands_reraster_always;
+			const u64 now_ms = CameraDriver::SteadyNowMs();
+			bool redraw[kHandSlots] = {false, false};
+			for (int i = 0; i < kHandSlots; i++)
+			{
+				if (!want[i])
+					continue;
+				const auto& img = s.hand_image[i];
+				redraw[i] = !keep_images || !img.valid ||
+				            HandModel::NeedsReraster(img.hs, img.eye, img.iq.centre, hs[i], eye,
+				                (now_ms > img.raster_ms) ? (now_ms - img.raster_ms) : 0);
+			}
+
 			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
 			static std::vector<u32> s_hand_pixels;
 			bool recording = false;
@@ -1419,6 +1519,12 @@ namespace VR::XRCompositor
 			{
 				if (!want[i])
 					continue;
+				if (!redraw[i])
+				{
+					// Kept: nothing acquired or drawn; the append below shows its last image again.
+					s.stat_hand_kept.fetch_add(1, std::memory_order_relaxed);
+					continue;
+				}
 				auto& hc = s.hand_chains[i];
 				// Headset rate: an image whose release never happened (runtime marked lost) is left to teardown.
 				if (hc.release_pending)
@@ -1487,6 +1593,15 @@ namespace VR::XRCompositor
 						s_hand_pixels.data(), static_cast<size_t>(kHandImageBytes));
 				}
 				RecordHandUpload(s.hand_cmd, i, hc.images[index].image);
+				// What this image shows, committed as the hand's image when its release goes through.
+				auto& drawn = s.hand_image_pending[i];
+				drawn.valid = true;
+				drawn.iq = iq[i];
+				drawn.hs = hs[i];
+				for (int k = 0; k < 3; k++)
+					drawn.eye[k] = eye[k];
+				drawn.pose_time = pose_time;
+				drawn.raster_ms = now_ms;
 				pending[pending_count] = i;
 				pending_count++;
 			}
@@ -1510,35 +1625,51 @@ namespace VR::XRCompositor
 						hc.release_pending = true;
 						hc.pending_submitted = submitted;
 						uploaded[pending[k]] = submitted;
+						if (submitted)
+							s.stat_hand_new.fetch_add(1, std::memory_order_relaxed);
 						continue;
 					}
 					if (XR_SUCCEEDED(LockedRelease(hc.swapchain)) && submitted)
 					{
 						hc.ever_released = true;
 						uploaded[pending[k]] = true;
+						s.stat_hand_new.fetch_add(1, std::memory_order_relaxed);
 					}
 				}
 			}
 
-			// Only hands drawn this frame: last frame's image on this frame's quad would be from the wrong place.
+			// Each hand goes with the image it shows and the pose that image was drawn for: drawn this present, or kept
+			// (its last released image, also for a hand whose redraw got no swapchain image this present). Without kept
+			// images only hands drawn this present go: last present's image on this present's quad would be from the
+			// wrong place. A hand whose image is about to be released without a finished drawing in it
+			// (release_pending without an upload) goes without a layer this present.
 			u32 appended = 0;
 			for (int i = 0; i < kHandSlots; i++)
 			{
-				if (!uploaded[i] || layer_count >= layer_capacity)
+				const auto& hc = s.hand_chains[i];
+				const auto& img = s.hand_image[i];
+				const bool show_kept = keep_images && want[i] && !uploaded[i] && img.valid && !hc.release_pending;
+				if ((!uploaded[i] && !show_kept) || layer_count >= layer_capacity)
 					continue;
+				const HandModel::ImpostorQuad& shown = uploaded[i] ? iq[i] : img.iq;
 				XrCompositionLayerQuad& quad = hand_quads[i];
 				quad.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
 				quad.next = nullptr;
 				quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
 				quad.space = XRSession::GetSpace();
 				quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-				quad.subImage = {s.hand_chains[i].swapchain,
+				quad.subImage = {hc.swapchain,
 					{{0, 0}, {static_cast<s32>(HandModel::kImageSize), static_cast<s32>(HandModel::kImageSize)}}, 0};
-				quad.pose.orientation = {iq[i].quat[0], iq[i].quat[1], iq[i].quat[2], iq[i].quat[3]};
-				quad.pose.position = {iq[i].centre[0], iq[i].centre[1], iq[i].centre[2]};
-				quad.size = {iq[i].size_m, iq[i].size_m};
+				quad.pose.orientation = {shown.quat[0], shown.quat[1], shown.quat[2], shown.quat[3]};
+				quad.pose.position = {shown.centre[0], shown.centre[1], shown.centre[2]};
+				quad.size = {shown.size_m, shown.size_m};
 				layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
 				appended++;
+				// The controller pose the image was drawn for, so the pacer can move it with the hand.
+				if (uploaded[i])
+					AttachToHand(att, i, i, hs[i].pos, hs[i].quat, eye, pose_time);
+				else
+					AttachToHand(att, i, i, img.hs.pos, img.hs.quat, img.eye, img.pose_time);
 			}
 			return appended;
 		}
@@ -1806,7 +1937,7 @@ namespace VR::XRCompositor
 		// is rastered at full opacity when its content changes and uploaded only when its content or fade step
 		// does; between uploads the runtime keeps showing the last released image.
 		u32 BuildHudLayers(XrCompositionLayerQuad* hud_quads, const XrCompositionLayerBaseHeader** layers,
-			u32& layer_count, u32 layer_capacity, u32 under_from)
+			u32& layer_count, u32 layer_capacity, u32 under_from, HandAttach* att)
 		{
 			HudCards::MaybeTestToast();
 			HudCards::MaybeTestBlink();
@@ -1894,11 +2025,12 @@ namespace VR::XRCompositor
 				{
 					const float head_quat[4] = {s.head_pose.orientation.x, s.head_pose.orientation.y, s.head_pose.orientation.z,
 						s.head_pose.orientation.w};
-					const HandModel::HandState fake = HandModel::FakeHandState(HandModel::kLeft, eye, head_quat, false);
+					const HandModel::HandState fake = FakeHand(HandModel::kLeft, eye, head_quat, false, s.head_pose_time);
 					if (fake.valid)
 					{
 						HudCards::PlaceWrist(fake.pos, fake.quat, eye, true, wrist_pos, wrist_quat, &wrist_facing);
 						wrist_placed = true;
+						AttachToHand(att, HudCards::kWrist, HandModel::kLeft, fake.pos, fake.quat, eye, s.head_pose_time);
 					}
 				}
 				else if (s.head_position_valid)
@@ -1915,6 +2047,8 @@ namespace VR::XRCompositor
 							orient.orientation_xyzw[2], orient.orientation_xyzw[3]};
 						HudCards::PlaceWrist(hand_pos, hand_quat, eye, false, wrist_pos, wrist_quat, &wrist_facing);
 						wrist_placed = true;
+						AttachToHand(att, HudCards::kWrist, HandModel::kLeft, hand_pos, hand_quat, eye,
+							(snap.display_time != 0) ? snap.display_time : s.head_pose_time);
 					}
 				}
 			}
@@ -1970,11 +2104,12 @@ namespace VR::XRCompositor
 					s.head_position_valid ? s.head_pose.position.y : 0.0f, s.head_position_valid ? s.head_pose.position.z : 0.0f};
 				float hand_pos[3] = {0.0f, 0.0f, 0.0f};
 				float hand_quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+				XrTime laser_time = s.head_pose_time; // the display time hand_pos/hand_quat were located for
 				if (s_fake_gun)
 				{
 					const float head_quat[4] = {s.head_pose.orientation.x, s.head_pose.orientation.y, s.head_pose.orientation.z,
 						s.head_pose.orientation.w};
-					const HandModel::HandState fake = HandModel::FakeHandState(HandModel::kRight, eye, head_quat, true);
+					const HandModel::HandState fake = FakeHand(HandModel::kRight, eye, head_quat, true, s.head_pose_time);
 					if (fake.valid)
 					{
 						for (int k = 0; k < 3; k++)
@@ -1996,10 +2131,15 @@ namespace VR::XRCompositor
 						for (int k = 0; k < 4; k++)
 							hand_quat[k] = orient.orientation_xyzw[k];
 						laser_hand = true;
+						if (snap.display_time != 0)
+							laser_time = snap.display_time;
 					}
 				}
 				// Looking straight down the beam no side of the quad faces the eye: that frame goes without it.
 				laser_placed = laser_hand && HudCards::PlaceLaser(hand_pos, hand_quat, eye, laser_pos, laser_quat);
+				// Only the gun's beam rides on the hand: anything else shown in the laser's slot stays unattached.
+				if (laser_placed)
+					AttachToHand(att, HudCards::kLaser, HandModel::kRight, hand_pos, hand_quat, eye, laser_time);
 			}
 			if (!laser_hand)
 				s.hud_laser_opacity = 0.0f;
@@ -2838,9 +2978,13 @@ namespace VR::XRCompositor
 			const XrCompositionLayerQuad* lever_quads;
 			const XrCompositionLayerQuad* hand_quads;
 			const XrCompositionLayerQuad* hud_quads;
+			// The controller pose each hand and each HUD card was placed for, by slot (HandAttach).
+			const HandAttach* hand_att;
+			const HandAttach* hud_att;
 		};
 
-		// Copies each pointed-to layer by value, in order, with its role.
+		// Copies each pointed-to layer by value, in order, with its role and, for a hand or a HUD card that rides on a
+		// controller, the pose it was placed for.
 		void FillPublishedSet(PublishedSet* out, const XrCompositionLayerBaseHeader* const* layers, u32 layer_count,
 			const LayerSources& src)
 		{
@@ -2849,6 +2993,7 @@ namespace VR::XRCompositor
 			{
 				const void* const p = layers[i];
 				PublishedSet::Entry& e = out->e[out->count];
+				e.att = HandAttach{};
 				bool known = false;
 				for (u32 k = 0; k < src.screen_slots && !known; k++)
 				{
@@ -2884,6 +3029,8 @@ namespace VR::XRCompositor
 						e.kind = kKindQuad;
 						e.role = kRoleHand;
 						e.quad = src.hand_quads[k];
+						if (src.hand_att)
+							e.att = src.hand_att[k];
 						known = true;
 					}
 				}
@@ -2894,6 +3041,8 @@ namespace VR::XRCompositor
 						e.kind = kKindQuad;
 						e.role = (k == HudCards::kLaser) ? kRoleHudLaser : (k == HudCards::kWrist) ? kRoleHudWrist : kRoleHudView;
 						e.quad = src.hud_quads[k];
+						if (src.hud_att)
+							e.att = src.hud_att[k];
 						known = true;
 					}
 				}
@@ -3070,6 +3219,13 @@ namespace VR::XRCompositor
 					// A hand's layer is only ever this present's image at this present's pose: drop it.
 					dropped[dropped_count++] = hc.swapchain;
 				}
+				// What the runtime shows for this hand from now on: this present's drawing (committed with the pose it was
+				// drawn for, in the same section that publishes it), or an image no kept hand may go with.
+				if (XR_SUCCEEDED(res) && hc.pending_submitted)
+					s.hand_image[i] = s.hand_image_pending[i];
+				else
+					s.hand_image[i].valid = false;
+				s.hand_image_pending[i].valid = false;
 				hc.pending_submitted = false;
 			}
 
@@ -3135,6 +3291,10 @@ namespace VR::XRCompositor
 			return n;
 		}
 
+		// A hand's view drifted this far from the one its image was drawn for while the pacer moved it: counted on the
+		// Hands line (the image is drawn again from kRerasterDriftDeg on, so this means images are not keeping up).
+		constexpr float kHandDriftWarnDeg = 15.0f;
+
 		// The Frames line: what reached the runtime over the last 5 s, kept by the thread that ends the frames (the
 		// pacer, or the GS thread in legacy mode).
 		struct FrameStats
@@ -3152,6 +3312,21 @@ namespace VR::XRCompositor
 			u32 end_n = 0;
 			u32 layers = 0;
 			u64 last_serial = 0;
+			// The Hands line (the pacer, headset rate only): layers riding on a controller placed, and how many of them
+			// moved to the controller pose of their display frame; how old the controller pose each went out with was;
+			// how far the controller had moved since the pose the GS placed it for; and the hand images' view drift.
+			u32 hand_placements = 0;
+			u32 hand_reposed = 0;
+			double hand_age_sum_ms = 0.0;
+			u32 hand_age_n = 0;
+			float hand_age_max_ms = 0.0f;
+			double hand_moved_sum_mm = 0.0;
+			double hand_moved_sum_deg = 0.0;
+			u32 hand_moved_n = 0;
+			float hand_moved_max_mm = 0.0f;
+			float hand_moved_max_deg = 0.0f;
+			float hand_drift_max_deg = 0.0f;
+			u32 hand_drift_over = 0;
 		};
 
 		void NoteWaitToBegin(FrameStats& st, s64 wait_ns, s64 begin_ns)
@@ -3189,6 +3364,23 @@ namespace VR::XRCompositor
 				VR::TakeXrQueueLockMaxWaitUs(), static_cast<double>(VR::TakeXrQueueLockTotalWaitUs()) / 1000.0 / secs, skipped, timed_out, s.stat_publish_deferred.exchange(0, std::memory_order_relaxed),
 				st.layers,
 				s.headset_rate ? "headset rate (VR pacer)" : "legacy (one per GS present)");
+			// Only the pacer places hands (legacy submits each frame for the display time it located the hands for).
+			const u32 hand_new = s.stat_hand_new.exchange(0, std::memory_order_relaxed);
+			const u32 hand_kept = s.stat_hand_kept.exchange(0, std::memory_order_relaxed);
+			if (st.hand_placements > 0)
+			{
+				Console.WriteLn("(VR) Hands: placements %u, re-posed %u, age mean %.1f max %.1f ms, moved since the GS pose mean "
+								"%.1f max %.1f mm / mean %.1f max %.1f deg, image drift max %.1f deg (%u over %.0f), GS images "
+								"new %.1f/s kept %.1f/s, mode %s",
+					st.hand_placements, st.hand_reposed,
+					(st.hand_age_n > 0) ? (st.hand_age_sum_ms / st.hand_age_n) : 0.0, static_cast<double>(st.hand_age_max_ms),
+					(st.hand_moved_n > 0) ? (st.hand_moved_sum_mm / st.hand_moved_n) : 0.0,
+					static_cast<double>(st.hand_moved_max_mm),
+					(st.hand_moved_n > 0) ? (st.hand_moved_sum_deg / st.hand_moved_n) : 0.0,
+					static_cast<double>(st.hand_moved_max_deg), static_cast<double>(st.hand_drift_max_deg), st.hand_drift_over,
+					static_cast<double>(kHandDriftWarnDeg), hand_new / secs, hand_kept / secs,
+					s.hands_display_rate ? "display rate (VR pacer)" : "GS present (HandsDisplayRate off)");
+			}
 			const u64 last_serial = st.last_serial;
 			st = FrameStats();
 			st.window_ms = now;
@@ -3268,6 +3460,306 @@ namespace VR::XRCompositor
 		bool PacerShouldStop(u32 gen)
 		{
 			return s.pacer_exit.load(std::memory_order_acquire) || PacerDetached(gen);
+		}
+
+		// The hands as the pacer places them for one display frame (LocateHandsNow), with the eye the GS convention
+		// takes (the head position, or the origin when it is not tracked).
+		struct HandsNow
+		{
+			struct H
+			{
+				bool valid = false;
+				float pos[3] = {0.0f, 0.0f, 0.0f};          // the grip position
+				float quat[4] = {0.0f, 0.0f, 0.0f, 1.0f}; // aim orientation, or grip (PCSX2_VR_HANDS_GRIP_ORIENT)
+				XrTime time = 0;                           // the display time this pose was located for
+			};
+			H hand[kHandSlots];
+			float eye[3] = {0.0f, 0.0f, 0.0f};
+		};
+
+		// What PlaceHandAttached did in one display frame, for the Hands line and the sync log. The jerk keys are the
+		// left hand, the right hand (HandModel::kLeft / kRight) and the gun's laser.
+		constexpr int kJerkKeys = 3;
+		constexpr int kJerkLaser = 2;
+		struct HandFrameInfo
+		{
+			u32 placements = 0;
+			u32 reposed = 0;
+			double age_sum_ms = 0.0;
+			u32 age_n = 0;
+			float age_max_ms = 0.0f;
+			double moved_sum_mm = 0.0;
+			double moved_sum_deg = 0.0;
+			u32 moved_n = 0;
+			float moved_max_mm = 0.0f;
+			float moved_max_deg = 0.0f;
+			float drift_max_deg = 0.0f;
+			u32 drift_over = 0;
+			// The quad centre submitted per jerk key this frame.
+			bool have[kJerkKeys] = {false, false, false};
+			float centre[kJerkKeys][3] = {};
+		};
+
+		// Headset rate: the hands for display time t, in the base space, as the GS places them (BuildHandLayers): the
+		// test hands from the head pose located for t, else the controllers XRInput::Update just located for t (grip
+		// position; aim orientation, or grip with PCSX2_VR_HANDS_GRIP_ORIENT). Called outside submit_mutex: the snapshot
+		// takes only leaf locks.
+		void LocateHandsNow(XrTime t, const XrPosef& head, bool head_valid, bool head_position_valid, HandsNow* out)
+		{
+			*out = HandsNow{};
+			out->eye[0] = head_position_valid ? head.position.x : 0.0f;
+			out->eye[1] = head_position_valid ? head.position.y : 0.0f;
+			out->eye[2] = head_position_valid ? head.position.z : 0.0f;
+			if (s.fake_hands != 0)
+			{
+				if (!head_valid)
+					return;
+				const float head_quat[4] = {head.orientation.x, head.orientation.y, head.orientation.z, head.orientation.w};
+				for (int i = 0; i < kHandSlots; i++)
+				{
+					const HandModel::HandState h = FakeHand(i, out->eye, head_quat, false, t);
+					if (!h.valid)
+						continue;
+					HandsNow::H& d = out->hand[i];
+					for (int k = 0; k < 3; k++)
+						d.pos[k] = h.pos[k];
+					for (int k = 0; k < 4; k++)
+						d.quat[k] = h.quat[k];
+					d.time = t;
+					d.valid = true;
+				}
+				return;
+			}
+			const VRInputSnapshot snap = GetInputSnapshot();
+			if (snap.generation == 0 || !snap.actions_active)
+				return;
+			for (int i = 0; i < kHandSlots; i++)
+			{
+				const auto& src = snap.hands[i];
+				if (!src.grip_pose.valid)
+					continue;
+				const auto& orient = (!s.grip_orient && src.aim_pose.valid) ? src.aim_pose : src.grip_pose;
+				HandsNow::H& d = out->hand[i];
+				for (int k = 0; k < 3; k++)
+					d.pos[k] = src.grip_pose.position_xyz[k];
+				for (int k = 0; k < 4; k++)
+					d.quat[k] = orient.orientation_xyzw[k];
+				d.time = (snap.display_time != 0) ? snap.display_time : t;
+				d.valid = true;
+			}
+		}
+
+		// The angle between two orientations (xyzw, normalised here), in degrees: 2 acos |a . b|.
+		float RotationBetweenDeg(const float a[4], const float b[4])
+		{
+			const float la = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2] + a[3] * a[3]);
+			const float lb = std::sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2] + b[3] * b[3]);
+			if (!(la > 1.0e-6f) || !(lb > 1.0e-6f))
+				return 0.0f;
+			const float d = std::fabs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]) / (la * lb);
+			const float deg = 2.0f * std::acos(std::min(d, 1.0f)) * (180.0f / 3.14159265f);
+			return std::isfinite(deg) ? deg : 0.0f;
+		}
+
+		// Headset rate: moves each layer that rides on a controller (an attached HandAttach: the hands, the gun's laser,
+		// the wrist card) rigidly with its hand, from the pose it was placed for to the pose located for this display
+		// frame, in the pacer's own copy of the published set. Always from the published pose, never cumulatively, and
+		// s.published is never written. apply false ([VR] HandsDisplayRate off), or no pose for the hand this frame,
+		// sends the published pose unchanged. Layers that do not ride on a controller are never touched. Records what it
+		// did in info.
+		void PlaceHandAttached(PublishedSet& set, const HandsNow& now, XrTime display_time, bool apply, HandFrameInfo* info)
+		{
+			*info = HandFrameInfo{};
+			for (u32 i = 0; i < set.count; i++)
+			{
+				PublishedSet::Entry& e = set.e[i];
+				const HandAttach& a = e.att;
+				if (!a.attached || e.kind != kKindQuad || a.hand >= kHandSlots)
+					continue;
+				const HandsNow::H& h = now.hand[a.hand];
+				XrPosef& pose = e.quad.pose;
+				const float published_centre[3] = {pose.position.x, pose.position.y, pose.position.z};
+				const float published_quat[4] = {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w};
+				XrTime used_time = a.ref_time;
+				info->placements++;
+				if (apply && h.valid)
+				{
+					float centre[3];
+					float quat[4];
+					HandModel::RePoseRigid(a.ref_pos, a.ref_quat, h.pos, h.quat, published_centre, published_quat, centre, quat);
+					pose.position = {centre[0], centre[1], centre[2]};
+					pose.orientation = {quat[0], quat[1], quat[2], quat[3]};
+					used_time = h.time;
+					info->reposed++;
+				}
+
+				// How old the controller pose this layer goes out with is.
+				if (used_time != 0)
+				{
+					const float age_ms =
+						static_cast<float>(std::max(0.0, static_cast<double>(display_time - used_time) / 1.0e6));
+					info->age_sum_ms += age_ms;
+					info->age_n++;
+					info->age_max_ms = std::max(info->age_max_ms, age_ms);
+				}
+				// How far the controller moved since the pose the GS placed this layer for.
+				if (h.valid)
+				{
+					const float dx = h.pos[0] - a.ref_pos[0];
+					const float dy = h.pos[1] - a.ref_pos[1];
+					const float dz = h.pos[2] - a.ref_pos[2];
+					const float mm = std::sqrt(dx * dx + dy * dy + dz * dz) * 1000.0f;
+					const float deg = RotationBetweenDeg(a.ref_quat, h.quat);
+					if (std::isfinite(mm))
+					{
+						info->moved_sum_mm += mm;
+						info->moved_sum_deg += deg;
+						info->moved_n++;
+						info->moved_max_mm = std::max(info->moved_max_mm, mm);
+						info->moved_max_deg = std::max(info->moved_max_deg, deg);
+					}
+					// A hand image seen from where the eye is now: how far the view drifted from the one it was drawn for.
+					if (e.role == kRoleHand)
+					{
+						const HandModel::ViewDrift drift = HandModel::MeasureViewDrift(
+							a.ref_pos, a.ref_quat, a.ref_eye, published_centre, h.pos, h.quat, now.eye);
+						if (drift.valid)
+						{
+							info->drift_max_deg = std::max(info->drift_max_deg, drift.angle_deg);
+							if (drift.angle_deg > kHandDriftWarnDeg)
+								info->drift_over++;
+						}
+					}
+				}
+
+				// The centre submitted, for the jerk. Only the laser riding on the gun hand counts as the laser.
+				int key = -1;
+				if (e.role == kRoleHand)
+					key = a.hand;
+				else if (e.role == kRoleHudLaser)
+					key = kJerkLaser;
+				if (key >= 0 && key < kJerkKeys)
+				{
+					info->have[key] = true;
+					info->centre[key][0] = pose.position.x;
+					info->centre[key][1] = pose.position.y;
+					info->centre[key][2] = pose.position.z;
+				}
+			}
+		}
+
+		// The Hands line's numbers: one display frame's placement folded into the 5 s window.
+		void AddHandFrame(FrameStats& st, const HandFrameInfo& f)
+		{
+			st.hand_placements += f.placements;
+			st.hand_reposed += f.reposed;
+			st.hand_age_sum_ms += f.age_sum_ms;
+			st.hand_age_n += f.age_n;
+			st.hand_age_max_ms = std::max(st.hand_age_max_ms, f.age_max_ms);
+			st.hand_moved_sum_mm += f.moved_sum_mm;
+			st.hand_moved_sum_deg += f.moved_sum_deg;
+			st.hand_moved_n += f.moved_n;
+			st.hand_moved_max_mm = std::max(st.hand_moved_max_mm, f.moved_max_mm);
+			st.hand_moved_max_deg = std::max(st.hand_moved_max_deg, f.moved_max_deg);
+			st.hand_drift_max_deg = std::max(st.hand_drift_max_deg, f.drift_max_deg);
+			st.hand_drift_over += f.drift_over;
+		}
+
+		// PCSX2_VR_SYNCLOG: how old the controller pose the hand-borne layers go out with is, per display frame (the mean
+		// over the frame's layers), and how smoothly the hands and the gun's laser move in the headset: the jerk
+		// |p(n) - 2 p(n-1) + p(n-2)| of each one's submitted quad centre, a rigid point on the hand (an impostor's centre
+		// is its bounding box's), so a redrawn image does not move it. Counted only over three display frames in a row
+		// whose display-time steps are each within 25% of the display period. Logged once a second.
+		void NoteHandPlacement(const HandFrameInfo& f, XrTime display_time)
+		{
+			static const bool s_synclog = (std::getenv("PCSX2_VR_SYNCLOG") != nullptr);
+			if (!s_synclog)
+				return;
+			struct Track
+			{
+				int n = 0;                 // frames held below (0-2)
+				float p[2][3] = {};        // [0] the frame before, [1] the one before that
+				XrTime t = 0;              // the display time of p[0]
+			};
+			static Track s_track[kJerkKeys];
+			static double s_age_sum = 0.0;
+			static float s_age_max = 0.0f;
+			static u32 s_age_frames = 0;
+			static double s_jerk_sq[2] = {0.0, 0.0}; // [0] the hands, [1] the laser
+			static float s_jerk_max[2] = {0.0f, 0.0f};
+			static u32 s_jerk_n[2] = {0, 0};
+			static u64 s_log_ms = 0;
+
+			if (f.age_n > 0)
+			{
+				s_age_sum += f.age_sum_ms / static_cast<double>(f.age_n);
+				s_age_max = std::max(s_age_max, f.age_max_ms);
+				s_age_frames++;
+			}
+			const XrDuration period = s.display_period_ns.load(std::memory_order_acquire);
+			for (int k = 0; k < kJerkKeys; k++)
+			{
+				Track& tr = s_track[k];
+				if (!f.have[k])
+				{
+					tr.n = 0;
+					continue;
+				}
+				// A display frame missed (or a step far off the period) starts the run again.
+				const XrTime step = display_time - tr.t;
+				const bool step_ok = period > 0 && step > 0 &&
+				                     std::abs(static_cast<double>(step - period)) <= 0.25 * static_cast<double>(period);
+				if (tr.n > 0 && !step_ok)
+					tr.n = 0;
+				const float* c = f.centre[k];
+				if (tr.n == 2)
+				{
+					const float jx = c[0] - 2.0f * tr.p[0][0] + tr.p[1][0];
+					const float jy = c[1] - 2.0f * tr.p[0][1] + tr.p[1][1];
+					const float jz = c[2] - 2.0f * tr.p[0][2] + tr.p[1][2];
+					const float jerk_mm = std::sqrt(jx * jx + jy * jy + jz * jz) * 1000.0f;
+					const int b = (k == kJerkLaser) ? 1 : 0;
+					if (std::isfinite(jerk_mm))
+					{
+						s_jerk_sq[b] += static_cast<double>(jerk_mm) * static_cast<double>(jerk_mm);
+						s_jerk_max[b] = std::max(s_jerk_max[b], jerk_mm);
+						s_jerk_n[b]++;
+					}
+				}
+				for (int j = 0; j < 3; j++)
+				{
+					tr.p[1][j] = tr.p[0][j];
+					tr.p[0][j] = c[j];
+				}
+				tr.t = display_time;
+				tr.n = std::min(tr.n + 1, 2);
+			}
+
+			const u64 now = CameraDriver::SteadyNowMs();
+			if (s_log_ms == 0)
+				s_log_ms = now;
+			if (now - s_log_ms < 1000)
+				return;
+			if (s_age_frames > 0 || s_jerk_n[0] > 0 || s_jerk_n[1] > 0)
+			{
+				Console.WriteLn("(VR) pacer: hands placement age per display frame mean %.1f max %.1f ms over %u frames; jerk "
+								"hand rms %.2f max %.2f mm, laser rms %.2f max %.2f mm (jerk samples: hand %u, laser %u)",
+					(s_age_frames > 0) ? (s_age_sum / static_cast<double>(s_age_frames)) : 0.0, static_cast<double>(s_age_max),
+					s_age_frames, (s_jerk_n[0] > 0) ? std::sqrt(s_jerk_sq[0] / static_cast<double>(s_jerk_n[0])) : 0.0,
+					static_cast<double>(s_jerk_max[0]),
+					(s_jerk_n[1] > 0) ? std::sqrt(s_jerk_sq[1] / static_cast<double>(s_jerk_n[1])) : 0.0,
+					static_cast<double>(s_jerk_max[1]), s_jerk_n[0], s_jerk_n[1]);
+			}
+			s_log_ms = now;
+			s_age_sum = 0.0;
+			s_age_max = 0.0f;
+			s_age_frames = 0;
+			for (int b = 0; b < 2; b++)
+			{
+				s_jerk_sq[b] = 0.0;
+				s_jerk_max[b] = 0.0f;
+				s_jerk_n[b] = 0;
+			}
 		}
 
 		// The VR pacer. Headset rate: it owns the frame loop, waiting, beginning and ending a frame every display
@@ -3410,6 +3902,7 @@ namespace VR::XRCompositor
 				const bool exiting = s.pacer_exit.load(std::memory_order_acquire);
 				XrView views[2] = {XrView{XR_TYPE_VIEW}, XrView{XR_TYPE_VIEW}};
 				bool views_ok = false;
+				HandsNow hands_now;
 				if (!exiting)
 				{
 					XRInput::Update(fs.predictedDisplayTime);
@@ -3428,7 +3921,12 @@ namespace VR::XRCompositor
 						s.pacer_head.pose = head;
 						s.pacer_head.valid = head_valid;
 						s.pacer_head.position_valid = head_position_valid;
+						s.pacer_head.time = fs.predictedDisplayTime;
 					}
+
+					// The hands for this frame's display time (outside submit_mutex: the input snapshot takes only leaf
+					// locks), for the layers riding on them.
+					LocateHandsNow(fs.predictedDisplayTime, head, head_valid, head_position_valid, &hands_now);
 
 					// Every frame for the background; about once a second without it, for the Eyes line alone.
 					const u64 probe_ms = CameraDriver::SteadyNowMs();
@@ -3451,6 +3949,7 @@ namespace VR::XRCompositor
 				const XrCompositionLayerBaseHeader* submit[kLayerCapacity + 1] = {};
 				u32 submit_count = 0;
 				bool stale = false;
+				HandFrameInfo hand_frame;
 				XrResult eres = XR_SUCCESS;
 				float end_ms = 0.0f;
 				{
@@ -3462,6 +3961,10 @@ namespace VR::XRCompositor
 							set = s.published;
 						}
 						stale = (set.count > 0 && set.publish_ms != 0 && CameraDriver::SteadyNowMs() > set.publish_ms + kStaleMs);
+						// The hands, the gun's laser and the wrist card move with their controllers to this frame's pose
+						// ([VR] HandsDisplayRate), in this copy only. A stale set drops them below.
+						if (!stale)
+							PlaceHandAttached(set, hands_now, fs.predictedDisplayTime, s.hands_display_rate, &hand_frame);
 						float turn = 0.0f;
 						if (set.fp_screen && set.turn_rate != 0.0f && set.publish_display_time != 0)
 						{
@@ -3502,7 +4005,11 @@ namespace VR::XRCompositor
 				stats.end_n++;
 				stats.layers = fs.shouldRender ? submit_count : 0;
 				if (fs.shouldRender && XR_SUCCEEDED(eres))
+				{
 					NoteScreenYaw(set, fs.predictedDisplayTime);
+					NoteHandPlacement(hand_frame, fs.predictedDisplayTime);
+					AddHandFrame(stats, hand_frame);
+				}
 				MaybeLogFrameStats(stats);
 			}
 
@@ -3571,6 +4078,40 @@ namespace VR::XRCompositor
 		// [VR] HeadsetRateSubmit and OpaqueBackground, read once (the GS thread, before the session runs).
 		s.headset_rate = EmuConfig.VR.HeadsetRateSubmit;
 		s.opaque_bg = EmuConfig.VR.OpaqueBackground;
+
+		// [VR] HandsDisplayRate and the hands' test aids, read once like HeadsetRateSubmit: all before the pacer starts,
+		// which then reads them without a lock. PCSX2_VR_FAKE_HANDS is parsed as BuildHandLayers does.
+		s.hands_display_rate = EmuConfig.VR.HandsDisplayRate;
+		s.grip_orient = (std::getenv("PCSX2_VR_HANDS_GRIP_ORIENT") != nullptr);
+		{
+			const char* fake = std::getenv("PCSX2_VR_FAKE_HANDS");
+			s.fake_hands = fake ? ((std::strcmp(fake, "gun") == 0) ? 2 : 1) : 0;
+			const char* reraster = std::getenv("PCSX2_VR_HANDS_RERASTER");
+			s.hands_reraster_always = (reraster != nullptr && std::strcmp(reraster, "always") == 0);
+		}
+		s.fake_sweep = false;
+		if (std::getenv("PCSX2_VR_FAKE_HANDS_SWEEP") != nullptr)
+		{
+			if (VMManager::IsOnlineLocked())
+				Console.Warning("(VR) PCSX2_VR_FAKE_HANDS_SWEEP refused: the network adapter is on (offline test aid).");
+			else if (s.fake_hands == 0)
+				Console.Warning("(VR) PCSX2_VR_FAKE_HANDS_SWEEP ignored: PCSX2_VR_FAKE_HANDS is not set.");
+			else
+			{
+				s.fake_sweep = true;
+				Console.WriteLn("(VR) Fake hands sweep: +-12 cm, +-20 deg yaw at 0.5 Hz (offline test aid).");
+			}
+		}
+		for (int i = 0; i < kHandSlots; i++)
+		{
+			s.hand_image[i].valid = false;
+			s.hand_image_pending[i].valid = false;
+		}
+		s.stat_hand_new.store(0, std::memory_order_relaxed);
+		s.stat_hand_kept.store(0, std::memory_order_relaxed);
+		// Pure maths, so it runs even when the session below fails.
+		if (std::getenv("PCSX2_VR_HANDS_SELFTEST") != nullptr)
+			HandModel::SelfTest();
 
 		s.screen_anchor_x = 0.0f;
 		s.screen_anchor_y = 0.0f;
@@ -3791,6 +4332,16 @@ namespace VR::XRCompositor
 
 		Console.WriteLn("(VR) Frame submission: %s",
 			s.headset_rate ? "headset rate (VR pacer thread)" : "once per GS present (legacy)");
+		if (!s.headset_rate)
+			Console.WriteLn("(VR) Hands: placed once per GS present (legacy frame submission)");
+		else if (!s.hands_display_rate)
+			Console.WriteLn("(VR) Hands: placed once per GS present ([VR] HandsDisplayRate off)");
+		else if (s.hands_reraster_always)
+			Console.WriteLn("(VR) Hands: placed every display frame on the VR pacer (images redrawn every present: "
+							"PCSX2_VR_HANDS_RERASTER=always)");
+		else
+			Console.WriteLn("(VR) Hands: placed every display frame on the VR pacer (images redrawn past %.1f deg view drift)",
+				static_cast<double>(HandModel::kRerasterDriftDeg));
 		Console.WriteLn("(VR) Compositor initialized (%u copy command buffers; swapchain created on first frame).",
 			NUM_CMD_BUFFERS);
 		return true;
@@ -3821,6 +4372,7 @@ namespace VR::XRCompositor
 				s.head_pose = s.pacer_head.pose;
 				s.head_pose_valid = s.pacer_head.valid;
 				s.head_position_valid = s.pacer_head.position_valid;
+				s.head_pose_time = s.pacer_head.time;
 			}
 			should_render = s.pacer_should_render.load(std::memory_order_acquire);
 			// A pacer stuck in the runtime (dead or no longer pacing): no screen, hand or HUD swapchain calls into it
@@ -3889,6 +4441,7 @@ namespace VR::XRCompositor
 
 			if (s.view_space != XR_NULL_HANDLE)
 				s.head_pose_valid = LocateAndPublishHead(fs.predictedDisplayTime, &s.head_pose, &s.head_position_valid);
+			s.head_pose_time = fs.predictedDisplayTime;
 
 			// Every frame for the background; about once a second without it, for the Eyes line alone.
 			static u64 s_next_eye_probe_ms = 0;
@@ -4028,6 +4581,9 @@ namespace VR::XRCompositor
 		XrCompositionLayerQuad hand_quads[kHandSlots] = {
 			{XR_TYPE_COMPOSITION_LAYER_QUAD}, {XR_TYPE_COMPOSITION_LAYER_QUAD}};
 		XrCompositionLayerQuad hud_quads[HudCards::kCardCount] = {};
+		// The controller pose each hand and HUD card was placed for (not attached unless it rides on a controller).
+		HandAttach hand_att[kHandSlots] = {};
+		HandAttach hud_att[HudCards::kCardCount] = {};
 		const XrCompositionLayerBaseHeader* layers[kLayerCapacity] = {};
 		u32 layer_count = 0;
 		bool cl_split = false;
@@ -4389,11 +4945,11 @@ namespace VR::XRCompositor
 		// Hands go last so they draw over the screen and the lever cards.
 		const u32 hands_from = layer_count;
 		if (!force_zero_layers && should_render)
-			BuildHandLayers(hand_quads, layers, layer_count, kLayerCapacity);
+			BuildHandLayers(hand_quads, layers, layer_count, kLayerCapacity, hand_att);
 
 		// HUD cards last of all, over the hands and everything else; only the laser sight goes in under the hands.
 		if (!force_zero_layers && should_render)
-			BuildHudLayers(hud_quads, layers, layer_count, kLayerCapacity, hands_from);
+			BuildHudLayers(hud_quads, layers, layer_count, kLayerCapacity, hands_from, hud_att);
 
 		for (u32 l = 0; l < 2; l++)
 		{
@@ -4403,7 +4959,7 @@ namespace VR::XRCompositor
 				s.stat_copy_timeout.fetch_add(1, std::memory_order_relaxed);
 		}
 
-		const LayerSources sources = {quads, cyls, 5, lever_quads, hand_quads, hud_quads};
+		const LayerSources sources = {quads, cyls, 5, lever_quads, hand_quads, hud_quads, hand_att, hud_att};
 
 		if (s.headset_rate)
 		{

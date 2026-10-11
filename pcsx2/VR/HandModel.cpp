@@ -3,10 +3,13 @@
 
 #include "VR/HandModel.h"
 
+#include "common/Console.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <utility>
 
 namespace VR::HandModel
@@ -851,5 +854,368 @@ namespace VR::HandModel
 		h.gun = gun && hand == kRight;
 		h.valid = true;
 		return h;
+	}
+
+	namespace
+	{
+		// Unit quaternion (xyzw) from q; identity when it is unusable.
+		void UnitQuat(const float q[4], float out[4])
+		{
+			const float l = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+			if (!(l > 1.0e-6f) || !std::isfinite(l))
+			{
+				out[0] = out[1] = out[2] = 0.0f;
+				out[3] = 1.0f;
+				return;
+			}
+			for (int i = 0; i < 4; i++)
+				out[i] = q[i] / l;
+		}
+
+		// The inverse of a unit quaternion.
+		void Conjugate(const float q[4], float out[4])
+		{
+			out[0] = -q[0];
+			out[1] = -q[1];
+			out[2] = -q[2];
+			out[3] = q[3];
+		}
+	}
+
+	void RePoseRigid(const float ref_pos[3], const float ref_quat[4], const float now_pos[3], const float now_quat[4],
+		const float in_centre[3], const float in_quat[4], float out_centre[3], float out_quat[4])
+	{
+		if (!Finite(ref_pos, 3) || !Finite(ref_quat, 4) || !Finite(now_pos, 3) || !Finite(now_quat, 4) ||
+			!Finite(in_centre, 3) || !Finite(in_quat, 4))
+		{
+			for (int i = 0; i < 3; i++)
+				out_centre[i] = in_centre[i];
+			for (int i = 0; i < 4; i++)
+				out_quat[i] = in_quat[i];
+			return;
+		}
+		float qr[4];
+		float qn[4];
+		float qr_inv[4];
+		float qd_raw[4];
+		float qd[4];
+		UnitQuat(ref_quat, qr);
+		UnitQuat(now_quat, qn);
+		Conjugate(qr, qr_inv);
+		QuatMul(qn, qr_inv, qd_raw);
+		UnitQuat(qd_raw, qd);
+		float q_raw[4];
+		QuatMul(qd, in_quat, q_raw);
+		const V3 moved = Add(Load(now_pos), Rotate(qd, Sub(Load(in_centre), Load(ref_pos))));
+		Store(moved, out_centre);
+		UnitQuat(q_raw, out_quat);
+	}
+
+	ViewDrift MeasureViewDrift(const float ref_pos[3], const float ref_quat[4], const float ref_eye[3],
+		const float ref_centre[3], const float now_pos[3], const float now_quat[4], const float now_eye[3])
+	{
+		ViewDrift d;
+		if (!Finite(ref_pos, 3) || !Finite(ref_quat, 4) || !Finite(ref_eye, 3) || !Finite(ref_centre, 3) ||
+			!Finite(now_pos, 3) || !Finite(now_quat, 4) || !Finite(now_eye, 3))
+		{
+			return d;
+		}
+		float qr[4];
+		float qn[4];
+		float qr_inv[4];
+		float qn_inv[4];
+		UnitQuat(ref_quat, qr);
+		UnitQuat(now_quat, qn);
+		Conjugate(qr, qr_inv);
+		Conjugate(qn, qn_inv);
+		// The image's centre as a point on the hand, and where that point is now.
+		const V3 local = Rotate(qr_inv, Sub(Load(ref_centre), Load(ref_pos)));
+		const V3 centre_now = Add(Load(now_pos), Rotate(qn, local));
+		const V3 to_eye_ref = Sub(Load(ref_eye), Load(ref_centre));
+		const V3 to_eye_now = Sub(Load(now_eye), centre_now);
+		const float dist_ref = Length(to_eye_ref);
+		const float dist_now = Length(to_eye_now);
+		if (!(dist_ref >= 0.05f) || !(dist_now >= 0.05f) || !std::isfinite(dist_ref) || !std::isfinite(dist_now))
+			return d;
+		// The direction to the eye in the hand's own frame, then and now. The angle between them is acos of their dot
+		// product, taken as atan2 of the cross and dot products, which keeps its precision near 0.
+		const V3 v_ref = Rotate(qr_inv, Mul(to_eye_ref, 1.0f / dist_ref));
+		const V3 v_now = Rotate(qn_inv, Mul(to_eye_now, 1.0f / dist_now));
+		const float angle = std::atan2(Length(Cross(v_ref, v_now)), Dot(v_ref, v_now));
+		d.angle_deg = angle / kDegToRad;
+		d.distance_ratio = dist_now / dist_ref;
+		d.valid = std::isfinite(d.angle_deg) && std::isfinite(d.distance_ratio);
+		return d;
+	}
+
+	bool NeedsReraster(const HandState& ref, const float ref_eye[3], const float ref_centre[3], const HandState& now,
+		const float now_eye[3], u64 age_ms)
+	{
+		if (!ref.valid || !now.valid)
+			return true;
+		if (ref.gun != now.gun || ref.slide_locked != now.slide_locked)
+			return true;
+		// A shot plays out frame by frame (recoil, flash, the slide cycling): every frame of it is drawn.
+		if (now.kick > 0.0f || ref.kick > 0.0f || now.flash || ref.flash || now.slide > 0.0f || ref.slide > 0.0f)
+			return true;
+		if (!(std::fabs(now.grip - ref.grip) <= kRerasterArticulation) ||
+			!(std::fabs(now.trigger - ref.trigger) <= kRerasterArticulation))
+		{
+			return true;
+		}
+		const ViewDrift d = MeasureViewDrift(ref.pos, ref.quat, ref_eye, ref_centre, now.pos, now.quat, now_eye);
+		if (!d.valid || d.angle_deg > kRerasterDriftDeg || std::fabs(d.distance_ratio - 1.0f) > kRerasterDistanceRatio)
+			return true;
+		return age_ms > kRerasterMaxAgeMs;
+	}
+
+	void ApplyFakeSweep(int hand, s64 t_ns, HandState* h)
+	{
+		if (!h)
+			return;
+		// The cycle position by integer modulo first, so a large display time keeps its precision.
+		constexpr s64 kCycleNs = 2000000000;
+		constexpr double kPiD = 3.14159265358979323846;
+		s64 into = t_ns % kCycleNs;
+		if (into < 0)
+			into += kCycleNs;
+		double phase = 2.0 * kPiD * static_cast<double>(into) / static_cast<double>(kCycleNs);
+		if (hand == kLeft)
+			phase += kPiD;
+		h->pos[0] += static_cast<float>(0.12 * std::sin(phase));
+		h->pos[1] += static_cast<float>(0.05 * std::sin(2.0 * phase));
+		const float yaw = static_cast<float>(0.35 * std::sin(phase));
+		const float ry[4] = {0.0f, std::sin(0.5f * yaw), 0.0f, std::cos(0.5f * yaw)};
+		float q[4];
+		QuatMul(ry, h->quat, q);
+		for (int i = 0; i < 4; i++)
+			h->quat[i] = q[i];
+	}
+
+	bool SelfTest()
+	{
+		int checks = 0;
+		int failed = 0;
+		const auto check = [&checks, &failed](bool ok, const char* name) {
+			checks++;
+			if (!ok)
+			{
+				failed++;
+				Console.Error("(VR) Hands self-test FAIL: %s", name);
+			}
+		};
+		const auto near3 = [](const float a[3], const float b[3], float tol) {
+			return std::fabs(a[0] - b[0]) <= tol && std::fabs(a[1] - b[1]) <= tol && std::fabs(a[2] - b[2]) <= tol;
+		};
+		// The same orientation: q and -q are the same rotation.
+		const auto same_rot = [](const float a[4], const float b[4], float tol) {
+			bool same = true;
+			bool negated = true;
+			for (int i = 0; i < 4; i++)
+			{
+				same = same && std::fabs(a[i] - b[i]) <= tol;
+				negated = negated && std::fabs(a[i] + b[i]) <= tol;
+			}
+			return same || negated;
+		};
+		const auto axis_angle = [](float ax, float ay, float az, float deg, float out[4]) {
+			const float l = std::sqrt(ax * ax + ay * ay + az * az);
+			const float half = 0.5f * deg * kDegToRad;
+			const float sn = std::sin(half) / l;
+			out[0] = ax * sn;
+			out[1] = ay * sn;
+			out[2] = az * sn;
+			out[3] = std::cos(half);
+		};
+		const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+
+		// RePoseRigid.
+		{
+			float qa[4];
+			float qi[4];
+			axis_angle(0.3f, 1.0f, -0.2f, 37.0f, qa);
+			axis_angle(-0.5f, 0.2f, 0.8f, 110.0f, qi);
+			const float p[3] = {0.25f, 1.05f, -0.45f};
+			const float c[3] = {0.31f, 1.12f, -0.52f};
+			float oc[3];
+			float oq[4];
+			RePoseRigid(p, qa, p, qa, c, qi, oc, oq);
+			check(near3(oc, c, 1.0e-5f) && same_rot(oq, qi, 1.0e-5f),
+				"RePoseRigid: a hand that did not move leaves the layer");
+
+			const float t[3] = {0.1f, -0.2f, 0.3f};
+			const float p_moved[3] = {p[0] + t[0], p[1] + t[1], p[2] + t[2]};
+			const float c_moved[3] = {c[0] + t[0], c[1] + t[1], c[2] + t[2]};
+			RePoseRigid(p, qa, p_moved, qa, c, qi, oc, oq);
+			check(near3(oc, c_moved, 1.0e-5f) && same_rot(oq, qi, 1.0e-5f),
+				"RePoseRigid: a pure translation moves the layer by exactly that and keeps its orientation");
+
+			const float grip[3] = {1.0f, 0.0f, 0.0f};
+			float ry90[4];
+			axis_angle(0.0f, 1.0f, 0.0f, 90.0f, ry90);
+			const float in_c[3] = {1.0f, 0.0f, -0.1f};
+			const float want_c[3] = {0.9f, 0.0f, 0.0f};
+			float want_q[4];
+			QuatMul(ry90, qi, want_q);
+			RePoseRigid(grip, identity, grip, ry90, in_c, qi, oc, oq);
+			check(near3(oc, want_c, 1.0e-5f) && same_rot(oq, want_q, 1.0e-5f),
+				"RePoseRigid: +90 deg of yaw about the grip turns the layer about the grip");
+
+			const float ry90_neg[4] = {-ry90[0], -ry90[1], -ry90[2], -ry90[3]};
+			float oc_neg[3];
+			float oq_neg[4];
+			RePoseRigid(grip, identity, grip, ry90_neg, in_c, qi, oc_neg, oq_neg);
+			check(near3(oc_neg, oc, 1.0e-6f) && same_rot(oq_neg, oq, 1.0e-6f), "RePoseRigid: q and -q give the same pose");
+
+			const float bad[3] = {std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f};
+			RePoseRigid(p, qa, bad, qa, c, qi, oc, oq);
+			check(near3(oc, c, 0.0f) && same_rot(oq, qi, 0.0f), "RePoseRigid: a pose that is not finite leaves the layer");
+		}
+
+		// MeasureViewDrift: the hand 0.6 m ahead of the eye, the image's centre 5 cm along its x axis.
+		const float hand_pos[3] = {0.0f, 1.0f, -0.5f};
+		const float centre[3] = {0.05f, 1.0f, -0.5f};
+		const float eye[3] = {0.0f, 1.0f, 0.1f};
+		{
+			ViewDrift d = MeasureViewDrift(hand_pos, identity, eye, centre, hand_pos, identity, eye);
+			check(d.valid && d.angle_deg < 0.01f && std::fabs(d.distance_ratio - 1.0f) < 1.0e-5f,
+				"MeasureViewDrift: the same view drifts 0 deg at a distance ratio of 1");
+
+			// Turned 10 deg about its x axis, across the line of sight (the centre, on that axis, stays put).
+			float rx10[4];
+			axis_angle(1.0f, 0.0f, 0.0f, 10.0f, rx10);
+			d = MeasureViewDrift(hand_pos, identity, eye, centre, hand_pos, rx10, eye);
+			check(d.valid && std::fabs(d.angle_deg - 10.0f) <= 0.5f,
+				"MeasureViewDrift: the hand turned 10 deg across the view drifts 10 deg");
+
+			// The eye moved straight back along its line to the centre, to twice the distance.
+			const float back[3] = {centre[0] + 2.0f * (eye[0] - centre[0]), centre[1] + 2.0f * (eye[1] - centre[1]),
+				centre[2] + 2.0f * (eye[2] - centre[2])};
+			d = MeasureViewDrift(hand_pos, identity, eye, centre, hand_pos, identity, back);
+			check(d.valid && d.angle_deg < 0.1f && std::fabs(d.distance_ratio - 2.0f) <= 0.01f,
+				"MeasureViewDrift: the eye twice as far back drifts 0 deg at a distance ratio of 2");
+
+			d = MeasureViewDrift(hand_pos, identity, centre, centre, hand_pos, identity, centre);
+			check(!d.valid, "MeasureViewDrift: an eye at the hand cannot be measured");
+		}
+
+		// NeedsReraster, from the same hand and view.
+		{
+			HandState ref;
+			ref.valid = true;
+			for (int k = 0; k < 3; k++)
+				ref.pos[k] = hand_pos[k];
+			ref.grip = 0.5f;
+			ref.trigger = 0.15f;
+			HandState now = ref;
+			check(!NeedsReraster(ref, eye, centre, now, eye, 0), "NeedsReraster: the same hand and view keeps the image");
+
+			now = ref;
+			now.grip += 0.1f;
+			check(NeedsReraster(ref, eye, centre, now, eye, 0), "NeedsReraster: grip +0.1 draws it again");
+
+			now = ref;
+			now.trigger += 0.02f;
+			check(!NeedsReraster(ref, eye, centre, now, eye, 0), "NeedsReraster: trigger +0.02 keeps the image");
+
+			float rx3[4];
+			axis_angle(1.0f, 0.0f, 0.0f, 3.0f, rx3);
+			now = ref;
+			for (int k = 0; k < 4; k++)
+				now.quat[k] = rx3[k];
+			check(NeedsReraster(ref, eye, centre, now, eye, 0), "NeedsReraster: 3 deg of view drift draws it again");
+
+			float rx1[4];
+			axis_angle(1.0f, 0.0f, 0.0f, 1.0f, rx1);
+			now = ref;
+			for (int k = 0; k < 4; k++)
+				now.quat[k] = rx1[k];
+			check(!NeedsReraster(ref, eye, centre, now, eye, 0), "NeedsReraster: 1 deg of view drift keeps the image");
+
+			now = ref;
+			now.gun = true;
+			check(NeedsReraster(ref, eye, centre, now, eye, 0), "NeedsReraster: the pistol taken or put away draws it again");
+
+			now = ref;
+			now.kick = 0.5f;
+			check(NeedsReraster(ref, eye, centre, now, eye, 0), "NeedsReraster: recoil draws it again");
+
+			now = ref;
+			check(NeedsReraster(ref, eye, centre, now, eye, 600), "NeedsReraster: a 600 ms old image is drawn again");
+		}
+
+		// ApplyFakeSweep, at a large display time.
+		{
+			HandState base;
+			base.valid = true;
+			base.pos[0] = 0.22f;
+			base.pos[1] = 1.3f;
+			base.pos[2] = -0.35f;
+			float q0[4];
+			axis_angle(0.2f, 1.0f, 0.1f, 25.0f, q0);
+			for (int k = 0; k < 4; k++)
+				base.quat[k] = q0[k];
+			base.grip = 0.5f;
+			base.trigger = 0.15f;
+			constexpr s64 kCycleNs = 2000000000;
+			constexpr s64 t0 = 987654321012345678;
+
+			HandState a = base;
+			HandState b = base;
+			ApplyFakeSweep(kRight, t0, &a);
+			ApplyFakeSweep(kRight, t0 + kCycleNs, &b);
+			check(near3(a.pos, b.pos, 1.0e-5f) && same_rot(a.quat, b.quat, 1.0e-5f), "ApplyFakeSweep: periodic over 2 s");
+			const float len =
+				std::sqrt(a.quat[0] * a.quat[0] + a.quat[1] * a.quat[1] + a.quat[2] * a.quat[2] + a.quat[3] * a.quat[3]);
+			check(std::fabs(len - 1.0f) < 1.0e-4f, "ApplyFakeSweep: the orientation stays a unit quaternion");
+			check(a.grip == base.grip && a.trigger == base.trigger && a.gun == base.gun && a.valid,
+				"ApplyFakeSweep: grip, trigger and the pistol untouched");
+
+			// A quarter of a cycle in: the right hand at +12 cm along x, the left at -12 cm.
+			const s64 quarter = t0 - (t0 % kCycleNs) + kCycleNs / 4;
+			HandState r = base;
+			HandState l = base;
+			ApplyFakeSweep(kRight, quarter, &r);
+			ApplyFakeSweep(kLeft, quarter, &l);
+			const float right_dx = r.pos[0] - base.pos[0];
+			const float left_dx = l.pos[0] - base.pos[0];
+			check(std::fabs(right_dx - 0.12f) < 1.0e-4f && std::fabs(left_dx + 0.12f) < 1.0e-4f,
+				"ApplyFakeSweep: left and right in opposite phase");
+
+			// Sampled at 90 Hz over a whole cycle: smooth, and no faster than the sweep allows.
+			constexpr s64 kStepNs = 11111111;
+			float prev1[3] = {0.0f, 0.0f, 0.0f};
+			float prev2[3] = {0.0f, 0.0f, 0.0f};
+			float max_second = 0.0f;
+			float max_step = 0.0f;
+			for (int n = 0; n <= 180; n++)
+			{
+				HandState h = base;
+				ApplyFakeSweep(kRight, t0 + static_cast<s64>(n) * kStepNs, &h);
+				if (n >= 1)
+				{
+					const V3 step = Sub(Load(h.pos), Load(prev1));
+					max_step = std::max(max_step, Length(step));
+				}
+				if (n >= 2)
+				{
+					const V3 second = Add(Sub(Load(h.pos), Mul(Load(prev1), 2.0f)), Load(prev2));
+					max_second = std::max(max_second, Length(second));
+				}
+				for (int k = 0; k < 3; k++)
+				{
+					prev2[k] = prev1[k];
+					prev1[k] = h.pos[k];
+				}
+			}
+			check(max_second < 0.0005f && max_step < 0.0065f,
+				"ApplyFakeSweep: smooth at 90 Hz (second difference under 0.5 mm, step under 6.5 mm)");
+		}
+
+		if (failed == 0)
+			Console.WriteLn(Color_StrongGreen, "(VR) Hands self-test: %d checks passed", checks);
+		else
+			Console.WriteLn(Color_StrongRed, "(VR) Hands self-test: %d of %d failed", failed, checks);
+		return failed == 0;
 	}
 }

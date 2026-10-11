@@ -1347,6 +1347,10 @@ struct Pcsx2Config
 		bool HeadsetRateSubmit = true;
 		// An opaque black projection layer under the screens, so the runtime's environment never shows around them.
 		bool OpaqueBackground = true;
+		// Hands, laser sight and wrist card are placed every headset display frame on the VR pacer from the controller pose
+		// for that frame (their images are still drawn on the GS thread); false = placed once per GS present. Only with
+		// HeadsetRateSubmit.
+		bool HandsDisplayRate = true;
 
 		VROptions();
 		void LoadSave(SettingsWrapper& wrap);

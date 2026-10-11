@@ -26,6 +26,22 @@ whole font), `PCSX2_VR_FAKE_HANDS` also shows the wrist card on the fake left ha
 outside first person), and `PCSX2_VR_HUD_SELFTEST` runs the HUD self-test once (`(VR) HUD self-test:` in
 the emulog). Every toast is logged as `(VR) HUD toast: "..."`.
 
+Hands at display rate (VR setting `HandsDisplayRate`, on by default, ini only; needs `HeadsetRateSubmit`): the hand
+impostors, the laser sight and the wrist card are still drawn on the GS thread, but the VR pacer places them every
+display frame from the controller pose located for that frame, moving each image rigidly from the pose it was drawn
+for, so they hold still against the world instead of stepping at the GS rate. A hand's image is drawn again only once
+the view of it drifts 2 deg (or the eye's distance 3%) from the one it was drawn for, its grip or trigger moves, a
+shot plays, or it is 0.5 s old; until then its last image is shown again. VR start logs `(VR) Hands: placed every
+display frame on the VR pacer (...)` or `(VR) Hands: placed once per GS present (...)`, and in headset-rate mode the
+Frames line is followed every 5 s by `(VR) Hands: placements, re-posed, age mean/max ms, moved since the GS pose
+mean/max mm / deg, image drift max deg (N over 15), GS images new/s kept/s, mode ...`. With `PCSX2_VR_SYNCLOG=1` the
+pacer also logs once a second `(VR) pacer: hands placement age per display frame mean/max ms ...; jerk hand rms/max mm,
+laser rms/max mm` (the jerk is |p(n) - 2p(n-1) + p(n-2)| of each submitted quad centre over three display frames in a
+row). Test aids on the null headset: `PCSX2_VR_FAKE_HANDS_SWEEP=1` (with `PCSX2_VR_FAKE_HANDS`; refused while the
+network adapter is on) sweeps the fake hands +-12 cm and +-20 deg of yaw at 0.5 Hz on the display clock;
+`PCSX2_VR_HANDS_RERASTER=always` draws every visible hand again every present (an image-quality A/B); and
+`PCSX2_VR_HANDS_SELFTEST=1` checks the placement maths at VR start (`(VR) Hands self-test: N checks passed`).
+
 Comfort blink (VR setting `ComfortBlink`, on by default): a view-locked black quad 0.3 m ahead that goes black
 over 40 ms, holds 60 ms and clears over 80 ms, on each snap turn and each change between the first-person and
 the world screen. The screen change itself is made once the blink is black (`(VR) HUD blink (world screen).`
