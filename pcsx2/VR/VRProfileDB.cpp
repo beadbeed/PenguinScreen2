@@ -2435,7 +2435,7 @@ static std::vector<VR::ProfileDB::SpatialControlSpec> parseControls(const std::s
 static VR::ProfileDB::FeedbackParams parseFeedback(const std::string_view serial, const ryml::ConstNodeRef& fnode)
 {
 	VR::ProfileDB::FeedbackParams fp;
-	warnUnknownKeys(serial, fnode, "feedback", {"padRumble", "hurt", "fire", "danger"});
+	warnUnknownKeys(serial, fnode, "feedback", {"padRumble", "hurt", "fire", "weapon", "danger"});
 	readOptionalBool(serial, fnode, "padRumble", "feedback.padRumble", fp.pad_rumble);
 
 	const auto read_width = [serial](const ryml::ConstNodeRef& n, const char* what, u8& dst) {
@@ -2522,6 +2522,105 @@ static VR::ProfileDB::FeedbackParams parseFeedback(const std::string_view serial
 				fp.fire_address = addr.value();
 				fp.fire_width = width;
 				fp.fire_hand = hand;
+			}
+		}
+	}
+
+	// weapon: the equipped item record behind the local record, for the shot, reload and dry-fire cues and the
+	// pistol and ammo shown in the headset. Numbers are hex like every other offset (stride 60 is 0x3C).
+	if (fnode.has_child("weapon"))
+	{
+		const ryml::ConstNodeRef w = fnode["weapon"];
+		if (!w.is_map())
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.weapon is not a map; ignoring it.", serial);
+		else
+		{
+			warnUnknownKeys(serial, w, "feedback.weapon",
+				{"equipped", "table", "stride", "id", "count", "owner", "stance", "raised", "action", "reload"});
+			bool ok = true;
+			// A plain hex value (with the decimal-looking trap warned about); false when present but not a number.
+			const auto read_value = [serial, &w](const char* key, const char* what, u32& dst) {
+				if (!w.has_child(key))
+					return true;
+				const std::string_view raw = nodeVal(w[key]);
+				const std::optional<u32> v = parseHexU32(raw);
+				if (!v.has_value())
+				{
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' {} '{}' is not a number; ignoring feedback.weapon.", serial, what, raw);
+					return false;
+				}
+				warnHexTrap(serial, raw, v.value(), what);
+				dst = v.value();
+				return true;
+			};
+			const std::optional<u32> equipped = record_offset(w, "equipped");
+			const std::optional<u32> table = w.has_child("table") ? parseAddress(nodeVal(w["table"])) : std::nullopt;
+			if (!equipped.has_value() || !table.has_value() || !inMainRam(table.value(), 1))
+			{
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.weapon needs equipped (a camera.base offset) and table "
+								   "(an address in main RAM); ignoring it.", serial);
+				ok = false;
+			}
+			u32 stride = fp.weapon_stride;
+			u32 id_off = fp.weapon_id_offset;
+			u32 count_off = fp.weapon_count_offset;
+			u32 owner_off = fp.weapon_owner_offset;
+			u32 raised = fp.weapon_stance_raised;
+			u32 reload = 0;
+			ok = ok && read_value("stride", "feedback.weapon.stride", stride);
+			ok = ok && read_value("id", "feedback.weapon.id", id_off);
+			ok = ok && read_value("count", "feedback.weapon.count", count_off);
+			ok = ok && read_value("owner", "feedback.weapon.owner", owner_off);
+			ok = ok && read_value("raised", "feedback.weapon.raised", raised);
+			ok = ok && read_value("reload", "feedback.weapon.reload", reload);
+			if (ok && (stride == 0 || stride > 0x1000 || id_off + 2 > stride || count_off + 2 > stride || owner_off + 1 > stride))
+			{
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.weapon needs a stride of 1-0x1000 with id, count and owner "
+								   "inside one item record; ignoring it.", serial);
+				ok = false;
+			}
+			std::optional<u32> stance = fp.weapon_stance_offset;
+			if (ok && w.has_child("stance"))
+			{
+				stance = record_offset(w, "stance");
+				if (!stance.has_value())
+				{
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.weapon.stance must be a camera.base offset; ignoring "
+									   "feedback.weapon.", serial);
+					ok = false;
+				}
+			}
+			std::optional<u32> action;
+			if (ok && w.has_child("action"))
+			{
+				action = record_offset(w, "action");
+				if (!action.has_value())
+				{
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.weapon.action must be a camera.base offset; ignoring "
+									   "feedback.weapon.", serial);
+					ok = false;
+				}
+			}
+			if (ok && (action.has_value() != w.has_child("reload")))
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.weapon.action and reload go together; without both every "
+								   "count drop while raised is taken as a shot.", serial);
+			if (ok)
+			{
+				fp.has_weapon = true;
+				fp.weapon_equipped_offset = equipped.value();
+				fp.weapon_table = table.value();
+				fp.weapon_stride = stride;
+				fp.weapon_id_offset = id_off;
+				fp.weapon_count_offset = count_off;
+				fp.weapon_owner_offset = owner_off;
+				fp.weapon_stance_offset = stance.value();
+				fp.weapon_stance_raised = raised;
+				if (action.has_value() && w.has_child("reload"))
+				{
+					fp.has_weapon_reload = true;
+					fp.weapon_action_offset = action.value();
+					fp.weapon_reload_action = reload;
+				}
 			}
 		}
 	}
@@ -2962,7 +3061,8 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 	{
 		out.feedback = parseFeedback(serial, node["feedback"]);
 		// The cues read through the camera's resolved record, so they need camera.base; rumble does not.
-		if ((out.feedback->has_hurt || out.feedback->has_fire) && !(out.camera.has_value() && out.camera->base.has_value()))
+		if ((out.feedback->has_hurt || out.feedback->has_fire || out.feedback->has_weapon) &&
+			!(out.camera.has_value() && out.camera->base.has_value()))
 			Console.WarningFmt("(VR) ProfileDB: Serial '{}' has feedback cues but no camera.base; they run only while first "
 							   "person is armed with that record resolved, so they never will.", serial);
 	}

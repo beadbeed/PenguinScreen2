@@ -15,6 +15,7 @@
 #include "common/Console.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -96,6 +97,8 @@ namespace VR::GameFeedback
 		LogLimit s_log_beat;
 		LogLimit s_log_bad_hp;
 		LogLimit s_log_rumble;
+		LogLimit s_log_reload;
+		LogLimit s_log_dry;
 
 		// What one vsync read. The self-test builds these by hand.
 		struct Sample
@@ -128,6 +131,92 @@ namespace VR::GameFeedback
 		};
 
 		CueState s_cues;
+
+		// Weapon (feedback.weapon): the equipped item record's rounds. A drop of 1-2 with the weapon raised is a
+		// shot, any rise a reload; a bigger drop (or a drop while lowered, or during the reload action) is not.
+		constexpr u32 kWeaponMaxShotStep = 2;
+		constexpr float kReloadTickAmp = 0.3f;
+		constexpr float kReloadTickSeconds = 0.015f;
+		constexpr u64 kReloadTickGapMs = 60;
+		constexpr float kDryAmp = 0.2f;
+		constexpr float kDrySeconds = 0.012f;
+		constexpr float kTriggerPressed = 0.5f;
+
+		// What one vsync read of the weapon. The self-test builds these by hand.
+		struct WeaponSample
+		{
+			bool readable = false; // the equipped byte could be read
+			u32 eq = 0;            // equipped item record index, 0 = bare hands
+			bool rec_in_ram = false;
+			u32 present = 0; // the record's +0x00
+			u32 index = 0;   // its +0x02 (its own index)
+			u32 owner = 0;   // its owner byte (player slot + 1)
+			bool slot_known = false;
+			u32 slot = 0; // the local player's slot (camera.base index byte)
+			u16 item_id = 0;
+			u16 ammo = 0;
+			bool raised = false;    // stance == raised
+			bool reloading = false; // action == reload
+			bool trigger = false;   // right trigger past kTriggerPressed
+			bool a = false;         // right A
+			int aim_hand = kRight;
+			float strength = 1.0f;
+			u64 now_ms = 0;
+			bool log = true;
+		};
+
+		struct WeaponState
+		{
+			bool baseline = false;
+			u32 eq = 0;
+			u16 ammo = 0;
+			bool trigger_down = true; // held until seen released, so a held trigger is never an edge
+			bool a_down = true;
+			bool tick_pending = false; // the reload's second tick
+			u64 tick_ms = 0;
+			Hold hold = Hold::Unknown;
+			WeaponView view;
+			std::array<bool, 256> bad_logged{}; // "failed checks" said once per equipped index
+		};
+
+		WeaponState s_weapon;
+
+		// Published for the GS thread (HandModel, HudCards) and CameraDriver.
+		std::atomic<u8> s_hold{static_cast<u8>(Hold::Unknown)};
+		std::mutex s_weapon_mutex;
+		WeaponView s_weapon_view;
+
+		void PublishWeapon(const WeaponState& st)
+		{
+			s_hold.store(static_cast<u8>(st.hold), std::memory_order_release);
+			std::lock_guard<std::mutex> lock(s_weapon_mutex);
+			s_weapon_view = st.view;
+		}
+
+		// A new baseline: the next good read sets the rounds without a cue. The cue times and shot serial carry on.
+		void ResetWeaponBaseline(WeaponState& st)
+		{
+			st.baseline = false;
+			st.eq = 0;
+			st.ammo = 0;
+			st.tick_pending = false;
+			st.hold = Hold::Unknown;
+			st.view.valid = false;
+			st.view.equipped = 0;
+			st.view.item_id = 0;
+			st.view.ammo = 0;
+		}
+
+		Hold ClassifyWeapon(const WeaponSample& w)
+		{
+			if (!w.readable)
+				return Hold::Unknown;
+			if (w.eq == 0)
+				return Hold::BareHands;
+			if (w.rec_in_ram && w.present == 1 && w.index == w.eq && w.slot_known && w.owner == w.slot + 1)
+				return Hold::Weapon;
+			return Hold::Unknown;
+		}
 
 		// Game rumble forwarding. The port is published by Poll; the rest is guarded by the mutex because
 		// InputManager can stop vibration from outside the vsync.
@@ -248,6 +337,85 @@ namespace VR::GameFeedback
 			}
 		}
 
+		void WeaponStep(const WeaponSample& w, WeaponState& st)
+		{
+			const bool trigger_edge = (w.trigger && !st.trigger_down) || (w.a && !st.a_down);
+			st.trigger_down = w.trigger;
+			st.a_down = w.a;
+
+			if (st.tick_pending && w.now_ms >= st.tick_ms)
+			{
+				Pulse(kLeft, kReloadTickAmp, kReloadTickSeconds, w.strength);
+				Pulse(kRight, kReloadTickAmp, kReloadTickSeconds, w.strength);
+				st.tick_pending = false;
+			}
+
+			const Hold hold = ClassifyWeapon(w);
+			if (hold == Hold::Unknown && w.readable && w.eq != 0 && w.eq < st.bad_logged.size() && !st.bad_logged[w.eq])
+			{
+				st.bad_logged[w.eq] = true;
+				if (w.log)
+					Console.Warning("(VR) Feedback: equipped record %u failed checks (present %u, index %u, owner %u, slot %u)",
+						w.eq, w.present, w.index, w.owner, w.slot);
+			}
+			if (hold != Hold::Weapon)
+			{
+				ResetWeaponBaseline(st);
+				st.hold = hold;
+				return;
+			}
+
+			// Another equipped record is a new baseline, no cue.
+			const bool same = st.baseline && st.eq == w.eq;
+			if (same && w.ammo < st.ammo)
+			{
+				const u32 drop = static_cast<u32>(st.ammo) - static_cast<u32>(w.ammo);
+				if (drop <= kWeaponMaxShotStep && w.raised && !w.reloading)
+				{
+					st.view.shot_serial++;
+					st.view.shot_ms = w.now_ms;
+					Pulse(w.aim_hand, kShotAmp, kShotSeconds, w.strength);
+					u32 skipped = 0;
+					if (w.log && TakeLog(s_log_shot, w.now_ms, kLogIntervalMs, &skipped))
+						Console.WriteLn("(VR) Feedback: shot, ammo %u -> %u, %s hand %.2f for %.0f ms%s.",
+							static_cast<u32>(st.ammo), static_cast<u32>(w.ammo), HandName(w.aim_hand),
+							static_cast<double>(kShotAmp), static_cast<double>(kShotSeconds) * 1000.0, MoreSuffix(skipped).text);
+				}
+			}
+			else if (same && w.ammo > st.ammo)
+			{
+				st.view.reload_ms = w.now_ms;
+				Pulse(kLeft, kReloadTickAmp, kReloadTickSeconds, w.strength);
+				Pulse(kRight, kReloadTickAmp, kReloadTickSeconds, w.strength);
+				st.tick_pending = true;
+				st.tick_ms = w.now_ms + kReloadTickGapMs;
+				u32 skipped = 0;
+				if (w.log && TakeLog(s_log_reload, w.now_ms, kLogIntervalMs, &skipped))
+					Console.WriteLn("(VR) Feedback: reload, ammo %u -> %u, two ticks in both hands%s.",
+						static_cast<u32>(st.ammo), static_cast<u32>(w.ammo), MoreSuffix(skipped).text);
+			}
+
+			// Dry fire: the trigger (or A) pulled on an empty gun held up.
+			if (w.raised && w.ammo == 0 && trigger_edge)
+			{
+				st.view.dry_ms = w.now_ms;
+				Pulse(w.aim_hand, kDryAmp, kDrySeconds, w.strength);
+				u32 skipped = 0;
+				if (w.log && TakeLog(s_log_dry, w.now_ms, kLogIntervalMs, &skipped))
+					Console.WriteLn("(VR) Feedback: dry fire, empty gun, %s hand %.2f for %.0f ms%s.", HandName(w.aim_hand),
+						static_cast<double>(kDryAmp), static_cast<double>(kDrySeconds) * 1000.0, MoreSuffix(skipped).text);
+			}
+
+			st.baseline = true;
+			st.eq = w.eq;
+			st.ammo = w.ammo;
+			st.hold = Hold::Weapon;
+			st.view.valid = true;
+			st.view.equipped = static_cast<u8>(w.eq);
+			st.view.item_id = w.item_id;
+			st.view.ammo = w.ammo;
+		}
+
 		bool ReadAt(u64 address, u8 width, u32* out)
 		{
 			if (address + width > Ps2MemSize::MainRam)
@@ -358,18 +526,26 @@ namespace VR::GameFeedback
 		s_strength.store(strength, std::memory_order_relaxed);
 		UpdateRumbleTarget(profile, fb);
 
-		// The cues use the camera's guards and its record: no cues on the title screen, in cutscenes or
-		// with first person off. Each time they stop, the next reads are a fresh baseline, not a hit.
+		// The cues use the camera's guards and its record: no cues on the title screen or in cutscenes. They
+		// keep going while grabbed, down or dead (LocalRecordAny ignores releaseWhen), so a bite still pulses.
+		// Each time they stop, the next reads are a fresh baseline, not a hit.
 		u32 record = 0;
-		if (!fb || (!fb->has_hurt && !fb->has_fire) || VMManager::GetState() != VMState::Running ||
-			!CameraDriver::LocalRecord(&record))
+		if (!fb || (!fb->has_hurt && !fb->has_fire && !fb->has_weapon) || VMManager::GetState() != VMState::Running ||
+			!CameraDriver::LocalRecordAny(&record))
 		{
 			s_cues = CueState{};
+			ResetWeaponBaseline(s_weapon);
+			s_weapon.trigger_down = true;
+			s_weapon.a_down = true;
+			PublishWeapon(s_weapon);
 			return;
 		}
 		// Another record (a different character slot) is a new baseline too.
 		if (s_cues.record_valid && s_cues.record != record)
+		{
 			s_cues = CueState{};
+			ResetWeaponBaseline(s_weapon);
+		}
 		s_cues.record_valid = true;
 		s_cues.record = record;
 
@@ -382,13 +558,73 @@ namespace VR::GameFeedback
 			           ReadAt(static_cast<u64>(record) + fb->hurt_max_offset, fb->hurt_width, &s.hp_max);
 			s.danger_below = fb->has_danger ? fb->danger_below : 0.0f;
 		}
-		if (fb->has_fire)
+		// With feedback.weapon the weapon reader owns the shot kick; the counter would kick twice.
+		if (fb->has_fire && !fb->has_weapon)
 		{
 			s.has_counter = ReadAt(fb->fire_address, fb->fire_width, &s.counter);
 			s.counter_mask = WidthMask(fb->fire_width);
 			s.fire_hand = (fb->fire_hand >= 0) ? fb->fire_hand : AimHand(*profile);
 		}
 		Step(s, s_cues);
+
+		// Weapon: reads only, the local record and its own equipped item record behind the owner check.
+		if (fb->has_weapon)
+		{
+			WeaponSample w;
+			w.now_ms = s.now_ms;
+			w.strength = strength;
+			w.aim_hand = AimHand(*profile);
+			u32 eq = 0;
+			w.readable = ReadAt(static_cast<u64>(record) + fb->weapon_equipped_offset, 1, &eq);
+			w.eq = eq;
+			if (profile->camera.has_value() && profile->camera->base.has_value() && profile->camera->base->is_indexed)
+				w.slot_known = ReadAt(profile->camera->base->index_addr, 1, &w.slot);
+			const u64 rec = static_cast<u64>(fb->weapon_table) + static_cast<u64>(eq) * static_cast<u64>(fb->weapon_stride);
+			w.rec_in_ram = w.readable && eq != 0 && rec + fb->weapon_stride <= static_cast<u64>(Ps2MemSize::MainRam);
+			if (w.rec_in_ram)
+			{
+				u32 v = 0;
+				ReadAt(rec, 1, &w.present);
+				ReadAt(rec + 2, 1, &w.index);
+				ReadAt(rec + fb->weapon_owner_offset, 1, &w.owner);
+				if (ReadAt(rec + fb->weapon_id_offset, 2, &v))
+					w.item_id = static_cast<u16>(v);
+				if (ReadAt(rec + fb->weapon_count_offset, 2, &v))
+					w.ammo = static_cast<u16>(v);
+			}
+			u32 stance = 0;
+			w.raised = ReadAt(static_cast<u64>(record) + fb->weapon_stance_offset, 1, &stance) &&
+			           stance == fb->weapon_stance_raised;
+			if (fb->has_weapon_reload)
+			{
+				u32 action = 0;
+				w.reloading = ReadAt(static_cast<u64>(record) + fb->weapon_action_offset, 1, &action) &&
+				              action == fb->weapon_reload_action;
+			}
+			const VRInputSnapshot snap = GetInputSnapshot();
+			if (snap.actions_active)
+			{
+				w.trigger = snap.hands[VRInputSnapshot::RIGHT].trigger > kTriggerPressed;
+				w.a = snap.hands[VRInputSnapshot::RIGHT].a;
+			}
+			WeaponStep(w, s_weapon);
+		}
+		else
+		{
+			ResetWeaponBaseline(s_weapon);
+		}
+		PublishWeapon(s_weapon);
+	}
+
+	Hold WeaponInHand()
+	{
+		return static_cast<Hold>(s_hold.load(std::memory_order_acquire));
+	}
+
+	WeaponView GetWeapon()
+	{
+		std::lock_guard<std::mutex> lock(s_weapon_mutex);
+		return s_weapon_view;
 	}
 
 	void OnPadRumble(u32 pad, float large_motor, float small_motor)
@@ -431,6 +667,10 @@ namespace VR::GameFeedback
 	void OnStateLoaded()
 	{
 		s_cues = CueState{};
+		ResetWeaponBaseline(s_weapon);
+		s_weapon.trigger_down = true;
+		s_weapon.a_down = true;
+		PublishWeapon(s_weapon);
 	}
 
 	bool SelfTest()
@@ -577,6 +817,149 @@ namespace VR::GameFeedback
 		Step(s, st);
 		check(take(kLeft), "fire.hand left kicks the left hand");
 		check(!take(kRight), "fire.hand left leaves the right hand alone");
+
+		// Weapon: record 87 owned by slot 0 (owner 1), 7 rounds, raised.
+		{
+			WeaponState ws;
+			WeaponSample w;
+			w.log = false;
+			w.readable = true;
+			w.eq = 87;
+			w.rec_in_ram = true;
+			w.present = 1;
+			w.index = 87;
+			w.owner = 1;
+			w.slot_known = true;
+			w.slot = 0;
+			w.item_id = 0x57;
+			w.ammo = 7;
+			w.raised = true;
+			w.aim_hand = kRight;
+			w.now_ms = 20000;
+			WeaponStep(w, ws);
+			check(none(), "weapon: first read is a baseline");
+			check(ws.hold == Hold::Weapon && ws.view.valid && ws.view.ammo == 7, "weapon: a good record is Weapon with 7 rounds");
+			w.ammo = 6;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(take(kRight) && approx(amp, kShotAmp) && approx(secs, kShotSeconds), "weapon: 7 -> 6 raised kicks the aim hand");
+			check(!take(kLeft), "weapon: the shot leaves the other hand alone");
+			check(ws.view.shot_serial == 1 && ws.view.shot_ms == w.now_ms, "weapon: the shot is counted and timed");
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(none(), "weapon: no kick while the rounds hold");
+
+			// Another record with fewer rounds: a new baseline, no kick.
+			w.eq = 88;
+			w.index = 88;
+			w.ammo = 5;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(none(), "weapon: an equipped change does not kick");
+			check(ws.view.shot_serial == 1, "weapon: an equipped change is not a shot");
+			w.eq = 87;
+			w.index = 87;
+			w.ammo = 6;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(none(), "weapon: changing back is a baseline too");
+
+			// Reload 6 -> 7: a tick in both hands now and another 60 ms later.
+			w.ammo = 7;
+			w.now_ms += 17;
+			const u64 reload_at = w.now_ms;
+			WeaponStep(w, ws);
+			check(take(kLeft) && approx(amp, kReloadTickAmp) && approx(secs, kReloadTickSeconds), "reload: left tick");
+			check(take(kRight) && approx(amp, kReloadTickAmp), "reload: right tick");
+			check(ws.view.reload_ms == reload_at, "reload: timed");
+			w.now_ms = reload_at + 30;
+			WeaponStep(w, ws);
+			check(none(), "reload: nothing between the ticks");
+			w.now_ms = reload_at + 61;
+			WeaponStep(w, ws);
+			check(take(kLeft) && take(kRight), "reload: the second tick 60 ms later");
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(none(), "reload: only two ticks");
+
+			// Lowered: a drop is not a shot. Nor is a drop during the reload action, or one of 3.
+			w.raised = false;
+			w.ammo = 6;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(none(), "weapon: a drop at stance 1 is ignored");
+			w.raised = true;
+			w.reloading = true;
+			w.ammo = 5;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(none(), "weapon: a drop during the reload action is ignored");
+			w.reloading = false;
+			w.ammo = 2;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(none(), "weapon: a drop of 3 is not a shot");
+
+			// Empty: a trigger edge clicks; holding it does not repeat; A counts too.
+			w.ammo = 0;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			none();
+			w.trigger = true;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(take(kRight) && approx(amp, kDryAmp) && approx(secs, kDrySeconds), "dry fire: trigger edge on an empty gun");
+			check(ws.view.dry_ms == w.now_ms, "dry fire: timed");
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(none(), "dry fire: a held trigger does not repeat");
+			w.trigger = false;
+			w.a = true;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(take(kRight) && approx(amp, kDryAmp), "dry fire: right A edge");
+			w.a = false;
+			w.ammo = 3;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			none(); // the reload ticks
+			w.trigger = true;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(none(), "dry fire: not with rounds left");
+			w.trigger = false;
+			w.now_ms += 200;
+			WeaponStep(w, ws);
+			none();
+
+			// Identity checks: a record of another player, or not naming itself, is Unknown and silent.
+			WeaponSample bad = w;
+			bad.owner = 2;
+			bad.ammo = 2;
+			bad.now_ms += 17;
+			WeaponStep(bad, ws);
+			check(ws.hold == Hold::Unknown && !ws.view.valid, "weapon: wrong owner is Unknown");
+			check(none(), "weapon: wrong owner does not kick");
+			bad = w;
+			bad.index = 86;
+			check(ClassifyWeapon(bad) == Hold::Unknown, "weapon: wrong index is Unknown");
+			bad = w;
+			bad.present = 0;
+			check(ClassifyWeapon(bad) == Hold::Unknown, "weapon: an absent record is Unknown");
+			bad = w;
+			bad.slot_known = false;
+			check(ClassifyWeapon(bad) == Hold::Unknown, "weapon: no local slot is Unknown");
+			bad = w;
+			bad.eq = 0;
+			check(ClassifyWeapon(bad) == Hold::BareHands, "weapon: nothing equipped is BareHands");
+			bad = w;
+			bad.readable = false;
+			check(ClassifyWeapon(bad) == Hold::Unknown, "weapon: an unreadable record is Unknown");
+			w.ammo = 2;
+			w.now_ms += 34;
+			WeaponStep(w, ws);
+			check(none() && ws.hold == Hold::Weapon, "weapon: back to a good record is a baseline");
+		}
 
 		// Stronger wins: a weaker pulse queued after a stronger one must not replace it (a beat vs a bite).
 		XRInput::QueuePulse(kRight, 0.3f, 0.05f);

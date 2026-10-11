@@ -542,6 +542,23 @@ namespace VR::ProfileDB
 		u32 fire_address = 0;
 		u8 fire_width = 2;
 		s8 fire_hand = -1; // 0 left, 1 right, -1 camera.lookAt's aim hand (right without one)
+		// The equipped weapon: the u8 at camera.base + weapon_equipped_offset is an item record index (0 = none)
+		// into weapon_table (weapon_stride bytes each). A record counts only when it is present (+0 == 1), names
+		// itself (+2 == the index) and its u8 owner is the local slot + 1. Its u16 count dropping while the u8
+		// stance at camera.base + weapon_stance_offset equals weapon_stance_raised is a shot (unless the u8 action
+		// is weapon_reload_action); a rise is a reload. Also decides whether the headset shows a pistol.
+		bool has_weapon = false;
+		u32 weapon_equipped_offset = 0;
+		u32 weapon_table = 0;
+		u32 weapon_stride = 60;
+		u32 weapon_id_offset = 0x06;
+		u32 weapon_count_offset = 0x24;
+		u32 weapon_owner_offset = 0x28;
+		u32 weapon_stance_offset = 0x08;
+		u32 weapon_stance_raised = 2;
+		bool has_weapon_reload = false;
+		u32 weapon_action_offset = 0;
+		u32 weapon_reload_action = 0;
 		// Heartbeat in the left hand while HP is below danger_below * max (needs hurt).
 		bool has_danger = false;
 		float danger_below = 0.25f;

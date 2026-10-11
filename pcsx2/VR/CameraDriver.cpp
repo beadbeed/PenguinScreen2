@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/CameraDriver.h"
+#include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
 #include "VR/HudCards.h"
 #include "VR/SpatialControls.h"
@@ -1165,6 +1166,13 @@ namespace VR::CameraDriver
 		bool s_local_record_valid = false;
 		bool s_local_guards_now = false; // and this vsync's camera guards held (no disarm grace)
 		u32 s_local_record_base = 0;
+		// camera.base while the camera guards pass, ignoring releaseWhen, the head pose and the network mode
+		// (LocalRecordAny: still valid while grabbed, down or dead). Reads only.
+		bool s_local_any_valid = false;
+		u32 s_local_any_base = 0;
+		// Vsyncs since the camera guards last passed, for LocalRecordAny's own disarm grace (the room-camera mode
+		// byte flickers about 12 times a second). Saturates; 0xFFFFFFFF = no grace (no VM, no profile, game change).
+		u32 s_any_guard_fail_vsyncs = 0xFFFFFFFFu;
 
 		std::atomic_bool s_recenter_requested{false};
 		// The pending recenter's caller shows its own toast (RequestRecenter(false)).
@@ -1748,7 +1756,8 @@ namespace VR::CameraDriver
 				}
 			}
 			// The first-person hands show the pistol in the right hand while the weapon is raised.
-			HandModel::SetGunHeld(weapon_raised);
+			// A bare-handed raise (no weapon equipped) shows no pistol; Unknown keeps the stance-only rule.
+			HandModel::SetGunHeld(weapon_raised && GameFeedback::WeaponInHand() != GameFeedback::Hold::BareHands);
 			s_weapon_raised = weapon_raised;
 
 			// Walk while aiming: with the weapon up Outbreak only turns and tilts the aim with the stick. The
@@ -2444,6 +2453,7 @@ namespace VR::CameraDriver
 		// only once armed, from this vsync's GetBase.
 		s_local_record_valid = false;
 		s_local_guards_now = false;
+		s_local_any_valid = false;
 
 		const bool switched_on = EffectiveVREnabled(EmuConfig.VR.Enable) && EmuConfig.VR.HeadCamera &&
 		                         !SplitState::Active();
@@ -2471,6 +2481,7 @@ namespace VR::CameraDriver
 			s_hooks_installed = false;
 			s_base.valid = false;
 			s_padlook = PadLookState{};
+			s_any_guard_fail_vsyncs = 0xFFFFFFFFu;
 			ResetDeltaState();
 			PadLook::Publish(0.0f);
 			return;
@@ -2493,6 +2504,7 @@ namespace VR::CameraDriver
 			s_hooks_installed = false;
 			s_base.valid = false;
 			s_padlook = PadLookState{};
+			s_any_guard_fail_vsyncs = 0xFFFFFFFFu;
 			if (vm_state == VMState::Running)
 			{
 				for (AnchorState& a : s_anchor)
@@ -2524,6 +2536,22 @@ namespace VR::CameraDriver
 			s_guard_fail_vsyncs++;
 		const bool guards_hold = (s_guard_fail_vsyncs == 0) ||
 		                         (s_armed_logged && s_guard_fail_vsyncs <= cam.disarm_after_vsyncs);
+		// LocalRecordAny: the record whenever the game is running past its guards, grabbed, down or dead too.
+		// Only for a profile with feedback cues (its only reader), so a pattern-scanned base is not hunted for
+		// while first person is off. It has its own disarm grace (ignoring releaseWhen, armed or not): the guards
+		// flicker for a vsync or two, and without the grace each flicker would reset the hurt and weapon cues.
+		const bool guards_now_pass = GuardsPass(cam);
+		if (guards_now_pass)
+			s_any_guard_fail_vsyncs = 0;
+		else if (s_any_guard_fail_vsyncs < 0xFFFFFFFFu)
+			s_any_guard_fail_vsyncs++;
+		if (vm_state == VMState::Running && profile->feedback.has_value() &&
+			s_any_guard_fail_vsyncs <= cam.disarm_after_vsyncs)
+		{
+			const std::optional<u32> base_any = GetBase(cam, crc);
+			s_local_any_valid = base_any.has_value();
+			s_local_any_base = base_any.value_or(0u);
+		}
 		const NetMode net_mode = ResolveNetMode(cam);
 		if (net_mode != s_net_mode || !s_net_mode_logged)
 		{
@@ -3030,6 +3058,15 @@ namespace VR::CameraDriver
 			*base = s_local_record_base;
 		if (guards_now)
 			*guards_now = s_local_guards_now;
+		return true;
+	}
+
+	bool LocalRecordAny(u32* base)
+	{
+		if (!s_local_any_valid)
+			return false;
+		if (base)
+			*base = s_local_any_base;
 		return true;
 	}
 

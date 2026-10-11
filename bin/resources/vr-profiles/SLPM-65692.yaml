@@ -32,8 +32,13 @@ SLPM-65692:
   # The game's own DualShock rumble goes to the controllers (the VR "Forward Game Rumble" setting). While
   # first person is armed: losing HP (u16 at local record +0x540, max HP at +0x542: File #2's record
   # differs from File #1's; not yet checked live) pulses both hands, harder the bigger the hit, and below
-  # a quarter of max HP (a placeholder) the left hand feels a heartbeat. No shot counter found yet.
-  feedback: { padRumble: true, hurt: { offset: 0x540, max: 0x542, width: 2 }, danger: { below: 0.20 } }
+  # a quarter of max HP (a placeholder) the left hand feels a heartbeat. Hurt and heartbeat keep going
+  # while grabbed, down or dead. Weapon: the u8 at local record +0xC8C is the equipped item's record
+  # index (0 = bare hands) in the 60-byte item table at 0x397B40, laid out as File #1's (checked in
+  # savestates). With the stance raised a drop of the rounds is a shot (aim-hand kick, pistol recoil), a
+  # rise is a reload, and an empty gun clicks on a trigger pull. The reload action byte is not measured
+  # yet, so no action/reload here. Nothing equipped shows bare hands; the wrist card shows the rounds.
+  feedback: { padRumble: true, hurt: { offset: 0x540, max: 0x542, width: 2 }, danger: { below: 0.20 }, weapon: { equipped: 0xC8C, table: 0x397B40 } }
   # Wrist card (VR only, first person): turn the left wrist to the face to read the character's condition
   # (FINE / CAUTION below 60% of max HP / DANGER below 20% / BLEED), an HP bar and the virus gauge. Reads
   # only. Local record offsets: HP u16 +0x540 of max +0x542; virus counter u32 +0xBC4 over the u32 maximum
