@@ -256,6 +256,20 @@ Carry on from this list, in order:
 
 ## 5b. The easy private server
 
+**Status (Mac, 10 Oct):**
+- The server is **running** on Alex's Mac at its LAN address **192.168.1.14**, and all its checks pass:
+  - the login page and encryption;
+  - the lobby on 8300 and the game server on 8690;
+  - a full login round trip.
+- Fixed: the lobby used to die if it started before its database (after the Mac or Docker VM
+  rebooted). It now waits.
+- **Accounts:** `alex` and `adrian`. The passwords are in `private-server/accounts.local.txt` on the
+  Mac only; Alex gives Adrian his.
+- **For Alex's PC at home:** `python tools\outbreak-vr\netmode.py private 192.168.1.14`.
+- **For Adrian remotely:** Tailscale isn't installed on the Mac yet. Once Alex installs it and signs in,
+  restart the server on the Tailscale address (`./server.sh up --ip <100.x>`). Then everyone uses
+  `netmode.py private <100.x>`, Alex's PC included.
+
 1. **Server (Alex's Mac, already built):** in `~/Documents/github/outbreak-vr/private-server`, run
    `./server.sh up`. The first run takes 15-25 minutes; later starts take seconds. Make one account each
    with `./server.sh adduser <id> <password>`. Keep the Mac awake while you play
