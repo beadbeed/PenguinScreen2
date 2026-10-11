@@ -60,7 +60,7 @@ float vr_stereo_disp(float q_in, float z_norm)
 
 	if (vr_map_mode == 0u)
 	{
-		return vr_stereo.x * max(0.0f, 1.0f - vr_stereo.y * q);
+		return vr_stereo.x * max(vr_splits.x, 1.0f - vr_stereo.y * q);
 	}
 
 	if (vr_map_mode == 2u)
@@ -120,7 +120,18 @@ void main()
 			#else
 				float vr_eye_sign = 1.0f;
 			#endif
-			gl_Position.x += vr_eye_sign * vr_stereo_disp(a_q, gl_Position.z);
+			float vr_d = vr_eye_sign * vr_stereo_disp(a_q, gl_Position.z);
+			if (vr_map_mode == 0u)
+			{
+				// Linear map: vr_splits.y/.z rotate the parallax with head roll so it stays
+				// along the eye baseline (no vertical disparity). Both are zero when unset.
+				gl_Position.x += vr_d * (1.0f - vr_splits.z);
+				gl_Position.y += vr_d * vr_splits.y;
+			}
+			else
+			{
+				gl_Position.x += vr_d;
+			}
 		}
 	#endif
 
@@ -476,7 +487,18 @@ void main()
 			#else
 				float vr_eye_sign = 1.0f;
 			#endif
-			gl_Position.x += vr_eye_sign * vr_stereo_disp(vtx.t.w, gl_Position.z);
+			float vr_d = vr_eye_sign * vr_stereo_disp(vtx.t.w, gl_Position.z);
+			if (vr_map_mode == 0u)
+			{
+				// Linear map: vr_splits.y/.z rotate the parallax with head roll so it stays
+				// along the eye baseline (no vertical disparity). Both are zero when unset.
+				gl_Position.x += vr_d * (1.0f - vr_splits.z);
+				gl_Position.y += vr_d * vr_splits.y;
+			}
+			else
+			{
+				gl_Position.x += vr_d;
+			}
 		}
 	#endif
 

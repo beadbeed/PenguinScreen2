@@ -52,6 +52,29 @@ a cutscene, a savestate load). The first one in a session logs `(VR) HUD: comfor
 `PCSX2_VR_VIGNETTE_TEST=1` ramps it up and down every 2 s at any time (with the setting on) for `hmdshot.py`
 captures on the null headset.
 
+First-person stereo depth (VR settings `NearDepthMetres`, default 0 = the profile's `stereo.firstPerson.nearest`,
+below 0 off, 0.45-1.5 m overrides; `RollParallax`, on by default; ini only): true stereo depth now reaches in front of
+the 1.5 m convergence plane down to `nearest` (0.75 m in both profiles: crossed disparity down to -separation)
+instead of flattening everything nearer onto that plane, for perspective-textured draws only (constant-Q,
+untextured and 2D/FST draws stay as before), and the parallax turns with head roll (full up to 25 deg, fading to
+none at 40 deg) so a tilted head sees no vertical disparity. Each first-person arm logs
+`(VR) First-person stereo: sep ..., conv ... (1.50 m), nearest 0.75 m (floor -1.00), roll parallax on`.
+
+Stereo dump and `stereo_metric.py` (headset-free, offline only): `PCSX2_VR_STEREODUMP=<dir>[,everyN]` (default
+every 30 frames) copies both eyes of the first-person multiview frame to `<dir>/stereo_<frame>_L.png` and `_R.png`
+with a JSON sidecar (frame, w, h, sep, conv, near_floor, roll_deg, aspect), logging `(VR) Stereo dump: <path>` for
+each pair; it never waits on the GPU, and is refused (logged once) while the network adapter is on.
+`PCSX2_VR_FAKE_HEADROLL=<deg>` adds a constant head roll to the fake head (positive = left ear down; on its own it
+gives a still head at yaw 0 / pitch 0 with that roll) and logs `(VR) CameraDriver: fake head roll ... -> euler roll
+...` once. `python stereo_metric.py <dir | stereo_NNNNNN>` (numpy + PIL) measures the right eye against the left
+on 48x48 tiles of the gradient images: dx percentiles in pixels and in units of sep*width (far content is about
++1, the 5th percentile shows the crossed near field) and the median disparity angle on the display.
+`--expect-floor -1` checks the 5th percentile is -1 x sep*width within 15% and never 2 px beyond;
+`--expect-roll 10` checks the angle is within 1 deg (at 40 deg and more there is no disparity to measure, which
+passes). Exit code 0 = pass. Example: null headset, File #1 J's Bar, first person armed, offline,
+`PCSX2_VR_STEREODUMP=D:\Games\PS2\stereo,15`, walk up to the bar counter, then
+`python stereo_metric.py D:\Games\PS2\stereo --expect-floor -1`.
+
 Rules when testing: never change emulation speed; never pause, savestate or dump RAM while online
 (obsrv drops clients after ~30 s without packets and bans speed changes); do not run the virtual pad
 while an anti-cheat game is open.

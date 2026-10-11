@@ -1939,6 +1939,8 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(VignetteStrength);
 	SettingsWrapEntry(OnlineSafe);
 	SettingsWrapEntry(PrivateCoopFirstPerson);
+	SettingsWrapEntry(NearDepthMetres);
+	SettingsWrapEntry(RollParallax);
 	SettingsWrapEntry(Brightness);
 	SettingsWrapEntry(GameRumble);
 	SettingsWrapEntry(HapticStrength);
@@ -1953,6 +1955,10 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 		ScreenArcDeg = std::clamp(ScreenArcDeg, 0.0f, 270.0f);
 		StereoSeparation = std::clamp(StereoSeparation, 0.0f, 0.1f);
 		StereoConvergence = std::clamp(StereoConvergence, 0.0f, 200.0f);
+		if (!std::isfinite(NearDepthMetres))
+			NearDepthMetres = 0.0f;
+		else if (NearDepthMetres > 0.0f)
+			NearDepthMetres = std::clamp(NearDepthMetres, 0.45f, 1.5f);
 		Brightness = std::clamp(Brightness, MIN_BRIGHTNESS, MAX_BRIGHTNESS);
 		HapticStrength = std::clamp(HapticStrength, 0.0f, 1.0f);
 		VignetteStrength = std::isfinite(VignetteStrength) ?

@@ -118,6 +118,9 @@ namespace VR::ProfileDB
 		// (the head-locked first-person screen needs different separation/convergence than the world one).
 		std::optional<float> fp_separation;
 		std::optional<float> fp_convergence;
+		// stereo.firstPerson.nearest (metres, 0.45-1.5): true near depth reaches down to this distance
+		// instead of flattening at the convergence plane.
+		std::optional<float> fp_nearest;
 
 		std::optional<HudCollimate> hud_collimate;
 

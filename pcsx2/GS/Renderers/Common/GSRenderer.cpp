@@ -13,6 +13,7 @@
 #include "Host.h"
 #include "PerformanceMetrics.h"
 #ifdef ENABLE_VR
+#include "VR/StereoDump.h"
 #include "VR/VRManager.h"
 #endif
 #include "pcsx2/Config.h"
@@ -694,6 +695,9 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 
 #ifdef ENABLE_VR
 	VR::EndOfFrame(blank_frame ? nullptr : g_gs_device->GetCurrent());
+	// After the XR copy: that submit has already put the frame in TransferSrc, so the dump's copy, recorded
+	// into the next GS command buffer, finds the image in the layout it is tracked in.
+	VR::StereoDump::MaybeCapture(blank_frame ? nullptr : g_gs_device->GetCurrent());
 #endif
 
 	if (!m_snapshot.empty())

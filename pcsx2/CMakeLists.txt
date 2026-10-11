@@ -1075,6 +1075,7 @@ set(pcsx2VRSources
 	VR/HeadPose.cpp
 	VR/MemWatch.cpp
 	VR/PadLook.cpp
+	VR/StereoDump.cpp
 	VR/StereoState.cpp
 	VR/VRInput.cpp
 	VR/VRManager.cpp
@@ -1099,6 +1100,7 @@ set(pcsx2VRHeaders
 	VR/HeadPose.h
 	VR/MemWatch.h
 	VR/PadLook.h
+	VR/StereoDump.h
 	VR/StereoState.h
 	VR/VRInput.h
 	VR/VRInputState.h
