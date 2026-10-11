@@ -602,6 +602,10 @@ namespace VR::CameraDriver
 		ResolvedBase s_base;
 		u64 s_vsync_counter = 0;
 		u32 s_base_unresolved_vsyncs = 0;
+		bool s_local_check_failed = false; // an indexed base's local-record check is failing (logged once per episode)
+
+		u32 ReadSized(u32 address, u8 width);
+		bool RecordCheckPass(const ProfileDB::RecordCheck& c, u32 base);
 
 		std::optional<u32> ScanForBase(const ProfileDB::CameraBase& spec)
 		{
@@ -692,6 +696,31 @@ namespace VR::CameraDriver
 					case 2: idx = memRead16(spec.index_addr); break;
 					default: idx = memRead32(spec.index_addr); break;
 				}
+				// Only the record the game itself runs as the local player may be written (File #1 0x639A30: a
+				// human record is local only when its +0x03 byte equals the local slot byte). Anything else (an
+				// index past the table, a record whose id byte disagrees, a failed check) leaves the base
+				// unresolved, and with it every first person write.
+				const auto local_check_failed = [&](s64 offset, u32 value) {
+					s_base.valid = false;
+					if (!s_local_check_failed)
+					{
+						s_local_check_failed = true;
+						Console.Warning("(VR) CameraDriver: local record check failed (index %u, +0x%llX reads %u): first person writes nothing until it holds.",
+							idx, static_cast<unsigned long long>(offset), value);
+					}
+					return std::optional<u32>();
+				};
+				if (spec.count != 0 && idx >= spec.count)
+				{
+					s_base.valid = false;
+					if (!s_local_check_failed)
+					{
+						s_local_check_failed = true;
+						Console.Warning("(VR) CameraDriver: local record check failed (index %u is not below the record count %u): first person writes nothing until it holds.",
+							idx, spec.count);
+					}
+					return std::nullopt;
+				}
 				const s64 resolved = static_cast<s64>(spec.indexed_base) + spec.array_offset +
 									 static_cast<s64>(idx) * static_cast<s64>(spec.stride);
 				if (resolved < 0 || resolved >= static_cast<s64>(Ps2MemSize::MainRam))
@@ -700,6 +729,39 @@ namespace VR::CameraDriver
 					return std::nullopt;
 				}
 				const u32 base = static_cast<u32>(resolved);
+				if (spec.has_id_offset)
+				{
+					const s64 ia = resolved + spec.id_offset;
+					if (ia < 0 || ia >= static_cast<s64>(Ps2MemSize::MainRam))
+						return local_check_failed(spec.id_offset, 0);
+					const u32 id = memRead8(static_cast<u32>(ia));
+					if (id != (idx & 0xFFu))
+						return local_check_failed(spec.id_offset, id);
+				}
+				for (const ProfileDB::RecordCheck& c : spec.checks)
+				{
+					if (!RecordCheckPass(c, base))
+					{
+						const s64 ca = resolved + c.offset;
+						const u32 v = (ca >= 0 && ca + c.width <= static_cast<s64>(Ps2MemSize::MainRam)) ?
+						                  ReadSized(static_cast<u32>(ca), c.width) : 0;
+						return local_check_failed(c.offset, v);
+					}
+				}
+				if (spec.has_validate)
+				{
+					const s64 va = resolved + spec.validate_offset;
+					if (va < 0 || va + 4 > static_cast<s64>(Ps2MemSize::MainRam))
+						return local_check_failed(spec.validate_offset, 0);
+					const u32 v = memRead32(static_cast<u32>(va));
+					if (v != spec.validate_equals)
+						return local_check_failed(spec.validate_offset, v);
+				}
+				if (s_local_check_failed)
+				{
+					s_local_check_failed = false;
+					Console.WriteLn("(VR) CameraDriver: local record check holds again (index %u).", idx);
+				}
 				if (!s_base.valid || s_base.crc != crc || s_base.base != base)
 				{
 					s_base = ResolvedBase{crc, base, true, 0};
@@ -1783,6 +1845,7 @@ namespace VR::CameraDriver
 		{
 			bool saved = false;
 			u32 original = 0;
+			bool given_back_logged = false; // given back on a failed `when` (logged once per episode)
 		};
 		std::vector<HoldState> s_hold_state;
 		u32 s_hold_crc = 0;
@@ -1805,9 +1868,24 @@ namespace VR::CameraDriver
 			for (size_t i = 0; i < la.holds.size(); i++)
 			{
 				const ProfileDB::CameraLookAt::Hold& h = la.holds[i];
-				if (!h.when.empty() && !GuardListPass(h.when))
-					continue;
 				HoldState& st = s_hold_state[i];
+				if (!h.when.empty() && !GuardListPass(h.when))
+				{
+					// The condition failed mid-hold (e.g. the slot the focus was moved to became used): a hold
+					// whose original comes from a static address gives it back now instead of leaving ours there.
+					if (st.saved && h.restore_from != 0 && ReadSized(h.address, h.width) == h.value)
+					{
+						WriteSized(h.address, h.width, HoldOriginal(h, st));
+						st.saved = false;
+						if (!st.given_back_logged)
+						{
+							st.given_back_logged = true;
+							Console.WriteLn("(VR) CameraDriver: focus hold given back (its condition no longer holds).");
+						}
+					}
+					continue;
+				}
+				st.given_back_logged = false;
 				const u32 cur = ReadSized(h.address, h.width);
 				if (!st.saved)
 				{
@@ -1830,7 +1908,9 @@ namespace VR::CameraDriver
 				{
 					const ProfileDB::CameraLookAt::Hold& h = la->holds[i];
 					HoldState& st = s_hold_state[i];
-					if (!st.saved || (!h.when.empty() && !GuardListPass(h.when)))
+					// A hold with restoreFrom is put back even on a failed `when`: its address is static and its
+					// original comes from the local slot byte, so the focus never stays on a slot now in use.
+					if (!st.saved || (h.restore_from == 0 && !h.when.empty() && !GuardListPass(h.when)))
 						continue;
 					if (ReadSized(h.address, h.width) == h.value)
 						WriteSized(h.address, h.width, HoldOriginal(h, st));
@@ -2658,7 +2738,11 @@ namespace VR::CameraDriver
 		{
 			const ProfileDB::CameraLookAt& la = cam.look_at.value();
 			s_hold_repair = false;
-			ApplyHolds(la, crc);
+			// Holds only while the local record is verified; otherwise ours are put back.
+			if (base.has_value() || !cam.base.has_value())
+				ApplyHolds(la, crc);
+			else
+				RestoreHolds(&la, true);
 			if (!la.pause_when.empty() && GuardListPass(la.pause_when))
 			{
 				// A menu, the map or pause: the camera keeps its last view (its writers stay silenced) and the

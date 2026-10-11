@@ -59,7 +59,10 @@ SLPM-65692:
   camera:
     networkFlag: 0x3137D2   # u8 1 while the game is in network play. Online, first person arms only in private co-op
                           # (VR setting PrivateCoopFirstPerson + login host pointed at a non-obsrv server); see CameraDriver::ResolveNetMode.
-    base: { indexed: 0x47BD30, indexAddr: 0x4912BD, indexWidth: 1, stride: 0x1100 }   # local character record
+    # Local character record. count/idOffset: a used record's +0x03 byte is its own index and the local record's
+    # equals the local slot byte (checked offline in the Training Ground), as File #1's game code tests; first person
+    # writes only a record that passes, and nothing while it fails.
+    base: { indexed: 0x47BD30, indexAddr: 0x4912BD, indexWidth: 1, stride: 0x1100, count: 4, idOffset: 0x03 }
     guards:
       - { address: 0x543004, equals: 3 }             # GAME overlay resident
       - { address: 0x4912A0, equals: 2, width: 1 }   # scenario status: in game
@@ -130,11 +133,12 @@ SLPM-65692:
         - { offset: 0x08, equals: 1, width: 1 }     # stance: normal (2 = weapon raised)
         - { offset: 0xFA8, equals: 0, width: 2 }    # stick magnitude: centred
       # Grabbed by a zombie (stance 5, checked on File #1: bites follow until Kevin breaks free), or down / dead /
-      # turned (status 0xBB8: 0x08-0x0B down, 0x0C down in gas, above that dead, 0x30-0x34 zombie): the game's own
+      # turned (status 0xBB8: 0x08-0x0B down, 0x0C down in gas, above that dead, 0x30-0x34 zombie; dead values also
+      # run above 0x3F, so the range goes to 0xFF): the game's own
       # camera shows it on the world screen; first person comes back facing the way the character does.
       releaseWhen:
         - { offset: 0x08, equals: 5, width: 1 }
-        - { offset: 0xBB8, min: 0x08, max: 0x3F, width: 1 }
+        - { offset: 0xBB8, min: 0x08, max: 0xFF, width: 1 }
       hold:
         # Focus slot as File #1: never a partner. Slot 3 while its record is empty (max HP +0x542 is 0), else slot 2
         # when you are slot 3 and it is empty; a full room holds nothing.

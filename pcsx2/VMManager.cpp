@@ -324,6 +324,23 @@ bool VMManager::HasValidOrInitializingVM()
 	return (state >= VMState::Initializing && state <= VMState::Resetting);
 }
 
+// Online (network adapter on) the game must never pause, change speed, or load or save a state: the server drops a
+// client that goes quiet and bans speed changes, and a state load desyncs the room. Every UI path (hotkeys, Qt
+// dialogs, FullscreenUI, drag-and-drop, resume, PINE) funnels through SetPaused, DoLoadState, DoSaveState,
+// SetLimiterMode and UpdateTargetSpeed, so the lock lives at those chokepoints. PCSX2_TEST_ONLINE_LOCKS=1 forces it on
+// with the adapter off, for testing.
+bool VMManager::IsOnlineLocked()
+{
+	static const bool s_test_online_locks = []() {
+		const char* env = std::getenv("PCSX2_TEST_ONLINE_LOCKS");
+		const bool on = (env && env[0] == '1' && env[1] == '\0');
+		if (on)
+			Console.WriteLn("(VMManager) PCSX2_TEST_ONLINE_LOCKS: online locks forced on for testing");
+		return on;
+	}();
+	return EmuConfig.DEV9.EthEnable || s_test_online_locks;
+}
+
 std::string VMManager::GetDiscPath()
 {
 	std::unique_lock lock(s_info_mutex);
@@ -1451,7 +1468,13 @@ VMBootResult VMManager::Initialize(const VMBootParameters& boot_params, Error* e
 	if (Achievements::IsHardcoreModeActive() && (!state_to_load.empty() || DebugInterface::getPauseOnEntry()))
 		return VMBootResult::PromptDisableHardcoreMode;
 
-	if (boot_params.start_unlimited.value_or(false))
+	if (IsOnlineLocked())
+	{
+		if (boot_params.start_unlimited.value_or(false) || boot_params.start_turbo.value_or(false))
+			Console.WriteLn("(VMManager) Online: ignoring the boot turbo/unlimited option (the game runs at 100%% online).");
+		s_limiter_mode = LimiterModeType::Nominal;
+	}
+	else if (boot_params.start_unlimited.value_or(false))
 		s_limiter_mode = LimiterModeType::Unlimited;
 	else if (boot_params.start_turbo.value_or(false))
 		s_limiter_mode = LimiterModeType::Turbo;
@@ -1819,6 +1842,13 @@ std::string VMManager::GetCurrentSaveStateFileName(s32 slot, bool backup)
 
 bool VMManager::DoLoadState(const char* filename, Error* error)
 {
+	if (IsOnlineLocked())
+	{
+		Console.Warning("(VMManager) Load state refused: the network adapter is on.");
+		Error::SetString(error, TRANSLATE_STR("VMManager", "Save states are disabled while the network adapter is on."));
+		return false;
+	}
+
 	if (GSDumpReplayer::IsReplayingDump())
 	{
 		Error::SetString(error, TRANSLATE_STR("VMManager", "Cannot load state while replaying a GS dump."));
@@ -1847,6 +1877,14 @@ bool VMManager::DoLoadState(const char* filename, Error* error)
 
 void VMManager::DoSaveState(const char* filename, s32 slot_for_message, bool zip_on_thread, bool backup_old_state, std::function<void(const std::string&)> error_callback)
 {
+	if (IsOnlineLocked())
+	{
+		Console.Warning("(VMManager) Save state refused: the network adapter is on.");
+		if (error_callback)
+			error_callback(TRANSLATE_STR("VMManager", "Save states are disabled while the network adapter is on."));
+		return;
+	}
+
 	if (GSDumpReplayer::IsReplayingDump())
 	{
 		error_callback(TRANSLATE_STR("VMManager", "Cannot save state while replaying a GS dump."));
@@ -2087,6 +2125,15 @@ LimiterModeType VMManager::GetLimiterMode()
 
 void VMManager::SetLimiterMode(LimiterModeType type)
 {
+	if (type != LimiterModeType::Nominal && IsOnlineLocked())
+	{
+		Console.Warning("(VMManager) Speed change refused: the network adapter is on (the game runs at 100%% online).");
+		Host::AddKeyedOSDMessage("OnlineSpeedRefused",
+			TRANSLATE_STR("VMManager", "Speed changes are disabled while the network adapter is on."),
+			Host::OSD_QUICK_DURATION);
+		return;
+	}
+
 	if (s_limiter_mode == type)
 		return;
 
@@ -2132,7 +2179,20 @@ void VMManager::UpdateTargetSpeed()
 	s_target_speed_synced_to_host = false;
 	s_use_vsync_for_timing = false;
 
-	if (EmuConfig.EmulationSpeed.SyncToHostRefreshRate)
+	// Online the game runs at exactly 100%: no NominalScalar, turbo, fast-boot fast forward or host-refresh retiming
+	// (which can move the speed by up to 5%).
+	static bool s_online_speed_held = false;
+	const bool online_locked = IsOnlineLocked();
+	if (online_locked != s_online_speed_held)
+	{
+		s_online_speed_held = online_locked;
+		if (online_locked)
+			Console.WriteLn("(VMManager) Online: emulation speed held at 100%%.");
+	}
+	if (online_locked)
+		target_speed = 1.0f;
+
+	if (!online_locked && EmuConfig.EmulationSpeed.SyncToHostRefreshRate)
 	{
 		if (const std::optional<float> host_refresh_rate = GSGetHostRefreshRate(); host_refresh_rate.has_value())
 		{
@@ -2667,6 +2727,17 @@ void VMManager::SetPaused(bool paused)
 {
 	if (!HasValidVM())
 		return;
+
+	if (paused && IsOnlineLocked())
+	{
+		// Qt dialogs, FullscreenUI, input recording and debugger breaks all pause through here; online their UI opens
+		// over the running game instead.
+		Console.Warning("(VMManager) Pause refused: the network adapter is on (the game never pauses online).");
+		Host::AddKeyedOSDMessage("OnlinePauseRefused",
+			TRANSLATE_STR("VMManager", "The game never pauses while the network adapter is on."),
+			Host::OSD_QUICK_DURATION);
+		return;
+	}
 
 	Console.WriteLn(paused ? "(VMManager) Pausing..." : "(VMManager) Resuming...");
 	SetState(paused ? VMState::Paused : VMState::Running);

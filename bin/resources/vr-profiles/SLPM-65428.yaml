@@ -61,7 +61,10 @@ SLPM-65428:
   camera:
     networkFlag: 0x3065C2   # u8 1 while the game is in network play. Online, first person arms only in private co-op
                           # (VR setting PrivateCoopFirstPerson + login host pointed at a non-obsrv server); see CameraDriver::ResolveNetMode.
-    base: { indexed: 0x476DD0, indexAddr: 0x48BF7D, indexWidth: 1, stride: 0x10E0 }   # local character record
+    # Local character record. count/idOffset: the game runs a human record as the local player only when its +0x03
+    # byte equals the local slot byte (0x639A30: lbu v1,0x3(s0); lbu v0,0x48BF7D; bne), so first person writes only
+    # a record that passes the same test, and nothing while it fails.
+    base: { indexed: 0x476DD0, indexAddr: 0x48BF7D, indexWidth: 1, stride: 0x10E0, count: 4, idOffset: 0x03 }
     guards:
       - { address: 0x540004, equals: 3 }             # GAME overlay resident
       - { address: 0x48BF60, equals: 2, width: 1 }   # scenario status: in game
@@ -136,11 +139,12 @@ SLPM-65428:
       # nothing is held and your body may show. The class-1 radius goes from 80 to 75 so zombies and partners
       # stay visible down to about 0.5 m away.
       # Grabbed by a zombie (stance 5, checked on File #1: bites follow until Kevin breaks free), or down / dead /
-      # turned (status 0xBA0: 0x08-0x0B down, 0x0C down in gas, above that dead, 0x30-0x34 zombie): the game's own
+      # turned (File #1 status 0xBA0, from the tracker decoder: 0x18-0x1C down, 0x1D-0x7F dead, 0x80 and above
+      # zombie; normal play stays below 0x18): the game's own
       # camera shows it on the world screen; first person comes back facing the way the character does.
       releaseWhen:
         - { offset: 0x08, equals: 5, width: 1 }
-        - { offset: 0xBA0, min: 0x08, max: 0x3F, width: 1 }
+        - { offset: 0xBA0, min: 0x18, max: 0xFF, width: 1 }
       hold:
         - { address: 0x3AEF74, value: 3, width: 1, restoreFrom: 0x48BF7D, when: [{ address: 0x48BF7D, notEquals: 3, width: 1 }, { address: 0x47A5B6, equals: 0, width: 2 }], notes: "camera focus slot: 3 while that record is empty" }
         - { address: 0x3AEF74, value: 2, width: 1, restoreFrom: 0x48BF7D, when: [{ address: 0x48BF7D, equals: 3, width: 1 }, { address: 0x4794D6, equals: 0, width: 2 }], notes: "camera focus slot: 2 while empty (you are slot 3)" }
