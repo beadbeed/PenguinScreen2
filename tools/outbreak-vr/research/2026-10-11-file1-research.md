@@ -66,3 +66,22 @@ Fine as shipped; see tools/outbreak-vr/HANDOFF.md "PC reply".
 - Aim pitch +0xBE0 with the weapon raised: PS2 stick up -> +8192, down -> -8192 (positive = up): pitchSign 1 is right.
 - With the weapon raised, the PS2 stick (up, down or right) moved Kevin about 20 units over 1.5 s in every direction: the raise
   step, not walking. File #2 does not natively walk while aiming in this state.
+
+## Command submenu flag (both Files, offline, 2026-10-11 evening)
+- The item-screen cursor struct + 0x20 (u8) is 1 while an item's command submenu (EQUIP/RELOAD/USE/...) is open and 0 when
+  it is closed (also +0x62). File #1 0x720BA0, File #2 0x767210. Moving inside the submenu does not change the main cursor
+  node. Found by full-RAM diffs (3 open/closed rounds) and confirmed on both Files.
+- The struct's +0x00 word stays 1 after the item screen closes (stale), so menu logic must also check the menu flag
+  (File #1 0x48BF7E, File #2 0x4912BE).
+- File #2's equipped box node is 0x768F98 (as inferred: cell 0 node 0x767280 + 49*0x98), index 0, x 550, y 216.
+
+## Breaking free of a grab (File #1 slot 5, offline; timings taken while the PC was hitching, so treat as relative)
+| input while grabbed (stance 5) | grabbed for | HP lost |
+|---|---|---|
+| nothing | 10.2 s | 800 |
+| mash Circle (VR A) ~8 Hz | 5.6 s | 500 |
+| mash Cross (VR B) ~8 Hz | 5.2 s | 500 |
+| mash Square (VR X) | 10.4 s | 850 (no effect) |
+| waggle the left stick left/right ~6 Hz | 5.6 s | 500 |
+| stick waggle + D-pad + Circle/Cross/Square/Triangle cycling | 3.3 s | 450 |
+After the grab: stance 1, action 0/1. So a shake gesture should drive left-stick waggle plus Circle/Cross pulses.
