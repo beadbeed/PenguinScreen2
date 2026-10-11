@@ -90,6 +90,22 @@ namespace VR::XRCompositor
 		// wait here stalls the GS thread and with it the emulator, which online means being dropped. On a
 		// timeout the copy is skipped and retried on the next present; the headset keeps the last image.
 		constexpr int64_t kSwapchainWaitNs = 5000000;
+		// All of one present's swapchain image waits together (both eyes, levers, hands, HUD cards) stay under this, so
+		// a runtime that is slow to hand images back (measured on the null HMD: 5 ms per chain, 15-20 ms per present)
+		// costs the GS at most this much per present; a chain whose image isn't back in time keeps its previous one.
+		constexpr int64_t kPresentWaitBudgetNs = 3000000;
+		int64_t s_present_wait_left_ns = kPresentWaitBudgetNs;
+
+		// xrWaitSwapchainImage for at most max_ns and at most what is left of this present's budget (0: just poll).
+		XrResult BudgetedWaitSwapchainImage(XrSwapchain swapchain, int64_t max_ns)
+		{
+			XrSwapchainImageWaitInfo wi = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+			wi.timeout = std::min<int64_t>(max_ns, std::max<int64_t>(0, s_present_wait_left_ns));
+			const auto start = std::chrono::steady_clock::now();
+			const XrResult res = xrWaitSwapchainImage(swapchain, &wi);
+			s_present_wait_left_ns -= std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+			return res;
+		}
 		constexpr u32 NUM_CMD_BUFFERS = 2;
 		// First-person hands: one impostor quad per hand (HandModel::kLeft / kRight).
 		constexpr int kHandSlots = 2;
@@ -712,9 +728,7 @@ namespace VR::XRCompositor
 				chain.wait_pending = true;
 			}
 
-			XrSwapchainImageWaitInfo wi = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-			wi.timeout = kSwapchainWaitNs;
-			XrResult res = xrWaitSwapchainImage(chain.swapchain, &wi);
+			XrResult res = BudgetedWaitSwapchainImage(chain.swapchain, kSwapchainWaitNs);
 			if (res == XR_TIMEOUT_EXPIRED)
 			{
 				// The image stays acquired (wait_pending); the next present waits on it again.
@@ -1001,10 +1015,8 @@ namespace VR::XRCompositor
 					lc.pending_index = index;
 					lc.wait_pending = true;
 				}
-				XrSwapchainImageWaitInfo wi = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-				wi.timeout = kSwapchainWaitNs;
 				// XR_TIMEOUT_EXPIRED is a success code: the image isn't ours yet, so wait again next frame.
-				const XrResult lwr = xrWaitSwapchainImage(lc.swapchain, &wi);
+				const XrResult lwr = BudgetedWaitSwapchainImage(lc.swapchain, kSwapchainWaitNs);
 				if (lwr == XR_TIMEOUT_EXPIRED || XR_FAILED(lwr))
 					continue;
 				lc.wait_pending = false;
@@ -1423,10 +1435,8 @@ namespace VR::XRCompositor
 					hc.pending_index = index;
 					hc.wait_pending = true;
 				}
-				XrSwapchainImageWaitInfo wi = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-				wi.timeout = kHandWaitNs;
 				// XR_TIMEOUT_EXPIRED is a success code: the image is not ours yet, so wait again next frame.
-				const XrResult wr = xrWaitSwapchainImage(hc.swapchain, &wi);
+				const XrResult wr = BudgetedWaitSwapchainImage(hc.swapchain, kHandWaitNs);
 				if (wr == XR_TIMEOUT_EXPIRED || XR_FAILED(wr))
 					continue;
 				hc.wait_pending = false;
@@ -2061,10 +2071,8 @@ namespace VR::XRCompositor
 					hc.pending_index = index;
 					hc.wait_pending = true;
 				}
-				XrSwapchainImageWaitInfo wi = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-				wi.timeout = kSwapchainWaitNs;
 				// XR_TIMEOUT_EXPIRED is a success code: the image is not ours yet, so wait again next frame.
-				const XrResult wr = xrWaitSwapchainImage(hc.swapchain, &wi);
+				const XrResult wr = BudgetedWaitSwapchainImage(hc.swapchain, kSwapchainWaitNs);
 				if (wr == XR_TIMEOUT_EXPIRED || XR_FAILED(wr))
 					continue;
 				hc.wait_pending = false;
@@ -3792,6 +3800,7 @@ namespace VR::XRCompositor
 	{
 		if (!s.initialized)
 			return;
+		s_present_wait_left_ns = kPresentWaitBudgetNs;
 
 		// Headset rate: the VR pacer begins and ends a frame every display period; this present only refreshes the
 		// images and publishes the layers built from them (PublishLayers). Legacy: this present begins and ends the
