@@ -48,6 +48,22 @@ decisions, what the Mac found, and what to do next. Alex's Mac holds the full re
 - File #2 `0x638F00` reads `2403001E` in-game, as the profile expects.
 - Note: sub-action 0 (standing idle) is sent too, so "only when moving" in section 3 is not quite right.
 
+**Tested on the PC (CI build of 331dde9, offline).** Each mode booted File #1 straight into Single Play slot 4 from the
+command line, with the fake head and no runtime. Nothing was contacted, and the ini was restored byte for byte.
+
+| ini (set by netmode.py) | Log | Armed | Online-safe | Heartbeat words | Camera NOPs | Focus |
+|---|---|---|---|---|---|---|
+| adapter off | `network mode offline` | yes | off | original | on | 3 |
+| `obsrv` | `online, restricted` + toast | no (reason 7) | on | original | off | 0 (local) |
+| `private 192.168.1.14` | `private co-op` + toast | yes | **off** | `24030003`, `2465FFFF`, ... | on | 3 |
+
+The game ran with the co-op patches in place without trouble (Single Play loopback). The headset-free harness from
+slot 4 passed 11 of 14 on the first run:
+- walk-and-shoot and run-latch-b-tap passed on rerun (known flakiness);
+- pitch passes from slot 3, but not from slot 4 (a test-save quirk, now noted in `vrtest.py`).
+
+The final build, **041ce54** (adds the Qt Pause lock), is installed on the PC. A smoke run of the harness passes; point-to-aim and pitch failed once each on timing, then passed twice. SteamVR wasn't touched today.
+
 **Small audit correction:** "body hidden / body follows view checked on File #2 only" — File #1 was checked too, on 10 Oct
 (`test_fakevr.py features`: focus slot 3, body-follow within 0.6°). The harness's body-follow scenario is File #1 too.
 

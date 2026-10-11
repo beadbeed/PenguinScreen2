@@ -1687,7 +1687,7 @@ namespace VR::CameraDriver
 			// body is hidden in first person, so the move stick shifts the character's position directly
 			// (the game's collision still pushes it back out of walls), and the game doesn't get that stick.
 			// Stick up goes where the camera looks, like normal walking.
-			// Online-safe (the setting, or any time the network adapter is on): no moving the character.
+			// Online-safe (the setting, or the network adapter on outside private co-op): no moving the character.
 			if (weapon_raised && la.aim_move_speed > 0.0f && la.aim_move_hand >= 0 && !OnlineSafeNow())
 			{
 				s_aim_moving = true;

@@ -18,6 +18,7 @@ where the scripted input must be refused, nothing may move the character and the
 silenced (both raise the weapon with R1 on padd's virtual pad); every other scenario is skipped then.
 Never with the network adapter on: the runner refuses (it loads savestates, which must never happen online).
 savestate-yaw saves to --scratch-slot (default 9) and overwrites it.
+pitch passes from slot 3 but not from slot 4 (+0xBC8 stays 0 there; a test-save quirk): run it with --slot 3.
 
 run-latch walks and runs ahead (about 3 m all told): use --slot with open floor in front. The ad-lib byte is not
 known yet: adlib-flick and adlib-diagonal check only the camera unless --adlib names it (an address, or +offset
