@@ -620,6 +620,10 @@ namespace VR::ProfileDB
 		// suspend_when, a confirm that reaches the game pauses steering until Cross, a cursor move or the menu closes.
 		std::vector<CameraGuard> when;
 		std::vector<CameraGuard> suspend_when;
+		// The menu proper (optional; any one passing): `when` can also pass on another screen (a stale cursor struct
+		// under the map or pause), so with live_when the menu counts as up only once one of these has passed since the
+		// `when` guards last started passing. Empty: `when` alone.
+		std::vector<CameraGuard> live_when;
 		// The cursor struct: u32 node pointer, u16 index, u16 x, u16 y.
 		u32 node_addr = 0;
 		u32 index_addr = 0;

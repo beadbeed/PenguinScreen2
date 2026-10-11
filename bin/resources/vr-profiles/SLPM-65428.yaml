@@ -57,7 +57,8 @@ SLPM-65428:
   # own pad, closed loop (the cursor struct below is read after every press), with a light tick as it lands; pull
   # the trigger (Circle) to select as usual. Nothing is ever confirmed for you: only the D-pad is pressed, and a
   # trigger pulled before the cursor has arrived reaches the game once it has, or never.
-  # Research (offline PINE reads, File #1 J's Bar, Kevin): u32 0x720B80 is 1 while the item screen is up; u32
+  # Research (offline PINE reads, File #1 J's Bar, Kevin): u32 0x720B80 is 1 while the item screen is up (and stays 1
+  # after it closes, so it is no proof on its own; see liveWhen); u32
   # 0x720B84 points at the cursor's cell node (nodes 0x98 apart); u16 0x720B8C is the cell's index in its panel and
   # u16 0x720B8E / 0x720B90 its x / y, screen units written in DECIMAL (x 498 is 498, not 0x498). Partner panels
   # reuse the same x / y with other nodes, so a cell is node, index, x and y together; any other node (a partner's
@@ -77,11 +78,21 @@ SLPM-65428:
   # coop: true steers in private co-op too (first person, and with it menu mode, never runs on obsrv): it presses
   # only your own pad's D-pad and reads only your own item screen's cursor. If the first co-op session's log says
   # the cursor struct did not match, set coop: false.
+  # liveWhen: the when list alone also passes on the map and pause after any visit to the item screen (0x48BF7E is up
+  # for all three and the cursor struct's 0x720B80 stays 1 once the item screen closes), and the stale cursor still
+  # matches a cell, so pointing would press the D-pad on the map or pause. u8 0x723F94 is 1 while the cursor is in your
+  # own item grid and 0 once the screen closes (offline reads, 2026-10-11), and the item screen always opens on cell 0,
+  # in the grid; it reads 0 in the equipped box, so it is not checked every poll: the item screen counts as up once it
+  # has read 1 since the when list last started passing, and stops the moment the when list fails (the screen closes).
+  # Expected to read 0 on the map and pause; menutest.py map-after-items checks it. Belt and braces: two presses in one
+  # opening that the cursor does not answer turn point-to-select off until the screen opens again.
   menuPointer:
     when:
       - { address: 0x540004, equals: 3 }             # GAME overlay resident
       - { address: 0x48BF7E, equals: 1, width: 1 }   # item screen, map or pause open
-      - { address: 0x720B80, equals: 1 }             # the item screen is up
+      - { address: 0x720B80, equals: 1 }             # the item screen has been up (stays 1 after it closes)
+    liveWhen:
+      - { address: 0x723F94, equals: 1, width: 1 }   # the cursor in your own item grid (where the screen opens)
     suspendWhen:
       - { address: 0x720BA0, equals: 1, width: 1 }   # an item's command submenu is open
     cursor: { node: 0x720B84, index: 0x720B8C, x: 0x720B8E, y: 0x720B90 }

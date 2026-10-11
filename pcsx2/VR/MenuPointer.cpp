@@ -55,6 +55,13 @@ namespace VR::MenuPointer
 		u32 s_log_dropped = 0;
 		u32 s_open_steers = 0;
 		u32 s_open_confirms = 0;
+		// liveWhen (LiveGate): a liveWhen guard has passed since the when guards last rose. While it is held the when
+		// guards are read every running poll, so it goes the moment the menu closes, whatever else stopped meanwhile.
+		bool s_live_seen = false;
+		// A stretch of the when guards passing with a liveWhen (for its one log line as it ends), and whether a liveWhen
+		// guard passed in it.
+		bool s_when_stretch = false;
+		bool s_when_stretch_live = false;
 		std::atomic<bool> s_selftest_ran{false};
 
 		bool DefaultRead(u32 address, u8 width, u32* value)
@@ -122,6 +129,8 @@ namespace VR::MenuPointer
 			st.open = false;
 			st.open_ms = 0.0f;
 			st.selfcheck_failed = false;
+			st.unanswered = 0;
+			st.unresponsive = false;
 			st.last_cell = -1;
 			st.under = -1;
 			st.under_ms = 0.0f;
@@ -363,6 +372,18 @@ namespace VR::MenuPointer
 		return !online_locked || (coop && menu_mode);
 	}
 
+	bool LiveGate(bool when_up, bool live_now, bool* seen)
+	{
+		if (!when_up)
+		{
+			*seen = false;
+			return false;
+		}
+		if (live_now)
+			*seen = true;
+		return *seen;
+	}
+
 	StepOut Step(const ProfileDB::MenuPointerParams& p, const StepIn& in, State& st)
 	{
 		StepOut out;
@@ -541,12 +562,14 @@ namespace VR::MenuPointer
 		// it was holding for the arrival never reaches the game (held back only while still held, so it can never turn
 		// into a confirm in a submenu the player did not make), and from here on the trigger passes straight through:
 		// nothing is armed, so a fresh pull is the player's own confirm on whatever the game has up.
-		const bool can_steer = !st.selfcheck_failed && !suspended;
+		const bool can_steer = !st.selfcheck_failed && !st.unresponsive && !suspended;
 		if (!can_steer)
 		{
 			const char* why = "a confirm just reached the game";
 			if (st.selfcheck_failed)
 				why = "the cursor struct did not match";
+			else if (st.unresponsive)
+				why = "the cursor does not answer";
 			else if (submenu || p.suspend_when.empty())
 				why = "a submenu is open";
 			abort_steer(why);
@@ -697,7 +720,16 @@ namespace VR::MenuPointer
 						st.phase_polls++;
 				}
 				else if (st.phase_polls >= p.settle_vsyncs)
+				{
 					abort_steer("the cursor did not move");
+					// kMaxUnansweredPresses of these in one opening: no more presses until the menu opens again.
+					st.unanswered++;
+					if (st.unanswered >= kMaxUnansweredPresses && !st.unresponsive)
+					{
+						st.unresponsive = true;
+						out.unresponsive_now = true;
+					}
+				}
 				else
 					st.phase_polls++;
 			}
@@ -756,15 +788,43 @@ namespace VR::MenuPointer
 		const bool gate_conditions = live && snap.actions_active && menu_mode && !SplitState::Active() && vm_running;
 		const ProfileDB::MenuPointerParams* params = nullptr;
 		bool screen_up = false;
-		if ((gate_conditions || s_state.latched) && VMManager::HasValidVM())
+		bool when_up = false;
+		bool evaluated = false;
+		if ((gate_conditions || s_state.latched || (s_live_seen && vm_running)) && VMManager::HasValidVM())
 		{
 			const std::string serial = VMManager::GetDiscSerial();
 			const ProfileDB::Profile* profile = serial.empty() ? nullptr : ProfileDB::Lookup(serial, VMManager::GetDiscCRC());
 			if (profile && profile->menu_pointer.has_value())
 			{
 				params = &profile->menu_pointer.value();
-				screen_up = VRInputSource::EvaluateGuards(params->when, reader);
+				evaluated = true;
+				when_up = VRInputSource::EvaluateGuards(params->when, reader);
+				// liveWhen: the when guards also pass on other screens (the map or pause after an item-screen visit), so
+				// the menu counts as up only once one of its guards has passed since they rose.
+				if (params->live_when.empty())
+					screen_up = when_up;
+				else
+					screen_up = LiveGate(when_up, when_up && AnyGuardPasses(params->live_when, reader), &s_live_seen);
 			}
+		}
+		// Not looked at on a running poll (out of menu mode, no profile): the menu may have changed unseen, so the proof
+		// that it is the menu proper goes. With the VM paused nothing can have changed.
+		if (!evaluated && vm_running)
+			s_live_seen = false;
+		// One line as a stretch of the when guards passing ends without a liveWhen guard ever passing in it (the map or
+		// pause), so a liveWhen that never matches the menu proper shows in the log.
+		if (evaluated && when_up && !params->live_when.empty())
+		{
+			s_when_stretch = true;
+			s_when_stretch_live = s_when_stretch_live || screen_up;
+		}
+		else if (s_when_stretch && (evaluated || vm_running))
+		{
+			if (!s_when_stretch_live)
+				Console.WriteLn("(VR) MenuPointer: a menu was up without the profile's liveWhen passing (the map or pause, "
+								"not the item screen); point-to-select stayed off.");
+			s_when_stretch = false;
+			s_when_stretch_live = false;
 		}
 		const bool screen_open = gate_conditions && screen_up;
 
@@ -857,6 +917,12 @@ namespace VR::MenuPointer
 			Console.Warning("(VR) MenuPointer: the cursor struct no longer matches its cell (node %06X index %u x %u y %u); "
 							"point-to-select off until the screen opens again.",
 				node, index, x, y);
+		}
+		if (out.unresponsive_now && LogLine())
+		{
+			Console.Warning("(VR) MenuPointer: the cursor did not answer %u presses (node %06X index %u x %u y %u); "
+							"point-to-select off until the screen opens again.",
+				kMaxUnansweredPresses, node, index, x, y);
 		}
 		if (out.arrived)
 		{
@@ -1048,6 +1114,22 @@ namespace VR::MenuPointer
 		check(SteeringAllowed(true, true, true), "online in menu mode with coop: true");
 		check(!SteeringAllowed(true, true, false) && !SteeringAllowed(true, false, true) && !SteeringAllowed(true, false, false),
 			"online otherwise: never");
+
+		// --- liveWhen: the menu proper -----------------------------------------------------------------------------
+		// File #1: the item screen opens in its own grid (liveWhen 0x723F94 = 1) and its cursor struct still reads 1 after
+		// it closes; the menu flag is also up for the map and pause, where liveWhen reads 0.
+		{
+			bool live_seen = false;
+			check(!LiveGate(false, false, &live_seen) && !live_seen, "no menu up: not live");
+			check(LiveGate(true, true, &live_seen) && live_seen, "the item screen opens in its grid: live");
+			check(LiveGate(true, false, &live_seen), "the cursor moving to the equipped box (liveWhen 0) stays live");
+			check(!LiveGate(false, false, &live_seen) && !live_seen, "the item screen closing clears it");
+			bool map_live = false;
+			for (int i = 0; i < 60; i++)
+				map_live = map_live || LiveGate(true, false, &live_seen);
+			check(!map_live && !live_seen, "the map or pause after an item-screen visit (stale cursor struct) is never live");
+			check(!LiveGate(false, false, &live_seen) && LiveGate(true, true, &live_seen), "the item screen again: live again");
+		}
 
 		// --- Steering against a scripted game -----------------------------------------------------------------------
 		// The game takes a press held at least 2 polls after a gap of at least 2, and moves the cursor 2 polls later along
@@ -1346,6 +1428,25 @@ namespace VR::MenuPointer
 			s.Run(120);
 			check(s.aborts == 1 && same(s.abort_reason, "the cursor did not move") && s.game.presses == 1,
 				"a cursor that does not move stops the steer after one press");
+			// A second unanswered press in the same opening turns point-to-select off until the menu opens again (a stale
+			// cursor struct under the map or pause would otherwise send a press on every change of hover).
+			s.Point(3);
+			s.Run(120);
+			check(s.aborts == 2 && s.game.presses == 2 && !s.out.unresponsive_now && s.st.unresponsive,
+				"a second unanswered press turns steering off for the opening");
+			s.Point(2);
+			s.Run(60);
+			s.Point(1);
+			s.Run(60);
+			check(s.game.presses == 2 && s.out.hovered < 0 && s.out.dir < 0, "after it, no change of hover presses anything");
+			s.in.gate = false;
+			s.Poll();
+			s.game.ignore = false;
+			s.ResetCounts();
+			s.Open();
+			s.Point(3);
+			s.Run(60);
+			check(!s.st.unresponsive && s.arrivals == 1 && s.game.cell == 3, "the menu opening again steers again");
 		}
 
 		// The cursor leaving the cells (a partner's panel) stops the steer.
@@ -1770,7 +1871,7 @@ namespace VR::MenuPointer
 
 		if (failures == 0)
 			Console.WriteLn(Color_StrongGreen, "(VR) MenuPointer self-test: passed (%d checks: ray/quad, tablet, hover, plan, "
-											   "online rule, steering, overrides, aborts, confirm, latch, suspendWhen, submenus).", checks);
+											   "online rule, liveWhen, steering, overrides, aborts, confirm, latch, suspendWhen, submenus).", checks);
 		else
 			Console.WriteLn(Color_StrongRed, "(VR) MenuPointer self-test FAIL: %s (%d of %d checks failed).", first, failures, checks);
 		return failures == 0;

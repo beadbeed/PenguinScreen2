@@ -20,7 +20,7 @@ and test the first-person camera. They talk to a running PenguinScreen2 through 
 | `sync_sweep.sh` / `sway_metric.py` | On the null headset: world wobble in the Headset Window for render-pose sync variants (`time`, or a `syncFramesBack` value). With `PCSX2_VR_SYNCLOG=1` the emulog also gets, once a second, `(VR) predict:` (how far frames still turn when shown, and the horizons) and `(VR) edge: rms/max deg, H ms` (how far the first-person frame sits from the head as it is shown, the leading-edge band that `lookAt.predict` shrinks; against the fake head when `PCSX2_VR_FAKE_HEADPOSE` is set). |
 | `session_recorder.py` | Started by `launch_vr.ps1` and `Launch-PenguinScreen2-SteamVR.cmd`: records game state (~4/s) and a screenshot every 5 s to `D:\Games\PS2\sessions\<time>` until the emulator closes, plus the emulog. Screenshots only when the network adapter is on. |
 | `hmdshot.py`, `input_log.py`, `record_play.py` | Headset Window screenshot; pad input + screenshots while someone plays; memory snapshots + screenshots while someone plays. |
-| `menutest.py` | Headset-free menu pointer tests for File #1's item screen (offline only): pointer hit maths, steering to each cell, fast click, the pause after a confirm, the command submenu (nothing pressed while its flag is up, no steering after it closes until the dot moves), overrides, closing mid-steer, the menu tablet, and the cell rects checked against captures. `--slot` loads a savestate first, `--report` saves captures, `--test-uv` points with PINE test hits instead of aiming (works with no OpenXR runtime). |
+| `menutest.py` | Headset-free menu pointer tests for File #1's item screen (offline only): pointer hit maths, steering to each cell, fast click, the pause after a confirm, the command submenu (nothing pressed while its flag is up, no steering after it closes until the dot moves), overrides, closing mid-steer, the map and pause after an item-screen visit (`map-after-items`: point-to-select must stay off and press nothing; pause goes in as Select through `drive.py`), the menu tablet, and the cell rects checked against captures. `--slot` loads a savestate first, `--report` saves captures, `--test-uv` points with PINE test hits instead of aiming (works with no OpenXR runtime). |
 
 HUD cards on the null headset: `PCSX2_VR_HUD_TEST=1` shows a test toast every 3 s (it cycles through the
 whole font), `PCSX2_VR_FAKE_HANDS` also shows the wrist card on the fake left hand at any angle (NO DATA
@@ -68,7 +68,13 @@ open (profile `suspendWhen`: the cursor struct + 0x20, File #1 0x720BA0, File #2
 submenu's highlight never moves under you; the trigger is yours (a fresh pull confirms the submenu entry; one held back
 before it opened stays back until you let go, so it never confirms an entry on its own). After any confirm steering
 also waits 0.4 s, so a submenu that confirm opens has its flag up before another press could go out, and once a
-submenu closes the cursor stays put until the dot moves to another cell. With `HandsDisplayRate` the VR pacer places
+submenu closes the cursor stays put until the dot moves to another cell. The item screen's cursor struct keeps
+reading 1 after the screen closes and the menu-open byte is also up for the map and pause, so the profiles' `liveWhen`
+(File #1 u8 0x723F94, 1 while the cursor is in your own grid, where the screen opens; File #2 0x76A604 by the same
+offset, UNVERIFIED) must have read 1 since the menu opened before point-to-select runs: on the map or pause it stays
+off and the log says `a menu was up without the profile's liveWhen passing (...)` as it closes. Two presses in one
+opening that the cursor does not answer also turn it off until the screen opens again (`the cursor did not answer 2
+presses ...`). With `HandsDisplayRate` the VR pacer places
 the beam and the dot again every display frame from the aim located for it (on the menu screen quad the GS
 published), so they keep up with the hands; a PINE test hit, or a frame with no aim pose, keeps the GS placement.
 Menus show at zero stereo separation (both profiles' stereo scene `menu` on the menu-open byte, as `pauseWhen`), so

@@ -93,6 +93,17 @@ namespace VR::MenuPointer
 	// Offline always; online only in menu mode with the profile's coop: true. Pure.
 	bool SteeringAllowed(bool online_locked, bool menu_mode, bool coop);
 
+	// The menu proper (the profile's liveWhen). The when guards can pass on another screen too (File #1's item-screen
+	// cursor struct keeps reading 1 after the screen closes, and the menu flag is also up for the map and pause), so the
+	// menu counts as up only once a liveWhen guard has passed (live_now) since when_up last rose; *seen carries that
+	// between polls. when_up false clears *seen and returns false. Pure.
+	bool LiveGate(bool when_up, bool live_now, bool* seen);
+
+	// A steer stopped because the cursor did not answer a press this many times in one opening of the menu turns
+	// point-to-select off until the menu opens again: a cursor that does not answer is not this menu's (a stale cursor
+	// struct under another screen, or a wrong table), and every press it ignores may be moving something else.
+	constexpr u32 kMaxUnansweredPresses = 2;
+
 	// One poll of point-to-select, everything it depends on passed in, so the self-test can drive it with a scripted game.
 	struct StepIn
 	{
@@ -154,6 +165,7 @@ namespace VR::MenuPointer
 		bool latched = false;           // and paused steering (no suspendWhen)
 		bool confirm_swallowed = false; // a confirm that will never reach the game
 		bool selfcheck_failed_now = false;
+		bool unresponsive_now = false; // kMaxUnansweredPresses reached this poll: off for the rest of the opening
 	};
 
 	struct State
@@ -162,6 +174,8 @@ namespace VR::MenuPointer
 		bool open = false;
 		float open_ms = 0.0f;
 		bool selfcheck_failed = false;
+		u32 unanswered = 0;        // steers stopped because the cursor did not answer a press
+		bool unresponsive = false; // unanswered reached kMaxUnansweredPresses
 		int last_cell = -1;
 		int under = -1; // the cell under the pointer, with HoverCell's hysteresis
 		float under_ms = 0.0f;

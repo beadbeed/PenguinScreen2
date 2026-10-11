@@ -141,6 +141,7 @@ ever pressed for you.
 ```yaml
 menuPointer:
   when: [ ... ]          # guards: all must pass while the mapped menu is up
+  liveWhen: [ ... ]      # optional guards: the menu counts as up once any one has passed
   suspendWhen: [ ... ]   # optional guards: steering waits while any one passes
   cursor: { node: 0x720B84, index: 0x720B8C, x: 0x720B8E, y: 0x720B90 }
   cells:
@@ -150,13 +151,14 @@ menuPointer:
 | Key | Meaning |
 |---|---|
 | `when` | a list of guards, written like `camera.guards`, that must all pass while the menu is up. Required |
+| `liveWhen` | guards for when `when` can also pass on another screen (a cursor struct that keeps its values after the menu closes, under a menu flag the map and pause share). The menu counts as up only once any one of them has passed since the `when` guards last started passing, and stops counting the moment `when` fails. Use a value that is true where the menu opens, even if it is not true everywhere in it (Outbreak's own-grid byte reads 0 in the equipped box). If none of them ever passes, point-to-select stays off and the log says so as the menu closes. Optional; every entry must be a valid guard, or the whole block is ignored |
 | `suspendWhen` | guards for a submenu or any state where the D-pad does something else. While any one of them passes nothing is pressed (a press under way is let go at once) and the trigger is yours: a fresh pull goes straight to the game, and one held back before the guard passed stays back until you let go, so it can never confirm a submenu entry on its own. After the guard stops passing steering waits 6 vsyncs more, then until you point at a different cell, so closing a submenu never moves the cursor to wherever you left the dot. After every confirm that reaches the game steering also waits 0.4 s, so the guard of a submenu that confirm opens has time to pass. Left empty, steering instead waits after every confirm that reaches the game, until Cross, the cursor moving to another cell, or the menu closing |
 | `cursor` | the addresses of the game's cursor: a 4-byte `node` pointer to the cell it is on, and 2-byte `index`, `x` and `y` |
 | `cells` | 1 to 16 cells, each with `node`, `index`, `x`, `y` (the cursor's values on that cell; all four must match), `rect` (where the cell shows: left, top, right and bottom as fractions `0` to `1` of the game picture) and `up`, `down`, `left`, `right` (the number, counting from 0, of the cell one D-pad press in that direction leads to; leave out a direction that leads nowhere, or out of the cells) |
 | `hand` | `either` (the default; the right hand first), `left` or `right` |
 | `coop` | `true` lets it steer online too, which happens only in private co-op. Default `false` |
 | `pressVsyncs`, `gapVsyncs` | each D-pad press is held this many vsyncs, then released at least this many (default `2` and `2`) |
-| `settleVsyncs` | how long to wait for the cursor to move after a press before giving up (default `10`) |
+| `settleVsyncs` | how long to wait for the cursor to move after a press before giving up (default `10`). The second press in one opening of the menu that the cursor does not answer turns point-to-select off until the menu opens again |
 | `maxPresses` | the most presses for one move (default `6`) |
 | `dwellMs` | how long you must point at a cell before the cursor goes there (default `60`) |
 | `armDelayMs` | nothing moves for this long after the menu opens (default `300`) |
