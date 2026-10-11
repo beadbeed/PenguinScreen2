@@ -399,13 +399,31 @@ namespace VR::MenuPointer
 
 		if (!in.gate)
 		{
-			// Nothing is pressed from the poll the gate drops, and everything about this opening resets.
+			// Nothing is pressed from the poll the gate drops, and everything about this opening resets, except the latch
+			// while the menu is still up: a submenu opened by the confirm may still be up behind the gate (the dashboard, a
+			// pause, the setting off), and the D-pad must not work it when the gate comes back. Cross, the cursor on
+			// another cell or the menu closing lets it go, as with the gate up.
 			if (st.open)
 			{
 				abort_steer("the menu closed");
 				out.closed = true;
 			}
+			bool keep_latch = st.latched && in.screen_up && !back_edge;
+			if (keep_latch && in.cursor_ok)
+			{
+				bool mismatch = false;
+				const int cell = MatchCell(p, in.node, in.index, in.x, in.y, &mismatch);
+				if (cell >= 0 && cell != st.latch_cell)
+					keep_latch = false;
+			}
+			const int latch_cell = st.latch_cell;
 			ResetOpen(st);
+			if (keep_latch)
+			{
+				st.latched = true;
+				st.latch_cell = latch_cell;
+			}
+			out.suspended = st.latched;
 			out.confirm_hold = st.swallow;
 			return out;
 		}
@@ -424,7 +442,12 @@ namespace VR::MenuPointer
 		bool opened = false;
 		if (!st.open)
 		{
+			// A latch kept through a gate drop (the menu stayed up) carries into this opening; a closed menu cleared it.
+			const bool latched = st.latched;
+			const int latch_cell = st.latch_cell;
 			ResetOpen(st);
+			st.latched = latched;
+			st.latch_cell = latch_cell;
 			st.open = true;
 			opened = true;
 			out.opened = true;
@@ -675,26 +698,33 @@ namespace VR::MenuPointer
 		const VRHandState& l = snap.hands[VRInputSnapshot::LEFT];
 		const VRHandState& r = snap.hands[VRInputSnapshot::RIGHT];
 
-		// Nothing is looked up or read out of menu mode, or with the VM paused (an idle poll), so normal play costs nothing.
+		// Nothing is looked up or read out of menu mode, or with the VM paused (an idle poll), so normal play costs nothing;
+		// the one exception is a latch held after a confirm, which needs to know whether the menu is still up whatever
+		// else has stopped (the dashboard, a pause, the setting off, menu mode), so it outlives a submenu only as long
+		// as the menu.
+		const bool vm_running = VMManager::GetState() == VMState::Running;
+		const bool gate_conditions = live && snap.actions_active && menu_mode && !SplitState::Active() && vm_running;
 		const ProfileDB::MenuPointerParams* params = nullptr;
-		bool screen_open = false;
-		if (live && snap.actions_active && menu_mode && !SplitState::Active() && VMManager::GetState() == VMState::Running)
+		bool screen_up = false;
+		if ((gate_conditions || s_state.latched) && VMManager::HasValidVM())
 		{
 			const std::string serial = VMManager::GetDiscSerial();
 			const ProfileDB::Profile* profile = serial.empty() ? nullptr : ProfileDB::Lookup(serial, VMManager::GetDiscCRC());
 			if (profile && profile->menu_pointer.has_value())
 			{
 				params = &profile->menu_pointer.value();
-				screen_open = VRInputSource::EvaluateGuards(params->when, reader);
+				screen_up = VRInputSource::EvaluateGuards(params->when, reader);
 			}
 		}
+		const bool screen_open = gate_conditions && screen_up;
 
 		StepIn in;
+		in.screen_up = screen_up;
 		u32 node = 0;
 		u32 index = 0;
 		u32 x = 0;
 		u32 y = 0;
-		if (screen_open)
+		if (screen_up)
 		{
 			in.cursor_ok = Read(reader, params->node_addr, 4, &node) && Read(reader, params->index_addr, 2, &index) &&
 			               Read(reader, params->x_addr, 2, &x) && Read(reader, params->y_addr, 2, &y);
@@ -719,7 +749,8 @@ namespace VR::MenuPointer
 		in.u = hit.u;
 		in.v = hit.v;
 		in.confirm = r.trigger >= 0.5f || r.a;
-		in.back = r.b;
+		// B lets a latch go because it is the game's cancel; with the VM paused the game never sees it.
+		in.back = r.b && vm_running;
 		in.menu = l.menu || r.menu;
 		in.dpad = l.dpad_up || l.dpad_down || l.dpad_left || l.dpad_right || r.dpad_up || r.dpad_down || r.dpad_left ||
 		          r.dpad_right;
@@ -1371,6 +1402,59 @@ namespace VR::MenuPointer
 			s.in.gate = true;
 			s.Poll();
 			check(!s.out.suspended && !s.st.latched, "closing the menu lets the latch go");
+		}
+
+		// The latch lives as long as the menu, not the gate: the dashboard, a pause or the setting off with the item
+		// screen (and maybe a submenu) still up keeps it, so the D-pad never works the submenu when the gate comes back.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.ResetCounts();
+			s.in.confirm = true;
+			s.Poll();
+			s.in.confirm = false;
+			check(s.passed == 1 && s.st.latched, "a confirm latches before the gate drops");
+			s.in.gate = false;
+			s.in.screen_up = true;
+			s.Run(5);
+			check(s.st.latched && s.out.dir < 0 && s.game.presses == 0, "a gate drop with the menu still up keeps the latch");
+			s.in.gate = true;
+			s.Run(25); // past the arm delay, the pointer off the screen
+			s.Point(3);
+			s.Run(40);
+			s.Point(1);
+			s.Run(40);
+			check(s.game.presses == 0 && s.st.latched && s.out.suspended,
+				"back through the gate, pointing at other cells presses nothing while latched");
+			s.in.back = true;
+			s.Poll();
+			s.in.back = false;
+			check(!s.st.latched, "Cross lets the kept latch go");
+			s.Point(3);
+			s.Run(60);
+			check(s.arrivals == 1 && s.game.cell == 3, "and steering resumes on the next hover");
+
+			s.Point(-1);
+			s.Run(5);
+			s.in.confirm = true;
+			s.Poll();
+			s.in.confirm = false;
+			check(s.st.latched, "a confirm latches again");
+			s.in.gate = false;
+			s.Run(3);
+			s.game.cell = 2; // the cursor moved while the gate was down
+			s.Poll();
+			check(!s.st.latched, "the cursor reaching another cell behind the gate lets the latch go");
+			s.in.screen_up = false;
+			s.in.gate = true;
+			s.Poll();
+			s.in.confirm = true;
+			s.Poll();
+			s.in.confirm = false;
+			s.in.gate = false;
+			s.Poll();
+			check(!s.st.latched, "the menu closing behind the gate lets the latch go");
 		}
 
 		// suspendWhen: steering waits while it passes and 6 polls after; a confirm does not latch.

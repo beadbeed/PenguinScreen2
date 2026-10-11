@@ -90,6 +90,10 @@ namespace VR::MenuPointer
 	struct StepIn
 	{
 		bool gate = false;      // point-to-select may run this poll: the menu is up, allowed, switched on, the VM running
+		// The profile's menu is up (its when guards pass), whether or not point-to-select may run. With the gate down it
+		// keeps the latch after a confirm alive (the item screen and a submenu can stay up behind the SteamVR dashboard,
+		// a pause or the setting going off); Poll evaluates it while the gate is up or the latch is held.
+		bool screen_up = false;
 		bool cursor_ok = false; // the cursor struct was read
 		u32 node = 0;
 		u16 index = 0;
@@ -151,7 +155,9 @@ namespace VR::MenuPointer
 		int ignore = -2;        // the hover the menu opened with, ignored until it changes (-2: none)
 		bool disarmed = false;  // after an override or an abort: no steering until the hover changes
 		int disarm_under = -1;  // the hover then
-		bool latched = false;   // a confirm reached the game (no suspendWhen): no steering until Cross, a move or close
+		// A confirm reached the game (no suspendWhen): no steering until Cross, the cursor reaching another cell or the
+		// menu closing. It lives as long as the menu, not the gate: a gate drop with the menu still up keeps it.
+		bool latched = false;
 		int latch_cell = -1;
 		u32 suspend_polls = 0;  // the suspendWhen tail
 		// Steering.
