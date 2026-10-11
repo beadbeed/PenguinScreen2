@@ -75,6 +75,11 @@ SLPM-65692:
       - { address: 0x5AA978, on: 0x00000000, off: 0x0C0D0D3C, when: [{ address: 0x543004, equals: 3 }] }   # door follow camera eye write
       - { address: 0x5AAAB4, on: 0x00000000, off: 0x0C0D0D3C, when: [{ address: 0x543004, equals: 3 }] }   # door follow camera eye write
       - { address: 0x6363B8, on: 0x00000000, off: 0xA2A20FBA, when: [{ address: 0x543004, equals: 3 }] }   # stick latch on camera-cut lines (would freeze gaze steering)
+      # Co-op (coopOnly): your heading goes to the other players in a type-2 heartbeat (0x638ED8, File #1's
+      # FUN_00633530) only every 30 game frames; every 3 instead (about 10 Hz, 0x18-byte messages). File #2's
+      # heartbeat already sends while you aim (its state check at 0x638BB0 accepts the aim-idle state), so unlike
+      # File #1 only the interval needs changing. Found by instruction pattern in the File #2 savestate.
+      - { address: 0x638F00, on: 0x24030003, off: 0x2403001E, when: [{ address: 0x543004, equals: 3 }], coopOnly: true }   # heartbeat interval 30 -> 3 (addiu v1,zero,3)
       # Aim pitch (see lookAt.aim): the gun-elevation servo's easing calls and stores to +0xBE0 (2.DAT 0x557D04-0x557DEC)
       # are NOP'd only while your weapon is raised (stance 2) and never online-safe, so the pitch written from the
       # controller holds. They are put back as soon as the weapon is lowered. The servo is shared, so partners' aim

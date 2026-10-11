@@ -55,8 +55,13 @@ confirmed by 2 or 3 of 3 independent reviewers.
 
 ## 2. Alex's decisions (10 Oct)
 
-1. **First person must work in online co-op** (with his brother). Don't just disable it online.
-   Make it correct and prove it on the private server first.
+1. **First person must work in online co-op** (with his brother). Alex, 10 Oct: **first person is NOT
+   forbidden from touching the game online.** It may write game memory and patch game code online.
+   The only online limits that stay:
+   - never pause;
+   - never change speed;
+   - never load or save a state;
+   - never write another player's character.
 2. **Less verification.** Heavy multi-agent checking is only for the network question; do everything
    else in one pass.
 3. **Getting off the emulator is the long-term goal, not the next step.** The recommended order is:
@@ -173,10 +178,16 @@ Our private server runs the same unpatched relay code as obsrv (Nagle on, the 0x
   - **The receiving side is unverified:** whether `FUN_0064D140` applies type 2 well while the partner
     copy is in weapon-ready. Watch for your brother seeing your character jitter or snap while aiming;
     if so, drop the three stance words and keep only the interval patch.
-  - **File #2 is not done.** Find its `FUN_00633530` with `xdisc_map.py` on the Mac, or by searching
-    for the `addiu v1,zero,30` + `lbu a1,<frame counter>` + `divu` sequence.
-- **Not done:** task 3's 4-player focus-slot case (2-player rooms should be fine: the hold uses slot 3,
-  or 0 if you are slot 3), task 4 for File #2, and task 5 (proof).
+  - **File #2 (fifth commit):** its heartbeat is at `0x638ED8`, and the 30 is at `0x638F00`, found by
+    instruction pattern in the File #2 savestate. It is patched the same way (30 → 3, coopOnly). File #2's
+    send check (`0x638BB0`) already accepts the aim-idle state, so it needs no stance patch.
+- **Also new:** `tools/outbreak-vr/netmode.py` switches a PC between the private server, obsrv and off
+  (see 5b).
+- **Not done:**
+  - task 3's 4-player focus-slot case (2-player rooms should be fine: the hold uses slot 3, or 0 if you
+    are slot 3);
+  - task 5 (proof);
+  - first person on obsrv (see task 6).
 - **Tested:** only `clang -fsyntax-only` on the Mac for `CameraDriver.cpp`, `VRProfileDB.cpp` and
   `Pcsx2Config.cpp`, plus CI. `QtHost.cpp` and the `.ui` file are checked only by CI. Nothing has been
   run.
@@ -234,12 +245,48 @@ Carry on from this list, in order:
      - no room or action mismatch longer than 2 s;
      - no drops;
      - both machines at 100% the whole time.
-6. **The project rule needs Alex's sign-off.** AGENTS.md hard rule 1 currently forbids game-memory
-   writes online. The proposed replacement:
+6. **The project rule (Alex, 10 Oct): first person may touch the game online.** AGENTS.md hard rule 1
+   on the Mac now says so. First person may write game memory and patch game code online. Online it
+   must still never pause, change speed, load or save a state, or write another player's character.
 
-   > First-person writes may run online only in PrivateCoop mode (our private server, both players
-   > consenting) after the two-player proof passes. Never on obsrv or an unknown server. Never pause,
-   > change speed or touch another player's slot.
+   **What the code does today:** first person runs online when Private Co-op First Person is on and the
+   login host points at a non-obsrv server, which is what `netmode.py private` sets up. On obsrv it
+   currently stays off and uses the 3D screen. In the Mac session, making it run on obsrv as well (a
+   default-on "Online First Person" setting) was blocked by Claude Code's safety check, so that edit
+   was not made. Whether to allow first person on obsrv, with strangers in the room, is Alex's call to
+   make in the Mac session.
+
+## 5b. The easy private server
+
+1. **Server (Alex's Mac, already built):** in `~/Documents/github/outbreak-vr/private-server`, run
+   `./server.sh up`. The first run takes 15-25 minutes; later starts take seconds. Make one account each
+   with `./server.sh adduser <id> <password>`. Keep the Mac awake while you play
+   (`caffeinate -dis ./server.sh up`, or just leave it plugged in with sleep off).
+2. **Connecting:** install **Tailscale** (free) on the Mac, Alex's Windows PC and the brother's PC. Alex
+   invites his brother to his tailnet, and everyone signs in. The Mac's Tailscale address is `100.x.y.z`
+   (`tailscale ip -4`). Check with `tailscale ping <mac>` from each PC; it must say **direct**, not
+   **DERP**.
+3. **Each Windows PC, with the emulator closed:**
+   `python tools\outbreak-vr\netmode.py private 100.x.y.z`
+   - This turns on the adapter, points the game's login hosts at the Mac, keeps DNAS on its public
+     replay, and turns on Private Co-op First Person.
+   - `python tools\outbreak-vr\netmode.py obsrv` switches back to obsrv.
+   - `... status` shows the current mode.
+4. **In the game:** Network Play → DNAS → the login page. Type the ID and password from step 1; there
+   is no auto-login on the private server. Then pick a handle, choose the area, create a passworded
+   room (one player), and join it (the other).
+5. **First time only:** no real game has ever connected to this server. Try Alex's Windows PC alone
+   first. If DNAS, the login page or the lobby fail, save the emulog and run `./server.sh logs` on the Mac.
+   Expected failure points, in order:
+   - the PS2 browser rejecting the server's TLS;
+   - DNAS;
+   - reaching the game server address;
+   - the menus.
+
+   `private-server/README.md` on the Mac has the details.
+
+**Even easier, if the brother lives with Alex:** skip Tailscale and use the Mac's LAN address
+(`192.168.1.14`) in step 3.
 
 ## 6. The next real headset test (offline, Single Play, network adapter off)
 
