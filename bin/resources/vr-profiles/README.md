@@ -170,11 +170,53 @@ address in a profile. A cell's `x`, `y`, `index` and neighbour numbers are
 
 Steering stops if the cursor stops answering, goes outside the mapped cells,
 or needs more than `maxPresses` presses. It also stops the moment you use the
-D-pad, a stick or a grip, or press B or Menu; pointing at another cell starts
-it again. If the cursor's node matches a cell but its index, `x` or `y` do not,
-the layout is not the one mapped, and point-to-select stays off until the menu
-opens again. Any invalid part of the block makes the emulator ignore the whole
-block, with a log line saying why.
+D-pad, a stick or a grip (except a grip squeezed in a belt pouch, below), or
+press B or Menu; pointing at another cell starts it again. If the cursor's node
+matches a cell but its index, `x` or `y` do not, the layout is not the one
+mapped, and point-to-select stays off until the menu opens again. Any invalid
+part of the block makes the emulator ignore the whole block, with a log line
+saying why.
+
+## `pouches`: belt pouches on your body
+
+In first-person play, `pouches` puts small pouches on your body, each tied to
+one of the game's item cells, like the belt in Dungeons of Eternity. Reach a
+hand into a pouch and the controller ticks once, lightly, if that cell is
+empty, or twice and firmer if it holds an item. Squeeze the grip there and the
+game's item screen opens with its cursor on that pouch's cell; if the screen
+is already open, the cursor just moves there. You still pick the item yourself
+with the trigger. Nothing is ever confirmed for you, and the item bytes are only
+read. The pouches work only while first person is running.
+
+```yaml
+pouches:
+  anchor: seat           # seat (default) or head
+  open: belt             # the id of the Zone control that opens the item screen
+  suspendWhen: [ ... ]   # optional guards: a squeeze is refused while any one passes
+  list:
+    - { cell: 0, item: 0xC84, side: -0.10, height: -0.20, forward: 0.14 }
+```
+
+| Key | Meaning |
+|---|---|
+| `list` | 1 to 8 pouches. Each has `cell` (the number, counting from 0, of the `menuPointer` cell its squeeze steers the cursor to), `side`, `height` and `forward` (metres from your eyes, placed the way a Zone control's `placement` is, measured sitting upright and looking ahead), and optionally `item` (a hex offset into the record `camera.base` finds: the byte there is `0` while the cell is empty) and `radius` |
+| `anchor` | `seat` (the default) hangs the pouches from your neck and turns them to the forward you last recentered to, so looking down at a pouch or glancing at it does not move it. `head` places them the way the Zone controls are placed, turning with your head |
+| `open` | the `id` of one of the profile's Zone controls. A squeeze with the item screen closed presses that zone as a squeeze inside it would, including its `stopFirst`. Without it, a pouch only moves the cursor of an item screen that is already open |
+| `hand` | `either` (the default), `left` or `right` |
+| `radius` | how far from its point a pouch reaches, in metres (`0.02` to `0.20`, default `0.065`) |
+| `suspendWhen` | guards, written like `camera.guards`, for a submenu of the item screen. While the item screen is up and any one of them passes, a squeeze is refused, and the menu pointer's own steering waits too |
+
+Steering the cursor uses `menuPointer`, so it follows the Menu Pointer setting
+and the same rules: it waits for `armDelayMs` after the screen opens, never
+runs while steering is suspended, and stops if you take over with the D-pad or
+a stick. The Zone controls come first: a hand within a zone's reach (its
+`radius` plus 3 cm) is that zone's, never a pouch's, when the zone takes that
+hand, so a pouch overlapping a hip zone never changes what a squeeze at the hip
+does. Elsewhere a hand inside a pouch belongs to that pouch only, and no zone
+sees it there. Keep each pouch's point well clear of the zones that take the
+same hand (the zones turn with your head, seat-anchored pouches do not). Any
+invalid part of the block
+makes the emulator ignore the whole block, with a log line saying why.
 
 ## `stereo`: depth
 

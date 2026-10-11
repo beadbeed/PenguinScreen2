@@ -11,6 +11,7 @@
 #ifdef ENABLE_VR
 #include "Counters.h"
 #include "MTGS.h"
+#include "VR/BeltPouches.h"
 #include "VR/CameraDriver.h"
 #include "VR/DepthHistogram.h"
 #include "VR/MemWatch.h"
@@ -810,9 +811,74 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 				// op 1: a test hit: u8 ver (1), u8 hand (0 left, 1 right), u16 ttl_ms, f32 u, f32 v (u below 0 clears it).
 				// Reply: u8 1. Refused as MsgVRFakeInput is: only with PCSX2_VR_TEST_INPUT set, and never while online play
 				// is possible.
+				// op 2, read-only, any time: the belt pouches (VR::BeltPouches) and the pouch requests the menu pointer took.
+				// Reply: u32 size, then the payload (little-endian), version 1:
+				//   u8 ver (1), u8 flags (bit0 pouches running, bit1 item screen up, bit2 menu mode, bit3 head anchor, bit4
+				//   open press on, bit5 a pouches.suspendWhen guard passes, bit6 left grip a pouch's, bit7 right grip a
+				//   pouch's), u8 pouch count, s8 left hand's pouch, s8 right hand's pouch, s8 the menu pointer's waiting
+				//   request (-1 none), u8 0, u8 0,
+				//   u32 reaches, item double ticks, squeezes, open presses, requests sent, squeezes refused,
+				//   u32 menu pointer requests received, started, refused, lapsed,
+				//   8 x (f32 centre xyz in the XR base space, f32 radius, s8 cell, s8 item (1 holds one, 0 empty, -1 not
+				//   read), u8 item byte, u8 0)
+				// Later versions only append, so a reader takes the size and the fields it knows.
 				if (!SafetyChecks(buf_cnt, 1, ret_cnt, 0, buf_size)) [[unlikely]]
 					goto error;
 				const u8 op = FromSpan<u8>(buf, buf_cnt);
+				if (op == 2)
+				{
+					constexpr u32 kPouchesSize = 208;
+					static_assert(VR::BeltPouches::kMaxPouches == 8, "the op 2 reply holds 8 pouches");
+					if (!SafetyChecks(buf_cnt, 1, ret_cnt, kPouchesSize + 4, buf_size)) [[unlikely]]
+						goto error;
+					buf_cnt += 1;
+					const VR::BeltPouches::Telemetry bt = VR::BeltPouches::GetTelemetry();
+					const VR::MenuPointer::Telemetry mt = VR::MenuPointer::GetTelemetry();
+					u32 pouch_flags = 0;
+					pouch_flags |= bt.active ? 0x01u : 0u;
+					pouch_flags |= bt.screen_up ? 0x02u : 0u;
+					pouch_flags |= bt.menu_mode ? 0x04u : 0u;
+					pouch_flags |= bt.head_anchor ? 0x08u : 0u;
+					pouch_flags |= bt.open_pressing ? 0x10u : 0u;
+					pouch_flags |= bt.suspended ? 0x20u : 0u;
+					pouch_flags |= bt.owned[0] ? 0x40u : 0u;
+					pouch_flags |= bt.owned[1] ? 0x80u : 0u;
+					ToResultVector(ret_buffer, kPouchesSize, ret_cnt);
+					ret_cnt += 4;
+					ToResultVector<u8>(ret_buffer, 1, ret_cnt + 0);
+					ToResultVector<u8>(ret_buffer, static_cast<u8>(pouch_flags), ret_cnt + 1);
+					ToResultVector<u8>(ret_buffer, bt.count, ret_cnt + 2);
+					ToResultVector<s8>(ret_buffer, bt.hover[0], ret_cnt + 3);
+					ToResultVector<s8>(ret_buffer, bt.hover[1], ret_cnt + 4);
+					ToResultVector<s8>(ret_buffer, mt.request, ret_cnt + 5);
+					ToResultVector<u8>(ret_buffer, 0, ret_cnt + 6);
+					ToResultVector<u8>(ret_buffer, 0, ret_cnt + 7);
+					ToResultVector<u32>(ret_buffer, bt.enters, ret_cnt + 8);
+					ToResultVector<u32>(ret_buffer, bt.item_ticks, ret_cnt + 12);
+					ToResultVector<u32>(ret_buffer, bt.squeezes, ret_cnt + 16);
+					ToResultVector<u32>(ret_buffer, bt.opens, ret_cnt + 20);
+					ToResultVector<u32>(ret_buffer, bt.requests, ret_cnt + 24);
+					ToResultVector<u32>(ret_buffer, bt.refused, ret_cnt + 28);
+					ToResultVector<u32>(ret_buffer, mt.requests, ret_cnt + 32);
+					ToResultVector<u32>(ret_buffer, mt.requests_started, ret_cnt + 36);
+					ToResultVector<u32>(ret_buffer, mt.requests_refused, ret_cnt + 40);
+					ToResultVector<u32>(ret_buffer, mt.requests_lapsed, ret_cnt + 44);
+					for (u32 i = 0; i < 8; i++)
+					{
+						const VR::BeltPouches::Telemetry::PouchView& pv = bt.pouches[i];
+						const u32 pouch_at = ret_cnt + 48 + i * 20;
+						ToResultVector<float>(ret_buffer, pv.centre[0], pouch_at + 0);
+						ToResultVector<float>(ret_buffer, pv.centre[1], pouch_at + 4);
+						ToResultVector<float>(ret_buffer, pv.centre[2], pouch_at + 8);
+						ToResultVector<float>(ret_buffer, pv.radius, pouch_at + 12);
+						ToResultVector<s8>(ret_buffer, pv.cell, pouch_at + 16);
+						ToResultVector<s8>(ret_buffer, pv.item, pouch_at + 17);
+						ToResultVector<u8>(ret_buffer, pv.item_byte, pouch_at + 18);
+						ToResultVector<u8>(ret_buffer, 0, pouch_at + 19);
+					}
+					ret_cnt += kPouchesSize;
+					break;
+				}
 				if (op == 0)
 				{
 					constexpr u32 kMenuPointerSize = 84;

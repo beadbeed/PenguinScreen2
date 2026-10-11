@@ -17,8 +17,9 @@ namespace VR::ProfileDB
 // there with closed-loop D-pad presses from this player's own pad, checked against the game's cursor struct after
 // every press. The trigger stays the player's confirm: one pulled before the cursor has arrived is held back until it
 // has, or never reaches the game, and nothing but the D-pad is ever pressed for the player. Online it steers only where
-// the profile says coop: true (first person, and so menu mode, runs online only in private co-op). The beam, the dot and
-// the pointing hands are XRCompositor's; this module only reads, decides and steers.
+// the profile says coop: true (first person, and so menu mode, runs online only in private co-op). A belt pouch squeezed
+// on the player's body asks for its cell the same way (RequestCell). The beam, the dot and the pointing hands are
+// XRCompositor's; this module only reads, decides and steers.
 //
 // Submenus (the profile's suspendWhen: an item's command submenu, EQUIP/USE/PLACE/...): while one is open nothing is
 // pressed (a press under way is let go that poll), the trigger is the player's (a fresh pull passes straight through to
@@ -38,6 +39,31 @@ namespace VR::MenuPointer
 	// The cell (an index into the profile's menuPointer.cells) under the pointer while point-to-select can act on it
 	// (steer the cursor there, or confirm it when the cursor is already there); -1 otherwise. Any thread.
 	int HoveredCell();
+
+	// The item screen (the profile's menuPointer menu) is up and live as the last Poll decided, by the same test that
+	// opens point-to-select's gate (its when guards, and its liveWhen guards wherever Poll takes them), in menu mode
+	// with the VM running, whether or not point-to-select may steer. The cursor struct alone stays set after the screen closes (the map and pause pass the
+	// when guards too), so callers take this rather than evaluating when themselves. One poll late for a caller that
+	// runs before Poll (BeltPouches). Any thread.
+	bool ItemScreenLive();
+
+	// A belt pouch (VR::BeltPouches) asks for the cursor on cell_index (an index into the profile's menuPointer.cells). It
+	// is steered there with the same closed-loop D-pad presses as a pointed-at cell, once point-to-select runs (the item
+	// screen may still be opening) and the screen has been up armDelayMs, under the same rules: refused while steering is
+	// suspended (suspendWhen, the profile's pouches.suspendWhen, or the latch after a confirm), after a failed self-check,
+	// with the cursor off the mapped cells or while the player takes over; nothing is ever confirmed. The pointer then
+	// waits for its hover to change before it steers again. The latest request replaces an earlier one, and one that
+	// point-to-select has not taken within 2.5 s lapses (or at once if the screen closes first). hand (0 left, 1 right,
+	// -1 none) feels a tick when it is refused. CPU thread (the input poll, before Poll).
+	void RequestCell(int cell_index, int hand);
+
+	// The hands whose grip belongs to a belt pouch this poll (inside one, or still closed after a squeeze there): their
+	// grip is not the override a squeezed grip otherwise is, so a pouch's own squeeze does not stop the steer it asked
+	// for. CPU thread (the input poll, before Poll); BeltPouches::Poll sets it every poll.
+	void SetPouchGrips(bool left, bool right);
+
+	// The grip a user override counts: the more squeezed of the hands whose grip does not belong to a pouch. Pure.
+	float OverrideGrip(float left, float right, bool left_pouch, bool right_pouch);
 
 	// What the last Poll saw, plus the screen transform the compositor last published, for PINE (MsgVRMenuPointer op 0)
 	// and the tests. Any thread.
@@ -78,6 +104,12 @@ namespace VR::MenuPointer
 		u32 ticks = 0; // landing ticks
 		u32 confirms_passed = 0;
 		u32 confirms_swallowed = 0;
+		// Belt pouch requests (RequestCell).
+		s8 request = -1; // waiting for point-to-select, -1 none
+		u32 requests = 0;
+		u32 requests_started = 0;
+		u32 requests_refused = 0;
+		u32 requests_lapsed = 0;
 	};
 	Telemetry GetTelemetry();
 
@@ -126,9 +158,11 @@ namespace VR::MenuPointer
 		bool dpad = false;        // any real D-pad button on either hand
 		float right_stick = 0.0f; // how far each stick is pushed
 		float left_stick = 0.0f;
-		float grip = 0.0f;     // the more squeezed grip
+		float grip = 0.0f;     // the more squeezed grip (OverrideGrip: not a belt pouch's)
 		bool suspend = false;  // one of the profile's suspendWhen guards passes (a submenu is open)
 		float dt_ms = 1000.0f / 60.0f;
+		int request = -1;           // a belt pouch's request made this poll (RequestCell), -1 none
+		bool pouch_suspend = false; // one of the profile's pouches.suspendWhen guards passes (an item's command submenu)
 	};
 
 	// With suspendWhen, steering waits this long after a confirm reaches the game: a submenu the confirm opens has its
@@ -166,6 +200,12 @@ namespace VR::MenuPointer
 		bool confirm_swallowed = false; // a confirm that will never reach the game
 		bool selfcheck_failed_now = false;
 		bool unresponsive_now = false; // kMaxUnansweredPresses reached this poll: off for the rest of the opening
+		// A belt pouch's request this poll.
+		int request_started = -1; // steering to this cell began (or the cursor was already on it)
+		int request_from = -1;    // from this cell
+		const char* request_refused = nullptr;
+		int request_refused_cell = -1;
+		int request_lapsed = -1; // this cell's request lapsed
 	};
 
 	struct State
@@ -208,6 +248,9 @@ namespace VR::MenuPointer
 		bool confirm_prev = false;
 		bool back_prev = false;
 		bool menu_prev = false;
+		// A belt pouch's request waiting for point-to-select (made with the screen closed, or within the arm delay).
+		int request = -1;
+		float request_ms = 0.0f;
 	};
 
 	StepOut Step(const ProfileDB::MenuPointerParams& p, const StepIn& in, State& st);

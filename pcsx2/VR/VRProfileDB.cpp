@@ -2962,6 +2962,165 @@ static std::optional<VR::ProfileDB::MenuPointerParams> parseMenuPointer(const st
 	return mp;
 }
 
+// pouches: belt pouches (VR::BeltPouches). A pouch tied to the wrong cell would steer the cursor to the wrong item, so any
+// bad part drops the whole block with a warning. The cross-checks against the rest of the profile are checkPouches'.
+static std::optional<VR::ProfileDB::PouchParams> parsePouches(const std::string_view serial, const ryml::ConstNodeRef& node)
+{
+	using VR::ProfileDB::Pouch;
+	using VR::ProfileDB::PouchAnchor;
+	using VR::ProfileDB::PouchParams;
+	using VR::SpatialControls::ZoneHand;
+	const auto reject = [serial](const std::string& why) -> std::optional<PouchParams> {
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' pouches {}; the whole block is IGNORED, so this game gets no belt "
+						   "pouches.", serial, why);
+		return std::nullopt;
+	};
+	warnUnknownKeys(serial, node, "pouches", {"anchor", "open", "hand", "radius", "suspendWhen", "list"});
+	PouchParams pp;
+
+	if (node.has_child("anchor"))
+	{
+		const std::string_view av = nodeVal(node["anchor"]);
+		if (StringUtil::compareNoCase(av, "seat"))
+			pp.anchor = PouchAnchor::Seat;
+		else if (StringUtil::compareNoCase(av, "head"))
+			pp.anchor = PouchAnchor::Head;
+		else
+			return reject(fmt::format("anchor '{}' is not seat|head", av));
+	}
+	if (node.has_child("open"))
+		pp.open.assign(nodeVal(node["open"]));
+	if (node.has_child("hand"))
+	{
+		const std::string_view hv = nodeVal(node["hand"]);
+		if (StringUtil::compareNoCase(hv, "either"))
+			pp.hand = ZoneHand::Either;
+		else if (StringUtil::compareNoCase(hv, "left"))
+			pp.hand = ZoneHand::Left;
+		else if (StringUtil::compareNoCase(hv, "right"))
+			pp.hand = ZoneHand::Right;
+		else
+			return reject(fmt::format("hand '{}' is not either|left|right", hv));
+	}
+	float default_radius = 0.065f;
+	if (node.has_child("radius"))
+	{
+		const std::optional<float> rv = StringUtil::FromChars<float>(nodeVal(node["radius"]));
+		if (!rv.has_value() || !std::isfinite(rv.value()) || rv.value() < 0.02f || rv.value() > 0.20f)
+			return reject("radius must be 0.02 to 0.20 metres");
+		default_radius = rv.value();
+	}
+	// A dropped guard would let steering run inside a submenu, so every entry must parse.
+	if (node.has_child("suspendWhen"))
+	{
+		const ryml::ConstNodeRef sw = node["suspendWhen"];
+		if (!sw.is_seq())
+			return reject("has a suspendWhen that is not a list of valid guards");
+		parseGuardList(serial, sw, "pouches suspendWhen guard", pp.suspend_when);
+		if (pp.suspend_when.size() != sw.num_children())
+			return reject("has a suspendWhen that is not a list of valid guards");
+	}
+
+	if (!node.has_child("list") || !node["list"].is_seq())
+		return reject("needs a list of pouches");
+	const ryml::ConstNodeRef list = node["list"];
+	const size_t pouch_count = list.num_children();
+	if (pouch_count < 1 || pouch_count > 8)
+		return reject(fmt::format("has {} pouches (1 to 8)", pouch_count));
+	size_t pouch_index = 0;
+	for (const ryml::ConstNodeRef& pn : list.children())
+	{
+		if (!pn.is_map())
+			return reject(fmt::format("pouch {} is not a map", pouch_index));
+		const std::string where = fmt::format("pouches.list[{}]", pouch_index);
+		warnUnknownKeys(serial, pn, where.c_str(), {"cell", "item", "side", "height", "forward", "radius"});
+		Pouch pouch;
+		pouch.radius = default_radius;
+		// A list number, decimal unless 0x-prefixed (as menuPointer's neighbours).
+		const std::optional<s64> cell = pn.has_child("cell") ? parseDecOrHex(nodeVal(pn["cell"])) : std::nullopt;
+		if (!cell.has_value() || cell.value() < 0 || cell.value() > 15)
+			return reject(fmt::format("pouch {} needs cell: the number (0-15) of the menuPointer cell it steers to", pouch_index));
+		pouch.cell = static_cast<int>(cell.value());
+		if (pn.has_child("item"))
+		{
+			// An offset into the camera.base record, hex like the other record offsets; a record is a few KB.
+			const std::optional<s64> off = parseSignedOffset(nodeVal(pn["item"]));
+			if (!off.has_value() || off.value() < 0 || off.value() >= 0x100000)
+				return reject(fmt::format("pouch {} item must be an offset (hex) into the camera.base record", pouch_index));
+			pouch.has_item = true;
+			pouch.item_offset = static_cast<u32>(off.value());
+		}
+		const auto read_metres = [&pn](const char* key, float lo, float hi, float& dst) {
+			if (!pn.has_child(key))
+				return false;
+			const std::optional<float> mv = StringUtil::FromChars<float>(nodeVal(pn[key]));
+			if (!mv.has_value() || !std::isfinite(mv.value()) || mv.value() < lo || mv.value() > hi)
+				return false;
+			dst = mv.value();
+			return true;
+		};
+		if (!read_metres("side", -1.0f, 1.0f, pouch.side) || !read_metres("height", -1.5f, 0.5f, pouch.height) ||
+			!read_metres("forward", -1.0f, 1.0f, pouch.forward))
+			return reject(fmt::format("pouch {} needs side, height and forward: metres from the head, as a Zone's placement",
+				pouch_index));
+		if (pn.has_child("radius") && !read_metres("radius", 0.02f, 0.20f, pouch.radius))
+			return reject(fmt::format("pouch {} radius must be 0.02 to 0.20 metres", pouch_index));
+		pp.list.push_back(pouch);
+		pouch_index++;
+	}
+	// Overlapping pouches still work (a hand belongs to the nearest), but reaching for one would often find the other.
+	for (size_t i = 0; i < pp.list.size(); i++)
+	{
+		for (size_t j = i + 1; j < pp.list.size(); j++)
+		{
+			const Pouch& a = pp.list[i];
+			const Pouch& b = pp.list[j];
+			const float dx = a.side - b.side, dy = a.height - b.height, dz = a.forward - b.forward;
+			if (std::sqrt(dx * dx + dy * dy + dz * dz) < a.radius + b.radius)
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' pouches {} and {} overlap; a hand in both belongs to the "
+								   "nearer one.", serial, i, j);
+		}
+	}
+	return pp;
+}
+
+// The pouches against the rest of the profile: the open control must be one of its Zone controls, each cell one of
+// menuPointer's, and the item bytes need camera.base. A pouch that fails a check loses only that part.
+static void checkPouches(const std::string_view serial, VR::ProfileDB::Profile& profile)
+{
+	VR::ProfileDB::PouchParams& pp = profile.pouches.value();
+	if (!pp.open.empty())
+	{
+		bool found = false;
+		for (const VR::ProfileDB::SpatialControlSpec& c : profile.controls)
+			found = found || (c.kind == VR::SpatialControls::DeviceKind::Zone && c.id == pp.open);
+		if (!found)
+		{
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' pouches open '{}' is not the id of one of its Zone controls; a "
+							   "pouch then only steers an item screen that is already up.", serial, pp.open);
+			pp.open.clear();
+		}
+	}
+	const size_t cells = profile.menu_pointer.has_value() ? profile.menu_pointer->cells.size() : 0;
+	if (cells == 0)
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has pouches but no menuPointer; a pouch only opens the item screen "
+						   "and never steers its cursor.", serial);
+	const bool has_record = profile.camera.has_value() && profile.camera->base.has_value();
+	for (size_t i = 0; i < pp.list.size(); i++)
+	{
+		VR::ProfileDB::Pouch& pouch = pp.list[i];
+		if (cells != 0 && static_cast<size_t>(pouch.cell) >= cells)
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' pouch {} steers to cell {}, which menuPointer does not have "
+							   "(0-{}); that pouch only opens the item screen.", serial, i, pouch.cell, cells - 1);
+		if (pouch.has_item && !has_record)
+		{
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' pouch {} reads its item through camera.base, which the profile "
+							   "does not have; its tick cannot tell an item from an empty cell.", serial, i);
+			pouch.has_item = false;
+		}
+	}
+}
+
 
 bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::NodeRef& node, Profile& out)
 {
@@ -3337,6 +3496,16 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 				fmt::format("(VR) ProfileDB: {} controls: is not a list — IGNORED, so this game gets no virtual control.",
 					StringUtil::toUpper(serial)));
 	}
+
+	// After controls, menuPointer and camera: the pouches are checked against all three.
+	if (node.has_child("pouches") && node["pouches"].is_map())
+	{
+		out.pouches = parsePouches(serial, node["pouches"]);
+		if (out.pouches.has_value())
+			checkPouches(serial, out);
+	}
+	else if (node.has_child("pouches"))
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a pouches that is not a map; ignoring it.", serial);
 
 	if (node.has_child("name"))
 		out.name.assign(nodeVal(node["name"]));

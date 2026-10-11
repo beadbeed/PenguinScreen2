@@ -11,6 +11,7 @@
 #include "Memory.h"
 #include "MemoryTypes.h"
 
+#include "VR/BeltPouches.h"
 #include "VR/CameraDriver.h"
 #include "VR/ControlQuads.h"
 #include "VR/MenuPointer.h"
@@ -742,6 +743,10 @@ void VRInputSource::PollEvents()
 	const bool split = VR::SplitState::Active();
 	const GuestReader reader = s_guest_reader.load(std::memory_order_acquire);
 
+	// Belt pouches: before the menu pointer, so a pouch squeeze's cell request and the pouch hands' grips reach it this
+	// poll, and before the instances compose, so the zones see a hand in a pouch as gone and an open press goes out now.
+	VR::BeltPouches::Poll(snap, reader, dt);
+
 	// Point-to-select menus: decided before the instances compose, so the Gamepad sends this poll's D-pad press and
 	// confirm hold (SpatialControls::SetPointerDpad / SetPointerConfirmHold) at once.
 	VR::MenuPointer::Poll(snap, reader, dt);
@@ -834,7 +839,10 @@ void VRInputSource::PollEvents()
 				SC::Anchor head;
 				if (SC::HeadAnchor(snap, in.zone_state, &head))
 				{
-					const SC::ZoneEvents ev = SC::StepZone(head, in.zone, hands, in.zone_state);
+					// A hand inside a belt pouch is the pouch's: the zone does not see it there, so a pouch can sit at the
+					// edge of a bigger zone (the hip holster) and a squeeze in it presses only the pouch. A press the zone
+					// already holds carries on, as it does wherever the hand goes.
+					const SC::ZoneEvents ev = SC::StepZone(head, in.zone, VR::BeltPouches::HandsOutsidePouches(hands), in.zone_state);
 					for (int hand = 0; hand < 2; ++hand)
 					{
 						// A light tick on reaching the zone says it is armed; a firmer one when it presses.
@@ -849,6 +857,10 @@ void VRInputSource::PollEvents()
 					in.zone_state.Reset();
 				}
 				values = SC::ComposeZone(in.zone_state);
+				// A belt pouch squeezed with the item screen closed opens it through the zone the profile's pouches.open
+				// names, as a squeeze in this zone would: a stopFirst zone stops the character first, then presses.
+				if (VR::BeltPouches::OpenPressFor(in.spec.id))
+					values[static_cast<u32>(SC::ControlId::Pressed)] = 1.0f;
 				if (in.zone.stop_first)
 				{
 					// The game takes this button only standing still (Outbreak's item screen won't open while

@@ -41,8 +41,21 @@ namespace VR::MenuPointer
 		constexpr u32 kSuspendTailPolls = 6;
 		// Event lines logged per opening of the menu; the rest are counted and reported as it closes.
 		constexpr u32 kLogLinesPerOpen = 24;
+		// A belt pouch's request point-to-select has not taken by then lapses: long enough for the stop, the press and
+		// the item screen opening after a squeeze with the screen closed, short enough not to steer long after.
+		constexpr float kRequestLapseMs = 2500.0f;
+		// A refused request: a dull buzz in the hand that squeezed the pouch, unlike any landing tick.
+		constexpr SpatialControls::HapticCue kRequestRefusedTick{0.15f, 0.12f};
 
 		std::atomic<int> s_hovered{-1};
+		// The profile's menu (the item screen) was up and live at the last Poll, menu mode and the VM running: what
+		// ItemScreenLive() returns.
+		std::atomic<bool> s_item_screen_live{false};
+		// RequestCell / SetPouchGrips (BeltPouches::Poll, just before Poll on the same thread).
+		std::atomic<int> s_request_cell{-1};
+		std::atomic<int> s_request_hand{-1};
+		std::atomic<bool> s_pouch_grip_left{false};
+		std::atomic<bool> s_pouch_grip_right{false};
 
 		std::mutex s_telemetry_mutex;
 		Telemetry s_telemetry;
@@ -62,6 +75,8 @@ namespace VR::MenuPointer
 		// guard passed in it.
 		bool s_when_stretch = false;
 		bool s_when_stretch_live = false;
+		int s_request_hand_now = -1;   // the hand of the latest pouch request
+		int s_request_steer_hand = -1; // a steer a pouch started ticks in this hand until it ends
 		std::atomic<bool> s_selftest_ran{false};
 
 		bool DefaultRead(u32 address, u8 width, u32* value)
@@ -300,6 +315,31 @@ namespace VR::MenuPointer
 		return s_hovered.load(std::memory_order_acquire);
 	}
 
+	bool ItemScreenLive()
+	{
+		return s_item_screen_live.load(std::memory_order_acquire);
+	}
+
+	void RequestCell(int cell_index, int hand)
+	{
+		// The hand first: Poll takes the cell, then reads the hand that goes with it.
+		s_request_hand.store((hand == 0 || hand == 1) ? hand : -1, std::memory_order_release);
+		s_request_cell.store(cell_index >= 0 ? cell_index : -1, std::memory_order_release);
+	}
+
+	void SetPouchGrips(bool left, bool right)
+	{
+		s_pouch_grip_left.store(left, std::memory_order_release);
+		s_pouch_grip_right.store(right, std::memory_order_release);
+	}
+
+	float OverrideGrip(float left, float right, bool left_pouch, bool right_pouch)
+	{
+		const float l = (left_pouch || !std::isfinite(left)) ? 0.0f : left;
+		const float r = (right_pouch || !std::isfinite(right)) ? 0.0f : right;
+		return std::max(l, r);
+	}
+
 	Telemetry GetTelemetry()
 	{
 		Telemetry t;
@@ -399,6 +439,35 @@ namespace VR::MenuPointer
 		// The wait after a confirm (suspendWhen) counts down every poll, the gate up or down.
 		st.after_confirm_ms = std::max(0.0f, st.after_confirm_ms - in.dt_ms);
 
+		// A pouch's request waiting at the start of this poll (it held the confirm controls back last poll if the gate
+		// was up).
+		const bool request_was_waiting = st.request >= 0;
+
+		// A belt pouch's request (RequestCell): the latest replaces an earlier one, and one point-to-select has not taken
+		// within kRequestLapseMs lapses, menu up or not.
+		if (in.request >= 0)
+		{
+			if (in.request < static_cast<int>(p.cells.size()))
+			{
+				st.request = in.request;
+				st.request_ms = 0.0f;
+			}
+			else
+			{
+				out.request_refused = "no such cell";
+				out.request_refused_cell = in.request;
+			}
+		}
+		else if (st.request >= 0)
+		{
+			st.request_ms += in.dt_ms;
+			if (st.request_ms > kRequestLapseMs)
+			{
+				out.request_lapsed = st.request;
+				st.request = -1;
+			}
+		}
+
 		// Stops a steer. A confirm waiting for it never reaches the game: it is swallowed (held back until let go if it
 		// is still held). The pointer then waits for the hover to change before it steers again, so nothing retries.
 		const auto abort_steer = [&](const char* why) {
@@ -433,6 +502,14 @@ namespace VR::MenuPointer
 			{
 				abort_steer("the menu closed");
 				out.closed = true;
+				// A pouch's request still waiting goes with the menu it was waiting in; one made with the menu closed
+				// (st.open false) waits on for it to open.
+				if (st.request >= 0)
+				{
+					out.request_refused = "the menu closed";
+					out.request_refused_cell = st.request;
+					st.request = -1;
+				}
 			}
 			bool keep_latch = st.latched && in.screen_up && !back_edge;
 			if (keep_latch && in.cursor_ok)
@@ -557,6 +634,9 @@ namespace VR::MenuPointer
 		{
 			suspended = st.latched;
 		}
+		// The pouches' suspendWhen (an item's command submenu is open) holds every steer, the pointer's as well as a
+		// pouch's: the D-pad would work the submenu.
+		suspended = suspended || in.pouch_suspend;
 
 		// Suspended, nothing is pressed from this very poll: a press under way is let go and the steer ends. A confirm
 		// it was holding for the arrival never reaches the game (held back only while still held, so it can never turn
@@ -584,8 +664,6 @@ namespace VR::MenuPointer
 			st.disarm_strict = true;
 			st.disarm_under = st.under;
 		}
-		const bool armed = can_steer && !st.disarmed;
-		out.hovered = armed ? st.under : -1;
 
 		const auto start_steer = [&](int to) {
 			st.target = to;
@@ -606,6 +684,60 @@ namespace VR::MenuPointer
 			st.presses = 0;
 		};
 
+		// A belt pouch's request: steered like a pointed-at cell once the menu has been up armDelayMs (the game may not
+		// take presses while the screen opens), unless steering is suspended or the self-check failed, or then the player
+		// is taking over (a stick still pushed from walking may let go within the delay) or the cursor is off the cells,
+		// which refuse it. It never confirms. The pointer then waits for its hover to change, so it does not pull the
+		// cursor straight back.
+		if (st.request >= 0)
+		{
+			const int to = st.request;
+			const char* refuse = can_steer           ? nullptr :
+			                     st.selfcheck_failed ? "the cursor struct did not match" :
+			                     st.unresponsive     ? "the cursor does not answer" :
+			                     (submenu || in.pouch_suspend || p.suspend_when.empty()) ? "a submenu is open" :
+			                                                                             "a confirm just reached the game";
+			const bool settled = st.open_ms >= p.arm_delay_ms;
+			if (!refuse && settled)
+				refuse = override_now ? "you took over" : (current < 0) ? "the cursor is not on the mapped cells" : nullptr;
+			if (refuse)
+			{
+				st.request = -1;
+				out.request_refused = refuse;
+				out.request_refused_cell = to;
+			}
+			else if (settled)
+			{
+				st.request = -1;
+				out.request_started = to;
+				out.request_from = current;
+				// A confirm waiting for the old target was meant for that cell: it never reaches the game.
+				if (st.pending)
+				{
+					st.pending = false;
+					out.confirm_swallowed = true;
+					if (in.confirm)
+						st.swallow = true;
+				}
+				if (to == current)
+				{
+					abort_steer("a pouch asked for the cell it is on");
+					// A trigger held through the wait was held back: letting it through now would be a fresh press.
+					if (in.confirm && !confirm_edge)
+						st.swallow = true;
+				}
+				else if (st.target >= 0)
+					retarget(to);
+				else
+					start_steer(to);
+				st.disarmed = true;
+				st.disarm_under = st.under;
+			}
+		}
+
+		const bool armed = can_steer && !st.disarmed;
+		out.hovered = armed ? st.under : -1;
+
 		if (confirm_edge)
 		{
 			if (st.target >= 0)
@@ -614,6 +746,14 @@ namespace VR::MenuPointer
 				if (armed && st.under >= 0 && st.under != st.target && current >= 0)
 					retarget(st.under);
 				st.pending = true;
+			}
+			else if (st.request >= 0)
+			{
+				// A pouch's request still waiting (the arm delay): the cursor has not started for the pouch's cell, so the
+				// cell it is on is not the one the player asked for. Like a confirm pulled before the cursor has arrived
+				// it never reaches the game; the player pulls again once the cursor lands.
+				st.swallow = true;
+				out.confirm_swallowed = true;
 			}
 			else if (armed && st.under >= 0 && current >= 0 && st.under != current)
 			{
@@ -763,9 +903,14 @@ namespace VR::MenuPointer
 		out.target = st.target;
 		out.presses = st.presses;
 		out.in_flight = st.target >= 0;
-		out.confirm_hold = out.in_flight || st.swallow;
+		// A pouch's request held the confirm controls back while it waited (as a steer in flight does); a trigger still
+		// held as it ends (taken, refused or lapsed) stays held back until let go, or the hold dropping would be a fresh
+		// press on whatever cell the cursor is on. A fresh pull this poll was decided above (pending, or swallowed).
+		if ((request_was_waiting || st.request >= 0) && in.confirm && !confirm_edge)
+			st.swallow = true;
+		out.confirm_hold = out.in_flight || st.swallow || (st.request >= 0);
 		// As it stands after this poll (a confirm passed now has latched, or started its wait, already).
-		out.suspended = p.suspend_when.empty() ? st.latched : (suspended || st.after_confirm_ms > 0.0f);
+		out.suspended = (p.suspend_when.empty() ? st.latched : (suspended || st.after_confirm_ms > 0.0f)) || in.pouch_suspend;
 		out.submenu = submenu;
 		out.selfcheck_failed = st.selfcheck_failed;
 		return out;
@@ -786,11 +931,18 @@ namespace VR::MenuPointer
 		// as the menu.
 		const bool vm_running = VMManager::GetState() == VMState::Running;
 		const bool gate_conditions = live && snap.actions_active && menu_mode && !SplitState::Active() && vm_running;
+		// A belt pouch's request made this poll (BeltPouches::Poll runs just before, on this thread).
+		const int request = s_request_cell.exchange(-1, std::memory_order_acq_rel);
+		if (request >= 0)
+			s_request_hand_now = s_request_hand.load(std::memory_order_acquire);
 		const ProfileDB::MenuPointerParams* params = nullptr;
+		const std::vector<ProfileDB::CameraGuard>* pouch_guards = nullptr;
 		bool screen_up = false;
+		// Also while a pouch's request waits (the screen still opening): it needs the cells and the screen's guards.
 		bool when_up = false;
 		bool evaluated = false;
-		if ((gate_conditions || s_state.latched || (s_live_seen && vm_running)) && VMManager::HasValidVM())
+		if ((gate_conditions || s_state.latched || (s_live_seen && vm_running) || s_state.request >= 0 || request >= 0) &&
+			VMManager::HasValidVM())
 		{
 			const std::string serial = VMManager::GetDiscSerial();
 			const ProfileDB::Profile* profile = serial.empty() ? nullptr : ProfileDB::Lookup(serial, VMManager::GetDiscCRC());
@@ -806,6 +958,8 @@ namespace VR::MenuPointer
 				else
 					screen_up = LiveGate(when_up, when_up && AnyGuardPasses(params->live_when, reader), &s_live_seen);
 			}
+			if (profile && profile->pouches.has_value() && !profile->pouches->suspend_when.empty())
+				pouch_guards = &profile->pouches->suspend_when;
 		}
 		// Not looked at on a running poll (out of menu mode, no profile): the menu may have changed unseen, so the proof
 		// that it is the menu proper goes. With the VM paused nothing can have changed.
@@ -866,9 +1020,13 @@ namespace VR::MenuPointer
 		          r.dpad_right;
 		in.right_stick = std::sqrt(r.thumbstick_x * r.thumbstick_x + r.thumbstick_y * r.thumbstick_y);
 		in.left_stick = std::sqrt(l.thumbstick_x * l.thumbstick_x + l.thumbstick_y * l.thumbstick_y);
-		in.grip = std::max(l.grip, r.grip);
+		// A grip squeezed in a belt pouch is that pouch's request, not the player taking over.
+		in.grip = OverrideGrip(l.grip, r.grip, s_pouch_grip_left.load(std::memory_order_acquire),
+			s_pouch_grip_right.load(std::memory_order_acquire));
 		in.suspend = in.gate && !params->suspend_when.empty() && AnyGuardPasses(params->suspend_when, reader);
 		in.dt_ms = std::clamp(std::isfinite(dt) ? dt : 0.0f, 0.0f, 0.25f) * 1000.0f;
+		in.request = request;
+		in.pouch_suspend = in.gate && pouch_guards != nullptr && AnyGuardPasses(*pouch_guards, reader);
 
 		static const ProfileDB::MenuPointerParams s_no_params{};
 		const StepOut out = Step(params ? *params : s_no_params, in, s_state);
@@ -877,12 +1035,22 @@ namespace VR::MenuPointer
 		SpatialControls::SetPointerConfirmHold(out.confirm_hold);
 		s_hovered.store(out.hovered, std::memory_order_release);
 
-		// Ticks: in the pointing hand while the pointer is on the screen, else the right.
-		const int tick_hand = (hit.valid && hit.hand >= 0 && hit.hand < 2) ? hit.hand : VRInputSnapshot::RIGHT;
+		// Ticks: in the hand of the pouch that started the steer while it runs, else in the pointing hand while the
+		// pointer is on the screen, else the right.
+		if (out.request_started >= 0)
+			s_request_steer_hand = s_request_hand_now;
+		const int tick_hand = (s_request_steer_hand == 0 || s_request_steer_hand == 1) ? s_request_steer_hand :
+		                      (hit.valid && hit.hand >= 0 && hit.hand < 2)          ? hit.hand :
+		                                                                              VRInputSnapshot::RIGHT;
 		if (out.landed)
 			XRInput::QueuePulse(tick_hand, SpatialControls::kHapticZoneEnter.amplitude, SpatialControls::kHapticZoneEnter.seconds);
 		if (out.confirm_swallowed)
 			XRInput::QueuePulse(tick_hand, SpatialControls::kHapticRelease.amplitude, SpatialControls::kHapticRelease.seconds);
+		if (!out.in_flight)
+			s_request_steer_hand = -1;
+		// A pouch's request refused: a dull buzz in the hand that squeezed it.
+		if (out.request_refused && (s_request_hand_now == 0 || s_request_hand_now == 1))
+			XRInput::QueuePulse(s_request_hand_now, kRequestRefusedTick.amplitude, kRequestRefusedTick.seconds);
 
 		// Logs: one line as the menu opens, the events (rate-limited per opening), a summary as it closes.
 		if (screen_open && !s_screen_open)
@@ -911,6 +1079,7 @@ namespace VR::MenuPointer
 			}
 		}
 		s_screen_open = screen_open;
+		s_item_screen_live.store(screen_open, std::memory_order_release);
 
 		if (out.selfcheck_failed_now && !out.opened && LogLine())
 		{
@@ -978,6 +1147,21 @@ namespace VR::MenuPointer
 			if (LogLine())
 				Console.WriteLn("(VR) MenuPointer: confirm swallowed (the cursor had not arrived).");
 		}
+		// Pouch requests are the player's own squeezes, a few a minute at most: always logged.
+		if (out.request_started >= 0)
+		{
+			if (out.request_started == out.request_from)
+				Console.WriteLn("(VR) MenuPointer: a pouch asked for cell %d; the cursor is already there.", out.request_started);
+			else
+				Console.WriteLn("(VR) MenuPointer: a pouch asked for cell %d; steering there from cell %d.", out.request_started,
+					out.request_from);
+		}
+		if (out.request_refused)
+			Console.WriteLn("(VR) MenuPointer: a pouch's request for cell %d refused (%s).", out.request_refused_cell,
+				out.request_refused);
+		if (out.request_lapsed >= 0)
+			Console.WriteLn("(VR) MenuPointer: a pouch's request for cell %d lapsed (point-to-select did not take it within "
+							"%.1f s).", out.request_lapsed, static_cast<double>(kRequestLapseMs) / 1000.0);
 
 		std::lock_guard<std::mutex> lock(s_telemetry_mutex);
 		Telemetry& t = s_telemetry;
@@ -1006,6 +1190,11 @@ namespace VR::MenuPointer
 		t.ticks += out.landed ? 1u : 0u;
 		t.confirms_passed += out.confirm_passed ? 1u : 0u;
 		t.confirms_swallowed += out.confirm_swallowed ? 1u : 0u;
+		t.request = static_cast<s8>(s_state.request);
+		t.requests += (request >= 0) ? 1u : 0u;
+		t.requests_started += (out.request_started >= 0) ? 1u : 0u;
+		t.requests_refused += out.request_refused ? 1u : 0u;
+		t.requests_lapsed += (out.request_lapsed >= 0) ? 1u : 0u;
 	}
 
 	bool SelfTest()
@@ -1869,9 +2058,316 @@ namespace VR::MenuPointer
 			check(s.arrivals == 1 && s.game.cell == 1, "until the dot reaches another cell");
 		}
 
+		// --- Belt pouch requests (RequestCell) ----------------------------------------------------------------------
+		// What the requests did over some polls.
+		struct RequestLog
+		{
+			int started = -1;
+			const char* refused = nullptr;
+			int lapsed = -1;
+		};
+		const auto note = [](const StepOut& o, RequestLog& rl) {
+			if (o.request_started >= 0)
+				rl.started = o.request_started;
+			if (o.request_refused)
+				rl.refused = o.request_refused;
+			if (o.request_lapsed >= 0)
+				rl.lapsed = o.request_lapsed;
+		};
+		// One poll with a request made in it.
+		const auto ask = [&note](Sim& s, int cell, RequestLog& rl) {
+			s.in.request = cell;
+			s.Poll();
+			s.in.request = -1;
+			note(s.out, rl);
+		};
+		const auto run_noting = [&note](Sim& s, int n, RequestLog& rl) {
+			for (int i = 0; i < n; i++)
+			{
+				s.Poll();
+				note(s.out, rl);
+			}
+		};
+
+		check(OverrideGrip(0.9f, 0.2f, true, false) == 0.2f && OverrideGrip(0.9f, 0.2f, false, false) == 0.9f &&
+				  OverrideGrip(0.9f, 0.8f, true, true) == 0.0f,
+			"a grip in a belt pouch is no override; the other hand's still is");
+
+		// Made with the menu closed: kept until it opens, steered once the arm delay has passed, nothing confirmed.
+		{
+			Sim s;
+			s.p = &p;
+			s.game.layout = &p;
+			RequestLog rl;
+			ask(s, 3, rl);
+			run_noting(s, 30, rl);
+			check(s.st.request == 3 && s.game.presses == 0 && rl.started < 0 && !rl.refused,
+				"a request made with the menu closed waits for it");
+			s.in.gate = true;
+			run_noting(s, 10, rl);
+			check(s.game.presses == 0 && s.st.request == 3, "and for the arm delay once it is up");
+			int guard = 0;
+			while (s.arrivals == 0 && guard++ < 60)
+			{
+				s.Poll();
+				note(s.out, rl);
+			}
+			check(rl.started == 3 && s.arrivals == 1 && s.game.cell == 3 && s.passed == 0 && s.st.request < 0,
+				"then the cursor is steered to the pouch's cell, and nothing is confirmed");
+			check(s.game.max_held <= 2 && s.game.min_gap >= 2, "with the pointer's own press timing");
+		}
+
+		// A trigger pulled while a request waits out the arm delay (the screen just appeared): the cursor is still on the
+		// cell the screen opened on, so it never reaches the game, and the cursor still goes to the pouch's cell.
+		{
+			Sim s;
+			s.p = &p;
+			s.game.layout = &p;
+			RequestLog rl;
+			ask(s, 3, rl);
+			run_noting(s, 4, rl);
+			s.in.gate = true;
+			run_noting(s, 5, rl);
+			const bool held_waiting = s.out.confirm_hold;
+			s.in.confirm = true;
+			s.Poll();
+			note(s.out, rl);
+			check(held_waiting && s.passed == 0 && s.out.confirm_hold && s.st.request == 3,
+				"a trigger pulled while a request waits for the arm delay does not reach the game");
+			run_noting(s, 3, rl);
+			s.in.confirm = false;
+			int guard = 0;
+			while (s.arrivals == 0 && guard++ < 60)
+			{
+				s.Poll();
+				note(s.out, rl);
+			}
+			check(rl.started == 3 && s.arrivals == 1 && s.game.cell == 3 && s.passed == 0 && s.swallowed >= 1,
+				"and the cursor is still steered to the pouch's cell, nothing confirmed");
+			s.in.confirm = true;
+			s.Poll();
+			s.in.confirm = false;
+			s.Poll();
+			check(s.passed == 1 && s.out.current == 3, "a pull once it has landed confirms the pouch's cell");
+		}
+
+		// A trigger held through the wait (pulled before the screen came up) is not let through as the request ends.
+		{
+			Sim s;
+			s.p = &p;
+			s.game.layout = &p;
+			RequestLog rl;
+			s.in.confirm = true;
+			ask(s, 0, rl);
+			s.in.gate = true;
+			run_noting(s, 40, rl);
+			check(rl.started == 0 && s.passed == 0 && s.out.confirm_hold,
+				"a trigger held while a request for the cursor's own cell waits stays held back after it");
+			s.in.confirm = false;
+			s.Poll();
+			check(!s.out.confirm_hold && s.passed == 0, "until it is let go");
+		}
+
+		// Made with the screen up: it takes the cursor from the pointed-at cell, and the pointer waits for its hover to
+		// change before it steers again.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.Point(1);
+			s.Run(40);
+			check(s.game.cell == 1, "the pointer brings the cursor to cell 1 first");
+			s.ResetCounts();
+			RequestLog rl;
+			ask(s, 3, rl);
+			run_noting(s, 60, rl);
+			check(rl.started == 3 && s.arrivals == 1 && s.game.cell == 3 && s.passed == 0,
+				"a request steers the cursor to its cell, away from the pointed-at one");
+			check(s.out.hovered < 0 && s.out.dir < 0, "and the pointer still on cell 1 does not pull it back");
+			s.Point(2);
+			s.Run(60);
+			check(s.game.cell == 2, "until it moves to another cell");
+		}
+
+		// Latched after a confirm (a command submenu may be up): refused, nothing pressed.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.ResetCounts();
+			s.in.confirm = true;
+			s.Poll();
+			s.in.confirm = false;
+			check(s.passed == 1 && s.st.latched, "a confirm on the cursor's cell latches");
+			RequestLog rl;
+			ask(s, 3, rl);
+			run_noting(s, 40, rl);
+			check(same(rl.refused, "a submenu is open") && s.game.presses == 0 && s.st.request < 0,
+				"latched, a request is refused and nothing is pressed");
+		}
+
+		// The pouches' submenu guard: a request is refused, and a steer under way stops the poll it starts passing.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.ResetCounts();
+			s.in.pouch_suspend = true;
+			RequestLog rl;
+			ask(s, 3, rl);
+			run_noting(s, 40, rl);
+			check(same(rl.refused, "a submenu is open") && s.game.presses == 0 && s.out.suspended,
+				"with the pouches' submenu guard passing, a request is refused and nothing is pressed");
+			s.in.pouch_suspend = false;
+			s.Run(5);
+			RequestLog rl_box;
+			ask(s, 4, rl_box);
+			int guard = 0;
+			while (s.game.presses == 0 && guard++ < 30)
+				s.Poll();
+			check(rl_box.started == 4 && s.out.in_flight, "a request steers once the guard clears");
+			s.in.pouch_suspend = true;
+			s.Poll();
+			check(s.out.dir < 0 && !s.out.in_flight && same(s.out.aborted, "a submenu is open"),
+				"the guard passing mid-steer stops the steer at once");
+			const int pressed_before = s.game.presses;
+			s.Run(30);
+			check(s.game.presses == pressed_before, "and nothing is pressed while it passes");
+		}
+
+		// Waiting in the arm delay when the menu closes: it goes with the menu.
+		{
+			Sim s;
+			s.p = &p;
+			s.game.layout = &p;
+			s.in.gate = true;
+			s.Run(3);
+			RequestLog rl;
+			ask(s, 3, rl);
+			s.in.gate = false;
+			run_noting(s, 3, rl);
+			s.in.gate = true;
+			run_noting(s, 60, rl);
+			check(same(rl.refused, "the menu closed") && rl.started < 0 && s.game.presses == 0,
+				"a request still waiting when the menu closes goes with it");
+		}
+
+		// Never taken: it lapses after 2.5 s and steers nothing when the menu opens later.
+		{
+			Sim s;
+			s.p = &p;
+			s.game.layout = &p;
+			RequestLog rl;
+			ask(s, 2, rl);
+			run_noting(s, 160, rl);
+			check(rl.lapsed == 2 && s.st.request < 0, "a request the menu never takes lapses after 2.5 s");
+			s.in.gate = true;
+			s.Run(60);
+			check(s.game.presses == 0, "and steers nothing when the menu opens later");
+		}
+
+		// The cell the cursor is already on: nothing pressed.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.ResetCounts();
+			RequestLog rl;
+			ask(s, 0, rl);
+			run_noting(s, 30, rl);
+			check(rl.started == 0 && !rl.refused && s.game.presses == 0, "a request for the cell the cursor is on presses nothing");
+		}
+
+		// A trigger already held when a request starts is swallowed, not turned into a confirm on arrival.
+		{
+			Sim s;
+			s.p = &p;
+			s.game.layout = &p;
+			s.in.confirm = true;
+			s.Poll();
+			s.Open();
+			s.ResetCounts();
+			RequestLog rl;
+			ask(s, 3, rl);
+			int guard = 0;
+			while (s.arrivals == 0 && guard++ < 60)
+				s.Poll();
+			check(s.arrivals == 1 && s.passed == 0 && s.out.confirm_hold,
+				"a trigger held when a request starts is held back, not confirmed");
+			s.in.confirm = false;
+			s.Poll();
+			check(!s.out.confirm_hold, "and let go once released");
+		}
+
+		// A confirm waiting for the pointer's target was meant for that cell: a request elsewhere swallows it.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.ResetCounts();
+			s.Point(4);
+			s.in.confirm = true;
+			s.Poll();
+			check(s.out.target == 4 && s.st.pending, "a fast click on the equipped box waits for the cursor");
+			RequestLog rl;
+			ask(s, 1, rl);
+			check(rl.started == 1 && !s.st.pending && s.out.target == 1, "a request mid-flight retargets the steer");
+			int guard = 0;
+			while (s.arrivals == 0 && guard++ < 60)
+				s.Poll();
+			check(s.arrivals == 1 && s.game.cell == 1 && s.passed == 0 && s.swallowed == 1,
+				"and the confirm meant for the equipped box never reaches the game");
+			s.in.confirm = false;
+			s.Point(-1);
+			s.Poll();
+		}
+
+		// A stick still pushed from walking as the screen opens keeps the request if let go within the arm delay; a
+		// request made while the player works a stick is refused.
+		{
+			Sim s;
+			s.p = &p;
+			s.game.layout = &p;
+			RequestLog rl;
+			ask(s, 3, rl);
+			s.in.left_stick = 1.0f;
+			s.in.gate = true;
+			run_noting(s, 8, rl);
+			s.in.left_stick = 0.0f;
+			int guard = 0;
+			while (s.arrivals == 0 && guard++ < 60)
+			{
+				s.Poll();
+				note(s.out, rl);
+			}
+			check(rl.started == 3 && s.arrivals == 1 && s.game.cell == 3, "a stick let go within the arm delay keeps the request");
+
+			Sim t;
+			t.p = &p;
+			t.Open();
+			t.ResetCounts();
+			RequestLog rl_stick;
+			t.in.left_stick = 1.0f;
+			ask(t, 3, rl_stick);
+			t.in.left_stick = 0.0f;
+			run_noting(t, 30, rl_stick);
+			check(same(rl_stick.refused, "you took over") && t.game.presses == 0, "a request made while a stick is pushed is refused");
+		}
+
+		// Out of range: refused at once.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			RequestLog rl;
+			ask(s, 9, rl);
+			check(same(rl.refused, "no such cell") && s.st.request < 0, "a request for a cell the profile does not have is refused");
+		}
+
 		if (failures == 0)
 			Console.WriteLn(Color_StrongGreen, "(VR) MenuPointer self-test: passed (%d checks: ray/quad, tablet, hover, plan, "
-											   "online rule, liveWhen, steering, overrides, aborts, confirm, latch, suspendWhen, submenus).", checks);
+											   "online rule, liveWhen, steering, overrides, aborts, confirm, latch, suspendWhen, submenus, "
+											   "pouch requests).", checks);
 		else
 			Console.WriteLn(Color_StrongRed, "(VR) MenuPointer self-test FAIL: %s (%d of %d checks failed).", first, failures, checks);
 		return failures == 0;

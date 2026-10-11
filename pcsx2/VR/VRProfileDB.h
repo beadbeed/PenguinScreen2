@@ -646,6 +646,46 @@ namespace VR::ProfileDB
 		std::vector<MenuPointerCell> cells; // 1 to 16
 	};
 
+	// pouches: belt pouches (VR::BeltPouches), Dungeons of Eternity style. Spots on the seated player's body, each tied to
+	// one of the game's item cells: a hand reaching into one ticks (firmer and twice while the cell holds an item); a grip
+	// squeezed there opens the item screen (through the Zone control `open` names, if it is closed) and the menu pointer
+	// steers the game's cursor to the pouch's cell (VR::MenuPointer::RequestCell). Nothing is ever confirmed for the
+	// player, and the item bytes are only read. Only while first person is armed, so never on obsrv.
+	struct Pouch
+	{
+		int cell = -1;         // the menuPointer.cells entry the cursor is steered to
+		bool has_item = false; // the u8 at camera.base + item_offset is 0 while the cell is empty
+		u32 item_offset = 0;
+		// Metres from the head as the Zone controls are placed (+ right, + up, + ahead), measured with the head upright
+		// and looking ahead.
+		float side = 0.0f;
+		float height = 0.0f;
+		float forward = 0.0f;
+		float radius = 0.065f;
+	};
+
+	enum class PouchAnchor : u8
+	{
+		// On the body: placed from the neck under the head, so looking down at a pouch does not move it, and turned to
+		// the forward the player last recentered to, so glancing at one does not swing them round.
+		Seat,
+		// As the Zone controls: from the head's position, turned with its yaw.
+		Head,
+	};
+
+	struct PouchParams
+	{
+		PouchAnchor anchor = PouchAnchor::Seat;
+		// The Zone control (its id) whose press opens the item screen. A pouch presses it the way a squeeze in that
+		// zone would (its stopFirst included). Empty: a pouch only steers an item screen that is already up.
+		std::string open;
+		SpatialControls::ZoneHand hand = SpatialControls::ZoneHand::Either;
+		// While any one passes (an item's command submenu is open), nothing is steered at all: a squeeze is refused and
+		// the menu pointer's own steering waits too.
+		std::vector<CameraGuard> suspend_when;
+		std::vector<Pouch> list; // 1 to 8
+	};
+
 	struct Profile
 	{
 		std::string serial;
@@ -667,6 +707,7 @@ namespace VR::ProfileDB
 		std::optional<FeedbackParams> feedback;
 		std::optional<HudParams> hud;
 		std::optional<MenuPointerParams> menu_pointer;
+		std::optional<PouchParams> pouches;
 		// screen.menu: the menu tablet's placement (VR setting MenuTablet).
 		std::optional<float> menu_screen_distance;
 		std::optional<float> menu_screen_height;
