@@ -1108,6 +1108,9 @@ namespace VR::CameraDriver
 		// (LocalRecordAny: still valid while grabbed, down or dead). Reads only.
 		bool s_local_any_valid = false;
 		u32 s_local_any_base = 0;
+		// Vsyncs since the camera guards last passed, for LocalRecordAny's own disarm grace (the room-camera mode
+		// byte flickers about 12 times a second). Saturates; 0xFFFFFFFF = no grace (no VM, no profile, game change).
+		u32 s_any_guard_fail_vsyncs = 0xFFFFFFFFu;
 
 		std::atomic_bool s_recenter_requested{false};
 		// The pending recenter's caller shows its own toast (RequestRecenter(false)).
@@ -2348,6 +2351,7 @@ namespace VR::CameraDriver
 			s_hooks_installed = false;
 			s_base.valid = false;
 			s_padlook = PadLookState{};
+			s_any_guard_fail_vsyncs = 0xFFFFFFFFu;
 			ResetDeltaState();
 			PadLook::Publish(0.0f);
 			return;
@@ -2370,6 +2374,7 @@ namespace VR::CameraDriver
 			s_hooks_installed = false;
 			s_base.valid = false;
 			s_padlook = PadLookState{};
+			s_any_guard_fail_vsyncs = 0xFFFFFFFFu;
 			if (vm_state == VMState::Running)
 			{
 				for (AnchorState& a : s_anchor)
@@ -2403,8 +2408,15 @@ namespace VR::CameraDriver
 		                         (s_armed_logged && s_guard_fail_vsyncs <= cam.disarm_after_vsyncs);
 		// LocalRecordAny: the record whenever the game is running past its guards, grabbed, down or dead too.
 		// Only for a profile with feedback cues (its only reader), so a pattern-scanned base is not hunted for
-		// while first person is off.
-		if (vm_state == VMState::Running && profile->feedback.has_value() && GuardsPass(cam))
+		// while first person is off. It has its own disarm grace (ignoring releaseWhen, armed or not): the guards
+		// flicker for a vsync or two, and without the grace each flicker would reset the hurt and weapon cues.
+		const bool guards_now_pass = GuardsPass(cam);
+		if (guards_now_pass)
+			s_any_guard_fail_vsyncs = 0;
+		else if (s_any_guard_fail_vsyncs < 0xFFFFFFFFu)
+			s_any_guard_fail_vsyncs++;
+		if (vm_state == VMState::Running && profile->feedback.has_value() &&
+			s_any_guard_fail_vsyncs <= cam.disarm_after_vsyncs)
 		{
 			const std::optional<u32> base_any = GetBase(cam, crc);
 			s_local_any_valid = base_any.has_value();
