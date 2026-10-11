@@ -106,16 +106,21 @@ SLPM-65428:
   # (suspendWhen: the cursor struct + 0x20, measured offline 2026-10-11). Only while first person is armed, so never on
   # obsrv.
   # Layout, in metres from your eyes the way the zones are placed (side + right, height + up, forward + ahead), measured
-  # sitting upright and looking ahead; each pouch is a ball 6.5 cm round its point:
+  # sitting upright and looking ahead; each pouch is a ball 6.5 cm round its point. A starting point to tune in the
+  # headset: high and narrow, the lower ones standing out from the body, to keep clear of the hip zones (balls 20 cm
+  # round, plus 3 cm before a hand counts as out):
   #              left                    right
-  #   chest      cell 0 (-0.10, -0.25)   cell 1 (0.10, -0.25)   forward 0.14
-  #   ribs       cell 2 (-0.10, -0.39)   cell 3 (0.10, -0.39)   forward 0.16
-  #   buckle          equipped box (0, -0.52)                   forward 0.18
+  #   chest      cell 0 (-0.10, -0.20)   cell 1 (0.10, -0.20)   forward 0.14
+  #   ribs       cell 2 (-0.07, -0.29)   cell 3 (0.07, -0.29)   forward 0.24
+  #   buckle          equipped box (0, -0.40)                   forward 0.28
   # anchor: seat hangs them from your neck and turns them with the forward you last recentered to, so looking down at a
   # pouch, or glancing at it, does not move it (anchor: head would place them as the zones are, turning with your head).
   # If they feel turned, sit facing forward and recenter (both stick clicks, or the Steam button's recenter).
-  # They clear the holster, belt and backpack zones' centres; where a pouch reaches into the edge of the hip holster's or
-  # the belt's ball, a hand inside the pouch belongs to the pouch alone.
+  # The zones come first: within 23 cm of the holster's point your right hand is the holster's, and within 23 cm of the
+  # belt's your left hand is the belt's, even inside a pouch, so a squeeze at your hip does what it always did. Facing
+  # ahead every pouch keeps at least 5 cm round its point clear of both, for either hand; the lower pouches' and the
+  # buckle's outer edges reach the hip zones (and turning your head swings the zones, not the pouches). An empty pouch
+  # ticks with a short sharp tap, not the zones' softer entry tick.
   pouches:
     anchor: seat
     open: belt
@@ -123,11 +128,11 @@ SLPM-65428:
     radius: 0.065
     suspendWhen: [{ address: 0x720BA0, equals: 1, width: 1 }]   # an item's command submenu is open
     list:
-      - { cell: 0, item: 0xC84, side: -0.10, height: -0.25, forward: 0.14 }   # upper left chest  -> item cell 0
-      - { cell: 1, item: 0xC85, side: 0.10, height: -0.25, forward: 0.14 }    # upper right chest -> item cell 1
-      - { cell: 2, item: 0xC86, side: -0.10, height: -0.39, forward: 0.16 }   # lower left        -> item cell 2
-      - { cell: 3, item: 0xC87, side: 0.10, height: -0.39, forward: 0.16 }    # lower right       -> item cell 3
-      - { cell: 4, side: 0.0, height: -0.52, forward: 0.18 }                  # belt buckle       -> the equipped box
+      - { cell: 0, item: 0xC84, side: -0.10, height: -0.20, forward: 0.14 }   # upper left chest  -> item cell 0
+      - { cell: 1, item: 0xC85, side: 0.10, height: -0.20, forward: 0.14 }    # upper right chest -> item cell 1
+      - { cell: 2, item: 0xC86, side: -0.07, height: -0.29, forward: 0.24 }   # lower left        -> item cell 2
+      - { cell: 3, item: 0xC87, side: 0.07, height: -0.29, forward: 0.24 }    # lower right       -> item cell 3
+      - { cell: 4, side: 0.0, height: -0.40, forward: 0.28 }                  # out from the buckle -> the equipped box
   stereo:
     separation: 0.012
     convergence: 55.0

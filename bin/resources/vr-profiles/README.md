@@ -192,7 +192,7 @@ pouches:
   open: belt             # the id of the Zone control that opens the item screen
   suspendWhen: [ ... ]   # optional guards: a squeeze is refused while any one passes
   list:
-    - { cell: 0, item: 0xC84, side: -0.10, height: -0.25, forward: 0.14 }
+    - { cell: 0, item: 0xC84, side: -0.10, height: -0.20, forward: 0.14 }
 ```
 
 | Key | Meaning |
@@ -207,8 +207,13 @@ pouches:
 Steering the cursor uses `menuPointer`, so it follows the Menu Pointer setting
 and the same rules: it waits for `armDelayMs` after the screen opens, never
 runs while steering is suspended, and stops if you take over with the D-pad or
-a stick. A hand inside a pouch belongs to that pouch only: a Zone control whose
-ball the pouch overlaps does not see it there. Any invalid part of the block
+a stick. The Zone controls come first: a hand within a zone's reach (its
+`radius` plus 3 cm) is that zone's, never a pouch's, when the zone takes that
+hand, so a pouch overlapping a hip zone never changes what a squeeze at the hip
+does. Elsewhere a hand inside a pouch belongs to that pouch only, and no zone
+sees it there. Keep each pouch's point well clear of the zones that take the
+same hand (the zones turn with your head, seat-anchored pouches do not). Any
+invalid part of the block
 makes the emulator ignore the whole block, with a log line saying why.
 
 ## `stereo`: depth

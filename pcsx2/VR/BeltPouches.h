@@ -15,6 +15,7 @@ namespace VR::ProfileDB
 {
 	struct Pouch;
 	struct PouchParams;
+	struct Profile;
 }
 
 // Belt pouches in VR (profile pouches:), Dungeons of Eternity style: spots on the seated player's body, each tied to one
@@ -36,16 +37,20 @@ namespace VR::BeltPouches
 	static constexpr float kNeckBack = 0.075f;
 	// A hand in a pouch stays in it until this much past its radius.
 	static constexpr float kExitMargin = 0.02f;
+	// The profile's Zone controls PlaceZones looks at (Outbreak has three).
+	static constexpr int kMaxZoneBalls = 16;
 
 	// CPU thread, every input poll (VRInputSource::PollEvents): before MenuPointer::Poll, so a squeeze's request and the
 	// pouch hands' grips reach it this poll, and before the controls compose, so an open press goes out this poll.
 	// reader reads guest memory (null: the default reader); dt is the time since the last poll in seconds.
 	void Poll(const VRInputSnapshot& snap, GuestReader reader, float dt);
 
-	// The hands as a Zone control sees them this poll: a hand inside a pouch is moved out of every zone's reach, so a pouch
-	// may sit inside a bigger zone (the hip holster's edge) and a squeeze in it presses only the pouch. A press a zone
-	// already holds carries on (a zone holds its button until the grip opens, wherever the hand goes), and a grip closed
-	// in a pouch presses no zone the hand moves into. Unchanged while the pouches are not running. CPU thread, after Poll.
+	// The hands as a Zone control sees them this poll: a hand inside a pouch is moved out of every zone's reach. A hand
+	// never counts as inside a pouch while it is within reach of a Zone control that takes that hand (InOwnZone), so this
+	// only ever hides a hand from zones that could not have seen it there, and the hip gestures work exactly as without
+	// pouches. A press a zone already holds carries on (a zone holds its button until the grip opens, wherever the hand
+	// goes), and a grip closed in a pouch presses no zone the hand moves into. Unchanged while the pouches are not running.
+	// CPU thread, after Poll.
 	SpatialControls::Hands HandsOutsidePouches(const SpatialControls::Hands& hands);
 
 	// True while a pouch squeezed with the item screen closed is opening it through the Zone control with this id (the
@@ -110,11 +115,33 @@ namespace VR::BeltPouches
 	// out.
 	int PouchUnder(const ProfileDB::PouchParams& p, const BodyFrame& f, int hand, const SpatialControls::Vec3& pos, int prev);
 
+	// One Zone control as a ball: where a hand may be and still be inside it (its radius plus its exit margin).
+	struct ZoneBall
+	{
+		SpatialControls::Vec3 centre;
+		float reach = 0.0f;
+		SpatialControls::ZoneHand hand = SpatialControls::ZoneHand::Either;
+	};
+	struct ZoneBalls
+	{
+		std::array<ZoneBall, kMaxZoneBalls> ball{};
+		int count = 0;
+	};
+
+	// The profile's Zone controls placed from head the way VRInputSource steps them (from the head's position, turned
+	// with its yaw), each as the ball of its radius plus the zones' exit margin.
+	ZoneBalls PlaceZones(const ProfileDB::Profile& profile, const SpatialControls::Anchor& head);
+
+	// A hand (0 left, 1 right) at pos is within reach of a Zone control that takes that hand: the zone may have it, so no
+	// pouch does. The zones turn with the head and the seat-anchored pouches do not, so this is decided every poll.
+	bool InOwnZone(const ZoneBalls& zones, int hand, const SpatialControls::Vec3& pos);
+
 	struct HandIn
 	{
 		bool valid = false;
 		SpatialControls::Vec3 position; // the grip pose
 		float squeeze = 0.0f;
+		bool in_zone = false; // InOwnZone: the zone's, never a pouch's
 	};
 
 	struct StepIn

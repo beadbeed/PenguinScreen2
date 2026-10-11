@@ -71,15 +71,18 @@ op 0 reads the state (`pine.menu_pointer()`, any time), op 1 sets a test hit (`p
 like the test input). `PCSX2_VR_SELFTEST` runs `(VR) MenuPointer self-test:` once.
 
 Belt pouches (profile `pouches:`, both Files; only while first person is armed, so never on obsrv): a 2 x 2 chest rig
-laid out like the item grid (cells 0 and 1 at the upper chest, 2 and 3 at the lower ribs; File #1 also the equipped
-box at the belt buckle), hung from a neck pivot under the head and turned to the forward you last recentered to, so
+laid out like the item grid (cells 0 and 1 at the upper chest, 2 and 3 below them standing out from the ribs; File #1
+also the equipped box out from the belt buckle), hung from a neck pivot under the head and turned to the forward you last recentered to, so
 looking down at a pouch does not move it. An open hand reaching into one ticks once, lightly, for an empty cell and
 twice, firmer, when the local record's item byte (File #1 +0xC84 + k, File #2 +0xC94 + k) is not 0. A squeeze opens
 the item screen through the belt zone if it is closed (stop, then Start) and asks the menu pointer for the cell
 (`MenuPointer::RequestCell`: the same closed-loop D-pad steering once the screen has been up 300 ms, refused while an
 item's command submenu is open (the cursor struct + 0x20) or after a confirm, never a confirm); with the screen up a
-squeeze just moves the cursor. A hand in a pouch is the pouch's alone (the zones do not see it there) and its grip is
-not a menu pointer override. Logs: `(VR) Pouches: N pouch(es) on the seat ...` once per game, `(VR) Pouches: pouch K
+squeeze just moves the cursor. The zones come first: a hand within a hip zone's reach (radius + 3 cm) that the zone
+takes is the zone's, even inside a pouch; elsewhere a hand in a pouch is the pouch's alone (the zones do not see it
+there) and its grip is not a menu pointer override. Whether the item screen is up comes from the menu pointer's own
+decision (`MenuPointer::ItemScreenLive`), so a squeeze on the map or pause is refused, and a trigger pulled while a
+pouch's request waits for the screen never reaches the game. Logs: `(VR) Pouches: N pouch(es) on the seat ...` once per game, `(VR) Pouches: pouch K
 (cell C, holds an item|empty) squeezed with the left|right hand; ...` per squeeze, and the menu pointer's `a pouch asked
 for cell C; steering there from cell F.`, `... refused (why).` and `... lapsed ...`. PINE `MsgVRMenuPointer` op 2 reads
 the pouches (`pine.pouches()`: each pouch's centre in the XR base space, the hand in each, the counters).

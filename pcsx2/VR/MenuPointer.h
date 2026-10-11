@@ -33,6 +33,13 @@ namespace VR::MenuPointer
 	// (steer the cursor there, or confirm it when the cursor is already there); -1 otherwise. Any thread.
 	int HoveredCell();
 
+	// The item screen (the profile's menuPointer menu) is up and live as the last Poll decided, by the same test that
+	// opens point-to-select's gate (its when guards, and its liveWhen guards wherever Poll takes them), in menu mode
+	// with the VM running, whether or not point-to-select may steer. The cursor struct alone stays set after the screen closes (the map and pause pass the
+	// when guards too), so callers take this rather than evaluating when themselves. One poll late for a caller that
+	// runs before Poll (BeltPouches). Any thread.
+	bool ItemScreenLive();
+
 	// A belt pouch (VR::BeltPouches) asks for the cursor on cell_index (an index into the profile's menuPointer.cells). It
 	// is steered there with the same closed-loop D-pad presses as a pointed-at cell, once point-to-select runs (the item
 	// screen may still be opening) and the screen has been up armDelayMs, under the same rules: refused while steering is

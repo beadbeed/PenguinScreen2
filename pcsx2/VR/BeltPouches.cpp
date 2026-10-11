@@ -35,8 +35,9 @@ namespace VR::BeltPouches
 		// The grip, as the Zone controls take it: squeezed past kGripOn, open again below kGripOff.
 		constexpr float kGripOn = 0.6f;
 		constexpr float kGripOff = 0.4f;
-		// Reaching an empty pouch: the zones' light entry tick. One holding an item: two firmer beats 90 ms apart.
-		constexpr SpatialControls::HapticCue kTickEmpty{0.25f, 0.02f};
+		// Reaching an empty pouch: a short sharp tap, unlike the zones' entry tick (kHapticZoneEnter 0.25 / 20 ms), so a
+		// hand can tell a pouch from a hip zone. One holding an item: two firmer beats 90 ms apart.
+		constexpr SpatialControls::HapticCue kTickEmpty{0.35f, 0.012f};
 		constexpr SpatialControls::HapticCue kTickItem{0.55f, 0.025f};
 		constexpr float kDoubleTickGapMs = 90.0f;
 		// A squeeze that did something: the zones' grab tick. One that did nothing: a dull buzz.
@@ -257,7 +258,8 @@ namespace VR::BeltPouches
 			}
 
 			const int prev = hs.pouch;
-			const int now = PouchUnder(p, in.frame, h, hi.position, prev);
+			// Within reach of a zone that takes this hand, the zone has it: the hip gestures never become pouch squeezes.
+			const int now = hi.in_zone ? -1 : PouchUnder(p, in.frame, h, hi.position, prev);
 			hs.pouch = now;
 			out.hover[h] = now;
 			out.claimed[h] = (now >= 0);
@@ -331,6 +333,38 @@ namespace VR::BeltPouches
 		return out;
 	}
 
+	ZoneBalls PlaceZones(const ProfileDB::Profile& profile, const SpatialControls::Anchor& head)
+	{
+		ZoneBalls zones;
+		const float margin = SpatialControls::ZoneParams{}.exit_margin;
+		for (const ProfileDB::SpatialControlSpec& c : profile.controls)
+		{
+			if (c.kind != SpatialControls::DeviceKind::Zone || zones.count >= kMaxZoneBalls)
+				continue;
+			// As StepZone places it: the placement's yaw is not used.
+			const SpatialControls::Placement at{c.placement.side, c.placement.height, c.placement.forward, 0.0f};
+			ZoneBall& b = zones.ball[static_cast<size_t>(zones.count)];
+			b.centre = SpatialControls::PlaceControl(head, at).pivot;
+			b.reach = c.zone_radius + margin;
+			b.hand = c.zone_hand;
+			zones.count++;
+		}
+		return zones;
+	}
+
+	bool InOwnZone(const ZoneBalls& zones, int hand, const SpatialControls::Vec3& pos)
+	{
+		if (!Finite(pos))
+			return false;
+		for (int i = 0; i < zones.count && i < kMaxZoneBalls; i++)
+		{
+			const ZoneBall& b = zones.ball[static_cast<size_t>(i)];
+			if (HandAllowed(b.hand, hand) && SpatialControls::Length(pos - b.centre) <= b.reach)
+				return true;
+		}
+		return false;
+	}
+
 	SpatialControls::Hands HandsOutsidePouches(const SpatialControls::Hands& hands)
 	{
 		SpatialControls::Hands out = hands;
@@ -380,10 +414,10 @@ namespace VR::BeltPouches
 		in.dt_ms = dt_ms;
 		in.items.fill(-1);
 		std::array<u8, kMaxPouches> item_bytes{};
+		SpatialControls::Anchor head;
 		if (params)
 		{
 			// The frame: on the seat (the neck, the recentered forward), or as the zones (the head and its yaw).
-			SpatialControls::Anchor head;
 			if (SpatialControls::HeadAnchor(snap, s_head_yaw, &head))
 			{
 				if (params->anchor == ProfileDB::PouchAnchor::Head)
@@ -407,14 +441,20 @@ namespace VR::BeltPouches
 		if (in.active)
 		{
 			const SpatialControls::Hands hands = SpatialControls::HandsFromSnapshot(snap);
+			// The Zone controls where they are this poll (they turn with the head; the seat's pouches do not).
+			const ZoneBalls zones = PlaceZones(*profile, head);
 			for (int h = 0; h < 2; h++)
 			{
 				in.hands[h].valid = hands.hand[h].valid;
 				in.hands[h].position = hands.hand[h].position;
 				in.hands[h].squeeze = hands.hand[h].squeeze;
+				in.hands[h].in_zone = InOwnZone(zones, h, hands.hand[h].position);
 			}
 			const std::optional<ProfileDB::MenuPointerParams>& mp = profile->menu_pointer;
-			in.screen_up = mp.has_value() && VRInputSource::EvaluateGuards(mp->when, reader);
+			// The item screen up as the menu pointer last decided it (its gate takes liveWhen as well as when), not
+			// re-evaluated here: the cursor struct's when stays set after the screen closes, and the map and pause pass
+			// it too, so a squeeze there would leave a request that steers. One poll late, which a squeeze never notices.
+			in.screen_up = mp.has_value() && MenuPointer::ItemScreenLive();
 			in.menu = SpatialControls::MenuMode();
 			in.first_person = CameraDriver::LookAtActive();
 			// Only with the item screen up: a submenu flag left set behind a closed screen must not refuse every squeeze.
@@ -583,7 +623,7 @@ namespace VR::BeltPouches
 		const auto dist = [](const Vec3& a, const Vec3& b) { return SpatialControls::Length(a - b); };
 
 		// The shipped File #1 layout (bin/resources/vr-profiles/SLPM-65428.yaml): a 2 x 2 chest rig laid out like the
-		// item grid, and the equipped box at the belt buckle.
+		// item grid, and the equipped box in front of the belt buckle (the profile itself is checked further down).
 		ProfileDB::PouchParams rig;
 		rig.open = "belt";
 		const auto add = [&rig](int cell, float side, float height, float forward, bool item, u32 offset) {
@@ -596,11 +636,11 @@ namespace VR::BeltPouches
 			pouch.item_offset = offset;
 			rig.list.push_back(pouch);
 		};
-		add(0, -0.10f, -0.25f, 0.14f, true, 0xC84);
-		add(1, 0.10f, -0.25f, 0.14f, true, 0xC85);
-		add(2, -0.10f, -0.39f, 0.16f, true, 0xC86);
-		add(3, 0.10f, -0.39f, 0.16f, true, 0xC87);
-		add(4, 0.0f, -0.52f, 0.18f, false, 0);
+		add(0, -0.10f, -0.20f, 0.14f, true, 0xC84);
+		add(1, 0.10f, -0.20f, 0.14f, true, 0xC85);
+		add(2, -0.07f, -0.29f, 0.24f, true, 0xC86);
+		add(3, 0.07f, -0.29f, 0.24f, true, 0xC87);
+		add(4, 0.0f, -0.40f, 0.28f, false, 0);
 
 		// --- Frames -------------------------------------------------------------------------------------------------
 		const Vec3 eyes{0.1f, 1.2f, -0.3f};
@@ -613,7 +653,7 @@ namespace VR::BeltPouches
 		{
 			// The pouch is where the profile says, turned with the yaw: zone-style placement from the head.
 			const Vec3 c = PouchCentre(head_up, rig.list[1]);
-			const Vec3 want = eyes + Quat::FromYaw(rest_yaw).Rotate(Vec3{0.10f, -0.25f, -0.14f});
+			const Vec3 want = eyes + Quat::FromYaw(rest_yaw).Rotate(Vec3{0.10f, -0.20f, -0.14f});
 			check(dist(c, want) < 1.0e-4f, "a pouch sits at its side, height and forward from the head, turned with the yaw");
 		}
 		const Vec3 neck_in_head{0.0f, -kNeckDown, kNeckBack};
@@ -654,7 +694,7 @@ namespace VR::BeltPouches
 			const Vec3 c = PouchCentre(plain, rig.list[static_cast<size_t>(i)]);
 			return Vec3{c.x + dx, c.y + dy, c.z + dz};
 		};
-		check(dist(at(3, 0.0f, 0.0f, 0.0f), Vec3{0.10f, -0.39f, -0.16f}) < 1.0e-5f, "pouch 3 sits at (0.10, -0.39, -0.16)");
+		check(dist(at(3, 0.0f, 0.0f, 0.0f), Vec3{0.07f, -0.29f, -0.24f}) < 1.0e-5f, "pouch 3 sits at (0.07, -0.29, -0.24)");
 		check(PouchUnder(rig, plain, 1, at(3, 0.0f, 0.0f, 0.0f), -1) == 3, "a hand at a pouch's centre is in it");
 		check(PouchUnder(rig, plain, 1, at(3, 0.06f, 0.0f, 0.0f), -1) == 3 && PouchUnder(rig, plain, 1, at(3, 0.07f, 0.0f, 0.0f), -1) == -1,
 			"a pouch is entered only inside its 6.5 cm radius");
@@ -672,13 +712,6 @@ namespace VR::BeltPouches
 				"hand: left leaves the right hand out");
 		}
 		{
-			// The shipped Zone controls' centres (holster, belt, backpack) are in no pouch, and no two pouches overlap.
-			const Vec3 holster{0.22f, -0.50f, -0.12f};
-			const Vec3 belt{-0.22f, -0.50f, -0.12f};
-			const Vec3 backpack{0.15f, -0.05f, 0.08f};
-			check(PouchUnder(rig, plain, 1, holster, -1) < 0 && PouchUnder(rig, plain, 0, belt, -1) < 0 &&
-					  PouchUnder(rig, plain, 1, backpack, -1) < 0,
-				"the holster, belt and backpack centres are in no pouch");
 			bool apart = true;
 			for (size_t i = 0; i < rig.list.size(); i++)
 			{
@@ -686,7 +719,147 @@ namespace VR::BeltPouches
 					apart = apart && dist(at(static_cast<int>(i), 0, 0, 0), at(static_cast<int>(j), 0, 0, 0)) >=
 					                     rig.list[i].radius + rig.list[j].radius;
 			}
-			check(apart, "no two of the shipped pouches overlap");
+			check(apart, "no two of the rig's pouches overlap");
+		}
+
+		// --- The zones come first ----------------------------------------------------------------------------------
+		// A Step input with both hands valid and open, away from everything, for the zone checks.
+		const auto base_for_zones = [](const ProfileDB::PouchParams& pp, const BodyFrame& frame) {
+			StepIn z;
+			z.active = true;
+			z.frame = frame;
+			z.first_person = true;
+			z.pointer = true;
+			z.cells = 5;
+			z.can_open = !pp.open.empty();
+			z.items.fill(-1);
+			for (HandIn& hand_in : z.hands)
+			{
+				hand_in.valid = true;
+				hand_in.position = Vec3{0.5f, 0.3f, -0.6f};
+			}
+			return z;
+		};
+		// A holster-like zone (right hand, the hip holster's ball with its exit margin) reaching into pouch 3's ball: a
+		// right hand there is the holster's, a left hand there is the pouch's.
+		{
+			ZoneBalls zones;
+			zones.count = 1;
+			zones.ball[0].centre = Vec3{0.22f, -0.50f, -0.12f};
+			zones.ball[0].reach = 0.23f;
+			zones.ball[0].hand = SpatialControls::ZoneHand::Right;
+			const Vec3 c3 = at(3, 0.0f, 0.0f, 0.0f);
+			const Vec3 to_holster = zones.ball[0].centre - c3;
+			const Vec3 edge = c3 + to_holster * (0.06f / SpatialControls::Length(to_holster));
+			check(!InOwnZone(zones, 1, c3) && InOwnZone(zones, 1, edge) && !InOwnZone(zones, 0, edge) &&
+					  PouchUnder(rig, plain, 1, edge, -1) == 3,
+				"pouch 3's ball reaches into the holster's: its centre is clear, its edge toward the holster is not");
+			State st;
+			StepIn z_in = base_for_zones(rig, plain);
+			z_in.hands[1].position = edge;
+			z_in.hands[1].in_zone = InOwnZone(zones, 1, edge);
+			z_in.hands[0].position = edge;
+			z_in.hands[0].in_zone = InOwnZone(zones, 0, edge);
+			StepOut o = Step(rig, z_in, st);
+			check(o.hover[1] < 0 && !o.claimed[1] && o.tick[1] == Tick::None && o.hover[0] == 3 && o.claimed[0],
+				"there the right hand is the holster's (no pouch, no tick) and the left hand is the pouch's");
+			z_in.hands[1].squeeze = 1.0f;
+			o = Step(rig, z_in, st);
+			check(o.action_pouch[1] < 0 && !o.open_press && !o.owned[1], "and a right squeeze there is the holster's alone");
+			// The right hand moving to the pouch's centre (out of the holster's reach) is in the pouch again.
+			z_in.hands[1].squeeze = 0.0f;
+			z_in.hands[1].position = c3;
+			z_in.hands[1].in_zone = InOwnZone(zones, 1, c3);
+			o = Step(rig, z_in, st);
+			check(o.hover[1] == 3 && o.claimed[1], "at the pouch's centre the right hand is in it");
+			// Kept in the pouch by its exit margin, a hand reaching back into the holster's reach is the holster's.
+			z_in.hands[1].position = edge;
+			z_in.hands[1].in_zone = InOwnZone(zones, 1, edge);
+			o = Step(rig, z_in, st);
+			check(o.hover[1] < 0 && !o.claimed[1], "a hand in the pouch is let go as it comes within the holster's reach");
+		}
+		check(kTickEmpty.amplitude != SpatialControls::kHapticZoneEnter.amplitude &&
+				  kTickEmpty.seconds != SpatialControls::kHapticZoneEnter.seconds,
+			"an empty pouch's tick is not the zones' entry tick");
+
+		// The shipped profiles' pouches against their own Zone controls, as the profiles load: the real spheres (each zone's
+		// radius plus the zones' exit margin, the farthest a hand can be and still be inside it), head upright, where the
+		// seat and head anchors agree. Every pouch keeps a core of kMinCore round its point that no zone taking the same
+		// hand reaches, so either hand can use it; where a pouch's ball (with its exit margin) does reach into such a zone,
+		// a hand there is the zone's, facing ahead and with the head turned 40 deg either way (the zones turn with it).
+		{
+			constexpr float kMinCore = 0.05f;
+			static constexpr const char* kShipped[] = {"SLPM-65428", "SLPM-65692"};
+			const float yaws[] = {0.0f, 0.6981317f, -0.6981317f};
+			for (const char* serial : kShipped)
+			{
+				const ProfileDB::Profile* shipped = ProfileDB::Lookup(serial, 0);
+				const bool has = shipped && shipped->pouches.has_value() && !shipped->pouches->list.empty();
+				check(has, "the shipped profiles load with their pouches");
+				if (!has)
+					continue;
+				const ProfileDB::PouchParams& pp = shipped->pouches.value();
+				const SpatialControls::Anchor ahead{};
+				const ZoneBalls ahead_zones = PlaceZones(*shipped, ahead);
+				check(ahead_zones.count >= 3, "the shipped profiles' holster, belt and backpack zones are placed");
+				bool core = true;
+				bool reachable = true;
+				bool zone_wins = true;
+				bool pouches_apart = true;
+				for (size_t i = 0; i < pp.list.size(); i++)
+				{
+					const ProfileDB::Pouch& pouch = pp.list[i];
+					const Vec3 c = PouchCentre(plain, pouch);
+					for (size_t j = i + 1; j < pp.list.size(); j++)
+						pouches_apart = pouches_apart && dist(c, PouchCentre(plain, pp.list[j])) >= pouch.radius + pp.list[j].radius;
+					for (int hh = 0; hh < 2; hh++)
+					{
+						if (!HandAllowed(pp.hand, hh))
+							continue;
+						reachable = reachable && !InOwnZone(ahead_zones, hh, c) &&
+						            PouchUnder(pp, plain, hh, c, -1) == static_cast<int>(i);
+						for (int z = 0; z < ahead_zones.count; z++)
+						{
+							const ZoneBall& b = ahead_zones.ball[static_cast<size_t>(z)];
+							if (HandAllowed(b.hand, hh))
+								core = core && SpatialControls::Length(b.centre - c) >= b.reach + kMinCore;
+						}
+						for (const float yaw : yaws)
+						{
+							SpatialControls::Anchor turned{};
+							turned.yaw = yaw;
+							const ZoneBalls zones = PlaceZones(*shipped, turned);
+							for (int z = 0; z < zones.count; z++)
+							{
+								const ZoneBall& b = zones.ball[static_cast<size_t>(z)];
+								const Vec3 to_zone = b.centre - c;
+								const float d = SpatialControls::Length(to_zone);
+								const float keep = pouch.radius + kExitMargin;
+								if (!HandAllowed(b.hand, hh) || d < 1.0e-4f || d - b.reach >= keep)
+									continue;
+								// The point toward the zone inside both balls, with the hand kept in the pouch (prev) there.
+								const float t = 0.5f * (std::max(d - b.reach, 0.0f) + keep);
+								const Vec3 pt = c + to_zone * (t / d);
+								State zs;
+								zs.hand[static_cast<size_t>(hh)].pouch = static_cast<int>(i);
+								zs.hand[static_cast<size_t>(hh)].primed = true;
+								StepIn zi = base_for_zones(pp, plain);
+								zi.hands[static_cast<size_t>(hh)].position = pt;
+								zi.hands[static_cast<size_t>(hh)].in_zone = InOwnZone(zones, hh, pt);
+								zi.hands[static_cast<size_t>(1 - hh)].valid = false;
+								const StepOut zo = Step(pp, zi, zs);
+								zone_wins = zone_wins && zi.hands[static_cast<size_t>(hh)].in_zone && zo.hover[static_cast<size_t>(hh)] < 0 &&
+								            !zo.claimed[static_cast<size_t>(hh)];
+							}
+						}
+					}
+				}
+				check(pouches_apart, "no two of a shipped profile's pouches overlap");
+				check(reachable, "every shipped pouch's centre is in that pouch for either hand, no zone reaching it");
+				check(core, "every shipped pouch keeps 5 cm round its point clear of every zone that takes the same hand");
+				check(zone_wins, "where a shipped pouch reaches into a zone taking the same hand, a hand there is the zone's, "
+								 "facing ahead or turned 40 deg");
+			}
 		}
 
 		// --- Squeezes and ticks -------------------------------------------------------------------------------------
@@ -851,7 +1024,8 @@ namespace VR::BeltPouches
 
 		if (failures == 0)
 			Console.WriteLn(Color_StrongGreen, "(VR) BeltPouches self-test: passed (%d checks: seat and head frames, looking "
-											   "down, glancing, hit tests, the shipped layout, ticks, squeezes, opening).", checks);
+											   "down, glancing, hit tests, zones first, the shipped layouts against their zones, ticks, "
+											   "squeezes, opening).", checks);
 		else
 			Console.WriteLn(Color_StrongRed, "(VR) BeltPouches self-test FAIL: %s (%d of %d checks failed).", first, failures, checks);
 		return failures == 0;
