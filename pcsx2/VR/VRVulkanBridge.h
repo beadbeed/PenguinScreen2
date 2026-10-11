@@ -53,6 +53,8 @@ namespace VR
 
 	// The longest wait for the lock since the last call, in microseconds (resets it).
 	u32 TakeXrQueueLockMaxWaitUs();
+	// Total time any thread waited for the lock since the last call, in microseconds (frame stats).
+	u64 TakeXrQueueLockTotalWaitUs();
 }
 
 #endif

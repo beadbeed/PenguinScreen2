@@ -201,6 +201,14 @@ namespace VR::XRCompositor
 			std::timed_mutex submit_mutex;
 			std::mutex publish_mutex;
 			PublishedSet published = {};
+			// Headset rate: a present whose release and publish found the pacer inside xrEndFrame keeps its images acquired
+			// and its layers here instead of waiting (the GS, and so the emulation, never waits for the runtime). The
+			// next present that gets submit_mutex publishes them, then releases the images, so each image keeps its own
+			// pose. Only the GS thread touches these.
+			PublishedSet deferred = {};
+			bool deferred_valid = false;
+			u64 deferred_since_ms = 0;
+			std::atomic<u32> stat_publish_deferred{0};
 
 			// The opaque black background projection layer.
 			XrSwapchain bg_swapchain = XR_NULL_HANDLE;
@@ -466,6 +474,10 @@ namespace VR::XRCompositor
 		{
 			if (swapchain == XR_NULL_HANDLE || s.abandoned.load(std::memory_order_acquire))
 				return;
+			// A deferred publish may show this swapchain: drop it (its images, if still acquired, are released with
+			// the next publish, which keeps the previous Screen entries).
+			s.deferred_valid = false;
+			s.deferred_since_ms = 0;
 			std::unique_lock<std::timed_mutex> submit(s.submit_mutex, std::defer_lock);
 			if (!submit.try_lock_for(kRuntimeStuckTimeout))
 			{
@@ -674,8 +686,8 @@ namespace VR::XRCompositor
 		// still to come"; a failed release turns it into Skipped there.
 		CopyResult CopyToSwapchain(GSTextureVK* src, u32 src_layer, decltype(s.chains[0])& chain)
 		{
-			// An image still waiting for its release (the last publish could not take submit_mutex, so the runtime
-			// was marked lost): leave the chain alone until teardown destroys it.
+			// An image still waiting for its release (the last publish found the pacer inside xrEndFrame and was
+			// deferred): nothing is copied into the chain until the next publish releases it.
 			if (chain.release_pending)
 				return CopyResult::Skipped;
 
@@ -2886,8 +2898,10 @@ namespace VR::XRCompositor
 		// images were not all replaced this present (a copy skipped or timed out, or none made), so the previous
 		// set's Screen entries stay and each image keeps the pose it was rendered from instead of jumping to this
 		// frame's.
-		void PublishLayers(const XrCompositionLayerBaseHeader* const* layers, u32 layer_count, const LayerSources& src,
-			bool keep_screen, bool fp_screen, const XrVector3f& fp_head, u64 fp_image)
+		// The set a present publishes, given the set published before it (prev): with keep_screen, prev's Screen entries
+		// stay (their images were not replaced this present) and this present's other entries are added.
+		PublishedSet BuildPublishedSet(const XrCompositionLayerBaseHeader* const* layers, u32 layer_count, const LayerSources& src,
+			bool keep_screen, bool fp_screen, const XrVector3f& fp_head, u64 fp_image, const PublishedSet& prev)
 		{
 			PublishedSet next = {};
 			FillPublishedSet(&next, layers, layer_count, src);
@@ -2898,10 +2912,7 @@ namespace VR::XRCompositor
 			next.fp_head = fp_head;
 			next.turn_rate = fp_screen ? turn_rate : 0.0f;
 			next.fp_image = fp_image;
-			s.stat_gs_frames.fetch_add(1, std::memory_order_relaxed);
 
-			std::lock_guard<std::mutex> lock(s.publish_mutex);
-			const PublishedSet& prev = s.published;
 			bool prev_screen = false;
 			for (u32 i = 0; i < prev.count && !prev_screen; i++)
 				prev_screen = (prev.e[i].role == kRoleScreen);
@@ -2925,11 +2936,18 @@ namespace VR::XRCompositor
 				merged.turn_rate = prev.fp_screen ? turn_rate : 0.0f;
 				merged.fp_image = prev.fp_image;
 				merged.serial = prev.serial + 1;
-				s.published = merged;
-				return;
+				return merged;
 			}
 			next.serial = prev.serial + 1;
-			s.published = next;
+			return next;
+		}
+
+		void PublishLayers(const XrCompositionLayerBaseHeader* const* layers, u32 layer_count, const LayerSources& src,
+			bool keep_screen, bool fp_screen, const XrVector3f& fp_head, u64 fp_image)
+		{
+			s.stat_gs_frames.fetch_add(1, std::memory_order_relaxed);
+			std::lock_guard<std::mutex> lock(s.publish_mutex);
+			s.published = BuildPublishedSet(layers, layer_count, src, keep_screen, fp_screen, fp_head, fp_image, s.published);
 		}
 
 		// Headset rate: releases the screen and hand images this present copied (left acquired by CopyToSwapchain and
@@ -2944,16 +2962,60 @@ namespace VR::XRCompositor
 		void ReleaseAndPublish(const XrCompositionLayerBaseHeader* const* layers, u32 layer_count, const LayerSources& src,
 			int* cl_copy, const bool* chain_was_released, bool fp_screen, const XrVector3f& fp_head, u64 fp_image)
 		{
-			std::unique_lock<std::timed_mutex> submit(s.submit_mutex, std::defer_lock);
-			if (!submit.try_lock_for(kRuntimeStuckTimeout))
+			// Never waits: with the pacer inside xrEndFrame the GS would wait for the runtime (measured on the null HMD:
+			// the emulation fell to about 80% speed). This present's images stay acquired (release_pending, so nothing
+			// more is copied into them) and its layers wait in s.deferred for the next present.
+			std::unique_lock<std::timed_mutex> submit(s.submit_mutex, std::try_to_lock);
+			if (!submit.owns_lock())
 			{
-				// The images stay acquired (release_pending): nothing more is copied into them, and the loss teardown
-				// destroys the swapchains (or leaves them alive with the pacer detached).
-				Console.Error("(VR) The VR pacer has been inside xrEndFrame for over 500 ms (runtime not answering): "
-							  "frame not published, abandoning VR; emulation continues.");
-				XRSession::MarkLost();
+				const u64 now_ms = CameraDriver::SteadyNowMs();
+				if (!s.deferred_valid)
+				{
+					bool d_attempted = false;
+					bool d_all_copied = true;
+					for (u32 l = 0; l < 2; l++)
+					{
+						if (cl_copy[l] < 0)
+							continue;
+						d_attempted = true;
+						if (cl_copy[l] != static_cast<int>(CopyResult::Copied))
+							d_all_copied = false;
+					}
+					PublishedSet prev;
+					{
+						std::lock_guard<std::mutex> publish(s.publish_mutex);
+						prev = s.published;
+					}
+					s.deferred = BuildPublishedSet(layers, layer_count, src, !d_attempted || !d_all_copied, fp_screen, fp_head,
+						fp_image, prev);
+					s.deferred_valid = true;
+					s.deferred_since_ms = now_ms;
+				}
+				s.stat_publish_deferred.fetch_add(1, std::memory_order_relaxed);
+				const u64 stuck_ms = static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(kRuntimeStuckTimeout).count());
+				if (now_ms > s.deferred_since_ms + stuck_ms)
+				{
+					// The images stay acquired: the loss teardown destroys the swapchains (or leaves them alive with the
+					// pacer detached).
+					Console.Error("(VR) The VR pacer has been inside xrEndFrame for over 500 ms (runtime not answering): "
+								  "frame not published, abandoning VR; emulation continues.");
+					XRSession::MarkLost();
+				}
 				return;
 			}
+
+			// A present deferred earlier: its layers go out first, with the images released below, and this present
+			// (which copied nothing into those still-acquired chains) publishes nothing of its own.
+			const bool had_deferred = s.deferred_valid;
+			if (had_deferred)
+			{
+				s.stat_gs_frames.fetch_add(1, std::memory_order_relaxed);
+				std::lock_guard<std::mutex> publish(s.publish_mutex);
+				s.deferred.serial = s.published.serial + 1;
+				s.published = s.deferred;
+				s.deferred_valid = false;
+			}
+			s.deferred_since_ms = 0;
 
 			// Swapchains whose release failed and that must not appear in the published set.
 			XrSwapchain dropped[2 + kHandSlots] = {};
@@ -3016,7 +3078,8 @@ namespace VR::XRCompositor
 				if (cl_copy[l] != static_cast<int>(CopyResult::Copied))
 					all_copied = false;
 			}
-			PublishLayers(layers, layer_count, src, !attempted || !all_copied, fp_screen, fp_head, fp_image);
+			if (!had_deferred)
+				PublishLayers(layers, layer_count, src, !attempted || !all_copied, fp_screen, fp_head, fp_image);
 
 			if (dropped_count > 0)
 			{
@@ -3077,6 +3140,8 @@ namespace VR::XRCompositor
 			u32 wait_begin_n = 0;
 			float wait_begin_max_ms = 0.0f;
 			float end_max_ms = 0.0f;
+			double end_sum_ms = 0.0;
+			u32 end_n = 0;
 			u32 layers = 0;
 			u64 last_serial = 0;
 		};
@@ -3108,11 +3173,13 @@ namespace VR::XRCompositor
 			const u32 skipped = s.stat_copy_skipped.exchange(0, std::memory_order_relaxed);
 			const u32 timed_out = s.stat_copy_timeout.exchange(0, std::memory_order_relaxed);
 			Console.WriteLn("(VR) Frames: submitted %.1f/s (display %.1f Hz), new GS frames %.1f/s, re-sent %.1f/s, stale %u, "
-							"shouldRender=false %u, wait->begin mean %.1f max %.1f ms, xrEndFrame max %.1f ms, queue-lock wait "
-							"max %u us, copies skipped %u timed out %u, layers %u, mode %s",
+							"shouldRender=false %u, wait->begin mean %.1f max %.1f ms, xrEndFrame mean %.1f max %.1f ms, queue-lock "
+							"wait max %u us total %.1f ms/s, copies skipped %u timed out %u, publishes deferred %u, layers %u, mode %s",
 				st.submitted / secs, hz, gs_frames / secs, st.resent / secs, st.stale, st.no_render,
-				(st.wait_begin_n > 0) ? (st.wait_begin_sum_ms / st.wait_begin_n) : 0.0, st.wait_begin_max_ms, st.end_max_ms,
-				VR::TakeXrQueueLockMaxWaitUs(), skipped, timed_out, st.layers,
+				(st.wait_begin_n > 0) ? (st.wait_begin_sum_ms / st.wait_begin_n) : 0.0, st.wait_begin_max_ms,
+				(st.end_n > 0) ? (st.end_sum_ms / st.end_n) : 0.0, st.end_max_ms,
+				VR::TakeXrQueueLockMaxWaitUs(), static_cast<double>(VR::TakeXrQueueLockTotalWaitUs()) / 1000.0 / secs, skipped, timed_out, s.stat_publish_deferred.exchange(0, std::memory_order_relaxed),
+				st.layers,
 				s.headset_rate ? "headset rate (VR pacer)" : "legacy (one per GS present)");
 			const u64 last_serial = st.last_serial;
 			st = FrameStats();
@@ -3423,6 +3490,8 @@ namespace VR::XRCompositor
 				if (!fs.shouldRender)
 					stats.no_render++;
 				stats.end_max_ms = std::max(stats.end_max_ms, end_ms);
+				stats.end_sum_ms += end_ms;
+				stats.end_n++;
 				stats.layers = fs.shouldRender ? submit_count : 0;
 				if (fs.shouldRender && XR_SUCCEEDED(eres))
 					NoteScreenYaw(set, fs.predictedDisplayTime);
@@ -4365,6 +4434,8 @@ namespace VR::XRCompositor
 		if (!should_render)
 			s_legacy_stats.no_render++;
 		s_legacy_stats.end_max_ms = std::max(s_legacy_stats.end_max_ms, end_ms);
+		s_legacy_stats.end_sum_ms += end_ms;
+		s_legacy_stats.end_n++;
 		s_legacy_stats.layers = submit_count;
 		if (XR_SUCCEEDED(eres))
 			NoteScreenYaw(set, fs.predictedDisplayTime);

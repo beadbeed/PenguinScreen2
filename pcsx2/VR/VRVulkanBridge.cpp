@@ -28,6 +28,7 @@ namespace VR
 		std::atomic<bool> s_xr_queue_lock_enabled{false};
 		std::atomic<bool> s_xr_queue_lock_abandoned{false};
 		std::atomic<u32> s_xr_queue_lock_max_wait_us{0};
+		std::atomic<u64> s_xr_queue_lock_total_wait_us{0};
 		// This thread holds the lock already, so a nested scope takes nothing (std::timed_mutex is not recursive).
 		thread_local bool t_xr_queue_lock_held = false;
 		// Long enough to ride out a runtime hiccup (a dashboard or environment load can hold xrEndFrame for a few
@@ -36,6 +37,7 @@ namespace VR
 
 		void NoteXrQueueLockWait(u32 us)
 		{
+			s_xr_queue_lock_total_wait_us.fetch_add(us, std::memory_order_relaxed);
 			u32 prev = s_xr_queue_lock_max_wait_us.load(std::memory_order_relaxed);
 			while (us > prev &&
 				   !s_xr_queue_lock_max_wait_us.compare_exchange_weak(prev, us, std::memory_order_relaxed))
@@ -119,6 +121,11 @@ namespace VR
 	u32 TakeXrQueueLockMaxWaitUs()
 	{
 		return s_xr_queue_lock_max_wait_us.exchange(0, std::memory_order_relaxed);
+	}
+
+	u64 TakeXrQueueLockTotalWaitUs()
+	{
+		return s_xr_queue_lock_total_wait_us.exchange(0, std::memory_order_relaxed);
 	}
 
 	namespace Internal
