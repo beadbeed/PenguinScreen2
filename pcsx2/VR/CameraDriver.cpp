@@ -2252,6 +2252,9 @@ namespace VR::CameraDriver
 		constexpr u64 kHeadPoseMaxAgeMs = 1500;
 		bool s_head_pose_stale = false;
 
+		// Menu mode as published to SpatialControls: s_pause_hit held through the guard flicker's disarm grace.
+		bool s_menu_hold = false;
+
 		HeadPose::Snapshot FreshHeadPose()
 		{
 			HeadPose::Snapshot p = HeadPose::Get();
@@ -2333,9 +2336,16 @@ namespace VR::CameraDriver
 			{
 				PublishComfortMotion();
 				PublishTelemetry();
-				// The right stick drives the menu D-pad while the item screen is up (pauseWhen hit); every
-				// disarmed way out leaves s_pause_hit false, so the stick goes back to turning.
-				SpatialControls::SetMenuMode(s_pause_hit);
+				// The right stick drives the menu D-pad while the item screen is up (pauseWhen hit). The guard
+				// byte flickers (the room-camera mode byte flips about 12 times a second), and on those grace
+				// vsyncs (still armed, guards failing) pauseWhen is not evaluated, so menu mode keeps its last
+				// value instead of dropping out. A real disarm, or a guards-pass vsync with pauseWhen missed,
+				// clears it and the stick goes back to turning.
+				if (s_pause_hit)
+					s_menu_hold = true;
+				else if (!(s_armed_logged && s_guard_fail_vsyncs != 0))
+					s_menu_hold = false;
+				SpatialControls::SetMenuMode(s_menu_hold);
 			}
 		};
 		PublishOnExit publish_on_exit;
