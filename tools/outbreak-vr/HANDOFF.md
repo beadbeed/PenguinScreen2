@@ -157,8 +157,13 @@ Our private server runs the same unpatched relay code as obsrv (Nagle on, the 0x
   `(VR) CameraDriver: network mode ...`.
 - **Done (part of task 2):** no pause on focus loss or on any controller disconnect while the network
   adapter is on (`QtHost.cpp`). The Online-Safe help text is corrected.
-- **Not done:** blocking hotkeys online, the PINE online refusals, task 3's 4-player focus-slot case,
-  task 4 (heartbeat) and task 5 (proof).
+- **Done (more of task 2, second commit):** while the network adapter is on, these hotkeys do nothing
+  and show a short OSD message (`OnlineLocked()` in `Hotkeys.cpp`):
+  - frame advance, frame limiter toggle, turbo (toggle and hold), slow motion, speed up/down;
+  - pause and the pause menu (`CanPause()`);
+  - every savestate save or load hotkey.
+- **Not done:** the PINE online refusals (savestate, load, MemWatch), task 3's 4-player focus-slot
+  case, task 4 (heartbeat) and task 5 (proof).
 - **Tested:** only `clang -fsyntax-only` on the Mac for `CameraDriver.cpp`, `VRProfileDB.cpp` and
   `Pcsx2Config.cpp`, plus CI. `QtHost.cpp` and the `.ui` file are checked only by CI. Nothing has been
   run.

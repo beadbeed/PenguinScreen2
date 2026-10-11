@@ -113,8 +113,22 @@ static void HotkeyAdjustVRBrightness(const float delta)
 }
 #endif
 
+// Online (network adapter on), nothing may pause the game, change its speed or load/save a state: the server
+// drops a client that goes quiet and bans speed changes, and a state load desyncs the room.
+static bool OnlineLocked()
+{
+	if (!EmuConfig.DEV9.EthEnable)
+		return false;
+	Host::AddKeyedOSDMessage("HotkeyOnlineLocked",
+		TRANSLATE_STR("Hotkeys", "Disabled while the network adapter is on (no pause, speed change or save state online)."),
+		Host::OSD_QUICK_DURATION);
+	return true;
+}
+
 static void HotkeyLoadStateSlot(s32 slot)
 {
+	if (OnlineLocked())
+		return;
 	Host::RunOnCPUThread([slot]() {
 		if (!VMManager::HasSaveStateInSlot(VMManager::GetDiscSerial().c_str(), VMManager::GetDiscCRC(), slot))
 		{
@@ -131,6 +145,8 @@ static void HotkeyLoadStateSlot(s32 slot)
 
 static void HotkeySaveStateSlot(s32 slot)
 {
+	if (OnlineLocked())
+		return;
 	VMManager::SaveStateToSlot(slot, true, [slot](const std::string& error) {
 		FullscreenUI::ReportStateSaveError(error, slot);
 	});
@@ -138,6 +154,8 @@ static void HotkeySaveStateSlot(s32 slot)
 
 static bool CanPause()
 {
+	if (OnlineLocked())
+		return false;
 	static constexpr const float PAUSE_INTERVAL = 3.0f;
 	static Common::Timer::Value s_last_pause_time = 0;
 
@@ -215,11 +233,15 @@ DEFINE_HOTKEY(
 	})
 DEFINE_HOTKEY(
 	"FrameAdvance", TRANSLATE_NOOP("Hotkeys", "Speed"), TRANSLATE_NOOP("Hotkeys", "Frame Advance"), [](s32 pressed) {
+		if (OnlineLocked())
+			return;
 		if (!pressed && VMManager::HasValidVM())
 			VMManager::FrameAdvance(1);
 	})
 DEFINE_HOTKEY("ToggleFrameLimit", TRANSLATE_NOOP("Hotkeys", "Speed"), TRANSLATE_NOOP("Hotkeys", "Toggle Frame Limit"),
 	[](s32 pressed) {
+		if (OnlineLocked())
+			return;
 		if (!pressed && VMManager::HasValidVM())
 		{
 			VMManager::SetLimiterMode((VMManager::GetLimiterMode() != LimiterModeType::Unlimited) ?
@@ -229,6 +251,8 @@ DEFINE_HOTKEY("ToggleFrameLimit", TRANSLATE_NOOP("Hotkeys", "Speed"), TRANSLATE_
 	})
 DEFINE_HOTKEY("ToggleTurbo", TRANSLATE_NOOP("Hotkeys", "Speed"),
 	TRANSLATE_NOOP("Hotkeys", "Toggle Turbo / Fast Forward"), [](s32 pressed) {
+		if (OnlineLocked())
+			return;
 		if (!pressed && VMManager::HasValidVM())
 		{
 			VMManager::SetLimiterMode(
@@ -237,6 +261,8 @@ DEFINE_HOTKEY("ToggleTurbo", TRANSLATE_NOOP("Hotkeys", "Speed"),
 	})
 DEFINE_HOTKEY("HoldTurbo", TRANSLATE_NOOP("Hotkeys", "Speed"),
 	TRANSLATE_NOOP("Hotkeys", "Turbo / Fast Forward (Hold)"), [](s32 pressed) {
+		if (OnlineLocked())
+			return;
 		if (!VMManager::HasValidVM())
 			return;
 		if (pressed > 0 && !s_limiter_mode_prior_to_hold_interaction.has_value())
@@ -254,6 +280,8 @@ DEFINE_HOTKEY("HoldTurbo", TRANSLATE_NOOP("Hotkeys", "Speed"),
 	})
 DEFINE_HOTKEY("ToggleSlowMotion", TRANSLATE_NOOP("Hotkeys", "Speed"), TRANSLATE_NOOP("Hotkeys", "Toggle Slow Motion"),
 	[](s32 pressed) {
+		if (OnlineLocked())
+			return;
 		if (!pressed && VMManager::HasValidVM())
 		{
 			VMManager::SetLimiterMode(
@@ -262,11 +290,15 @@ DEFINE_HOTKEY("ToggleSlowMotion", TRANSLATE_NOOP("Hotkeys", "Speed"), TRANSLATE_
 	})
 DEFINE_HOTKEY("IncreaseSpeed", TRANSLATE_NOOP("Hotkeys", "Speed"), TRANSLATE_NOOP("Hotkeys", "Increase Target Speed"),
 	[](s32 pressed) {
+		if (OnlineLocked())
+			return;
 		if (!pressed && VMManager::HasValidVM())
 			HotkeyAdjustTargetSpeed(0.1);
 	})
 DEFINE_HOTKEY("DecreaseSpeed", TRANSLATE_NOOP("Hotkeys", "Speed"), TRANSLATE_NOOP("Hotkeys", "Decrease Target Speed"),
 	[](s32 pressed) {
+		if (OnlineLocked())
+			return;
 		if (!pressed && VMManager::HasValidVM())
 			HotkeyAdjustTargetSpeed(-0.1);
 	})
@@ -314,21 +346,29 @@ DEFINE_HOTKEY("NextSaveStateSlot", TRANSLATE_NOOP("Hotkeys", "Save States"),
 	})
 DEFINE_HOTKEY("SaveStateToSlot", TRANSLATE_NOOP("Hotkeys", "Save States"),
 	TRANSLATE_NOOP("Hotkeys", "Save State To Selected Slot"), [](s32 pressed) {
+		if (OnlineLocked())
+			return;
 		if (!pressed && VMManager::HasValidVM())
 			SaveStateSelectorUI::SaveCurrentSlot();
 	})
 DEFINE_HOTKEY("LoadStateFromSlot", TRANSLATE_NOOP("Hotkeys", "Save States"),
 	TRANSLATE_NOOP("Hotkeys", "Load State From Selected Slot"), [](s32 pressed) {
+		if (OnlineLocked())
+			return;
 		if (!pressed && VMManager::HasValidVM())
 			SaveStateSelectorUI::LoadCurrentSlot();
 	})
 DEFINE_HOTKEY("LoadBackupStateFromSlot", TRANSLATE_NOOP("Hotkeys", "Save States"),
 	TRANSLATE_NOOP("Hotkeys", "Load Backup State From Selected Slot"), [](s32 pressed) {
+		if (OnlineLocked())
+			return;
 		if (!pressed && VMManager::HasValidVM())
 			SaveStateSelectorUI::LoadCurrentBackupSlot();
 	})
 DEFINE_HOTKEY("SaveStateAndSelectNextSlot", TRANSLATE_NOOP("Hotkeys", "Save States"),
 	TRANSLATE_NOOP("Hotkeys", "Save State and Select Next Slot"), [](s32 pressed) {
+		if (OnlineLocked())
+			return;
 		if (!pressed && VMManager::HasValidVM())
 		{
 			SaveStateSelectorUI::SaveCurrentSlot();
@@ -337,6 +377,8 @@ DEFINE_HOTKEY("SaveStateAndSelectNextSlot", TRANSLATE_NOOP("Hotkeys", "Save Stat
 	})
 DEFINE_HOTKEY("SelectNextSlotAndSaveState", TRANSLATE_NOOP("Hotkeys", "Save States"),
 	TRANSLATE_NOOP("Hotkeys", "Select Next Slot and Save State"), [](s32 pressed) {
+		if (OnlineLocked())
+			return;
 		if (!pressed && VMManager::HasValidVM())
 		{
 			SaveStateSelectorUI::SelectNextSlot(false);
