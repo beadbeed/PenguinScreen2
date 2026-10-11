@@ -881,6 +881,7 @@ namespace VR
 
 		UpdatePresence(snapshot, actions_active);
 
+		snapshot.display_time = time;
 		PublishSnapshot(snapshot);
 		return true;
 	}

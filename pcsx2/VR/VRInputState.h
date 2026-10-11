@@ -59,6 +59,7 @@ struct VRInputSnapshot
   std::uint64_t generation = 0;
   // Monotonic time (ms) of the publish; GetInputSnapshot() treats an old one as neutral.
   std::uint64_t published_ms = 0;
+  std::int64_t display_time = 0; // XrTime the poses were located for (VRInput::Update); 0 = none
 };
 
 VRInputSnapshot GetInputSnapshot();
