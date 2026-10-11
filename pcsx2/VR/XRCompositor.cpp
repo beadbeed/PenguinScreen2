@@ -454,18 +454,22 @@ namespace VR::XRCompositor
 			set.count = kept;
 		}
 
+		// How long the GS waits for a pacer inside the runtime before VR is abandoned (as VRVulkanBridge's queue lock):
+		// rides out a runtime hiccup, and the emulation never waits longer than this on a runtime that stopped answering.
+		constexpr auto kRuntimeStuckTimeout = std::chrono::milliseconds(500);
+
 		// Destroys a swapchain the pacer may be submitting: waits for the pacer's submit in progress (submit_mutex),
 		// drops the published entries that show it, then destroys it. Bounded like the queue lock: a pacer stuck in
-		// xrEndFrame for 100 ms means the runtime stopped answering, so VR is abandoned and the swapchain left alive.
+		// xrEndFrame for 500 ms means the runtime stopped answering, so VR is abandoned and the swapchain left alive.
 		// With the compositor abandoned the handle is only forgotten.
 		void DestroySwapchainSynced(XrSwapchain swapchain)
 		{
 			if (swapchain == XR_NULL_HANDLE || s.abandoned.load(std::memory_order_acquire))
 				return;
 			std::unique_lock<std::timed_mutex> submit(s.submit_mutex, std::defer_lock);
-			if (!submit.try_lock_for(std::chrono::milliseconds(100)))
+			if (!submit.try_lock_for(kRuntimeStuckTimeout))
 			{
-				Console.Error("(VR) The VR pacer has been inside xrEndFrame for over 100 ms (runtime not answering): "
+				Console.Error("(VR) The VR pacer has been inside xrEndFrame for over 500 ms (runtime not answering): "
 							  "swapchain left alive, abandoning VR; emulation continues.");
 				XRSession::MarkLost();
 				std::lock_guard<std::mutex> publish(s.publish_mutex);
@@ -2933,7 +2937,7 @@ namespace VR::XRCompositor
 		// swapchain's last released image, so a release before the publish would let the pacer end a frame with the
 		// new image at the previous present's pose (and, in layered stereo, one eye new and the other old). Lock order
 		// as documented at s.submit_mutex: submit_mutex, then the queue lock (LockedRelease). Bounded like
-		// DestroySwapchainSynced: a pacer inside xrEndFrame for over 100 ms means the runtime stopped answering.
+		// DestroySwapchainSynced: a pacer inside xrEndFrame for over 500 ms means the runtime stopped answering.
 		// cl_copy: each eye's CopyResult this present (-1: none tried); a failed release turns Copied into Skipped.
 		// chain_was_released: each eye chain's ever_released before this present's copies, which set it on Copied
 		// ahead of the release so this present's layers are built; restored when the release fails.
@@ -2941,11 +2945,11 @@ namespace VR::XRCompositor
 			int* cl_copy, const bool* chain_was_released, bool fp_screen, const XrVector3f& fp_head, u64 fp_image)
 		{
 			std::unique_lock<std::timed_mutex> submit(s.submit_mutex, std::defer_lock);
-			if (!submit.try_lock_for(std::chrono::milliseconds(100)))
+			if (!submit.try_lock_for(kRuntimeStuckTimeout))
 			{
 				// The images stay acquired (release_pending): nothing more is copied into them, and the loss teardown
 				// destroys the swapchains (or leaves them alive with the pacer detached).
-				Console.Error("(VR) The VR pacer has been inside xrEndFrame for over 100 ms (runtime not answering): "
+				Console.Error("(VR) The VR pacer has been inside xrEndFrame for over 500 ms (runtime not answering): "
 							  "frame not published, abandoning VR; emulation continues.");
 				XRSession::MarkLost();
 				return;

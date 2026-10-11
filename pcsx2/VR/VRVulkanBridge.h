@@ -30,7 +30,7 @@ namespace VR
 	// xrReleaseSwapchainImage, which run on the VR pacer thread as well as the GS thread. Every vkQueueSubmit,
 	// vkQueuePresentKHR and vkDeviceWaitIdle on the GS side and each of those XR calls holds this lock (never
 	// xrWaitFrame or xrWaitSwapchainImage). Lock order: XRCompositor's submit mutex, then this lock; never the reverse.
-	// Bounded: a lock held over 100 ms (the runtime not answering) abandons VR instead of blocking emulation. A scope
+	// Bounded: a lock held over 500 ms (the runtime not answering) abandons VR instead of blocking emulation. A scope
 	// opened while this thread already holds the lock (the spin submit inside SubmitCommandBuffer) takes nothing.
 	class ScopedXrQueueLock
 	{

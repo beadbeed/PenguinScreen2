@@ -30,7 +30,9 @@ namespace VR
 		std::atomic<u32> s_xr_queue_lock_max_wait_us{0};
 		// This thread holds the lock already, so a nested scope takes nothing (std::timed_mutex is not recursive).
 		thread_local bool t_xr_queue_lock_held = false;
-		constexpr auto kXrQueueLockTimeout = std::chrono::milliseconds(100);
+		// Long enough to ride out a runtime hiccup (a dashboard or environment load can hold xrEndFrame for a few
+		// frames), short enough that the GS (and so the emulation) never waits long on a runtime that stopped answering.
+		constexpr auto kXrQueueLockTimeout = std::chrono::milliseconds(500);
 
 		void NoteXrQueueLockWait(u32 us)
 		{
@@ -86,7 +88,7 @@ namespace VR
 		// Whoever holds it is stuck inside the runtime. Go on unlocked: emulation must not wait for it.
 		if (!s_xr_queue_lock_abandoned.exchange(true, std::memory_order_acq_rel))
 		{
-			Console.Error("(VR) Vulkan queue lock held over 100 ms (runtime not answering): abandoning VR, emulation continues.");
+			Console.Error("(VR) Vulkan queue lock held over 500 ms (runtime not answering): abandoning VR, emulation continues.");
 			XRSession::MarkLost();
 		}
 	}
