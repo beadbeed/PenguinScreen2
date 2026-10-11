@@ -164,8 +164,19 @@ Our private server runs the same unpatched relay code as obsrv (Nagle on, the 0x
   - every savestate save or load hotkey.
 - **Done (third commit):** PINE refuses MsgSaveState, MsgLoadState and MsgVRMemWatch while the
   network adapter is on.
-- **Not done:** task 3's 4-player focus-slot
-  case, task 4 (heartbeat) and task 5 (proof).
+- **Done (fourth commit; task 4 for File #1 only):** new silence flag `coopOnly` (active only in
+  NetMode::PrivateCoop). SLPM-65428 patches `FUN_00633530` so your heading heartbeat goes out every 3
+  game frames instead of 30 (`0x633548`: `addiu v1,zero,3`). It now also goes out with the weapon raised
+  (`0x633580-0x63358C`: stance in {1, 2}). The original words were checked against the File #1
+  savestate, and the patch words were disassembled back.
+  - **Untested.** Offline these patches never apply; only a private-server session exercises them.
+  - **The receiving side is unverified:** whether `FUN_0064D140` applies type 2 well while the partner
+    copy is in weapon-ready. Watch for your brother seeing your character jitter or snap while aiming;
+    if so, drop the three stance words and keep only the interval patch.
+  - **File #2 is not done.** Find its `FUN_00633530` with `xdisc_map.py` on the Mac, or by searching
+    for the `addiu v1,zero,30` + `lbu a1,<frame counter>` + `divu` sequence.
+- **Not done:** task 3's 4-player focus-slot case (2-player rooms should be fine: the hold uses slot 3,
+  or 0 if you are slot 3), task 4 for File #2, and task 5 (proof).
 - **Tested:** only `clang -fsyntax-only` on the Mac for `CameraDriver.cpp`, `VRProfileDB.cpp` and
   `Pcsx2Config.cpp`, plus CI. `QtHost.cpp` and the `.ui` file are checked only by CI. Nothing has been
   run.

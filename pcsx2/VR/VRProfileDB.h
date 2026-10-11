@@ -262,6 +262,9 @@ namespace VR::ProfileDB
 		std::vector<RecordCheck> active_when;
 		// Never patched while online-safe (the VR setting, or the network adapter on); a patched word is put back.
 		bool offline_only = false;
+		// Only while first person runs in private co-op (CameraDriver's NetMode::PrivateCoop), e.g. patches that
+		// change what the game sends to partners.
+		bool coop_only = false;
 	};
 
 	struct CameraCodeHook

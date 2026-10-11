@@ -77,6 +77,16 @@ SLPM-65428:
       - { address: 0x5A9340, on: 0x00000000, off: 0x0C0D013C, when: [{ address: 0x540004, equals: 3 }] }   # door follow camera eye write
       - { address: 0x5A9410, on: 0x00000000, off: 0x0C0D013C, when: [{ address: 0x540004, equals: 3 }] }   # door follow camera eye write
       - { address: 0x630B00, on: 0x00000000, off: 0xA2220FAA, when: [{ address: 0x540004, equals: 3 }] }   # stick latch on camera-cut lines (would freeze gaze steering)
+      # Co-op (private server only, coopOnly): the game sends your heading to partners in a type-2 heartbeat
+      # (FUN_00633530 -> FUN_0064C620(p, 2): position, status, heading) only every 30 game frames (about once a
+      # second) and only in free stance, so partners saw your first-person turns late and never saw where you
+      # aim. Every 3 frames (about 10 Hz; a 0x18-byte message) and also with the weapon raised (stance 1 or 2;
+      # the sub-action list that follows still filters to idle/turn/walk states).
+      - { address: 0x633548, on: 0x24030003, off: 0x2403001E, when: [{ address: 0x540004, equals: 3 }], coopOnly: true }   # heartbeat interval 30 -> 3 (addiu v1,zero,3)
+      - { address: 0x633580, on: 0x2465FFFF, off: 0x24050001, when: [{ address: 0x540004, equals: 3 }], coopOnly: true }   # a1 = stance - 1
+      - { address: 0x633584, on: 0x2CA50002, off: 0x10650003, when: [{ address: 0x540004, equals: 3 }], coopOnly: true }   # a1 = stance in {1, 2}
+      - { address: 0x633588, on: 0x10A00087, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], coopOnly: true }   # beq a1,zero,exit (0x6337A8)
+      - { address: 0x63358C, on: 0x00000000, off: 0x10000087, when: [{ address: 0x540004, equals: 3 }], coopOnly: true }   # delay slot (was the stance != 1 exit)
       # Aim pitch (see lookAt.aim): the gun-elevation servo's easing calls and stores to +0xBC8 are NOP'd only while
       # your weapon is raised (stance 2) and never online-safe, so the pitch written from the controller holds. They
       # are put back as soon as the weapon is lowered. The servo is shared, so partners' aim pitch holds still while you aim.

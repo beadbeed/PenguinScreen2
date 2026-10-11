@@ -941,6 +941,7 @@ namespace VR::CameraDriver
 					continue;
 				const u32 cur = static_cast<u32>(memRead32(sil.ee_address));
 				const bool active = !(sil.offline_only && OnlineSafeNow()) &&
+				                    !(sil.coop_only && s_net_mode != NetMode::PrivateCoop) &&
 				                    (sil.active_when.empty() || (base.has_value() && RecordChecksPass(sil.active_when, base.value())));
 				if (!active)
 				{
