@@ -1438,21 +1438,21 @@ namespace VR::HudCards
 
 		// Beam placement: +Y along the beam, +Z turned about it to the eye, centred half its length out; none
 		// looking straight down it or with no length.
-		const float beam_origin[3] = {0.0f, 1.0f, 0.0f};
-		const float beam_dir[3] = {0.0f, 0.0f, -2.0f}; // not unit length on purpose
-		const float beam_eye[3] = {0.0f, 1.3f, 0.3f};
+		const float mb_origin[3] = {0.0f, 1.0f, 0.0f};
+		const float mb_dir[3] = {0.0f, 0.0f, -2.0f}; // not unit length on purpose
+		const float mb_eye[3] = {0.0f, 1.3f, 0.3f};
 		float bmp[3];
 		float bmq[4];
-		const bool beam_ok = PlaceBeam(beam_origin, beam_dir, 2.0f, beam_eye, bmp, bmq);
-		const V3 beam_y = Rotate(bmq, V3{0.0f, 1.0f, 0.0f});
-		const V3 beam_z = Rotate(bmq, V3{0.0f, 0.0f, 1.0f});
-		check(beam_ok && beam_y.z < -0.999f, "the menu beam quad's +Y runs along its direction");
-		check(beam_ok && beam_z.y > 0.999f, "the menu beam quad turns about its length to face the eye");
-		check(beam_ok && std::abs(bmp[0]) < 1.0e-4f && std::abs(bmp[1] - 1.0f) < 1.0e-4f && std::abs(bmp[2] + 1.0f) < 1.0e-4f,
+		const bool mb_ok = PlaceBeam(mb_origin, mb_dir, 2.0f, mb_eye, bmp, bmq);
+		const V3 mb_y = Rotate(bmq, V3{0.0f, 1.0f, 0.0f});
+		const V3 mb_z = Rotate(bmq, V3{0.0f, 0.0f, 1.0f});
+		check(mb_ok && mb_y.z < -0.999f, "the menu beam quad's +Y runs along its direction");
+		check(mb_ok && mb_z.y > 0.999f, "the menu beam quad turns about its length to face the eye");
+		check(mb_ok && std::abs(bmp[0]) < 1.0e-4f && std::abs(bmp[1] - 1.0f) < 1.0e-4f && std::abs(bmp[2] + 1.0f) < 1.0e-4f,
 			"the menu beam's centre is half its length out");
-		const float beam_eye_on_axis[3] = {0.0f, 1.0f, 0.5f};
-		check(!PlaceBeam(beam_origin, beam_dir, 2.0f, beam_eye_on_axis, bmp, bmq) &&
-				  !PlaceBeam(beam_origin, beam_dir, 0.0f, beam_eye, bmp, bmq),
+		const float mb_eye_on_axis[3] = {0.0f, 1.0f, 0.5f};
+		check(!PlaceBeam(mb_origin, mb_dir, 2.0f, mb_eye_on_axis, bmp, bmq) &&
+				  !PlaceBeam(mb_origin, mb_dir, 0.0f, mb_eye, bmp, bmq),
 			"no menu beam looking straight down it or with no length");
 
 		// Dot placement: on the screen's plane just off its face, with the screen's orientation, about 0.6 deg across
