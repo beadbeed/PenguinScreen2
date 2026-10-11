@@ -1145,6 +1145,9 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 	if (cnode.has_child("base") && cnode["base"].is_map())
 	{
 		const ryml::ConstNodeRef bnode = cnode["base"];
+		warnUnknownKeys(serial, bnode, "camera.base",
+			{"indexed", "indexAddr", "indexWidth", "arrayOffset", "stride", "count", "idOffset", "check", "pointer",
+				"derefOffsets", "pattern", "range", "offset", "validate", "notes"});
 		CameraBase base;
 		bool base_ok = false;
 		if (bnode.has_child("indexed"))
@@ -1281,6 +1284,52 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 			}
 			else
 				base_ok = false;
+		}
+		// Indexed bases: which records may count as the local player. A key that does not parse drops the whole base
+		// (first person then stays off), since a dropped check would widen the rule onto another player's record.
+		const bool has_identity_keys = bnode.has_child("count") || bnode.has_child("idOffset") || bnode.has_child("check");
+		if (base_ok && has_identity_keys && !base.is_indexed)
+		{
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.base count/idOffset/check need an indexed base; ignoring them.", serial);
+		}
+		else if (base_ok && has_identity_keys)
+		{
+			if (bnode.has_child("count"))
+			{
+				const std::string_view raw = nodeVal(bnode["count"]);
+				const bool is_hex = (raw.size() > 2 && raw[0] == '0' && (raw[1] == 'x' || raw[1] == 'X'));
+				const std::optional<u32> cnt = is_hex ? parseHexU32(raw) : StringUtil::FromChars<u32>(raw);
+				if (cnt.has_value() && cnt.value() != 0)
+					base.count = cnt.value();
+				else
+				{
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.base count must be a nonzero number; ignoring the whole base.", serial);
+					base_ok = false;
+				}
+			}
+			if (base_ok && bnode.has_child("idOffset"))
+			{
+				const std::optional<s64> ido = parseSignedOffset(nodeVal(bnode["idOffset"]));
+				if (ido.has_value())
+				{
+					base.has_id_offset = true;
+					base.id_offset = ido.value();
+				}
+				else
+				{
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.base idOffset is invalid; ignoring the whole base.", serial);
+					base_ok = false;
+				}
+			}
+			if (base_ok && bnode.has_child("check"))
+			{
+				if (!bnode["check"].is_seq() ||
+					!parseRecordCheckList(serial, bnode["check"], "camera.base check", base.checks))
+				{
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.base check must be a list of valid checks; ignoring the whole base.", serial);
+					base_ok = false;
+				}
+			}
 		}
 		if (base_ok && base.is_pointer && !base.deref_offsets.empty() && !base.has_validate)
 		{

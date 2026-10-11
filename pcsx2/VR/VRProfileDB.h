@@ -216,6 +216,19 @@ namespace VR::ProfileDB
 		float scale = 1.0f;
 	};
 
+	// A value at the camera base (e.g. the local character record) + offset; all checks of a list must hold.
+	struct RecordCheck
+	{
+		s64 offset = 0;
+		u32 equals = 0;
+		u8 width = 1;
+		bool not_equals = false;
+		// min/max instead of equals: holds while min <= value <= max.
+		bool has_range = false;
+		u32 min = 0;
+		u32 max = 0;
+	};
+
 	struct CameraBase
 	{
 		std::vector<u8> pattern;
@@ -235,19 +248,12 @@ namespace VR::ProfileDB
 		bool has_validate = false;
 		s64 validate_offset = 0;
 		u32 validate_equals = 0;
-	};
-
-	// A value at the camera base (e.g. the local character record) + offset; all checks of a list must hold.
-	struct RecordCheck
-	{
-		s64 offset = 0;
-		u32 equals = 0;
-		u8 width = 1;
-		bool not_equals = false;
-		// min/max instead of equals: holds while min <= value <= max.
-		bool has_range = false;
-		u32 min = 0;
-		u32 max = 0;
+		// Indexed bases only: the index must be below count (0 = no limit), the byte at base + id_offset must equal
+		// the index (the game's own local-player test), and every check must hold, or first person writes nothing.
+		u32 count = 0;
+		bool has_id_offset = false;
+		s64 id_offset = 0;
+		std::vector<RecordCheck> checks;
 	};
 
 	struct CameraSilence

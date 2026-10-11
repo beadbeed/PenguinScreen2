@@ -117,7 +117,7 @@ static void HotkeyAdjustVRBrightness(const float delta)
 // drops a client that goes quiet and bans speed changes, and a state load desyncs the room.
 static bool OnlineLocked()
 {
-	if (!EmuConfig.DEV9.EthEnable)
+	if (!VMManager::IsOnlineLocked())
 		return false;
 	Host::AddKeyedOSDMessage("HotkeyOnlineLocked",
 		TRANSLATE_STR("Hotkeys", "Disabled while the network adapter is on (no pause, speed change or save state online)."),

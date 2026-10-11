@@ -69,6 +69,10 @@ namespace VMManager
 
 	bool HasValidVM();
 
+	/// True while the network adapter is on (or PCSX2_TEST_ONLINE_LOCKS=1 forces it for testing): nothing may pause the
+	/// game, change its speed, or load or save a state.
+	bool IsOnlineLocked();
+
 	std::string GetDiscPath();
 
 	std::string GetDiscSerial();
