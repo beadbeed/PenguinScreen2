@@ -3,6 +3,7 @@
 
 #include "VR/HudCards.h"
 #include "VR/CameraDriver.h"
+#include "VR/GameFeedback.h"
 #include "VR/VRProfileDB.h"
 
 #include "Config.h"
@@ -62,6 +63,9 @@ namespace VR::HudCards
 		constexpr int kBarY1 = 87;
 		constexpr int kBarWidthPx = kBarX1 - kBarX0 + 1;
 		constexpr int kVirusY = 122;
+		// With a weapon in hand the rounds go under the bar and the virus line moves down and shrinks.
+		constexpr int kAmmoY = 106;
+		constexpr int kVirusWithAmmoY = 136;
 		// Anything past this is not a character id, so it can't index the virus table.
 		constexpr u32 kMaxCharacterId = 32;
 		// A virus maximum outside 1..this is not one (a stale overlay or a wrong table): no gauge.
@@ -662,6 +666,16 @@ namespace VR::HudCards
 			{
 				active = true;
 				ReadWrist(profile->hud->wrist.value(), record, guards_now, &d);
+				// The rounds in the equipped gun (feedback.weapon), when GameFeedback trusts the record.
+				if (GameFeedback::WeaponInHand() == GameFeedback::Hold::Weapon)
+				{
+					const GameFeedback::WeaponView wv = GameFeedback::GetWeapon();
+					if (wv.valid)
+					{
+						d.has_ammo = true;
+						d.ammo = wv.ammo;
+					}
+				}
 			}
 		}
 		if (active != s_wrist_logged)
@@ -694,6 +708,9 @@ namespace VR::HudCards
 		k |= static_cast<u64>((d.has_bleed && d.bleeding) ? 1u : 0u) << 4;
 		k |= static_cast<u64>(BarFillPx(d)) << 8;
 		k |= static_cast<u64>(VirusTenths(d) + 1) << 20;
+		k |= static_cast<u64>(d.has_ammo ? 1u : 0u) << 5;
+		if (d.has_ammo)
+			k |= static_cast<u64>(d.ammo) << 44;
 		return k;
 	}
 
@@ -806,7 +823,16 @@ namespace VR::HudCards
 		else
 			std::snprintf(virus, sizeof(virus), "%s", "VIRUS --");
 		const std::string virus_line(virus);
-		c.Text(w / 2, kVirusY, virus_line, FitScale(virus_line.size(), w - 2 * kWristPadPx, 3), kWristText);
+		const bool ammo = !no_data && d.has_ammo;
+		if (ammo)
+		{
+			char rounds[24];
+			std::snprintf(rounds, sizeof(rounds), "AMMO %u", static_cast<unsigned>(d.ammo));
+			const std::string ammo_line(rounds);
+			c.Text(w / 2, kAmmoY, ammo_line, FitScale(ammo_line.size(), w - 2 * kWristPadPx, 3), kWristText);
+		}
+		c.Text(w / 2, ammo ? kVirusWithAmmoY : kVirusY, virus_line,
+			FitScale(virus_line.size(), w - 2 * kWristPadPx, ammo ? 2 : 3), kWristText);
 	}
 
 	void RasterBlink(std::vector<u32>& out)
@@ -1100,6 +1126,18 @@ namespace VR::HudCards
 		kb.virus_pct = 12.36f;
 		check(WristKey(ka, false) != WristKey(kb, false), "a virus tenth changes the key");
 		check(WristKey(ka, true) != WristKey(ka, false), "the NO DATA card has its own key");
+		kb = ka;
+		kb.has_ammo = true;
+		kb.ammo = 7;
+		check(WristKey(ka, false) != WristKey(kb, false), "a weapon's rounds appearing changes the key");
+		WristData kc = kb;
+		kc.ammo = 6;
+		check(WristKey(kb, false) != WristKey(kc, false), "a shot (7 -> 6 rounds) changes the key");
+		kc.ammo = 7;
+		check(WristKey(kb, false) == WristKey(kc, false), "the same rounds keep the key");
+		kc.has_ammo = false;
+		kc.ammo = 0;
+		check(WristKey(ka, false) == WristKey(kc, false), "no weapon is the card without the AMMO line");
 		WristData sliver = ka;
 		sliver.hp = 1;
 		check(BarFillPx(sliver) == 1, "a sliver of bar stays above 0 HP");

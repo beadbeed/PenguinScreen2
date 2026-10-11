@@ -26,6 +26,11 @@ namespace VR::HandModel
 		// The palm runs back from the knuckles this far below square to the handle, so after the
 		// handle tilt the wrist comes out level instead of cocked up.
 		constexpr float kPalmDropDeg = 15.0f;
+		// Shot feedback (HandState::kick, slide): at full kick the hand and gun pitch up this far about the grip
+		// and come back this far toward the wrist; the slide travels this far back when it cycles or locks.
+		constexpr float kRecoilDeg = 7.0f;
+		constexpr float kRecoilBackCm = 1.5f;
+		constexpr float kSlideTravelCm = 1.8f;
 		constexpr float kFingerHalfT = 0.9f; // fingers ~1.8 cm thick
 		// Triangles closer to the eye than this are dropped rather than clipped.
 		constexpr float kNearM = 0.03f;
@@ -119,6 +124,7 @@ namespace VR::HandModel
 			kMatHandle,
 			kMatGunSlide,
 			kMatGunFrame,
+			kMatFlash, // muzzle flash: unlit, constant warm white
 			kMatCount
 		};
 
@@ -162,6 +168,7 @@ namespace VR::HandModel
 				mat[kMatHandle] = MakeMaterial(0x26282cu, 0.10f, 0.35f);
 				mat[kMatGunSlide] = MakeMaterial(0x4b4f55u, 0.15f, 0.40f);
 				mat[kMatGunFrame] = MakeMaterial(0x2c2e32u, 0.08f, 0.35f);
+				mat[kMatFlash] = MakeMaterial(0xffe8b0u, 0.0f, 0.0f);
 				for (int i = 0; i <= 1024; i++)
 				{
 					const float l = static_cast<float>(i) / 1024.0f;
@@ -377,17 +384,25 @@ namespace VR::HandModel
 			}
 		}
 
-		// The rest of the pistol, in the pointing frame itself so the barrel runs along -Z.
-		void BuildGunTop(std::vector<Tri>& out)
+		// The rest of the pistol, in the pointing frame itself so the barrel runs along -Z. slide_cm moves the
+		// slide and its sights back (+Z) as it cycles or locks open; flash adds a muzzle flash ahead of it.
+		void BuildGunTop(std::vector<Tri>& out, float slide_cm, bool flash)
 		{
-			AddBoxAA(out, 0.0f, 6.4f, -5.0f, 1.5f, 1.75f, 9.0f, kMatGunSlide); // slide, 3 x 3.5 x 18
+			const float s = slide_cm;
+			AddBoxAA(out, 0.0f, 6.4f, -5.0f + s, 1.5f, 1.75f, 9.0f, kMatGunSlide); // slide, 3 x 3.5 x 18
 			AddBoxAA(out, 0.0f, 4.2f, -7.6f, 1.25f, 0.6f, 5.2f, kMatGunFrame); // dust cover under it
 			AddBoxAA(out, 0.0f, 0.4f, -5.6f, 0.45f, 0.3f, 2.6f, kMatGunFrame); // trigger guard, bottom
 			AddBoxAA(out, 0.0f, 2.2f, -8.0f, 0.45f, 1.8f, 0.3f, kMatGunFrame); // trigger guard, front
 			AddBoxAA(out, 0.0f, 2.0f, -4.6f, 0.35f, 1.0f, 0.35f, kMatGunSlide); // trigger
 			AddBoxAA(out, 0.0f, 6.7f, -14.06f, 0.45f, 0.45f, 0.08f, kMatGunFrame); // muzzle
-			AddBoxAA(out, 0.0f, 8.35f, -13.0f, 0.22f, 0.2f, 0.35f, kMatGunFrame); // front sight
-			AddBoxAA(out, 0.0f, 8.35f, 3.0f, 0.75f, 0.2f, 0.3f, kMatGunFrame); // rear sight
+			AddBoxAA(out, 0.0f, 8.35f, -13.0f + s, 0.22f, 0.2f, 0.35f, kMatGunFrame); // front sight (on the slide)
+			AddBoxAA(out, 0.0f, 8.35f, 3.0f + s, 0.75f, 0.2f, 0.3f, kMatGunFrame); // rear sight
+			if (flash)
+			{
+				// A small four-point star just past the muzzle: two thin crossed bars, 3 x 0.4 x 0.4.
+				AddBoxAA(out, 0.0f, 6.7f, -14.5f, 1.5f, 0.2f, 0.2f, kMatFlash);
+				AddBoxAA(out, 0.0f, 6.7f, -14.5f, 0.2f, 1.5f, 0.2f, kMatFlash);
+			}
 		}
 
 		std::vector<Tri> s_mesh;
@@ -401,8 +416,19 @@ namespace VR::HandModel
 			s_mesh.reserve(512);
 			BuildHand(s_mesh, h.grip, h.trigger, gun);
 			const size_t tilted = s_mesh.size();
+			float kick = 0.0f;
 			if (gun)
-				BuildGunTop(s_mesh);
+			{
+				// The slide: back while it cycles after a shot, and held back on an empty gun.
+				const float slide = std::isfinite(h.slide) ? std::clamp(h.slide, 0.0f, 1.0f) : 0.0f;
+				BuildGunTop(s_mesh, kSlideTravelCm * std::max(slide, h.slide_locked ? 1.0f : 0.0f), h.flash);
+				kick = std::isfinite(h.kick) ? std::clamp(h.kick, 0.0f, 1.0f) : 0.0f;
+			}
+			// Recoil: the hand and gun pitch up about the grip origin and come back toward the wrist.
+			const float ka = kRecoilDeg * kick * kDegToRad;
+			const float kc = std::cos(ka);
+			const float ks = std::sin(ka);
+			const float kback = kRecoilBackCm * kick;
 
 			const float ta = -kHandleTiltDeg * kDegToRad;
 			const float tc = std::cos(ta);
@@ -424,11 +450,14 @@ namespace VR::HandModel
 					if (tilt)
 						r = V3{v.x, v.y * tc - v.z * ts, v.y * ts + v.z * tc};
 					r.x *= mx;
+					if (kick > 0.0f)
+						r = V3{r.x, r.y * kc - r.z * ks, r.y * ks + r.z * kc};
 					return r;
 				};
 				for (int k = 0; k < 3; k++)
 				{
-					const V3 l = local(t.p[k]);
+					V3 l = local(t.p[k]);
+					l.z += kback;
 					lmin = V3{std::min(lmin.x, l.x), std::min(lmin.y, l.y), std::min(lmin.z, l.z)};
 					lmax = V3{std::max(lmax.x, l.x), std::max(lmax.y, l.y), std::max(lmax.z, l.z)};
 					t.p[k] = Add(pos, Rotate(q, Mul(l, 0.01f)));
@@ -512,6 +541,8 @@ namespace VR::HandModel
 		u32 Shade(const Tables& tab, const Tri& t, const V3& to_eye, const V3& light, const V3& up)
 		{
 			const Material& m = tab.mat[t.mat];
+			if (t.mat == kMatFlash)
+				return PackLinear(tab, m.r, m.g, m.b); // unlit, opaque
 			const V3 v = Normalize(to_eye);
 			const float ndl = std::max(Dot(t.n, light), 0.0f);
 			const float ndv = std::clamp(Dot(t.n, v), 0.0f, 1.0f);

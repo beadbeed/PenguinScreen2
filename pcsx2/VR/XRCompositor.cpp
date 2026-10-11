@@ -6,6 +6,7 @@
 #include "VR/SplitState.h"
 #include "VR/ControlQuads.h"
 #include "VR/HandModel.h"
+#include "VR/GameFeedback.h"
 #include "VR/HudCards.h"
 #include "VR/SpatialControls.h"
 #include "VR/VRManager.h"
@@ -1122,6 +1123,21 @@ namespace VR::XRCompositor
 					d.trigger = src.trigger;
 					d.gun = gun && (i == HandModel::kRight);
 				}
+			}
+			// Shot feedback on the pistol (fake hands too, for headset-free captures): recoil, a muzzle flash and
+			// the slide cycling after each shot, and the slide held back on an empty gun. The laser keeps the
+			// true aim.
+			if (hs[HandModel::kRight].valid && hs[HandModel::kRight].gun)
+			{
+				const GameFeedback::WeaponView wv = GameFeedback::GetWeapon();
+				const u64 shot_now_ms = CameraDriver::SteadyNowMs();
+				const bool shot = wv.valid && wv.shot_ms != 0;
+				const double age = (shot_now_ms > wv.shot_ms) ? static_cast<double>(shot_now_ms - wv.shot_ms) : 0.0;
+				HandModel::HandState& d = hs[HandModel::kRight];
+				d.kick = (shot && age < 300.0) ? static_cast<float>(std::exp(-age / 60.0)) : 0.0f;
+				d.flash = shot && age < 45.0;
+				d.slide = (shot && age < 120.0) ? static_cast<float>(1.0 - age / 120.0) : 0.0f;
+				d.slide_locked = wv.valid && wv.ammo == 0;
 			}
 			if (!hs[0].valid && !hs[1].valid)
 				return 0;
