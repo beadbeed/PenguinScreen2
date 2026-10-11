@@ -1330,6 +1330,13 @@ struct Pcsx2Config
 		float NearDepthMetres = 0.0f;
 		// First person: turn the stereo parallax with head roll so a tilted head sees no vertical disparity.
 		bool RollParallax = true;
+		// Derive first-person separation and convergence from the headset IPD and the first-person screen, for
+		// profiles with stereo.firstPerson.auto; false = the profile's numbers.
+		bool FirstPersonAutoStereo = true;
+		// How deep the first-person stereo looks: 1.0 = life-size, below flattens toward the screen distance, above
+		// deepens near objects while distant ones never pass parallel.
+		static constexpr float MIN_FP_STEREO_STRENGTH = 0.5f, MAX_FP_STEREO_STRENGTH = 1.5f;
+		float FirstPersonStereoStrength = 1.0f;
 
 		// Headset brightness: scales the gamma of the presentation lift (1.0 = neutral) on top of the
 		// profile's own. Applied only while a VR session runs, so flat play is never touched.

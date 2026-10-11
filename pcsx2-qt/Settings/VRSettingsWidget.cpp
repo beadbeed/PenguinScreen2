@@ -29,6 +29,7 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.stereoUseProfile, "VR", "StereoUseProfile", true);
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.stereoSeparation, "VR", "StereoSeparation", 0.02f);
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.stereoConvergence, "VR", "StereoConvergence", 20.0f);
+	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.fpStereoStrength, "VR", "FirstPersonStereoStrength", 1.0f);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.headCamera, "VR", "HeadCamera", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.snapTurn, "VR", "SnapTurn", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.comfortBlink, "VR", "ComfortBlink", true);
@@ -78,6 +79,12 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 	dialog()->registerWidgetHelp(m_ui.stereoConvergence, tr("Convergence"), tr("20.00"),
 		tr("The depth at which objects appear AT the screen. Objects nearer pop out; objects farther sink in. The useful "
 		   "range varies enormously between games (from below 1 to over 100)."));
+
+	dialog()->registerWidgetHelp(m_ui.fpStereoStrength, tr("First-Person Stereo Strength"), tr("1.00"),
+		tr("How deep the first-person view looks. 1.00 is life-size, computed from your headset's IPD and the first-person "
+		   "screen. Lower values flatten the picture toward the screen distance, which can be easier on the eyes. Higher "
+		   "values deepen nearby objects (the world reads a little smaller) while distant objects never go past parallel. "
+		   "Applies to games whose VR profile has first-person stereo. Takes effect immediately, easing over half a second."));
 
 	dialog()->registerWidgetHelp(m_ui.headCamera, tr("Head-Tracked Camera"), tr("Checked"),
 		tr("Drives the game's own camera with your head movement, by writing the head pose into the game's memory each "
@@ -212,6 +219,9 @@ void VRSettingsWidget::updateTuningFields()
 	m_ui.stereoConvergence->setEnabled(!use_profile);
 	m_ui.stereoSeparationLabel->setEnabled(!use_profile);
 	m_ui.stereoConvergenceLabel->setEnabled(!use_profile);
+	// First-person stereo comes only from a game profile, so its strength does something only with the profile on.
+	m_ui.fpStereoStrength->setEnabled(use_profile);
+	m_ui.fpStereoStrengthLabel->setEnabled(use_profile);
 
 	const QSignalBlocker sep_blocker(m_ui.stereoSeparation);
 	const QSignalBlocker conv_blocker(m_ui.stereoConvergence);

@@ -62,6 +62,18 @@ namespace VR::StereoState
 		// Linear-map disparity floor, in units of separation: 0 keeps the old clamp at the
 		// convergence plane, -1 lets content reach crossed disparity -separation.
 		float near_floor = 0.0f;
+
+		// First-person auto stereo, for the stereo dump sidecar and the logs only (the draws use separation,
+		// convergence and near_floor above): whether the values came from the headset, the IPD and the
+		// first-person screen they were derived from, the strength, the separation the ease is heading for, how
+		// far the ease has got (0-1) and the NDC-to-display width ratio applied.
+		bool fp_auto = false;
+		float fp_ipd_m = 0.0f;
+		float fp_screen_w_m = 0.0f, fp_screen_h_m = 0.0f, fp_screen_d_m = 0.0f;
+		float fp_strength = 1.0f;
+		float fp_sep_target = 0.0f;
+		float fp_ease = 1.0f;
+		float fp_ndc_ratio = 1.0f;
 	};
 
 	void Publish(const Params& params);
