@@ -25,7 +25,31 @@ SLPM-65692:
   # and placed where the shown frame was rendered from (camera.lookAt viewMatrix; poseLagMs is the
   # fallback guess), so the runtime can reproject it as the head turns. menu: the menu tablet (VR setting Menu
   # Tablet, off by default), as File #1's. The beam, the dot and the pointing hands work in menus here too.
-  # menuPointer: not mapped yet (the File #2 item-screen cursor struct is unknown).
+  # Point-to-select on the item screen (as File #1). File #2's cursor struct is at 0x7671F0, the same layout as File
+  # #1's 0x720B80 (found offline 2026-10-11 in Training Ground: open on (498,108), Right -> (550,108), Down -> (550,160)
+  # index 3, node 0x767448; cell 0's node is the struct + 0x90 as on File #1, cells 0x98 apart). Only Kevin's four cells
+  # are mapped: the equipped box's node is not measured on File #2 yet, so it is left out rather than guessed.
+  menuPointer:
+    when:
+      - { address: 0x543004, equals: 3 }             # GAME overlay resident
+      - { address: 0x4912BE, equals: 1, width: 1 }   # item screen, map or pause open
+      - { address: 0x7671F0, equals: 1 }             # the item screen is up
+    suspendWhen: []
+    cursor: { node: 0x7671F4, index: 0x7671FC, x: 0x7671FE, y: 0x767200 }
+    hand: either
+    coop: true
+    pressVsyncs: 2
+    gapVsyncs: 2
+    settleVsyncs: 10
+    maxPresses: 6
+    dwellMs: 60
+    armDelayMs: 300
+    enterInset: 0.12
+    cells:
+      - { node: 0x767280, index: 0, x: 498, y: 108, rect: [0.807, 0.184, 0.895, 0.307], right: 1, down: 2 }          # cell 0
+      - { node: 0x767318, index: 1, x: 550, y: 108, rect: [0.895, 0.184, 0.982, 0.307], left: 0, down: 3 }           # cell 1
+      - { node: 0x7673B0, index: 2, x: 498, y: 160, rect: [0.807, 0.307, 0.895, 0.430], up: 0, right: 3 }            # cell 2
+      - { node: 0x767448, index: 3, x: 550, y: 160, rect: [0.895, 0.307, 0.982, 0.430], up: 1, left: 2 }             # cell 3
   screen: { distance: 2.5, height: 1.3, arc: 0, menu: { distance: 0.70, height: 0.36, drop: 0.30 }, firstPerson: { distance: 1.5, height: 3.575, arc: 0, poseLagMs: 40 } }
   # Headset only: a gamma lift so the dark rooms read on a headset's LCD without washing out the blacks.
   # Applied only while first person drives the camera (firstPersonOnly defaults to true), so menus and the
