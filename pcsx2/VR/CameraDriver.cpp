@@ -10,6 +10,7 @@
 #include "VR/PadLook.h"
 #include "VR/VRManager.h"
 #include "VR/SplitState.h"
+#include "VR/StereoState.h"
 #include "VR/VRInput.h"
 #include "VR/VRInputState.h"
 #include "VR/VRProfileDB.h"
@@ -1834,6 +1835,8 @@ namespace VR::CameraDriver
 				memWrite32(la.eye_address + i * 4, std::bit_cast<u32>(eye[i]));
 				memWrite32(la.target_address + i * 4, std::bit_cast<u32>(target[i]));
 			}
+			// The GS turns the first-person parallax with the head's roll (the shown frame stays roll-level).
+			StereoState::PublishHeadRoll(e_cam.roll);
 			if (la.roll_address != 0)
 			{
 				const s32 roll = static_cast<s32>(std::lround(la.roll_sign * e_cam.roll * (65536.0f / (2.0f * PI_F)))) & 0xFFFF;
@@ -2152,6 +2155,19 @@ namespace VR::CameraDriver
 			return amp;
 		}
 
+		// PCSX2_VR_FAKE_HEADROLL=<deg>: a constant head roll for headset-free stereo tests, about the head's own
+		// +Z (counter-clockwise as the viewer sees it, left ear down, for a positive value). Read once.
+		const std::optional<float>& FakeHeadRoll()
+		{
+			static const std::optional<float> roll = []() -> std::optional<float> {
+				const char* env = std::getenv("PCSX2_VR_FAKE_HEADROLL");
+				if (!env)
+					return std::nullopt;
+				return static_cast<float>(std::atof(env)) * (PI_F / 180.0f);
+			}();
+			return roll;
+		}
+
 		struct FakeHead
 		{
 			float yaw = 0.0f;
@@ -2199,13 +2215,34 @@ namespace VR::CameraDriver
 		std::optional<HeadPose::Snapshot> MaybeFakePose()
 		{
 			const std::optional<float>& amp = FakeHeadAmplitude();
-			if (!amp.has_value())
+			const std::optional<float>& fake_roll = FakeHeadRoll();
+			if (!amp.has_value() && !fake_roll.has_value())
 				return std::nullopt;
 
 			const u64 now = NowMs();
-			const FakeHead f = FakeHeadAt(amp.value(), now);
+			// Only FAKE_HEADROLL set: a still head at yaw 0 / pitch 0 with that roll.
+			const FakeHead f = amp.has_value() ? FakeHeadAt(amp.value(), now) : FakeHead{};
 			float q[4];
 			FakeHeadQuat(f, q);
+			if (fake_roll.has_value())
+			{
+				// q * Rz(roll): a roll about the head's own +Z, after yaw and pitch, so it reads back as the YXZ
+				// Euler roll. A constant right factor leaves the room-frame angular velocity unchanged.
+				const float sr = std::sin(fake_roll.value() * 0.5f), cr = std::cos(fake_roll.value() * 0.5f);
+				const float qx = q[0], qy = q[1], qz = q[2], qw = q[3];
+				q[0] = qx * cr + qy * sr;
+				q[1] = qy * cr - qx * sr;
+				q[2] = qz * cr + qw * sr;
+				q[3] = qw * cr - qz * sr;
+
+				static std::atomic<bool> s_fake_roll_logged{false};
+				if (!s_fake_roll_logged.exchange(true))
+				{
+					const EulerAngles re = QuaternionToEulerYXZ(q[0], q[1], q[2], q[3]);
+					Console.WriteLn("(VR) CameraDriver: fake head roll %.1f deg -> euler roll %.1f deg",
+						fake_roll.value() * (180.0f / PI_F), re.roll * (180.0f / PI_F));
+				}
+			}
 			HeadPose::Snapshot p;
 			p.orientation_x = q[0];
 			p.orientation_y = q[1];

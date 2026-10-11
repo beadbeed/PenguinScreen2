@@ -207,6 +207,9 @@ namespace VR
 		int s_scene_pending = -1;
 		u32 s_scene_pending_count = 0;
 		constexpr u32 SCENE_DEBOUNCE_VSYNCS = 3;
+		// near_floor of the last first-person publish, so a NearDepthMetres change republishes even
+		// though the scene itself did not change.
+		float s_scene_published_near_floor = 0.0f;
 
 		// Presentation lift, published every vsync by ApplySceneStereo (CPU thread) for PresentationLift
 		// (GS thread), which must not touch the profile DB or EmuConfig.
@@ -480,6 +483,10 @@ namespace VR
 	void ApplySceneStereo()
 	{
 		const Pcsx2Config::VROptions& cfg = EmuConfig.VR;
+		// GS-thread gates, refreshed every vsync: roll parallax follows the setting, and the stereo dump
+		// is offline only (never while the network adapter is on).
+		StereoState::SetRollParallaxEnabled(cfg.RollParallax);
+		StereoState::SetDumpAllowed(!EmuConfig.DEV9.EthEnable);
 		PublishPresentation(cfg);
 		if (!StereoGateOpen(cfg.Enable, LaunchRequestedVR(), StereoRenderArmed(), cfg.StereoMode,
 				cfg.StereoUseProfile))
@@ -529,7 +536,40 @@ namespace VR
 			}
 		}
 
-		if (s_scene_memo_valid)
+		// First person: how near true stereo depth reaches (metres, 0 = off). The linear map
+		// sep * (1 - conv * q) equals an off-axis camera pair for w >= conv; letting it go negative down to
+		// 1 - conv / (nearest * units) extends that to `nearest` instead of flattening onto the conv plane.
+		float fp_nearest = 0.0f;
+		float fp_near_floor = 0.0f;
+		float fp_units = 100.0f;
+		if (match == kFirstPersonScene)
+		{
+			if (cfg.NearDepthMetres > 0.0f)
+				fp_nearest = std::clamp(cfg.NearDepthMetres, 0.45f, 1.5f);
+			else if (cfg.NearDepthMetres == 0.0f && base.fp_nearest.has_value())
+				fp_nearest = base.fp_nearest.value();
+
+			if (profile->camera.has_value() && profile->camera->look_at.has_value())
+			{
+				const float u = std::abs(profile->camera->look_at->units_per_meter);
+				if (std::isfinite(u) && u > 0.0f)
+					fp_units = u;
+			}
+
+			if (fp_nearest > 0.0f)
+			{
+				const float conv = base.fp_convergence.value_or(base.convergence);
+				const float floor_v = 1.0f - conv / (fp_nearest * fp_units);
+				fp_near_floor = std::isfinite(floor_v) ? std::clamp(floor_v, -2.0f, 0.0f) : 0.0f;
+			}
+		}
+
+		// Only near_floor changed (the setting was edited while first person stays armed): republish now.
+		const bool fp_floor_only = s_scene_memo_valid && match == kFirstPersonScene &&
+		                           s_scene_published == kFirstPersonScene &&
+		                           fp_near_floor != s_scene_published_near_floor;
+
+		if (s_scene_memo_valid && !fp_floor_only)
 		{
 			if (match == s_scene_published)
 			{
@@ -570,6 +610,8 @@ namespace VR
 		{
 			stereo.separation = base.fp_separation.value_or(stereo.separation);
 			stereo.convergence = base.fp_convergence.value_or(stereo.convergence);
+			stereo.first_person = true;
+			stereo.near_floor = fp_near_floor;
 		}
 
 		MTGS::RunOnGSThread([stereo]() { StereoState::Publish(stereo); });
@@ -590,8 +632,24 @@ namespace VR
 		}
 		else if (match == kFirstPersonScene)
 		{
-			Host::AddKeyedOSDMessage("VRStereoScene",
-				fmt::format("Stereo: first person (sep {:.4f}, conv {:.4g})", stereo.separation, stereo.convergence), 3.0f);
+			if (!fp_floor_only)
+			{
+				Host::AddKeyedOSDMessage("VRStereoScene",
+					fmt::format("Stereo: first person (sep {:.4f}, conv {:.4g})", stereo.separation, stereo.convergence), 3.0f);
+			}
+			// Once per first-person arm (and again if only near_floor changed).
+			if (fp_nearest > 0.0f)
+			{
+				Console.WriteLn("(VR) First-person stereo: sep %.4f, conv %.0f (%.2f m), nearest %.2f m (floor %.2f), roll parallax %s",
+					stereo.separation, stereo.convergence, stereo.convergence / fp_units, fp_nearest, fp_near_floor,
+					cfg.RollParallax ? "on" : "off");
+			}
+			else
+			{
+				Console.WriteLn("(VR) First-person stereo: sep %.4f, conv %.0f (%.2f m), nearest off, roll parallax %s",
+					stereo.separation, stereo.convergence, stereo.convergence / fp_units,
+					cfg.RollParallax ? "on" : "off");
+			}
 		}
 		else if (s_scene_memo_valid)
 		{
@@ -599,6 +657,7 @@ namespace VR
 		}
 
 		s_scene_published = match;
+		s_scene_published_near_floor = fp_near_floor;
 		s_scene_memo_valid = true;
 		s_scene_pending = match;
 		s_scene_pending_count = 0;
