@@ -1,24 +1,34 @@
-"""Headset-free first-person VR tests for File #1 (SLPM-65428): drives the real VR input path with
-scripted controllers over PINE (MsgVRFakeInput) and checks the game's memory and the camera's
-telemetry (MsgVRTelemetry). Prints PASS / FAIL / SKIP per scenario; exits 1 if any failed.
+"""Headset-free first-person VR tests for File #1 (SLPM-65428) and File #2 (SLPM-65692): drives the real VR
+input path with scripted controllers over PINE (MsgVRFakeInput) and checks the game's memory and the camera's
+telemetry (MsgVRTelemetry). Prints PASS / FAIL / SKIP per scenario; exits 1 if any failed. The running serial
+picks the addresses (the GAMES table below); any other game is refused.
 
 Start the emulator first, with PCSX2_VR_TEST_INPUT=1 in its environment and PINE on (slot 28011):
 in VR on SteamVR's null headset (python null_driver.py on, then launch_vr.ps1), or headset-free with
 no OpenXR runtime. Leave PCSX2_VR_FAKE_HEADPOSE unset (launch_fakevr.ps1 sets it): the env fake head
-outranks the scripted one. Be in a room (J's Bar) standing idle with room to walk ahead, or pass
---slot with a savestate like that (loaded before every scenario; recommended, walk-and-shoot moves you).
+outranks the scripted one. Be in a room (File #1: J's Bar; File #2: the Training Ground) standing idle with
+room to walk ahead, or pass --slot with a savestate like that (loaded before every scenario; recommended,
+walk-and-shoot moves you). --slot auto loads the game's usual test saves: File #1 slot 4 (pitch: slot 3),
+File #2 slot 1, the Training Ground (pitch: slot 2, the same place with the .45 equipped).
 
   python vrtest.py all                         # every scenario
   python vrtest.py arm holster point-to-aim    # some
   python vrtest.py --list
   python vrtest.py all --slot 3 --junit out/junit.xml --report out/   # report: HTML + Headset Window shots
+  python vrtest.py all --slot auto             # the game's usual test saves per scenario
+  python vrtest.py --check-profile             # no emulator: the addresses here against both shipped profiles
 
 walk-and-shoot-online-safe and pitch-online-safe only run with the VR "Online-Safe First Person" setting on,
 where the scripted input must be refused, nothing may move the character and the aim servo is never
 silenced (both raise the weapon with R1 on padd's virtual pad); every other scenario is skipped then.
 Never with the network adapter on: the runner refuses (it loads savestates, which must never happen online).
 savestate-yaw saves to --scratch-slot (default 9) and overwrites it.
-pitch passes from slot 3 but not from slot 4 (+0xBC8 stays 0 there; a test-save quirk): run it with --slot 3.
+pitch passes from slot 3 but not from slot 4 on File #1 (+0xBC8 stays 0 there; a test-save quirk): run it with
+--slot 3 (or --slot auto).
+
+File #2 steps about 20 units forward as the weapon comes up (the raise step, ~0.3 s): walk-and-shoot waits it out
+before measuring and walk-and-shoot-online-safe allows for it. File #2 has no aim-walk of its own (the left stick
+only turns the aim), so the 70 units/s there come from the VR camera alone.
 
 run-latch walks and runs ahead (about 3 m all told): use --slot with open floor in front. The ad-lib byte is not
 known yet: adlib-flick and adlib-diagonal check only the camera unless --adlib names it (an address, or +offset
@@ -41,28 +51,109 @@ from xml.etree import ElementTree as ET
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pine import FakeController, PineError, pose, require_offline, wait_for_pine, zone
 
-SERIAL = "SLPM-65428"
+PROFILES_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "bin", "resources",
+                                             "vr-profiles"))
 
-# File #1 addresses (README.md, bin/resources/vr-profiles/SLPM-65428.yaml).
-RECORDS, RECORD_STRIDE, LOCAL_SLOT = 0x476DD0, 0x10E0, 0x48BF7D
-POSITION, HEADING, STANCE = 0x38, 0x92, 0x08  # record offsets: f32 x/y/z, s16 heading, u8 stance (1 normal, 2 aimed)
-EYE, TARGET = 0x306338, 0x306344
-MENU_OPEN = 0x48BF7E
-CUT_HANDLER, FOCUS_SLOT, NEAR_CULL = 0x58EAEC, 0x3AEF74, 0x6D6CF4
-# Aim pitch: s16 record offset (0x10000 = 360 deg, positive up) and the gun-elevation servo words the profile
-# NOPs while the weapon is raised offline: (address, the game's own word).
-AIM_PITCH = 0xBC8
-# Running: u8 action (0 idle, 1 walk, 3 run, 128 aiming) and the input block at +0xF78 (+0 pressed, +8 held), whose
-# held word the sprint latch's Cross must be gone from once the item screen is up.
-ACTION = 0x54F
-INPUT_HELD = 0xF80
-PITCH_SERVO = ((0x556968, 0x0C0D1AEC), (0x556980, 0x0C0D1AEC), (0x556998, 0x0C0D1AEC), (0x5569CC, 0xA6200BC8),
-               (0x5569D8, 0xA6230BC8), (0x5569E4, 0xA6230BC8), (0x5569E8, 0xA6200BC8))
-PITCH_SERVO_STORES = (0x5569CC, 0x5569D8, 0x5569E4, 0x5569E8)
+# Per-game addresses (README.md, bin/resources/vr-profiles/<serial>.yaml, research/2026-10-11-file*-research.md);
+# --check-profile compares them with the shipped profiles. Record offsets are into the local character record
+# (records + local slot byte * stride).
+#   records/stride/local_slot     character records, their stride and the u8 local slot byte
+#   menu_open                     u8 1 while the item screen, the map or pause is up (the profile's pauseWhen)
+#   eye/target                    the game camera's eye and target vectors (f32 x, y, z)
+#   cut_handler                   the fixed-cut handler call the profile NOPs while first person is armed
+#   focus_slot/near_cull          the camera focus slot byte and the characters' near-cull radius (f32) the profile holds
+#   max_hp                        u16 max HP record offset (an empty record reads 0; the focus hold tests it)
+#   aim_pitch                     s16 aim pitch (0x10000 = 360 deg, positive up)
+#   pitch_servo                   the gun-elevation servo words the profile NOPs while the weapon is raised offline:
+#                                 (address, the game's own word); pitch_servo_stores are the ones storing the pitch
+#   stick_mag                     u16 stick magnitude (0 = centred; the profile's bodyFollow)
+#   action                        u8 action (0 idle, 1 walk, 3 run, 128 aiming; same values on both Files)
+#   input_held                    the held word of the input block, which the sprint latch's Cross must be gone from
+#                                 once the item screen is up (File #1: block +0xF78, +0 pressed, +8 held; File #2: held
+#                                 +0xF90, Cross 0x10)
+#   raise_settle                  seconds to wait after the stance reads 2 before measuring a walk (File #2's raise step)
+#   raise_step                    units the raise itself may move the character (none on File #1, ~20 on File #2)
+#   default_slot/scenario_slots   the usual test saves for --slot auto
+#   focus_rule                    "legacy": the rule vrtest has always checked on File #1 (focus 0 when you are slot 3,
+#                                 else 3); "hold": the profile's hold (3 while record 3 is empty and you are not slot 3,
+#                                 2 while record 2 is empty and you are; a full room holds nothing and is not checked)
+#   skip                          scenario name -> reason, for a scenario that needs something the game lacks
+GAMES = {
+    "SLPM-65428": dict(
+        title="File #1",
+        records=0x476DD0, stride=0x10E0, local_slot=0x48BF7D,
+        menu_open=0x48BF7E,
+        eye=0x306338, target=0x306344,
+        cut_handler=0x58EAEC, focus_slot=0x3AEF74, near_cull=0x6D6CF4,
+        max_hp=0x546,
+        aim_pitch=0xBC8,
+        pitch_servo=((0x556968, 0x0C0D1AEC), (0x556980, 0x0C0D1AEC), (0x556998, 0x0C0D1AEC), (0x5569CC, 0xA6200BC8),
+                     (0x5569D8, 0xA6230BC8), (0x5569E4, 0xA6230BC8), (0x5569E8, 0xA6200BC8)),
+        pitch_servo_stores=(0x5569CC, 0x5569D8, 0x5569E4, 0x5569E8),
+        stick_mag=0xF98,
+        action=0x54F,
+        input_held=0xF80,
+        raise_settle=0.2, raise_step=0.0,
+        default_slot=4, scenario_slots={"pitch": 3},
+        focus_rule="legacy",
+        skip={},
+    ),
+    "SLPM-65692": dict(
+        title="File #2",
+        records=0x47BD30, stride=0x1100, local_slot=0x4912BD,
+        menu_open=0x4912BE,
+        eye=0x313548, target=0x313554,
+        cut_handler=0x595248, focus_slot=0x3B31F4, near_cull=0x718DB4,
+        max_hp=0x542,
+        aim_pitch=0xBE0,
+        pitch_servo=((0x557D70, 0x0C0D278C), (0x557D88, 0x0C0D278C), (0x557DA0, 0x0C0D278C), (0x557DD0, 0xA6400BE0),
+                     (0x557DDC, 0xA6430BE0), (0x557DE8, 0xA6430BE0), (0x557DEC, 0xA6400BE0)),
+        pitch_servo_stores=(0x557DD0, 0x557DDC, 0x557DE8, 0x557DEC),
+        stick_mag=0xFA8,
+        action=0x54B,
+        input_held=0xF90,
+        raise_settle=0.5, raise_step=25.0,
+        default_slot=1, scenario_slots={"pitch": 2},
+        focus_rule="hold",
+        skip={},
+    ),
+}
 
-# Profile values the scenarios expect.
-HOLSTER = zone(0.22, -0.50, 0.12)
-BELT = zone(-0.22, -0.50, 0.12)
+# The same on both Files (one engine): record offsets f32 x/y/z position, s16 heading, u8 stance (1 normal,
+# 2 aimed), and the near-cull radius the profile holds while armed (the game's own is 80).
+POSITION, HEADING, STANCE = 0x38, 0x92, 0x08
+NEAR_CULL_ARMED = 75.0
+
+# The running game's values, which the scenarios read; select_game() sets them (File #1's until main() reads
+# the serial).
+SERIAL = TITLE = GAME = None
+RECORDS = RECORD_STRIDE = LOCAL_SLOT = MENU_OPEN = EYE = TARGET = None
+CUT_HANDLER = FOCUS_SLOT = NEAR_CULL = MAX_HP = AIM_PITCH = STICK_MAG = ACTION = INPUT_HELD = None
+PITCH_SERVO = PITCH_SERVO_STORES = RAISE_SETTLE = RAISE_STEP = None
+
+
+def select_game(serial):
+    """Points the module constants the scenarios use at one game (a key of GAMES)."""
+    global SERIAL, TITLE, GAME, RECORDS, RECORD_STRIDE, LOCAL_SLOT, MENU_OPEN, EYE, TARGET
+    global CUT_HANDLER, FOCUS_SLOT, NEAR_CULL, MAX_HP, AIM_PITCH, STICK_MAG, ACTION, INPUT_HELD
+    global PITCH_SERVO, PITCH_SERVO_STORES, RAISE_SETTLE, RAISE_STEP
+    g = GAMES[serial]
+    SERIAL, TITLE, GAME = serial, g["title"], g
+    RECORDS, RECORD_STRIDE, LOCAL_SLOT = g["records"], g["stride"], g["local_slot"]
+    MENU_OPEN, EYE, TARGET = g["menu_open"], g["eye"], g["target"]
+    CUT_HANDLER, FOCUS_SLOT, NEAR_CULL, MAX_HP = g["cut_handler"], g["focus_slot"], g["near_cull"], g["max_hp"]
+    AIM_PITCH, STICK_MAG, ACTION, INPUT_HELD = g["aim_pitch"], g["stick_mag"], g["action"], g["input_held"]
+    PITCH_SERVO, PITCH_SERVO_STORES = g["pitch_servo"], g["pitch_servo_stores"]
+    RAISE_SETTLE, RAISE_STEP = g["raise_settle"], g["raise_step"]
+
+
+select_game("SLPM-65428")
+
+# Profile values the scenarios expect (the same in both profiles; --check-profile checks them).
+HOLSTER_PLACEMENT = (0.22, -0.50, 0.12)   # side, height, forward (metres from the head)
+BELT_PLACEMENT = (-0.22, -0.50, 0.12)
+HOLSTER = zone(*HOLSTER_PLACEMENT)
+BELT = zone(*BELT_PLACEMENT)
 SMOOTH_TURN_DEG_S = 120.0
 AIM_MOVE_UNITS_S = 70.0
 PITCH_SIGN, PITCH_CLAMP = 1.0, 8000
@@ -286,6 +377,22 @@ class Runner:
 
 # --- scenarios: each returns a one-line detail on PASS, raises Fail / Skip ---------------------
 
+def expected_focus(r, slot):
+    """The camera focus slot the profile's hold should show for local slot `slot`, or None when it holds nothing
+    (a full room: the game keeps its own focus). focus_rule 'legacy' keeps File #1's check as it always was."""
+    if GAME["focus_rule"] == "legacy":
+        return 0 if slot == 3 else 3
+
+    def empty(k):
+        return r.p.read16(RECORDS + k * RECORD_STRIDE + MAX_HP) == 0
+
+    if slot != 3 and empty(3):
+        return 3
+    if slot == 3 and empty(2):
+        return 2
+    return None
+
+
 def sc_arm(r):
     with r.controller():
         r.wait_armed()
@@ -293,12 +400,15 @@ def sc_arm(r):
         slot = r.p.read8(LOCAL_SLOT)
         focus = r.p.read8(FOCUS_SLOT)
         cull = u2f(r.p.read32(NEAR_CULL))
+        want_focus = expected_focus(r, slot)
         r.shot("armed")
-    want_focus = 0 if slot == 3 else 3
     check(cut == 0, "cut handler 0x%06X = 0x%08X, expected 0 (silenced)" % (CUT_HANDLER, cut))
-    check(focus == want_focus, "camera focus slot %d, expected %d (local slot %d)" % (focus, want_focus, slot))
-    check(abs(cull - 75.0) < 1e-3, "near-cull radius %.2f, expected 75.0" % cull)
-    return "armed, cut handler NOP, focus slot %d, near-cull %.1f" % (focus, cull)
+    if want_focus is not None:
+        check(focus == want_focus, "camera focus slot %d, expected %d (local slot %d)" % (focus, want_focus, slot))
+    check(abs(cull - NEAR_CULL_ARMED) < 1e-3, "near-cull radius %.2f, expected %.1f" % (cull, NEAR_CULL_ARMED))
+    held = ("focus slot %d" % focus) if want_focus is not None else (
+        "focus slot %d (not checked: a full room holds nothing)" % focus)
+    return "armed, cut handler NOP, %s, near-cull %.1f" % (held, cull)
 
 
 def sc_smooth_turn(r):
@@ -362,7 +472,7 @@ def sc_walk_and_shoot(r):
         r.wait_armed()
         took = r.raise_weapon(fc, aim=pose())
         check(took is not None, "the holster did not raise the weapon (stance %d)" % r.stance())
-        time.sleep(0.2)
+        time.sleep(RAISE_SETTLE)  # File #2 steps forward as the weapon comes up: measure after it
         x0, _, z0 = r.position()
         yaw = r.cam_yaw()
         fc.set_hand(LEFT, stick=(0.0, 1.0))
@@ -381,7 +491,8 @@ def sc_walk_and_shoot(r):
 
 
 def sc_pitch(r):
-    """Point the gun 20 deg down: the servo is NOP'd and +0xBC8 holds the controller's pitch; lower it and
+    """Point the gun 20 deg down: the servo is NOP'd and the aim pitch (File #1 +0xBC8, File #2 +0xBE0) holds the
+    controller's pitch; lower it and
     the servo is back within 6 vsyncs."""
     deg = -20.0
     want = pitch_units(deg)
@@ -432,7 +543,7 @@ def sc_pitch(r):
 
 def sc_pitch_online_safe(r):
     """Online-safe: R1 + stick up on the virtual pad. The servo must never be silenced and the game's own
-    code must tilt the aim (stick up eases +0xBC8 toward +8192)."""
+    code must tilt the aim (stick up eases the aim pitch toward +8192, on both Files)."""
     if not r.p.telemetry()["online_safe"]:
         raise Skip("needs the VR Online-Safe setting on")
     try:
@@ -511,7 +622,10 @@ def sc_walk_online_safe(r):
     time.sleep(0.2)
     x1, _, z1 = r.position()
     dist = math.hypot(x1 - x0, z1 - z0)
-    check(dist < 5.0, "moved %.1f units with the weapon raised and online-safe on" % dist)
+    # File #2's raise itself steps about 20 units forward (RAISE_STEP); a walk would go far past that in the 2 s.
+    limit = 5.0 + RAISE_STEP
+    check(dist < limit, "moved %.1f units with the weapon raised and online-safe on" % dist +
+          (" (the raise step allows %.0f)" % RAISE_STEP if RAISE_STEP else ""))
     return "test input refused; moved %.1f units%s" % (dist, " (R1 + stick up on the virtual pad)" if used_pad else
                                                             " (padd not running: no pad input)")
 
@@ -777,13 +891,208 @@ def write_report(folder, results, shots):
         f.write(page)
 
 
+# --- --check-profile: the addresses above against the shipped profiles (no emulator) -------------------------
+
+def _fmt(v):
+    if isinstance(v, bool) or v is None:
+        return repr(v)
+    if isinstance(v, int):
+        return "0x%X" % v
+    return repr(v)
+
+
+def _silence_on(entry):
+    # PyYAML reads the bare key 'on' as True (YAML 1.1); accept either spelling.
+    return entry.get("on", entry.get(True))
+
+
+def _silence_off(entry):
+    return entry.get("off", entry.get(False))
+
+
+def load_profile(folder, serial):
+    """The shipped profile's entry for `serial` (a dict), read with PyYAML."""
+    try:
+        import yaml
+    except ImportError:
+        raise RuntimeError("PyYAML is needed for --check-profile (pip install pyyaml)")
+    path = os.path.join(folder, serial + ".yaml")
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict) or serial not in data:
+        raise RuntimeError("%s has no %s entry" % (path, serial))
+    return data[serial]
+
+
+def profile_problems(serial, prof):
+    """Compares GAMES[serial] (and the shared constants) with a loaded profile. Returns (checks, problems)."""
+    g = GAMES[serial]
+    problems = []
+    checks = [0]
+
+    def want(what, got, expected):
+        checks[0] += 1
+        same = (abs(got - expected) < 1e-6) if isinstance(got, (int, float)) and isinstance(expected, (int, float)) \
+            and not isinstance(got, bool) else got == expected
+        if not same:
+            problems.append("%s: profile %s, vrtest %s" % (what, _fmt(got), _fmt(expected)))
+
+    def has(what, ok, detail):
+        checks[0] += 1
+        if not ok:
+            problems.append("%s: %s" % (what, detail))
+
+    cam = prof.get("camera") or {}
+    base = cam.get("base") or {}
+    look = cam.get("lookAt") or {}
+    aim = look.get("aim") or {}
+    want("camera.base.indexed (records)", base.get("indexed"), g["records"])
+    want("camera.base.stride", base.get("stride"), g["stride"])
+    want("camera.base.indexAddr (local slot byte)", base.get("indexAddr"), g["local_slot"])
+    want("camera.lookAt.eye", look.get("eye"), g["eye"])
+    want("camera.lookAt.target", look.get("target"), g["target"])
+    want("camera.lookAt.position", look.get("position"), POSITION)
+    want("camera.lookAt.heading", look.get("heading"), HEADING)
+    want("camera.lookAt.smoothTurnDegPerSec", look.get("smoothTurnDegPerSec"), SMOOTH_TURN_DEG_S)
+    want("camera.lookAt.aim.stance", aim.get("stance"), STANCE)
+    want("camera.lookAt.aim.equals", aim.get("equals"), 2)
+    want("camera.lookAt.aim.hand", aim.get("hand"), "right")
+    want("camera.lookAt.aim.pitch", aim.get("pitch"), g["aim_pitch"])
+    want("camera.lookAt.aim.pitchSign", aim.get("pitchSign"), PITCH_SIGN)
+    want("camera.lookAt.aim.pitchClamp", aim.get("pitchClamp"), PITCH_CLAMP)
+    want("camera.lookAt.aim.move", aim.get("move"), AIM_MOVE_UNITS_S)
+
+    # Menu flag: the camera's pauseWhen and the menu pointer's when.
+    pause = [c.get("address") for c in look.get("pauseWhen") or []]
+    has("camera.lookAt.pauseWhen", g["menu_open"] in pause, "no entry on 0x%X (has %s)" % (
+        g["menu_open"], ", ".join(_fmt(a) for a in pause) or "none"))
+    if "menuPointer" in prof:
+        when = [c.get("address") for c in (prof["menuPointer"] or {}).get("when") or []]
+        has("menuPointer.when", g["menu_open"] in when, "no entry on 0x%X" % g["menu_open"])
+
+    # Body follow: stance normal and the stick magnitude centred (File #1 also tests its action byte).
+    follow = dict((c.get("offset"), c.get("equals")) for c in look.get("bodyFollow") or [])
+    has("camera.lookAt.bodyFollow stance", follow.get(STANCE) == 1, "no { offset: 0x%X, equals: 1 }" % STANCE)
+    has("camera.lookAt.bodyFollow stick magnitude", follow.get(g["stick_mag"]) == 0,
+        "no { offset: 0x%X, equals: 0 } (has offsets %s)" % (g["stick_mag"], ", ".join(_fmt(o) for o in follow)))
+    other = [o for o in follow if o not in (STANCE, g["stick_mag"])]
+    for o in other:
+        want("camera.lookAt.bodyFollow action offset", o, g["action"])
+    weapon = (prof.get("feedback") or {}).get("weapon") or {}
+    if "action" in weapon:
+        want("feedback.weapon.action", weapon.get("action"), g["action"])
+    hurt = (prof.get("feedback") or {}).get("hurt") or {}
+    if "max" in hurt:
+        want("feedback.hurt.max (max HP)", hurt.get("max"), g["max_hp"])
+
+    # Silence: the cut handler NOP and the pitch servo words (offlineOnly, active while the stance is 2).
+    silence = cam.get("silence") or []
+    by_addr = dict((e.get("address"), e) for e in silence)
+    cut = by_addr.get(g["cut_handler"])
+    has("camera.silence cut handler", cut is not None, "no entry on 0x%X" % g["cut_handler"])
+    if cut is not None:
+        want("camera.silence cut handler 0x%X on" % g["cut_handler"], _silence_on(cut), 0)
+    servo = dict((e.get("address"), e) for e in silence if e.get("offlineOnly"))
+    ours = dict(g["pitch_servo"])
+    for a, own in g["pitch_servo"]:
+        e = servo.get(a)
+        has("camera.silence servo 0x%X" % a, e is not None, "no offlineOnly entry")
+        if e is None:
+            continue
+        want("camera.silence servo 0x%X off (the game's word)" % a, _silence_off(e), own)
+        want("camera.silence servo 0x%X on" % a, _silence_on(e), 0)
+        active = [(c.get("offset"), c.get("equals")) for c in e.get("activeWhen") or []]
+        has("camera.silence servo 0x%X activeWhen" % a, (STANCE, 2) in active, "not active on stance 2 (%s)" % active)
+    extra = sorted(a for a in servo if a not in ours)
+    has("camera.silence offlineOnly entries", not extra, "not in vrtest's servo list: %s" % ", ".join(
+        _fmt(a) for a in extra))
+    stores = [a for a in g["pitch_servo_stores"] if a not in ours]
+    has("vrtest pitch_servo_stores", not stores, "not servo words: %s" % ", ".join(_fmt(a) for a in stores))
+    for a in g["pitch_servo_stores"]:
+        e = servo.get(a)
+        if e is not None:
+            # A store to the pitch: sh rt, <aim pitch>(base) carries the offset in its low half.
+            want("servo store 0x%X offset" % a, _silence_off(e) & 0xFFFF, g["aim_pitch"])
+
+    # Holds: the camera focus slot (3 / 2 while that record's max HP is 0) and the near-cull radius.
+    hold = look.get("hold") or []
+    focus = [h for h in hold if h.get("address") == g["focus_slot"]]
+    values = sorted(h.get("value") for h in focus)
+    want("camera.lookAt.hold focus slot 0x%X values" % g["focus_slot"], values, [2, 3])
+    for h in focus:
+        want("camera.lookAt.hold focus %s restoreFrom" % h.get("value"), h.get("restoreFrom"), g["local_slot"])
+        k = h.get("value")
+        if k in (2, 3):
+            empty = g["records"] + k * g["stride"] + g["max_hp"]
+            addrs = [c.get("address") for c in h.get("when") or []]
+            has("camera.lookAt.hold focus %d when" % k, empty in addrs, "no test of record %d's max HP 0x%X (has %s)" % (
+                k, empty, ", ".join(_fmt(a) for a in addrs)))
+    cull = [h for h in hold if h.get("address") == g["near_cull"]]
+    has("camera.lookAt.hold near-cull 0x%X" % g["near_cull"], bool(cull), "no entry")
+    if cull:
+        want("camera.lookAt.hold near-cull f32", cull[0].get("f32"), NEAR_CULL_ARMED)
+
+    # Zones the scripted hands squeeze in.
+    zones = dict((c.get("id"), c) for c in prof.get("controls") or [] if c.get("device") == "Zone")
+    for zid, place, hand, button in (("holster", HOLSTER_PLACEMENT, "right", "R1"),
+                                     ("belt", BELT_PLACEMENT, "left", "Start")):
+        z = zones.get(zid)
+        has("controls zone %s" % zid, z is not None, "missing")
+        if z is None:
+            continue
+        p = z.get("placement") or {}
+        want("controls zone %s placement" % zid, (p.get("side"), p.get("height"), p.get("forward")), place)
+        want("controls zone %s hand" % zid, (z.get("params") or {}).get("hand"), hand)
+        want("controls zone %s Pressed" % zid, (z.get("bind") or {}).get("Pressed"), button)
+    return checks[0], problems
+
+
+def check_profiles(folder):
+    """--check-profile: loads both shipped profiles and checks the addresses vrtest uses. Returns the exit code."""
+    bad = 0
+    for serial, g in GAMES.items():
+        try:
+            prof = load_profile(folder, serial)
+        except (OSError, RuntimeError) as e:
+            print("ERROR %s (%s): %s" % (serial, g["title"], e))
+            bad += 1
+            continue
+        except Exception as e:  # a YAML parse error
+            print("ERROR %s (%s): %s: %s" % (serial, g["title"], type(e).__name__, e))
+            bad += 1
+            continue
+        n, problems = profile_problems(serial, prof)
+        if problems:
+            bad += 1
+            print("FAIL  %s (%s): %d of %d checks differ" % (serial, g["title"], len(problems), n))
+            for line in problems:
+                print("      " + line)
+        else:
+            print("PASS  %s (%s): %d checks match the profile" % (serial, g["title"], n))
+    return 1 if bad else 0
+
+
+def slot_arg(text):
+    """--slot: a savestate slot number, or 'auto' for the game's usual test saves."""
+    if text == "auto":
+        return text
+    try:
+        return int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("a slot number or 'auto'")
+
+
 def main():
     names = [n for n, _ in SCENARIOS]
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("scenarios", nargs="*", help="'all' or names: " + ", ".join(names))
     ap.add_argument("--list", action="store_true", help="list the scenarios")
+    ap.add_argument("--check-profile", action="store_true",
+                    help="no emulator: load both shipped profiles and check the addresses vrtest uses match them")
+    ap.add_argument("--profiles-dir", default=PROFILES_DIR, help="where the shipped profiles are (default %(default)s)")
     ap.add_argument("--pine-slot", type=int, default=28011)
-    ap.add_argument("--slot", type=int, help="savestate slot to load before every scenario")
+    ap.add_argument("--slot", type=slot_arg, help="savestate slot to load before every scenario, or 'auto': File #1 "
+                                                  "slot 4 (pitch 3), File #2 slot 1 (pitch 2, the .45 equipped)")
     ap.add_argument("--scratch-slot", type=int, default=9, help="slot savestate-yaw saves to (overwritten)")
     ap.add_argument("--settle", type=float, default=3.0, help="seconds to wait after loading a state")
     ap.add_argument("--junit", help="write a JUnit XML file here")
@@ -793,6 +1102,8 @@ def main():
     ap.add_argument("--adlib-width", type=int, default=1, choices=(1, 2, 4))
     args = ap.parse_args()
 
+    if args.check_profile:
+        return check_profiles(args.profiles_dir)
     if args.list or not args.scenarios:
         print("\n".join(names))
         return 0
@@ -812,9 +1123,11 @@ def main():
     except PineError as e:
         print("PINE: %s (emulator running, EnablePINE on, a build with MsgVRTelemetry?)" % e)
         return 2
-    if serial != SERIAL:
-        print("these scenarios are for %s; the emulator is running %r" % (SERIAL, serial))
+    if serial not in GAMES:
+        print("these scenarios are for %s; the emulator is running %r" % (
+            " and ".join("%s (%s)" % (s, g["title"]) for s, g in GAMES.items()), serial))
         return 2
+    select_game(serial)
     online_safe = tel["online_safe"]
     if not online_safe:
         try:
@@ -822,7 +1135,7 @@ def main():
         except PineError:
             print("MsgVRFakeInput refused: start the emulator with PCSX2_VR_TEST_INPUT=1 in its environment.")
             return 2
-    print("%s, telemetry v%d, online-safe %s" % (serial, tel["version"], "ON" if online_safe else "off"))
+    print("%s (%s), telemetry v%d, online-safe %s" % (serial, TITLE, tel["version"], "ON" if online_safe else "off"))
 
     runner = Runner(p, args)
     results = []
@@ -831,10 +1144,13 @@ def main():
         runner.current = name
         t0 = time.time()
         try:
+            if name in GAME["skip"]:
+                raise Skip("%s: %s" % (TITLE, GAME["skip"][name]))
             if online_safe and fn not in ONLINE_SAFE_SCENARIOS:
                 raise Skip("online-safe is on: scripted input is refused")
-            if args.slot is not None:
-                p.load_state(args.slot)
+            slot = GAME["scenario_slots"].get(name, GAME["default_slot"]) if args.slot == "auto" else args.slot
+            if slot is not None:
+                p.load_state(slot)
                 time.sleep(args.settle)
             result, detail = "PASS", fn(runner)
         except Skip as e:
