@@ -164,6 +164,9 @@ namespace VR::HudCards
 		float virus_pct = 0.0f; // 0-100
 		bool has_bleed = false;
 		bool bleeding = false;
+		// Rounds in the equipped gun (GameFeedback, feedback.weapon), drawn as "AMMO n" under the HP bar.
+		bool has_ammo = false;
+		u16 ammo = 0;
 	};
 
 	enum class Condition : u8

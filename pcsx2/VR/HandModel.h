@@ -32,6 +32,13 @@ namespace VR::HandModel
 		float trigger = 0.0f;
 		// Right hand only: hold a pistol instead of the controller.
 		bool gun = false;
+		// With gun, shot feedback: kick 0-1 pitches the hand and gun up (7 deg) and back (1.5 cm) about the
+		// grip; flash draws a muzzle flash; slide 0-1 moves the slide back (1.8 cm at 1); slide_locked holds it
+		// fully back (an empty gun).
+		float kick = 0.0f;
+		bool flash = false;
+		float slide = 0.0f;
+		bool slide_locked = false;
 	};
 
 	// The player's character has a weapon raised (the right hand then holds the pistol).
