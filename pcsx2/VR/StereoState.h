@@ -57,6 +57,11 @@ namespace VR::StereoState
 		float log_w1 = 0.0f;
 		float log_dfar = 0.0f;
 
+		// First-person scene armed (linear map only).
+		bool first_person = false;
+		// Linear-map disparity floor, in units of separation: 0 keeps the old clamp at the
+		// convergence plane, -1 lets content reach crossed disparity -separation.
+		float near_floor = 0.0f;
 	};
 
 	void Publish(const Params& params);
@@ -68,4 +73,17 @@ namespace VR::StereoState
 	float GetCurrentEyeSign();
 
 	void AdvanceEye();
+
+	// Head roll (radians, game camera convention) published by the camera driver each
+	// time it writes the look-at. HeadRoll returns false if never set or older than 150 ms.
+	void PublishHeadRoll(float roll_rad);
+	bool HeadRoll(float* roll_rad);
+
+	// Rotate first-person parallax with head roll (VR.RollParallax).
+	void SetRollParallaxEnabled(bool enabled);
+	bool RollParallaxEnabled();
+
+	// Offline-only gate for the headset-free stereo dump (false while the network adapter is on).
+	void SetDumpAllowed(bool allowed);
+	bool DumpAllowed();
 }

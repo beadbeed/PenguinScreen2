@@ -13,6 +13,7 @@
 #include "Host.h"
 #include "PerformanceMetrics.h"
 #ifdef ENABLE_VR
+#include "VR/StereoDump.h"
 #include "VR/VRManager.h"
 #endif
 #include "pcsx2/Config.h"
@@ -693,6 +694,7 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 	}
 
 #ifdef ENABLE_VR
+	VR::StereoDump::MaybeCapture(blank_frame ? nullptr : g_gs_device->GetCurrent());
 	VR::EndOfFrame(blank_frame ? nullptr : g_gs_device->GetCurrent());
 #endif
 

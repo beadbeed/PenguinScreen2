@@ -2702,7 +2702,7 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 		if (snode.has_child("firstPerson") && snode["firstPerson"].is_map())
 		{
 			const ryml::ConstNodeRef fp = snode["firstPerson"];
-			warnUnknownKeys(serial, fp, "stereo.firstPerson", {"separation", "convergence"});
+			warnUnknownKeys(serial, fp, "stereo.firstPerson", {"separation", "convergence", "nearest"});
 			if (fp.has_child("separation"))
 			{
 				const std::optional<float> v = StringUtil::FromChars<float>(nodeVal(fp["separation"]));
@@ -2718,6 +2718,14 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 					sp.fp_convergence = v.value();
 				else
 					Console.WarningFmt("(VR) ProfileDB: Serial '{}' has an invalid stereo.firstPerson convergence; ignoring it.", serial);
+			}
+			if (fp.has_child("nearest"))
+			{
+				const std::optional<float> v = StringUtil::FromChars<float>(nodeVal(fp["nearest"]));
+				if (v.has_value() && std::isfinite(v.value()) && v.value() >= 0.45f && v.value() <= 1.5f)
+					sp.fp_nearest = v.value();
+				else
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a stereo.firstPerson nearest outside 0.45-1.5 m; ignoring it.", serial);
 			}
 		}
 

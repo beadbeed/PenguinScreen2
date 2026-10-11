@@ -6081,6 +6081,35 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 	m_conf.cb_vs.vr_band[2].w = vr_zq_apply ? s_vr_zqfit.beta : 0.0f;
 	m_conf.cb_vs.vr_band[3].w = vr_zq_apply ? 1.0f : 0.0f;
 
+	// First person, linear map: vr_splits carries the near floor (.x) and the head-roll rotation of the
+	// parallax (.y, .z), which the linear branch of tfx.glsl reads; all zero keeps the old behaviour.
+	if (vr_engaged && st.map == VR::StereoState::Params::Map::Linear && st.first_person)
+	{
+		// Only perspective draws may go in front of the convergence plane: Z-fitted ones, or textured
+		// non-FST draws whose Q varies. Constant-Q and untextured draws never jump forward.
+		const bool vr_near_ok = vr_zq_apply || (PRIM->TME && !PRIM->FST && !m_vt.m_eq.q);
+		const float vr_floor = vr_near_ok ? st.near_floor : 0.0f;
+
+		float vr_roll_y = 0.0f;
+		float vr_roll_z = 0.0f;
+		float vr_roll = 0.0f;
+		if (VR::StereoState::RollParallaxEnabled() && VR::StereoState::HeadRoll(&vr_roll) && std::isfinite(vr_roll))
+		{
+			// Positive roll (left ear down) puts the right eye higher, so far content in the right-eye image
+			// moves up; Vulkan NDC +y points down after the flip in tfx.glsl and the right eye's sign is +1.
+			constexpr float kRollYSign = -1.0f;
+			constexpr float kDegToRad = 3.14159265358979323846f / 180.0f;
+			const float abs_roll = std::abs(vr_roll);
+			const float fade = (abs_roll <= 25.0f * kDegToRad) ? 1.0f :
+			                   (abs_roll >= 40.0f * kDegToRad) ? 0.0f :
+			                                                     (40.0f * kDegToRad - abs_roll) / (15.0f * kDegToRad);
+			const float aspect = (GSConfig.AspectRatio == AspectRatioType::R16_9) ? (16.0f / 9.0f) : (4.0f / 3.0f);
+			vr_roll_z = 1.0f - std::cos(vr_roll) * fade;
+			vr_roll_y = kRollYSign * std::sin(vr_roll) * aspect * fade;
+		}
+		m_conf.cb_vs.vr_splits = GSVector4(vr_floor, vr_roll_y, vr_roll_z, 0.0f);
+	}
+
 	if (vr_zq_apply && VRZQFitVerbose()) [[unlikely]]
 	{
 		const float zhi = m_vt.m_max.p.z * 0x1p-32f;

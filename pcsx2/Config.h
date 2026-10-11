@@ -1324,6 +1324,12 @@ struct Pcsx2Config
 		// network adapter is on or the game is online. On: it may arm online, but only while DEV9's Internal
 		// DNS sends the game's login host to a server that is not obsrv (see CameraDriver::ResolveNetMode).
 		bool PrivateCoopFirstPerson = false;
+		// First-person near depth, in metres: how near true stereo depth reaches before it flattens onto that
+		// plane. 0 = the profile's stereo.firstPerson.nearest, below 0 = off (flatten at the convergence plane
+		// as before), above 0 = this value (clamped to 0.45-1.5 m).
+		float NearDepthMetres = 0.0f;
+		// First person: turn the stereo parallax with head roll so a tilted head sees no vertical disparity.
+		bool RollParallax = true;
 
 		// Headset brightness: scales the gamma of the presentation lift (1.0 = neutral) on top of the
 		// profile's own. Applied only while a VR session runs, so flat play is never touched.
