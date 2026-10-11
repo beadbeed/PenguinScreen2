@@ -112,12 +112,14 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 	dialog()->registerWidgetHelp(m_ui.onlineSafe, tr("Online-Safe First Person"), tr("Unchecked"),
 		tr("Turns off the first-person extras that change gameplay, such as walking while aiming and aim pitch from "
 		   "the controller. The first-person camera itself still turns your character, which other players see. "
-		   "Always on while the network adapter is enabled, whatever this box says. Takes effect immediately."));
+		   "Always on while the network adapter is enabled, except in private co-op, where it follows this box. "
+		   "Takes effect immediately."));
 
 	dialog()->registerWidgetHelp(m_ui.privateCoopFirstPerson, tr("Private Co-op First Person"), tr("Unchecked"),
 		tr("Lets first person run online, but only on a private server: the network adapter's Internal DNS must send "
 		   "www01.kddi-mmbb.jp to an address that is not obsrv. On obsrv or any other server, first person stays off "
-		   "online and you get the 3D screen. Your partner sees your character turn where you look, a little late. "
+		   "online and you get the 3D screen. Your partner sees your character turn and aim where you look, slightly "
+		   "late. Walking while aiming and aim pitch work there too, unless Online-Safe First Person is checked. "
 		   "Takes effect immediately."));
 
 	dialog()->registerWidgetHelp(m_ui.gameRumble, tr("Forward Game Rumble to the VR Controllers"), tr("Checked"),

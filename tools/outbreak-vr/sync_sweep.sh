@@ -6,6 +6,7 @@
 cd "$(dirname "$0")"
 SHIP="D:/Games/PS2/PenguinScreen2/resources/vr-profiles/SLPM-65428.yaml"
 OVR="D:/Games/PS2/PenguinScreen2/vrprofiles/SLPM-65428.yaml"
+trap 'rm -f "$OVR"' EXIT   # a leftover override silently replaces the shipped profile
 mkdir -p "$(dirname "$OVR")"
 for V in "$@"; do
   if [ "$V" = "time" ]; then

@@ -13,9 +13,10 @@ outranks the scripted one. Be in a room (J's Bar) standing idle with room to wal
   python vrtest.py --list
   python vrtest.py all --slot 3 --junit out/junit.xml --report out/   # report: HTML + Headset Window shots
 
-walk-and-shoot-online-safe and pitch-online-safe only run with VR "online-safe" (or the network adapter)
-on, where the scripted input must be refused, nothing may move the character and the aim servo is never
+walk-and-shoot-online-safe and pitch-online-safe only run with the VR "Online-Safe First Person" setting on,
+where the scripted input must be refused, nothing may move the character and the aim servo is never
 silenced (both raise the weapon with R1 on padd's virtual pad); every other scenario is skipped then.
+Never with the network adapter on: the runner refuses (it loads savestates, which must never happen online).
 savestate-yaw saves to --scratch-slot (default 9) and overwrites it.
 
 run-latch walks and runs ahead (about 3 m all told): use --slot with open floor in front. The ad-lib byte is not
@@ -37,7 +38,7 @@ import traceback
 from xml.etree import ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pine import FakeController, PineError, pose, wait_for_pine, zone
+from pine import FakeController, PineError, pose, require_offline, wait_for_pine, zone
 
 SERIAL = "SLPM-65428"
 
@@ -432,7 +433,7 @@ def sc_pitch_online_safe(r):
     """Online-safe: R1 + stick up on the virtual pad. The servo must never be silenced and the game's own
     code must tilt the aim (stick up eases +0xBC8 toward +8192)."""
     if not r.p.telemetry()["online_safe"]:
-        raise Skip("needs VR online-safe or the network adapter on")
+        raise Skip("needs the VR Online-Safe setting on")
     try:
         import padd
     except ImportError:
@@ -491,7 +492,7 @@ def sc_pitch_online_safe(r):
 
 def sc_walk_online_safe(r):
     if not r.p.telemetry()["online_safe"]:
-        raise Skip("needs VR online-safe or the network adapter on")
+        raise Skip("needs the VR Online-Safe setting on")
     try:
         r.p.fake_input(ttl_ms=100)
         raise Fail("MsgVRFakeInput was accepted with online-safe on")
@@ -804,6 +805,7 @@ def main():
 
     try:
         p = wait_for_pine(args.pine_slot, seconds=10)
+        require_offline(p)
         serial = p.game_id()
         tel = p.telemetry()
     except PineError as e:

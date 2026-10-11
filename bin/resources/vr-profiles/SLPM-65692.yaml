@@ -54,7 +54,7 @@ SLPM-65692:
   # door follow camera's eye writes are NOP'd, so nothing overwrites them; the view build after them still
   # runs. camera.lookAt then writes the eye at the local character's head every vsync, looking along the
   # character's heading (+0x92) plus head yaw, tilted by head pitch, moved by head translation (cm units).
-  # File #2 code words checked against our 2.DAT; heading +0x92 is carried over from File #1 and not yet confirmed live.
+  # File #2 code words checked against our 2.DAT; heading +0x92 (carried over from File #1) was checked live in 6c4fbdc.
   # Research notes: tools/outbreak-vr and D:/Games/PS2/research on the test PC.
   camera:
     networkFlag: 0x3137D2   # u8 1 while the game is in network play. Online, first person arms only in private co-op
@@ -136,8 +136,10 @@ SLPM-65692:
         - { offset: 0x08, equals: 5, width: 1 }
         - { offset: 0xBB8, min: 0x08, max: 0x3F, width: 1 }
       hold:
-        - { address: 0x3B31F4, value: 3, width: 1, restoreFrom: 0x4912BD, when: [{ address: 0x4912BD, notEquals: 3, width: 1 }], notes: "camera focus slot" }
-        - { address: 0x3B31F4, value: 0, width: 1, restoreFrom: 0x4912BD, when: [{ address: 0x4912BD, equals: 3, width: 1 }], notes: "camera focus slot (you are slot 3)" }
+        # Focus slot as File #1: never a partner. Slot 3 while its record is empty (max HP +0x542 is 0), else slot 2
+        # when you are slot 3 and it is empty; a full room holds nothing.
+        - { address: 0x3B31F4, value: 3, width: 1, restoreFrom: 0x4912BD, when: [{ address: 0x4912BD, notEquals: 3, width: 1 }, { address: 0x47F572, equals: 0, width: 2 }], notes: "camera focus slot: 3 while that record is empty" }
+        - { address: 0x3B31F4, value: 2, width: 1, restoreFrom: 0x4912BD, when: [{ address: 0x4912BD, equals: 3, width: 1 }, { address: 0x47E472, equals: 0, width: 2 }], notes: "camera focus slot: 2 while empty (you are slot 3)" }
         - { address: 0x718DB4, f32: 75.0, restoreF32: 80.0, when: [{ address: 0x543004, equals: 3 }], notes: "near-cull radius, characters" }
       viewMatrix: 0x3134F0
       syncFramesBack: 2

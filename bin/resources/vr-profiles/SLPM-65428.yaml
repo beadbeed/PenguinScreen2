@@ -129,9 +129,11 @@ SLPM-65428:
         - { offset: 0x54F, equals: 0, width: 1 }    # action: idle (1 walk, 3 run, 128 aiming)
         - { offset: 0xF98, equals: 0, width: 2 }    # stick magnitude: centred
       # Hide your own body: the room's near-camera cull (models whose feet + 100 up are nearer the eye
-      # than their class radius) spares only the camera's focus character. Point the focus at another
-      # slot (3, empty offline; 0 if you are slot 3 online) and the cull hides the local character; it is
-      # put back from the local slot byte. The class-1 radius goes from 80 to 75 so zombies and partners
+      # than their class radius) spares only the camera's focus character. Point the focus at an empty
+      # slot and the cull hides the local character; it is put back from the local slot byte. Never at a
+      # partner online: slot 3 when it is empty (max HP +0x546 is 0 in an unused record; offline it always
+      # is), else slot 2 when you are slot 3 and it is empty. In a full 4-player room no slot is free, so
+      # nothing is held and your body may show. The class-1 radius goes from 80 to 75 so zombies and partners
       # stay visible down to about 0.5 m away.
       # Grabbed by a zombie (stance 5, checked on File #1: bites follow until Kevin breaks free), or down / dead /
       # turned (status 0xBA0: 0x08-0x0B down, 0x0C down in gas, above that dead, 0x30-0x34 zombie): the game's own
@@ -140,8 +142,8 @@ SLPM-65428:
         - { offset: 0x08, equals: 5, width: 1 }
         - { offset: 0xBA0, min: 0x08, max: 0x3F, width: 1 }
       hold:
-        - { address: 0x3AEF74, value: 3, width: 1, restoreFrom: 0x48BF7D, when: [{ address: 0x48BF7D, notEquals: 3, width: 1 }], notes: "camera focus slot" }
-        - { address: 0x3AEF74, value: 0, width: 1, restoreFrom: 0x48BF7D, when: [{ address: 0x48BF7D, equals: 3, width: 1 }], notes: "camera focus slot (you are slot 3)" }
+        - { address: 0x3AEF74, value: 3, width: 1, restoreFrom: 0x48BF7D, when: [{ address: 0x48BF7D, notEquals: 3, width: 1 }, { address: 0x47A5B6, equals: 0, width: 2 }], notes: "camera focus slot: 3 while that record is empty" }
+        - { address: 0x3AEF74, value: 2, width: 1, restoreFrom: 0x48BF7D, when: [{ address: 0x48BF7D, equals: 3, width: 1 }, { address: 0x4794D6, equals: 0, width: 2 }], notes: "camera focus slot: 2 while empty (you are slot 3)" }
         - { address: 0x6D6CF4, f32: 75.0, restoreF32: 80.0, when: [{ address: 0x540004, equals: 3 }], notes: "near-cull radius, characters" }
       # The view matrix the game builds from eye/target (row vectors). Matching it against what was
       # written says which head pose each displayed frame came from, so the first-person screen is

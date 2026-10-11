@@ -19,7 +19,7 @@ import time
 sys.path.insert(0, os.path.dirname(__file__))
 import drive
 import padd
-from pine import Pine, PineError
+from pine import Pine, PineError, require_offline
 
 SILENCE = [0x58EAEC, 0x58EAFC, 0x58EB0C, 0x5A91E0, 0x5A9340, 0x5A9410, 0x630B00]
 ORIGINAL = [0x0C163B1C, 0x0C163C8C, 0x0C163B60, 0x0C0D013C, 0x0C0D013C, 0x0C0D013C, 0xA2220FAA]
@@ -136,5 +136,6 @@ def flat(p):
 
 if __name__ == "__main__":
     pine = Pine()
+    require_offline(pine)
     wait_ready(pine)
     {"armed": armed, "features": features, "flat": flat}[sys.argv[1]](pine)

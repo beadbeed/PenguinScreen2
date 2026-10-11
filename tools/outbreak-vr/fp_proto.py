@@ -13,7 +13,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(__file__))
-from pine import MSG_READ16, MSG_READ32, MSG_WRITE32, Pine
+from pine import MSG_READ16, MSG_READ32, MSG_WRITE32, Pine, require_offline
 
 SILENCE = [(0x58EAEC, 0x0C163B1C), (0x58EAFC, 0x0C163C8C), (0x58EB0C, 0x0C163B60),
            (0x5A91E0, 0x0C0D013C), (0x5A9340, 0x0C0D013C), (0x5A9410, 0x0C0D013C)]
@@ -108,6 +108,7 @@ if __name__ == "__main__":
     secs = float(sys.argv[1]) if len(sys.argv) > 1 else 20
     fp = FirstPerson(eye_height=float(sys.argv[2]) if len(sys.argv) > 2 else 155.0,
                      fov=float(sys.argv[3]) if len(sys.argv) > 3 else 80.0)
+    require_offline(fp.p)
     fp.start()
     try:
         time.sleep(secs)

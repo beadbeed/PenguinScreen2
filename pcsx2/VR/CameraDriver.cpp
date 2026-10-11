@@ -856,13 +856,6 @@ namespace VR::CameraDriver
 			return false;
 		}
 
-		// Online-safe: the VR setting, or any time the network adapter is on. Nothing that changes what the
-		// game simulates (code patches, writes to the character) is done then.
-		bool OnlineSafeNow()
-		{
-			return EmuConfig.VR.OnlineSafe || EmuConfig.DEV9.EthEnable;
-		}
-
 		// Where first person may run, resolved every vsync. Unknown is treated as Restricted.
 		enum class NetMode : u8
 		{
@@ -872,9 +865,19 @@ namespace VR::CameraDriver
 		};
 		NetMode s_net_mode = NetMode::Offline;
 		bool s_net_mode_logged = false;
+		u32 s_net_toast_crc = 0; // the game the last co-op / restricted toast was shown in
+		NetMode s_net_toast_mode = NetMode::Offline;
+
+		// Online-safe: the extras that change gameplay (walking while aiming, aim pitch) stay off. The VR setting,
+		// or the network adapter on anywhere but private co-op: there partners take your character as state
+		// values (position, heading, aim), so first person plays in full and only the setting turns them off.
+		bool OnlineSafeNow()
+		{
+			return EmuConfig.VR.OnlineSafe || (EmuConfig.DEV9.EthEnable && s_net_mode != NetMode::PrivateCoop);
+		}
 
 		// DEV9's Internal DNS sends the game's login host (www01.kddi-mmbb.jp) to an address that is not obsrv
-		// (208.72.237.0/24). This is how scripts/online-doctor.py --private points a client at our server.
+		// (208.72.237.0/24). This is how tools/outbreak-vr/netmode.py private points a client at our server.
 		bool LoginHostIsPrivate()
 		{
 			for (const Pcsx2Config::DEV9Options::HostEntry& h : EmuConfig.DEV9.EthHosts)
@@ -2400,8 +2403,17 @@ namespace VR::CameraDriver
 			s_net_mode = net_mode;
 			s_net_mode_logged = true;
 		}
+		s_online_safe = OnlineSafeNow(); // again, now that private co-op is known
 		const bool net_ok = (net_mode != NetMode::Restricted);
 		const bool armed = switched_on && (vm_state == VMState::Running) && pose.valid && guards_hold && net_ok;
+		// Say once per game in the headset why first person is (or isn't) running online.
+		const bool would_arm = switched_on && (vm_state == VMState::Running) && pose.valid && guards_hold;
+		if (would_arm && net_mode != NetMode::Offline && !(s_net_toast_crc == crc && s_net_toast_mode == net_mode))
+		{
+			s_net_toast_crc = crc;
+			s_net_toast_mode = net_mode;
+			HudCards::Toast(net_ok ? "Private co-op: first person online" : "Online: 3D screen (not private co-op)", 4.0f);
+		}
 		s_disarm_reason = armed                          ? DisarmReason::Armed :
 		                  !switched_on                   ? DisarmReason::SwitchedOff :
 		                  !net_ok                        ? DisarmReason::OnlineRestricted :
@@ -2433,6 +2445,7 @@ namespace VR::CameraDriver
 			{
 				const char* reason =
 					!switched_on                   ? "VR/HeadCamera switch off" :
+					!net_ok                        ? "online, not private co-op" :
 					(vm_state != VMState::Running) ? "VM not Running (paused)" :
 					!pose.valid                    ? "no valid head pose published" :
 													 "profile guard failed";

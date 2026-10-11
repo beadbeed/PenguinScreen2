@@ -10,8 +10,11 @@ with scripted controllers (only when the emulator was started with PCSX2_VR_TEST
 with online-safe or the network adapter on); telemetry() reads what the first-person camera did.
 """
 import math
+import os
+import re
 import socket
 import struct
+import sys
 import threading
 import time
 
@@ -314,6 +317,42 @@ def wait_for_pine(slot=28011, seconds=60):
         except OSError:
             time.sleep(1)
     raise PineError("PINE not reachable on 127.0.0.1:%d (EnablePINE on? game running?)" % slot)
+
+
+# The emulator's ini (portable install on the test PC; PCSX2_INI overrides) and each game's network-play flag.
+INI = os.environ.get("PCSX2_INI", r"D:\Games\PS2\PenguinScreen2\inis\PenguinScreen2.ini")
+NETWORK_FLAG = {"SLPM-65428": 0x3065C2, "SLPM-65692": 0x3137D2}
+
+
+def network_adapter_on(ini=INI):
+    """True if [DEV9/Eth] EthEnable is true in the ini; None if the ini can't be read."""
+    try:
+        with open(ini, encoding="utf-8", errors="replace") as fh:
+            section = None
+            for line in fh:
+                m = re.match(r"^\[(.+)\]\s*$", line)
+                if m:
+                    section = m.group(1)
+                elif section == "DEV9/Eth" and re.match(r"^\s*EthEnable\s*=\s*true\s*$", line, re.I):
+                    return True
+        return False
+    except OSError:
+        return None
+
+
+def require_offline(p=None):
+    """Exit unless the emulator is offline. The test tools pause, load savestates, patch code and send test input;
+    none of that may ever happen online (the server drops a client that stalls, and a state load desyncs the room)."""
+    if network_adapter_on():
+        sys.exit("the network adapter is on (%s): test tools never run online. Close the emulator, run "
+                 "netmode.py off, and start it again." % INI)
+    if p is not None:
+        try:
+            flag = NETWORK_FLAG.get(p.game_id())
+            if flag is not None and p.read8(flag):
+                sys.exit("the game is in network play: test tools never run online.")
+        except PineError:
+            pass
 
 
 if __name__ == "__main__":

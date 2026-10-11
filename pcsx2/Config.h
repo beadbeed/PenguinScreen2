@@ -1316,9 +1316,9 @@ struct Pcsx2Config
 		static constexpr float MAX_VIGNETTE_STRENGTH = 1.0f;
 		static constexpr float DEFAULT_VIGNETTE_STRENGTH = 0.6f;
 		float VignetteStrength = DEFAULT_VIGNETTE_STRENGTH;
-		// First person changes only what this player sees (camera, screen, own body), never gameplay
-		// that others see (walking while aiming moves the character). Also on whenever the network
-		// adapter is enabled, so it holds for online play without having to remember it.
+		// Turns off the first-person extras that change gameplay (walking while aiming, aim pitch from the
+		// controller). Also on whenever the network adapter is enabled, except in private co-op (below),
+		// where first person plays in full unless this is set.
 		bool OnlineSafe = false;
 		// First person online, in co-op on a private server only. Off: first person never arms while the
 		// network adapter is on or the game is online. On: it may arm online, but only while DEV9's Internal

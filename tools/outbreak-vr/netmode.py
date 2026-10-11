@@ -7,8 +7,8 @@
   python netmode.py status                     # show what is set now
 
 Close the emulator first: it rewrites its ini on exit. Works on Windows, macOS and Linux.
-The ini is found next to a portable install (D:\\Games\\PS2\\PenguinScreen2\\inis\\PCSX2.ini) or in the user
-folder; pass --ini PATH to choose. A backup is kept as PCSX2.ini.bak.
+The ini is found next to a portable install (D:\\Games\\PS2\\PenguinScreen2\\inis\\PenguinScreen2.ini, or
+PCSX2.ini) or in the user folder; pass --ini PATH to choose. The previous settings are kept as <ini>.bak.
 
 private:
 - adapter on (Sockets, Auto);
@@ -32,6 +32,7 @@ OBSRV_DNS = "208.72.237.31"
 DNAS = ("gate1.jp.dnas.playstation.org", "153.121.44.150")
 LOGIN_HOSTS = ("kddi-mmbb.jp", "www01.kddi-mmbb.jp")
 CANDIDATES = [
+    r"D:\Games\PS2\PenguinScreen2\inis\PenguinScreen2.ini",
     r"D:\Games\PS2\PenguinScreen2\inis\PCSX2.ini",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "inis", "PCSX2.ini"),
     os.path.expanduser(r"~\Documents\PenguinScreen2\inis\PCSX2.ini"),
@@ -40,13 +41,22 @@ CANDIDATES = [
 ]
 
 
+def emulator_running():
+    """The emulator rewrites its ini on exit, so a change made while it runs would be lost (Windows check only)."""
+    if os.name != "nt":
+        return False
+    import subprocess
+    out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq pcsx2-qt.exe"], capture_output=True, text=True).stdout
+    return "pcsx2-qt.exe" in out
+
+
 def find_ini(explicit):
     if explicit:
         return explicit
     for c in CANDIDATES:
         if os.path.exists(c):
             return os.path.normpath(c)
-    sys.exit("PCSX2.ini not found; run the emulator once, or pass --ini PATH")
+    sys.exit("the emulator ini was not found; run the emulator once, or pass --ini PATH")
 
 
 def parse(lines):
@@ -110,6 +120,9 @@ def main():
     ini = find_ini(a.ini)
     with open(ini, encoding="utf-8") as fh:
         blocks = parse(fh.readlines())
+
+    if a.mode != "status" and emulator_running():
+        sys.exit("close the emulator first: it rewrites its ini on exit")
 
     if a.mode == "status":
         eth = read_keys(blocks, "DEV9/Eth")

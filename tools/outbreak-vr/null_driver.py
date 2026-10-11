@@ -32,8 +32,11 @@ def close_steamvr():
 
 def on(standby=False):
     close_steamvr()
-    shutil.copy2(SETTINGS, BACKUP)
     d = json.load(open(SETTINGS, encoding="utf-8"))
+    if d.get("steamvr", {}).get("forcedDriver") == "null" and os.path.exists(BACKUP):
+        print("null HMD was already on; keeping the backup of the real settings")
+    else:
+        shutil.copy2(SETTINGS, BACKUP)
     d.setdefault("steamvr", {}).update({"forcedDriver": "null", "activateMultipleDrivers": True, "requireHmd": False,
                                         "enableHomeApp": False})
     d["driver_null"] = {"enable": True, "serialNumber": "Null Serial Number", "modelNumber": "Null Model Number",
