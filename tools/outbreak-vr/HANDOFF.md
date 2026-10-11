@@ -187,7 +187,7 @@ Our private server runs the same unpatched relay code as obsrv (Nagle on, the 0x
   - task 3's 4-player focus-slot case (2-player rooms should be fine: the hold uses slot 3, or 0 if you
     are slot 3);
   - task 5 (proof);
-  - first person on obsrv (see task 6).
+  - first person on obsrv is not wanted (see task 6).
 - **Tested:** only `clang -fsyntax-only` on the Mac for `CameraDriver.cpp`, `VRProfileDB.cpp` and
   `Pcsx2Config.cpp`, plus CI. `QtHost.cpp` and the `.ui` file are checked only by CI. Nothing has been
   run.
@@ -251,10 +251,8 @@ Carry on from this list, in order:
 
    **What the code does today:** first person runs online when Private Co-op First Person is on and the
    login host points at a non-obsrv server, which is what `netmode.py private` sets up. On obsrv it
-   currently stays off and uses the 3D screen. In the Mac session, making it run on obsrv as well (a
-   default-on "Online First Person" setting) was blocked by Claude Code's safety check, so that edit
-   was not made. Whether to allow first person on obsrv, with strangers in the room, is Alex's call to
-   make in the Mac session.
+   stays off and uses the 3D screen. **That is what Alex wants:** he only plays online co-op with his
+   brother on the private server and doesn't need first person on obsrv. Nothing more to do there.
 
 ## 5b. The easy private server
 
