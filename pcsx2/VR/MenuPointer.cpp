@@ -50,6 +50,7 @@ namespace VR::MenuPointer
 		// CPU thread only.
 		State s_state;
 		bool s_screen_open = false; // the profile's menu was up last poll (whether or not point-to-select ran)
+		bool s_submenu_open = false; // a suspendWhen guard held steering last poll (StepOut::submenu), for its log lines
 		u32 s_log_budget = 0;
 		u32 s_log_dropped = 0;
 		u32 s_open_steers = 0;
@@ -114,7 +115,8 @@ namespace VR::MenuPointer
 			return false;
 		}
 
-		// Everything about one opening of the menu, back to closed. The swallow and the button edges carry on.
+		// Everything about one opening of the menu, back to closed. The swallow, the button edges and the wait after a
+		// confirm carry on.
 		void ResetOpen(State& st)
 		{
 			st.open = false;
@@ -126,6 +128,7 @@ namespace VR::MenuPointer
 			st.ignore = -2;
 			st.disarmed = false;
 			st.disarm_under = -1;
+			st.disarm_strict = false;
 			st.latched = false;
 			st.latch_cell = -1;
 			st.suspend_polls = 0;
@@ -372,6 +375,8 @@ namespace VR::MenuPointer
 		// A swallowed confirm stays held back until the controls are let go, whatever else happens meanwhile.
 		if (st.swallow && !in.confirm)
 			st.swallow = false;
+		// The wait after a confirm (suspendWhen) counts down every poll, the gate up or down.
+		st.after_confirm_ms = std::max(0.0f, st.after_confirm_ms - in.dt_ms);
 
 		// Stops a steer. A confirm waiting for it never reaches the game: it is swallowed (held back until let go if it
 		// is still held). The pointer then waits for the hover to change before it steers again, so nothing retries.
@@ -423,6 +428,13 @@ namespace VR::MenuPointer
 				st.latched = true;
 				st.latch_cell = latch_cell;
 			}
+			// The wait after a confirm outlives a gate drop only while the menu is still up; a confirm reaching the game
+			// meanwhile (with the gate down nothing but a swallow holds the trigger, and a fresh pull is never swallowed)
+			// starts it as well.
+			if (!in.screen_up)
+				st.after_confirm_ms = 0.0f;
+			else if (confirm_edge && !p.suspend_when.empty())
+				st.after_confirm_ms = kAfterConfirmMs;
 			out.suspended = st.latched;
 			out.confirm_hold = st.swallow;
 			return out;
@@ -481,8 +493,12 @@ namespace VR::MenuPointer
 			st.ignore = st.under;
 		else if (st.ignore != -2 && st.under != st.ignore)
 			st.ignore = -2;
-		if (st.disarmed && st.under != st.disarm_under)
+		// Any change of hover arms again, except after a submenu: there only the hover reaching another cell does.
+		if (st.disarmed && st.under != st.disarm_under && (!st.disarm_strict || st.under >= 0))
+		{
 			st.disarmed = false;
+			st.disarm_strict = false;
+		}
 
 		// The player taking over with another control stops any steer, and the pointer waits for the hover to change.
 		const bool override_now = in.dpad || in.right_stick >= kOverrideRightStick || in.left_stick >= kOverrideLeftStick ||
@@ -498,30 +514,53 @@ namespace VR::MenuPointer
 		// the cursor moving to another cell or the menu closing: the D-pad might be working a submenu by then.
 		if (st.latched && (back_edge || (current >= 0 && current != st.latch_cell)))
 			st.latched = false;
+		// With suspendWhen, steering waits while one of its guards passes (a submenu is open) and kSuspendTailPolls
+		// after, and for the wait after a confirm (a submenu that confirm opens may not have its flag up yet).
 		bool suspended = false;
+		bool submenu = false;
 		if (!p.suspend_when.empty())
 		{
 			if (in.suspend)
 			{
 				st.suspend_polls = kSuspendTailPolls;
-				suspended = true;
+				submenu = true;
 			}
 			else if (st.suspend_polls > 0)
 			{
 				st.suspend_polls--;
-				suspended = true;
+				submenu = true;
 			}
+			suspended = submenu || st.after_confirm_ms > 0.0f;
 		}
 		else
 		{
 			suspended = st.latched;
 		}
 
+		// Suspended, nothing is pressed from this very poll: a press under way is let go and the steer ends. A confirm
+		// it was holding for the arrival never reaches the game (held back only while still held, so it can never turn
+		// into a confirm in a submenu the player did not make), and from here on the trigger passes straight through:
+		// nothing is armed, so a fresh pull is the player's own confirm on whatever the game has up.
 		const bool can_steer = !st.selfcheck_failed && !suspended;
 		if (!can_steer)
-			abort_steer(st.selfcheck_failed ? "the cursor struct did not match" : "a submenu is open");
+		{
+			const char* why = "a confirm just reached the game";
+			if (st.selfcheck_failed)
+				why = "the cursor struct did not match";
+			else if (submenu || p.suspend_when.empty())
+				why = "a submenu is open";
+			abort_steer(why);
+		}
 		if (st.target >= 0 && current < 0)
 			abort_steer("the cursor left the cells");
+		// A submenu: once it has closed, steering stays off until the dot reaches a cell other than the one it is on as
+		// the submenu (and its tail) ends, so closing it never sends the cursor to wherever the dot was left meanwhile.
+		if (submenu)
+		{
+			st.disarmed = true;
+			st.disarm_strict = true;
+			st.disarm_under = st.under;
+		}
 		const bool armed = can_steer && !st.disarmed;
 		out.hovered = armed ? st.under : -1;
 
@@ -561,7 +600,9 @@ namespace VR::MenuPointer
 			}
 			else
 			{
-				// It reaches the game now, on the cursor's own cell.
+				// It reaches the game now: on the cursor's own cell, or (suspended) on whatever the game has up, such as
+				// the highlighted entry of a submenu. With suspendWhen, steering then waits kAfterConfirmMs for a
+				// submenu this confirm opens to show its flag.
 				out.confirm_passed = true;
 				out.confirm_cell = current;
 				if (p.suspend_when.empty())
@@ -569,6 +610,10 @@ namespace VR::MenuPointer
 					st.latched = true;
 					st.latch_cell = current;
 					out.latched = true;
+				}
+				else
+				{
+					st.after_confirm_ms = kAfterConfirmMs;
 				}
 			}
 		}
@@ -608,6 +653,10 @@ namespace VR::MenuPointer
 					st.latched = true;
 					st.latch_cell = current;
 					out.latched = true;
+				}
+				else
+				{
+					st.after_confirm_ms = kAfterConfirmMs;
 				}
 			}
 			st.target = -1;
@@ -683,8 +732,9 @@ namespace VR::MenuPointer
 		out.presses = st.presses;
 		out.in_flight = st.target >= 0;
 		out.confirm_hold = out.in_flight || st.swallow;
-		// As it stands after this poll (a confirm passed now has latched already).
-		out.suspended = p.suspend_when.empty() ? st.latched : suspended;
+		// As it stands after this poll (a confirm passed now has latched, or started its wait, already).
+		out.suspended = p.suspend_when.empty() ? st.latched : (suspended || st.after_confirm_ms > 0.0f);
+		out.submenu = submenu;
 		out.selfcheck_failed = st.selfcheck_failed;
 		return out;
 	}
@@ -835,8 +885,25 @@ namespace VR::MenuPointer
 					Console.WriteLn("(VR) MenuPointer: confirm passed on cell %d; steering paused until Cross, a cursor move or "
 									"the screen closes.",
 						out.confirm_cell);
+				else if (out.submenu)
+					Console.WriteLn("(VR) MenuPointer: confirm passed into the submenu (the player's own pull; nothing steered).");
+				else if (params && !params->suspend_when.empty())
+					Console.WriteLn("(VR) MenuPointer: confirm passed on cell %d; steering waits %.0f ms for a submenu's flag.",
+						out.confirm_cell, static_cast<double>(kAfterConfirmMs));
 				else
 					Console.WriteLn("(VR) MenuPointer: confirm passed on cell %d.", out.confirm_cell);
+			}
+		}
+		// A submenu (suspendWhen) holding steering, as it opens and as it ends (after its tail).
+		if (out.submenu != s_submenu_open)
+		{
+			s_submenu_open = out.submenu;
+			if (screen_open && LogLine())
+			{
+				if (out.submenu)
+					Console.WriteLn("(VR) MenuPointer: submenu open; nothing is pressed and the trigger passes straight through.");
+				else
+					Console.WriteLn("(VR) MenuPointer: submenu closed; steering waits for the dot to reach another cell.");
 			}
 		}
 		if (out.confirm_swallowed)
@@ -1002,9 +1069,35 @@ namespace VR::MenuPointer
 			int presses = 0;
 			int max_held = 0;
 			int min_gap = 99;
+			// A command submenu: with submenu_on_confirm a confirm reaching the game opens it at once, but its flag (what
+			// suspendWhen reads) is seen only flag_delay polls later. While it is open a press the game takes moves its
+			// highlight (counted), not the cursor, and the next confirm closes it, flag and all, at once.
+			bool submenu_on_confirm = false;
+			int flag_delay = 0;
+			int flag_in = 0;
+			bool submenu = false;
+			bool flag = false;
+			int submenu_presses = 0;
 
+			void Confirmed()
+			{
+				if (submenu)
+				{
+					submenu = false;
+					flag = false;
+					flag_in = 0;
+				}
+				else if (submenu_on_confirm)
+				{
+					submenu = true;
+					flag_in = flag_delay;
+					flag = (flag_delay <= 0);
+				}
+			}
 			void Advance()
 			{
+				if (flag_in > 0 && --flag_in == 0 && submenu)
+					flag = true;
 				if (pending_in > 0 && --pending_in == 0 && pending_dir >= 0)
 				{
 					const int to = layout->cells[static_cast<size_t>(cell)].next[pending_dir];
@@ -1054,8 +1147,15 @@ namespace VR::MenuPointer
 				if (!taken && !ignore && held_polls >= 2 && gap_before >= 2)
 				{
 					taken = true;
-					pending_dir = dir;
-					pending_in = 2;
+					if (submenu)
+					{
+						submenu_presses++;
+					}
+					else
+					{
+						pending_dir = dir;
+						pending_in = 2;
+					}
 				}
 			}
 		};
@@ -1075,13 +1175,26 @@ namespace VR::MenuPointer
 			int swallowed = 0;
 			int landed = 0;
 			bool hold_dropped_in_flight = false;
+			bool auto_suspend = false;  // in.suspend follows the game's submenu flag
+			bool trigger_prev = false;  // the confirm controls as the game got them last poll
+			int phantom = 0;            // confirms the game saw that the pointer never passed
 
 			void Poll()
 			{
 				game.Advance();
 				game.Fill(in);
+				if (auto_suspend)
+					in.suspend = game.flag;
 				out = Step(*p, in, st);
 				game.See(out.dir);
+				// The confirm controls as the game gets them (the trigger, unless held back): a rising edge the pointer
+				// did not pass would be a confirm the player never made at that moment.
+				const bool trigger = in.confirm && !out.confirm_hold;
+				if (trigger && !trigger_prev && !out.confirm_passed)
+					phantom++;
+				trigger_prev = trigger;
+				if (out.confirm_passed)
+					game.Confirmed();
 				polls++;
 				if (out.arrived)
 				{
@@ -1457,7 +1570,9 @@ namespace VR::MenuPointer
 			check(!s.st.latched, "the menu closing behind the gate lets the latch go");
 		}
 
-		// suspendWhen: steering waits while it passes and 6 polls after; a confirm does not latch.
+		// suspendWhen: steering waits while it passes and 6 polls after, then until the dot reaches another cell (the
+		// cell it was left on, or leaving the cells and coming back, moves nothing); a confirm does not latch, it only
+		// holds steering for kAfterConfirmMs.
 		{
 			ProfileDB::MenuPointerParams sp = p;
 			sp.suspend_when.push_back(ProfileDB::CameraGuard{});
@@ -1468,22 +1583,194 @@ namespace VR::MenuPointer
 			s.in.suspend = true;
 			s.Point(3);
 			s.Run(40);
-			check(s.game.presses == 0 && s.out.suspended, "suspendWhen suspends steering");
+			check(s.game.presses == 0 && s.out.suspended && s.out.submenu, "suspendWhen suspends steering");
 			s.in.suspend = false;
 			s.Run(5);
 			check(s.game.presses == 0 && s.out.suspended, "for 6 polls after it clears");
-			s.Run(40);
-			check(s.arrivals == 1 && s.game.cell == 3, "then steering resumes");
+			s.Run(60);
+			check(s.game.presses == 0 && !s.out.suspended && !s.out.submenu && s.out.hovered < 0,
+				"after a submenu, the cell the dot was left on moves nothing");
+			s.Point(-1);
+			s.Run(10);
+			s.Point(3);
+			s.Run(60);
+			check(s.game.presses == 0, "nor does the dot leaving the cells and coming back to it");
+			s.Point(1);
+			s.Run(60);
+			check(s.arrivals == 1 && s.game.cell == 1, "the dot reaching another cell steers again");
+			s.Point(3);
+			s.Run(60);
+			check(s.arrivals == 2 && s.game.cell == 3, "and from then on as usual");
 			s.in.confirm = true;
 			s.Poll();
 			s.in.confirm = false;
 			s.Poll();
-			check(s.passed == 1 && !s.out.suspended, "with suspendWhen a confirm does not latch");
+			check(s.passed == 1 && s.out.suspended && !s.st.latched, "with suspendWhen a confirm does not latch: it holds steering");
+			s.Run(30);
+			check(!s.out.suspended, "for kAfterConfirmMs only");
+		}
+
+		// suspendWhen: the poll a submenu's flag rises, a press under way is let go and the steer ends; nothing is
+		// pressed while it is up, wherever the dot goes.
+		{
+			ProfileDB::MenuPointerParams sp = p;
+			sp.suspend_when.push_back(ProfileDB::CameraGuard{});
+			Sim s;
+			s.p = &sp;
+			s.Open();
+			s.ResetCounts();
+			s.Point(3);
+			int guard = 0;
+			while (s.out.dir < 0 && guard++ < 30)
+				s.Poll();
+			check(s.out.dir >= 0, "suspendWhen: a steer starts");
+			s.in.suspend = true;
+			s.Poll();
+			check(s.out.dir < 0 && !s.out.in_flight && s.out.suspended && same(s.abort_reason, "a submenu is open"),
+				"the press under way is let go the poll a submenu's flag rises");
+			const int before = s.game.presses;
+			s.Point(1);
+			s.Run(40);
+			s.Point(4);
+			s.Run(40);
+			check(s.game.presses == before && s.out.dir < 0 && s.out.hovered < 0,
+				"nothing is pressed while a submenu is up, wherever the dot goes");
+		}
+
+		// suspendWhen: a confirm waiting for the cursor when a submenu opens never reaches the game. It stays held back
+		// only while it is still held (so it can never turn into a submenu confirm the player did not make); once let
+		// go the trigger is the player's, and a fresh pull passes straight through to the submenu.
+		{
+			ProfileDB::MenuPointerParams sp = p;
+			sp.suspend_when.push_back(ProfileDB::CameraGuard{});
+			Sim s;
+			s.p = &sp;
+			s.Open();
+			s.ResetCounts();
+			s.Point(4);
+			int guard = 0;
+			while (!s.out.in_flight && guard++ < 30)
+				s.Poll();
+			s.in.confirm = true;
+			s.Poll();
+			check(s.out.in_flight && s.out.confirm_hold && s.passed == 0, "a pull during the flight is held back");
+			s.in.suspend = true;
+			s.Poll();
+			check(s.swallowed == 1 && s.passed == 0 && s.out.dir < 0 && !s.out.in_flight, "a submenu opening drops it");
+			s.Run(10);
+			check(s.passed == 0 && s.out.confirm_hold, "held back while it is still held");
+			s.in.confirm = false;
+			s.Poll();
+			check(!s.out.confirm_hold, "and the trigger is the player's once let go");
+			s.Point(1);
+			s.Run(5);
+			s.in.confirm = true;
+			s.Poll();
+			check(s.passed == 1 && !s.out.confirm_hold && s.out.target < 0 && s.out.dir < 0,
+				"a fresh pull passes straight through to the submenu, wherever the dot is");
+			s.in.confirm = false;
+			s.Poll();
+			check(s.phantom == 0, "the game never sees a confirm the pointer did not pass");
+		}
+
+		// The race: the game opens a command submenu as a confirm reaches it, but its flag is seen only 8 polls (133 ms)
+		// later, and the dot goes straight on to another cell meanwhile. No press may go out in between (it would move
+		// the submenu's highlight, and the next pull confirm the wrong entry), and closing the submenu with the player's
+		// own pull moves nothing either.
+		{
+			ProfileDB::MenuPointerParams sp = p;
+			sp.suspend_when.push_back(ProfileDB::CameraGuard{});
+			Sim s;
+			s.p = &sp;
+			s.auto_suspend = true;
+			s.game.submenu_on_confirm = true;
+			s.game.flag_delay = 8;
+			s.Open();
+			s.ResetCounts();
+			s.Point(0);
+			s.Run(10);
+			s.in.confirm = true;
+			s.Poll();
+			s.in.confirm = false;
+			check(s.passed == 1 && s.game.submenu && s.out.suspended,
+				"a confirm on the cursor's own cell opens its submenu and holds steering");
+			s.Point(3);
+			s.Run(60);
+			check(s.game.flag && s.game.submenu_presses == 0 && s.game.presses == 0 && s.out.dir < 0,
+				"nothing is pressed between a confirm and its submenu's flag, nor after");
+			s.in.confirm = true;
+			s.Poll();
+			s.in.confirm = false;
+			check(s.passed == 2 && !s.game.submenu, "the player's own pull confirms the submenu entry");
+			s.Run(60);
+			check(s.game.presses == 0 && s.game.cell == 0 && s.phantom == 0,
+				"closing it moves nothing, and every confirm the game saw was one the pointer passed");
+			s.Point(1);
+			s.Run(60);
+			check(s.arrivals == 1 && s.game.cell == 1, "after the submenu, the dot reaching another cell steers again");
+		}
+
+		// A confirm that opens no submenu: steering waits kAfterConfirmMs, then goes on to the cell the dot moved to.
+		{
+			ProfileDB::MenuPointerParams sp = p;
+			sp.suspend_when.push_back(ProfileDB::CameraGuard{});
+			Sim s;
+			s.p = &sp;
+			s.auto_suspend = true;
+			s.Open();
+			s.ResetCounts();
+			s.Point(0);
+			s.Run(10);
+			s.in.confirm = true;
+			s.Poll();
+			s.in.confirm = false;
+			s.Point(3);
+			s.Run(15);
+			check(s.passed == 1 && s.game.presses == 0 && s.out.suspended, "for 0.4 s after a confirm nothing is pressed");
+			s.Run(40);
+			check(s.arrivals == 1 && s.game.cell == 3 && !s.out.suspended, "with no submenu, steering then goes on");
+		}
+
+		// A gate drop (the dashboard, a pause) with a submenu up: back through the gate it is still suspended, and once
+		// the player's own pull has closed it the cursor stays put until the dot reaches another cell.
+		{
+			ProfileDB::MenuPointerParams sp = p;
+			sp.suspend_when.push_back(ProfileDB::CameraGuard{});
+			Sim s;
+			s.p = &sp;
+			s.auto_suspend = true;
+			s.game.submenu_on_confirm = true;
+			s.game.flag_delay = 2;
+			s.Open();
+			s.ResetCounts();
+			s.Point(0);
+			s.Run(10);
+			s.in.confirm = true;
+			s.Poll();
+			s.in.confirm = false;
+			s.Run(10);
+			check(s.game.flag && s.out.submenu, "the submenu opens");
+			s.in.gate = false;
+			s.in.screen_up = true;
+			s.Run(10);
+			s.Point(3);
+			s.in.gate = true;
+			s.Run(60);
+			check(s.game.presses == 0 && s.game.submenu_presses == 0 && s.out.submenu,
+				"back through the gate with the submenu up, nothing is pressed");
+			s.in.confirm = true;
+			s.Poll();
+			s.in.confirm = false;
+			s.Run(60);
+			check(!s.game.submenu && s.game.presses == 0 && s.game.cell == 0, "once it has closed the cursor stays put");
+			s.Point(1);
+			s.Run(60);
+			check(s.arrivals == 1 && s.game.cell == 1, "until the dot reaches another cell");
 		}
 
 		if (failures == 0)
 			Console.WriteLn(Color_StrongGreen, "(VR) MenuPointer self-test: passed (%d checks: ray/quad, tablet, hover, plan, "
-											   "online rule, steering, overrides, aborts, confirm, latch, suspendWhen).", checks);
+											   "online rule, steering, overrides, aborts, confirm, latch, suspendWhen, submenus).", checks);
 		else
 			Console.WriteLn(Color_StrongRed, "(VR) MenuPointer self-test FAIL: %s (%d of %d checks failed).", first, failures, checks);
 		return failures == 0;

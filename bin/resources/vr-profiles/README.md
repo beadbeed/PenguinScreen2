@@ -150,7 +150,7 @@ menuPointer:
 | Key | Meaning |
 |---|---|
 | `when` | a list of guards, written like `camera.guards`, that must all pass while the menu is up. Required |
-| `suspendWhen` | guards for a submenu or any state where the D-pad does something else. Steering waits while any one of them passes, and for 6 vsyncs after. Left empty, steering instead waits after every confirm that reaches the game, until Cross, the cursor moving to another cell, or the menu closing |
+| `suspendWhen` | guards for a submenu or any state where the D-pad does something else. While any one of them passes nothing is pressed (a press under way is let go at once) and the trigger is yours: a fresh pull goes straight to the game, and one held back before the guard passed stays back until you let go, so it can never confirm a submenu entry on its own. After the guard stops passing steering waits 6 vsyncs more, then until you point at a different cell, so closing a submenu never moves the cursor to wherever you left the dot. After every confirm that reaches the game steering also waits 0.4 s, so the guard of a submenu that confirm opens has time to pass. Left empty, steering instead waits after every confirm that reaches the game, until Cross, the cursor moving to another cell, or the menu closing |
 | `cursor` | the addresses of the game's cursor: a 4-byte `node` pointer to the cell it is on, and 2-byte `index`, `x` and `y` |
 | `cells` | 1 to 16 cells, each with `node`, `index`, `x`, `y` (the cursor's values on that cell; all four must match), `rect` (where the cell shows: left, top, right and bottom as fractions `0` to `1` of the game picture) and `up`, `down`, `left`, `right` (the number, counting from 0, of the cell one D-pad press in that direction leads to; leave out a direction that leads nowhere, or out of the cells) |
 | `hand` | `either` (the default; the right hand first), `left` or `right` |
@@ -201,7 +201,10 @@ both a cockpit and the world outside it. Two tools cover that.
 profiles use this for menus and alternate camera views. Each rule has a `when`
 block that identifies the game state; leave those as shipped. The values you
 can adjust are each rule's own `separation` and `convergence`. A rule that
-leaves one out inherits the base value. The first matching rule wins.
+leaves one out inherits the base value. The first matching rule wins. A rule
+with `separation: 0` shows that state flat, on the screen's own plane: the
+Outbreak profiles do this while a menu is up, so the menu pointer's dot sits on
+the menu instead of in front of or behind it.
 
 **`map: bands`** gives each depth range its own setting, so near objects and
 the distant world can both have comfortable depth at once:

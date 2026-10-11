@@ -170,6 +170,27 @@ namespace VR::XRCompositor
 			XrTime ref_time = 0; // the display time that pose was located for; 0 = unknown
 		};
 
+		// Which part of the menu pointer a published layer is (PublishedSet::Entry::pointer), so the pacer can place it
+		// again each display frame (PlaceMenuPointerNow).
+		constexpr u8 kPointerPartNone = 0;
+		constexpr u8 kPointerPartBeam = 1; // the menu beam, in the laser's slot
+		constexpr u8 kPointerPartDot = 2;
+
+		// What the pacer needs to place the menu pointer's beam and dot again each display frame: the flat screen quad
+		// they were placed on (the world screen or the menu tablet, as GetScreenTransform() gave it to PlaceMenuPointer),
+		// whether a hand's aim ray placed them (a PINE test hit has no hand to follow) and whether the laser's slot holds
+		// the menu beam this present. BuildHudLayers fills it (GS thread) and the publish copies it into the set.
+		struct PointerPublish
+		{
+			bool screen_valid = false;
+			float screen_pos[3] = {0.0f, 0.0f, 0.0f};
+			float screen_quat[4] = {0.0f, 0.0f, 0.0f, 1.0f}; // +Z the screen's face normal
+			float half_width = 0.0f;
+			float half_height = 0.0f;
+			bool ray = false;
+			bool beam = false;
+		};
+
 		// The layers the GS built at its last present, copied by value: the pacer submits them every display period
 		// until the next present replaces them (the runtime keeps showing each swapchain's last released image).
 		struct PublishedSet
@@ -178,12 +199,14 @@ namespace VR::XRCompositor
 			{
 				u8 kind;
 				u8 role;
+				u8 pointer; // kPointerPart*: the menu pointer's beam or dot, placed again by the pacer
 				XrCompositionLayerQuad quad;
 				XrCompositionLayerCylinderKHR cyl;
 				HandAttach att; // not attached unless the layer rides on a controller
 			};
 			Entry e[kLayerCapacity];
 			u32 count;
+			PointerPublish pointer; // how the menu pointer's beam and dot in e were placed
 			u64 publish_ms; // SteadyNowMs at publish
 			// The publish moment on the display clock (the steady clock moved by the latest frame's lead from its
 			// wait to its display time); 0 = unknown. Turns extrapolate from here.
@@ -1736,7 +1759,33 @@ namespace VR::XRCompositor
 			int hand = -1;
 			bool tablet = false;
 			bool test = false;
+			// The flat screen quad they were placed on, for the pacer (PointerPublish).
+			float screen_pos[3] = {0.0f, 0.0f, 0.0f};
+			float screen_quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+			float half_width = 0.0f;
+			float half_height = 0.0f;
 		};
+
+		// The dot for a hit at hit_point on the flat screen whose orientation is screen_quat, and, from the aim pose at
+		// aim_pos (null: a PINE test hit, no beam), the beam: from kBeamStartM ahead of the aim pose to the hit, along the
+		// ray that made it. Seen from eye. The maths PlaceMenuPointer (GS thread) and the pacer (PlaceMenuPointerNow) share.
+		void PlaceMenuPointerParts(const float hit_point[3], const float screen_quat[4], const float* aim_pos, const float eye[3],
+			MenuPointerPlacement* mp)
+		{
+			HudCards::PlacePointer(hit_point, screen_quat, eye, mp->dot_pos, mp->dot_quat, &mp->dot_size);
+			mp->beam = false;
+			mp->beam_length = 0.0f;
+			if (!aim_pos)
+				return;
+			const float dir[3] = {hit_point[0] - aim_pos[0], hit_point[1] - aim_pos[1], hit_point[2] - aim_pos[2]};
+			const float dir_len = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+			if (!std::isfinite(dir_len) || !(dir_len > 1.0e-4f))
+				return;
+			const float start[3] = {aim_pos[0] + dir[0] / dir_len * HudCards::kBeamStartM,
+				aim_pos[1] + dir[1] / dir_len * HudCards::kBeamStartM, aim_pos[2] + dir[2] / dir_len * HudCards::kBeamStartM};
+			mp->beam_length = dir_len - HudCards::kBeamStartM;
+			mp->beam = mp->beam_length > 0.01f && HudCards::PlaceBeam(start, dir, mp->beam_length, eye, mp->beam_pos, mp->beam_quat);
+		}
 
 		// On while the MenuPointer setting is on, a menu is up in first-person play (menu mode), the first-person screen
 		// is not in use, this present published a flat screen quad and a hand's aim (or a PINE test hit) meets it.
@@ -1754,26 +1803,20 @@ namespace VR::XRCompositor
 				return false;
 			const float eye[3] = {s.head_position_valid ? s.head_pose.position.x : 0.0f,
 				s.head_position_valid ? s.head_pose.position.y : 0.0f, s.head_position_valid ? s.head_pose.position.z : 0.0f};
-			const float screen_quat[4] = {screen.center.orientation_xyzw[0], screen.center.orientation_xyzw[1],
-				screen.center.orientation_xyzw[2], screen.center.orientation_xyzw[3]};
 			const float hit_point[3] = {hit.point[0], hit.point[1], hit.point[2]};
 			MenuPointerPlacement mp;
-			HudCards::PlacePointer(hit_point, screen_quat, eye, mp.dot_pos, mp.dot_quat, &mp.dot_size);
-			// The beam runs from just ahead of the aim pose to the hit, along the ray that made it.
-			if (!hit.test && hit.hand >= 0 && hit.hand < 2 && snap.hands[hit.hand].aim_pose.valid)
-			{
-				const auto& o = snap.hands[hit.hand].aim_pose.position_xyz;
-				const float dir[3] = {hit.point[0] - o[0], hit.point[1] - o[1], hit.point[2] - o[2]};
-				const float dir_len = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-				if (std::isfinite(dir_len) && dir_len > 1.0e-4f)
-				{
-					const float start[3] = {o[0] + dir[0] / dir_len * HudCards::kBeamStartM,
-						o[1] + dir[1] / dir_len * HudCards::kBeamStartM, o[2] + dir[2] / dir_len * HudCards::kBeamStartM};
-					mp.beam_length = dir_len - HudCards::kBeamStartM;
-					mp.beam = mp.beam_length > 0.01f &&
-					          HudCards::PlaceBeam(start, dir, mp.beam_length, eye, mp.beam_pos, mp.beam_quat);
-				}
-			}
+			for (int k = 0; k < 3; k++)
+				mp.screen_pos[k] = screen.center.position_xyz[k];
+			for (int k = 0; k < 4; k++)
+				mp.screen_quat[k] = screen.center.orientation_xyzw[k];
+			mp.half_width = screen.half_width;
+			mp.half_height = screen.half_height;
+			// The beam only from a hand's aim ray: a PINE test hit has no aim pose to start one from.
+			const bool from_hand = !hit.test && hit.hand >= 0 && hit.hand < 2 && snap.hands[hit.hand].aim_pose.valid;
+			const float aim_pos[3] = {from_hand ? snap.hands[hit.hand].aim_pose.position_xyz[0] : 0.0f,
+				from_hand ? snap.hands[hit.hand].aim_pose.position_xyz[1] : 0.0f,
+				from_hand ? snap.hands[hit.hand].aim_pose.position_xyz[2] : 0.0f};
+			PlaceMenuPointerParts(hit_point, mp.screen_quat, from_hand ? aim_pos : nullptr, eye, &mp);
 			mp.on_cell = MenuPointer::HoveredCell() >= 0;
 			mp.hand = hit.hand;
 			mp.tablet = screen.tablet;
@@ -1781,6 +1824,10 @@ namespace VR::XRCompositor
 			*out = mp;
 			return true;
 		}
+
+		// The menu pointer as this present placed it, for the publish (FillPublishedSet). GS thread only; BuildHudLayers
+		// clears it at its start and fills it once the beam and the dot are decided.
+		PointerPublish s_pointer_pub;
 
 		VkDeviceSize HudImageBytes(int card)
 		{
@@ -2025,6 +2072,7 @@ namespace VR::XRCompositor
 		u32 BuildHudLayers(XrCompositionLayerQuad* hud_quads, const XrCompositionLayerBaseHeader** layers,
 			u32& layer_count, u32 layer_capacity, u32 under_from, HandAttach* att)
 		{
+			s_pointer_pub = PointerPublish{};
 			HudCards::MaybeTestToast();
 			HudCards::MaybeTestBlink();
 			if (s.hud_disabled)
@@ -2280,6 +2328,21 @@ namespace VR::XRCompositor
 						menu_pointer.test ? "PINE test" : (menu_pointer.hand == HandModel::kLeft ? "left" : "right"),
 						menu_pointer.tablet ? "tablet" : "world");
 				}
+			}
+			// With the hands at display rate the pacer places the beam and the dot again every display frame from the aim
+			// located for it (PlaceMenuPointerNow); this is what it needs from this present.
+			if (pointer_on)
+			{
+				PointerPublish& pp = s_pointer_pub;
+				pp.screen_valid = true;
+				for (int k = 0; k < 3; k++)
+					pp.screen_pos[k] = menu_pointer.screen_pos[k];
+				for (int k = 0; k < 4; k++)
+					pp.screen_quat[k] = menu_pointer.screen_quat[k];
+				pp.half_width = menu_pointer.half_width;
+				pp.half_height = menu_pointer.half_height;
+				pp.ray = !menu_pointer.test && menu_pointer.hand >= 0 && menu_pointer.hand < 2;
+				pp.beam = want[HudCards::kLaser].on && want[HudCards::kLaser].content == 2;
 			}
 
 			bool any = false;
@@ -3156,6 +3219,8 @@ namespace VR::XRCompositor
 			// The controller pose each hand and each HUD card was placed for, by slot (HandAttach).
 			const HandAttach* hand_att;
 			const HandAttach* hud_att;
+			// How the menu pointer's beam and dot were placed this present (null: no pointer parts marked).
+			const PointerPublish* pointer = nullptr;
 		};
 
 		// Copies each pointed-to layer by value, in order, with its role and, for a hand or a HUD card that rides on a
@@ -3164,11 +3229,13 @@ namespace VR::XRCompositor
 			const LayerSources& src)
 		{
 			out->count = 0;
+			out->pointer = src.pointer ? *src.pointer : PointerPublish{};
 			for (u32 i = 0; i < layer_count && out->count < kLayerCapacity; i++)
 			{
 				const void* const p = layers[i];
 				PublishedSet::Entry& e = out->e[out->count];
 				e.att = HandAttach{};
+				e.pointer = kPointerPartNone;
 				bool known = false;
 				for (u32 k = 0; k < src.screen_slots && !known; k++)
 				{
@@ -3218,6 +3285,11 @@ namespace VR::XRCompositor
 						e.quad = src.hud_quads[k];
 						if (src.hud_att)
 							e.att = src.hud_att[k];
+						// The dot's slot holds only the dot; the laser's holds the menu beam when this present put it there.
+						if (k == HudCards::kPointer)
+							e.pointer = kPointerPartDot;
+						else if (k == HudCards::kLaser && out->pointer.beam)
+							e.pointer = kPointerPartBeam;
 						known = true;
 					}
 				}
@@ -3262,6 +3334,8 @@ namespace VR::XRCompositor
 						merged.e[merged.count++] = next.e[i];
 				}
 				merged.publish_ms = next.publish_ms;
+				// The menu pointer's beam and dot are this present's entries, placed on this present's screen quad.
+				merged.pointer = next.pointer;
 				merged.publish_display_time = prev.publish_display_time;
 				merged.fp_screen = prev.fp_screen;
 				merged.fp_head = prev.fp_head;
@@ -3647,6 +3721,11 @@ namespace VR::XRCompositor
 				float pos[3] = {0.0f, 0.0f, 0.0f};          // the grip position
 				float quat[4] = {0.0f, 0.0f, 0.0f, 1.0f}; // aim orientation, or grip (PCSX2_VR_HANDS_GRIP_ORIENT)
 				XrTime time = 0;                           // the display time this pose was located for
+				// The aim pose itself (the controllers only, not the test hands): the ray the menu pointer follows and
+				// where its beam starts (PlaceMenuPointerNow). Valid without a grip pose too.
+				bool aim_valid = false;
+				float aim_pos[3] = {0.0f, 0.0f, 0.0f};
+				float aim_quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 			};
 			H hand[kHandSlots];
 			float eye[3] = {0.0f, 0.0f, 0.0f};
@@ -3711,10 +3790,18 @@ namespace VR::XRCompositor
 			for (int i = 0; i < kHandSlots; i++)
 			{
 				const auto& src = snap.hands[i];
+				HandsNow::H& d = out->hand[i];
+				if (src.aim_pose.valid)
+				{
+					for (int k = 0; k < 3; k++)
+						d.aim_pos[k] = src.aim_pose.position_xyz[k];
+					for (int k = 0; k < 4; k++)
+						d.aim_quat[k] = src.aim_pose.orientation_xyzw[k];
+					d.aim_valid = true;
+				}
 				if (!src.grip_pose.valid)
 					continue;
 				const auto& orient = (!s.grip_orient && src.aim_pose.valid) ? src.aim_pose : src.grip_pose;
-				HandsNow::H& d = out->hand[i];
 				for (int k = 0; k < 3; k++)
 					d.pos[k] = src.grip_pose.position_xyz[k];
 				for (int k = 0; k < 4; k++)
@@ -3821,6 +3908,324 @@ namespace VR::XRCompositor
 					info->centre[key][2] = pose.position.z;
 				}
 			}
+		}
+
+		// What PlaceMenuPointerNow did with one display frame.
+		constexpr int kPointerNowNone = 0;    // the set holds no beam or dot
+		constexpr int kPointerNowKept = 1;    // the GS placement went out (a PINE test hit, or no aim pose this frame)
+		constexpr int kPointerNowPlaced = 2;  // placed from this frame's aim
+		constexpr int kPointerNowDropped = 3; // this frame's aim misses the screen: the beam and the dot left out
+
+		// Headset rate, with [VR] HandsDisplayRate: the menu pointer's beam and dot placed again for this display frame in
+		// the pacer's copy of the set, from the aim pose LocateHandsNow located for it and the flat screen quad the set was
+		// published with, by the ray the GS placed them by (PlaceMenuPointer; the right hand first, as GetInputSnapshot
+		// takes the hit). So the beam stays on the hand and the dot under the aim between GS presents, like the hands,
+		// instead of stepping at the GS rate. The GS placement goes out unchanged for a PINE test hit (no hand to follow)
+		// and when no aim pose was located for this frame (none, or the test hands). An aim that misses the screen this
+		// frame leaves the beam and the dot out of it (the next present drops them too), and a beam that cannot be placed
+		// (the eye on its line, the hand at the screen) goes alone. Only poses and sizes change and entries only ever go,
+		// so the layer count never grows; s.published is never written.
+		int PlaceMenuPointerNow(PublishedSet& set, const HandsNow& now)
+		{
+			int beam = -1;
+			int dot = -1;
+			for (u32 i = 0; i < set.count; i++)
+			{
+				const PublishedSet::Entry& e = set.e[i];
+				if (e.kind != kKindQuad)
+					continue;
+				if (e.pointer == kPointerPartBeam)
+					beam = static_cast<int>(i);
+				else if (e.pointer == kPointerPartDot)
+					dot = static_cast<int>(i);
+			}
+			if (beam < 0 && dot < 0)
+				return kPointerNowNone;
+			const PointerPublish& pp = set.pointer;
+			if (!pp.screen_valid || !pp.ray)
+				return kPointerNowKept;
+
+			VRScreenTransform screen;
+			screen.valid = true;
+			screen.center.valid = true;
+			screen.center.position_xyz = {pp.screen_pos[0], pp.screen_pos[1], pp.screen_pos[2]};
+			screen.center.orientation_xyzw = {pp.screen_quat[0], pp.screen_quat[1], pp.screen_quat[2], pp.screen_quat[3]};
+			screen.half_width = pp.half_width;
+			screen.half_height = pp.half_height;
+
+			static constexpr int kAimOrder[kHandSlots] = {HandModel::kRight, HandModel::kLeft};
+			bool any_aim = false;
+			int hand = -1;
+			VRScreenHit hit;
+			for (const int h : kAimOrder)
+			{
+				const HandsNow::H& hn = now.hand[h];
+				if (!hn.aim_valid)
+					continue;
+				any_aim = true;
+				VRPose aim;
+				aim.valid = true;
+				aim.position_xyz = {hn.aim_pos[0], hn.aim_pos[1], hn.aim_pos[2]};
+				aim.orientation_xyzw = {hn.aim_quat[0], hn.aim_quat[1], hn.aim_quat[2], hn.aim_quat[3]};
+				const VRScreenHit rh = RayHitScreen(screen, aim);
+				if (rh.valid && std::isfinite(rh.point[0]) && std::isfinite(rh.point[1]) && std::isfinite(rh.point[2]))
+				{
+					hit = rh;
+					hand = h;
+					break;
+				}
+			}
+			if (!any_aim)
+				return kPointerNowKept;
+
+			bool keep_beam = false;
+			bool keep_dot = false;
+			if (hand >= 0)
+			{
+				MenuPointerPlacement mp;
+				const float hit_point[3] = {hit.point[0], hit.point[1], hit.point[2]};
+				PlaceMenuPointerParts(hit_point, pp.screen_quat, now.hand[hand].aim_pos, now.eye, &mp);
+				if (dot >= 0)
+				{
+					XrCompositionLayerQuad& dq = set.e[dot].quad;
+					dq.pose.orientation = {mp.dot_quat[0], mp.dot_quat[1], mp.dot_quat[2], mp.dot_quat[3]};
+					dq.pose.position = {mp.dot_pos[0], mp.dot_pos[1], mp.dot_pos[2]};
+					dq.size = {mp.dot_size, mp.dot_size};
+					keep_dot = true;
+				}
+				if (beam >= 0 && mp.beam)
+				{
+					XrCompositionLayerQuad& bq = set.e[beam].quad;
+					bq.pose.orientation = {mp.beam_quat[0], mp.beam_quat[1], mp.beam_quat[2], mp.beam_quat[3]};
+					bq.pose.position = {mp.beam_pos[0], mp.beam_pos[1], mp.beam_pos[2]};
+					bq.size = {HudCards::kBeamWidthM, mp.beam_length};
+					keep_beam = true;
+				}
+			}
+			// What could not be placed for this frame goes out of it; the rest keep their order (the dot over the beam,
+			// both under the hands).
+			u32 kept = 0;
+			for (u32 i = 0; i < set.count; i++)
+			{
+				const int idx = static_cast<int>(i);
+				if ((idx == beam && !keep_beam) || (idx == dot && !keep_dot))
+					continue;
+				if (kept != i)
+					set.e[kept] = set.e[i];
+				kept++;
+			}
+			set.count = kept;
+			return (hand >= 0) ? kPointerNowPlaced : kPointerNowDropped;
+		}
+
+		// The pacer's menu pointer placements, logged every 5 s while there were any: "(VR) Menu pointer (pacer): N display
+		// frame(s) placed from their own aim, M with the GS placement, K left out (aim off the screen) in 5.0 s". Pacer
+		// thread only.
+		void NoteMenuPointerNow(int result)
+		{
+			static u32 s_now_placed = 0;
+			static u32 s_now_kept = 0;
+			static u32 s_now_dropped = 0;
+			static u64 s_now_window_ms = 0;
+			if (result == kPointerNowPlaced)
+				s_now_placed++;
+			else if (result == kPointerNowKept)
+				s_now_kept++;
+			else if (result == kPointerNowDropped)
+				s_now_dropped++;
+			const u64 now_ms = CameraDriver::SteadyNowMs();
+			if (s_now_window_ms == 0)
+				s_now_window_ms = now_ms;
+			if (now_ms < s_now_window_ms + 5000)
+				return;
+			if (s_now_placed + s_now_kept + s_now_dropped > 0)
+			{
+				Console.WriteLn("(VR) Menu pointer (pacer): %u display frame(s) placed from their own aim, %u with the GS "
+								"placement, %u left out (aim off the screen) in %.1f s.",
+					s_now_placed, s_now_kept, s_now_dropped, static_cast<double>(now_ms - s_now_window_ms) / 1000.0);
+			}
+			s_now_placed = 0;
+			s_now_kept = 0;
+			s_now_dropped = 0;
+			s_now_window_ms = now_ms;
+		}
+
+		// PCSX2_VR_SELFTEST: PlaceMenuPointerNow against hand-made sets (the screen, the beam, the dot and a hand) and
+		// hand-made aims. Pure maths, no XR call: run from Initialize before the session.
+		bool SelfTestMenuPointerNow()
+		{
+			int checks = 0;
+			int failures = 0;
+			const char* first = nullptr;
+			const auto check = [&](bool ok, const char* name) {
+				checks++;
+				if (ok)
+					return;
+				failures++;
+				if (!first)
+					first = name;
+			};
+			const auto near3 = [](const XrVector3f& a, const float b[3], float tol) {
+				return std::fabs(a.x - b[0]) < tol && std::fabs(a.y - b[1]) < tol && std::fabs(a.z - b[2]) < tol;
+			};
+			// An aim pose at from whose -Z runs toward to: yaw about +Y, then pitch about +X.
+			const auto aim_at = [](HandsNow::H& hn, const float from[3], const float to[3]) {
+				const float d[3] = {to[0] - from[0], to[1] - from[1], to[2] - from[2]};
+				const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+				const float yaw = std::atan2(-d[0], -d[2]);
+				const float pitch = std::asin(std::clamp(d[1] / len, -1.0f, 1.0f));
+				const float syh = std::sin(0.5f * yaw), cyh = std::cos(0.5f * yaw);
+				const float sph = std::sin(0.5f * pitch), cph = std::cos(0.5f * pitch);
+				hn.aim_valid = true;
+				for (int k = 0; k < 3; k++)
+					hn.aim_pos[k] = from[k];
+				hn.aim_quat[0] = cyh * sph;
+				hn.aim_quat[1] = syh * cph;
+				hn.aim_quat[2] = -syh * sph;
+				hn.aim_quat[3] = cyh * cph;
+			};
+			// The world screen 2.5 m out (1.73 x 1.3 m), and a set as the GS publishes it in a menu: the screen, the menu
+			// beam, the dot and a hand, the beam and the dot at a GS placement far from anything this test aims at.
+			const auto make_set = [](PublishedSet& out) {
+				out = PublishedSet{};
+				PointerPublish& pp = out.pointer;
+				pp.screen_valid = true;
+				pp.screen_pos[1] = 1.5f;
+				pp.screen_pos[2] = -2.5f;
+				pp.half_width = 0.867f;
+				pp.half_height = 0.65f;
+				pp.ray = true;
+				pp.beam = true;
+				static constexpr u8 kRoles[4] = {kRoleScreen, kRoleHudLaser, kRoleHudView, kRoleHand};
+				static constexpr u8 kParts[4] = {kPointerPartNone, kPointerPartBeam, kPointerPartDot, kPointerPartNone};
+				for (u32 i = 0; i < 4; i++)
+				{
+					PublishedSet::Entry& e = out.e[i];
+					e.kind = kKindQuad;
+					e.role = kRoles[i];
+					e.pointer = kParts[i];
+					e.quad = XrCompositionLayerQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+					e.quad.pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {9.0f, 9.0f, 9.0f}};
+					e.quad.size = {0.5f, 0.5f};
+				}
+				out.count = 4;
+			};
+			const float eye[3] = {0.0f, 1.6f, 0.0f};
+			// u 0.7, v 0.4 on the world screen.
+			const float target[3] = {0.2f * 2.0f * 0.867f, 1.5f + 0.1f * 2.0f * 0.65f, -2.5f};
+			const float dot_at[3] = {target[0], target[1], target[2] + HudCards::kPointerLiftM};
+			const float right_from[3] = {0.2f, 1.2f, -0.3f};
+			const float left_from[3] = {-0.2f, 1.2f, -0.3f};
+			const float away[3] = {0.2f, 1.2f, 2.7f}; // straight back, away from the screen
+			const float gs_pos[3] = {9.0f, 9.0f, 9.0f};
+
+			// From the right hand: the dot where this frame's aim meets the screen, the beam from just ahead of the hand.
+			{
+				PublishedSet set;
+				make_set(set);
+				HandsNow now;
+				for (int k = 0; k < 3; k++)
+					now.eye[k] = eye[k];
+				aim_at(now.hand[HandModel::kRight], right_from, target);
+				check(PlaceMenuPointerNow(set, now) == kPointerNowPlaced && set.count == 4,
+					"the beam and the dot are placed from this frame's aim");
+				check(near3(set.e[2].quad.pose.position, dot_at, 1.0e-3f),
+					"the dot lies on the screen (lifted off its face) where this frame's aim meets it");
+				check(set.e[2].quad.size.width >= HudCards::kPointerMinM && set.e[2].quad.size.width == set.e[2].quad.size.height,
+					"the dot is sized from the eye");
+				const float d[3] = {target[0] - right_from[0], target[1] - right_from[1], target[2] - right_from[2]};
+				const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+				const float along = HudCards::kBeamStartM + 0.5f * (len - HudCards::kBeamStartM);
+				const float mid[3] = {right_from[0] + d[0] / len * along, right_from[1] + d[1] / len * along,
+					right_from[2] + d[2] / len * along};
+				check(std::fabs(set.e[1].quad.size.height - (len - HudCards::kBeamStartM)) < 1.0e-3f &&
+						  set.e[1].quad.size.width == HudCards::kBeamWidthM && near3(set.e[1].quad.pose.position, mid, 1.0e-3f),
+					"the beam runs from just ahead of the hand to the dot");
+				check(set.e[0].role == kRoleScreen && set.e[3].role == kRoleHand && near3(set.e[0].quad.pose.position, gs_pos, 1.0e-6f) &&
+						  near3(set.e[3].quad.pose.position, gs_pos, 1.0e-6f),
+					"the screen and the hand are left alone");
+			}
+
+			// The right hand's aim misses: the left hand's places them, as GetInputSnapshot would take it.
+			{
+				PublishedSet set;
+				make_set(set);
+				HandsNow now;
+				for (int k = 0; k < 3; k++)
+					now.eye[k] = eye[k];
+				aim_at(now.hand[HandModel::kRight], right_from, away);
+				aim_at(now.hand[HandModel::kLeft], left_from, target);
+				const float d[3] = {target[0] - left_from[0], target[1] - left_from[1], target[2] - left_from[2]};
+				const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+				check(PlaceMenuPointerNow(set, now) == kPointerNowPlaced && near3(set.e[2].quad.pose.position, dot_at, 1.0e-3f) &&
+						  std::fabs(set.e[1].quad.size.height - (len - HudCards::kBeamStartM)) < 1.0e-3f,
+					"with the right hand's aim off the screen, the left hand's places them");
+			}
+
+			// Every aim misses: the beam and the dot are left out of this frame, the rest in order.
+			{
+				PublishedSet set;
+				make_set(set);
+				HandsNow now;
+				aim_at(now.hand[HandModel::kRight], right_from, away);
+				check(PlaceMenuPointerNow(set, now) == kPointerNowDropped && set.count == 2 && set.e[0].role == kRoleScreen &&
+						  set.e[1].role == kRoleHand,
+					"an aim off the screen leaves the beam and the dot out of the frame, the rest in order");
+			}
+
+			// No aim this frame, or a PINE test hit: the GS placement goes out unchanged.
+			{
+				PublishedSet set;
+				make_set(set);
+				HandsNow now;
+				check(PlaceMenuPointerNow(set, now) == kPointerNowKept && set.count == 4 &&
+						  near3(set.e[1].quad.pose.position, gs_pos, 1.0e-6f) && near3(set.e[2].quad.pose.position, gs_pos, 1.0e-6f),
+					"with no aim this frame the GS placement stays");
+				make_set(set);
+				set.pointer.ray = false;
+				aim_at(now.hand[HandModel::kRight], right_from, target);
+				check(PlaceMenuPointerNow(set, now) == kPointerNowKept && set.count == 4 &&
+						  near3(set.e[2].quad.pose.position, gs_pos, 1.0e-6f),
+					"a dot for a PINE test hit stays where the GS put it");
+				make_set(set);
+				set.pointer.screen_valid = false;
+				check(PlaceMenuPointerNow(set, now) == kPointerNowKept && near3(set.e[2].quad.pose.position, gs_pos, 1.0e-6f),
+					"with no screen published the GS placement stays");
+			}
+
+			// The eye on the beam's line: the beam goes alone, the dot is still placed.
+			{
+				PublishedSet set;
+				make_set(set);
+				HandsNow now;
+				aim_at(now.hand[HandModel::kRight], right_from, target);
+				const float d[3] = {target[0] - right_from[0], target[1] - right_from[1], target[2] - right_from[2]};
+				const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+				for (int k = 0; k < 3; k++)
+					now.eye[k] = right_from[k] - d[k] / len * 0.3f;
+				check(PlaceMenuPointerNow(set, now) == kPointerNowPlaced && set.count == 3 && set.e[1].pointer == kPointerPartDot &&
+						  near3(set.e[1].quad.pose.position, dot_at, 1.0e-3f),
+					"looking straight down the beam, the beam goes alone and the dot stays");
+			}
+
+			// A set with no pointer parts is not touched.
+			{
+				PublishedSet set;
+				make_set(set);
+				set.e[1].pointer = kPointerPartNone;
+				set.e[2].pointer = kPointerPartNone;
+				HandsNow now;
+				aim_at(now.hand[HandModel::kRight], right_from, target);
+				check(PlaceMenuPointerNow(set, now) == kPointerNowNone && set.count == 4 && near3(set.e[2].quad.pose.position, gs_pos, 1.0e-6f),
+					"a set without the beam or the dot is not touched");
+			}
+
+			if (failures == 0)
+				Console.WriteLn(Color_StrongGreen, "(VR) Menu pointer (pacer) self-test: passed (%d checks).", checks);
+			else
+				Console.WriteLn(Color_StrongRed, "(VR) Menu pointer (pacer) self-test FAIL: %s (%d of %d checks failed).", first,
+					failures, checks);
+			return failures == 0;
 		}
 
 		// The Hands line's numbers: one display frame's placement folded into the 5 s window.
@@ -4125,6 +4530,7 @@ namespace VR::XRCompositor
 				u32 submit_count = 0;
 				bool stale = false;
 				HandFrameInfo hand_frame;
+				int pointer_now = kPointerNowNone;
 				XrResult eres = XR_SUCCESS;
 				float end_ms = 0.0f;
 				{
@@ -4140,6 +4546,9 @@ namespace VR::XRCompositor
 						// ([VR] HandsDisplayRate), in this copy only. A stale set drops them below.
 						if (!stale)
 							PlaceHandAttached(set, hands_now, fs.predictedDisplayTime, s.hands_display_rate, &hand_frame);
+						// The menu pointer's beam and dot follow this frame's aim with the hands (PlaceMenuPointerNow).
+						if (!stale && s.hands_display_rate)
+							pointer_now = PlaceMenuPointerNow(set, hands_now);
 						float turn = 0.0f;
 						if (set.fp_screen && set.turn_rate != 0.0f && set.publish_display_time != 0)
 						{
@@ -4185,6 +4594,7 @@ namespace VR::XRCompositor
 					NoteHandPlacement(hand_frame, fs.predictedDisplayTime);
 					AddHandFrame(stats, hand_frame);
 				}
+				NoteMenuPointerNow(pointer_now);
 				MaybeLogFrameStats(stats);
 			}
 
@@ -4287,6 +4697,9 @@ namespace VR::XRCompositor
 		// Pure maths, so it runs even when the session below fails.
 		if (std::getenv("PCSX2_VR_HANDS_SELFTEST") != nullptr)
 			HandModel::SelfTest();
+		// The pacer's menu pointer placement, with the other menu pointer self-tests.
+		if (std::getenv("PCSX2_VR_SELFTEST") != nullptr)
+			SelfTestMenuPointerNow();
 
 		s.screen_anchor_x = 0.0f;
 		s.screen_anchor_y = 0.0f;
@@ -5214,7 +5627,7 @@ namespace VR::XRCompositor
 				s.stat_copy_timeout.fetch_add(1, std::memory_order_relaxed);
 		}
 
-		const LayerSources sources = {quads, cyls, 5, lever_quads, hand_quads, hud_quads, hand_att, hud_att};
+		const LayerSources sources = {quads, cyls, 5, lever_quads, hand_quads, hud_quads, hand_att, hud_att, &s_pointer_pub};
 
 		if (s.headset_rate)
 		{
