@@ -574,6 +574,13 @@ namespace VR::XRSession
 					break;
 				}
 
+				case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:
+				{
+					Console.WriteLn("(VR) Interaction profile changed (controller connected, disconnected or rebound).");
+					XRInput::OnInteractionProfileChanged();
+					break;
+				}
+
 				default:
 					break;
 			}
