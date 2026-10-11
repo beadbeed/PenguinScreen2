@@ -21,6 +21,7 @@ and test the first-person camera. They talk to a running PenguinScreen2 through 
 | `session_recorder.py` | Started by `launch_vr.ps1` and `Launch-PenguinScreen2-SteamVR.cmd`: records game state (~4/s) and a screenshot every 5 s to `D:\Games\PS2\sessions\<time>` until the emulator closes, plus the emulog. Screenshots only when the network adapter is on. |
 | `hmdshot.py`, `input_log.py`, `record_play.py` | Headset Window screenshot; pad input + screenshots while someone plays; memory snapshots + screenshots while someone plays. |
 | `menutest.py` | Headset-free menu pointer tests for File #1's item screen (offline only): pointer hit maths, steering to each cell, fast click, the confirm latch, overrides, closing mid-steer, the menu tablet, and the cell rects checked against captures. `--slot` loads a savestate first, `--report` saves captures, `--test-uv` points with PINE test hits instead of aiming (works with no OpenXR runtime). |
+| `grabtest.py` | Headset-free shake-to-break-free tests for File #1 (offline only, `PCSX2_VR_TEST_INPUT=1`): `idle-shake` (no grab: shaking moves nothing and presses nothing), `baseline` (a grab with no input, about 10 s) and `shake` (shaking the scripted right controller from the load: the grab must end well before the baseline, and nothing more is pressed once it has). Loads `--grab-slot` (default 5, a zombie grabs Kevin) and `--calm-slot` (default 6). |
 
 HUD cards on the null headset: `PCSX2_VR_HUD_TEST=1` shows a test toast every 3 s (it cycles through the
 whole font), `PCSX2_VR_FAKE_HANDS` also shows the wrist card on the fake left hand at any angle (NO DATA
@@ -81,6 +82,29 @@ Snap turns count nothing (the blink covers them). It goes at once when first per
 a cutscene, a savestate load). The first one in a session logs `(VR) HUD: comfort vignette shown (...)`.
 `PCSX2_VR_VIGNETTE_TEST=1` ramps it up and down every 2 s at any time (with the setting on) for `hmdshot.py`
 captures on the null headset.
+
+Shake to break free (profile key `breakout`, both Files): measured offline on File #1 (J's Bar, savestate 5, where a
+zombie grabs Kevin about 4.7 s after the load), a grab (local record stance +0x08 == 5) lasts about 10 s with no input;
+mashing Circle or Cross (about 8 Hz) or waggling the left stick left and right (about 6 Hz) halves it, all of it
+together breaks free in about 3.3 s, and Square does nothing. So CameraDriver publishes "local character grabbed" every
+vsync (`SpatialControls::SetGrabbed`): every `breakout.grabbed` check holds on the local record (`LocalRecordAny`, so it
+holds while `releaseWhen` has handed the camera back: stance 5 and the status byte in normal play, +0xBA0 below 0x18 on
+File #1, +0xBB8 below 0x08 on File #2), no `lookAt.pauseWhen` menu is up, the VM runs in VR (not split-screen; the
+head-tracked camera may be off), and the network mode is not restricted (never on obsrv; private co-op is fine). A
+publish older than 250 ms reads as not grabbed (pause, stall). While grabbed, the Gamepad
+(`SpatialControls::ApplyGrabBreakout`, `VR/GrabBreakout.cpp`) watches both grips: a hand is shaking while it moves
+faster than `shakeSpeed` (1.0 m/s; the runtime's grip velocity, else the grip position's change, as PINE test input
+sends) or reverses direction `reversals` (3) times within `reversalWindowMs` (300) above `reversalSpeed` (0.25 m/s), and
+for `holdMs` (250) after. While a hand shakes, the left stick's X goes +1/-1 (`stickHz` 6 full cycles a second) and
+Circle (ButtonA) and Cross (ButtonB) take turns (`pressHz` 8 presses a second, `pressMs` 60 each, Circle first), ORed
+in: no Circle press while A or the trigger is held, no Cross while B is, and a sideways push of the player's own (past
+half) keeps the stick. Each press buzzes the shaking hand (`buzz` 0.35, `buzzMs` 20, times Haptic Strength). Everything
+stops on the poll the grab ends, and nothing is pressed in menu mode. Logs: `(VR) CameraDriver: local character grabbed;
+shaking a controller presses to break free (...)` and `(VR) CameraDriver: no longer grabbed (after N s).`; the first
+grab of a run shows the toast `Shake to break free!` (logged as a HUD toast) when the controllers are live.
+`PCSX2_VR_SELFTEST` covers it in the Gamepad self-test (`breakout: ...` checks: nothing without the grab or without a
+shake, the alternation and rates, the press length, the buzz, held buttons kept, the stop on the grab's end, the
+reversal and runtime-velocity paths). `grabtest.py` checks it in the game, headset-free.
 
 First-person stereo depth (VR settings `NearDepthMetres`, default 0 = the profile's `stereo.firstPerson.nearest`,
 below 0 off, 0.45-1.5 m overrides; `RollParallax`, on by default; ini only): true stereo depth now reaches in front of
@@ -150,6 +174,7 @@ From the Outbreak Tracker DLL, HeySnippy's ModernCam code sites and a disassembl
 | Camera focus slot (near-cull spares it) | u8 `0x3AEF74`; near-cull radii f32 `0x6D6CF0` (class 1 = characters at +4, 80) |
 | View matrix (row vectors; look = -col 2) | `0x3062E0` |
 | Stance / action / stick magnitude | record +0x08 (1 normal, 2 aiming) / +0x54F (0 idle, 1 walk, 3 run, 128 aim) / +0xF98 (u16) |
+| Grabbed (shake to break free) | record +0x08 == 5 (action 176, status +0xBA0 stays 0x00); input block +0xF78 (+0 pressed, +8 held word) |
 | Cut handlers (NOP to own the camera) | `0x58EAEC` = `0x0C163B1C`, `0x58EAFC` = `0x0C163C8C`, `0x58EB0C` = `0x0C163B60`; keep `0x58EB14` (view build) |
 | Door follow-camera eye writes | `0x5A91E0`, `0x5A9340`, `0x5A9410` = `0x0C0D013C` |
 | HP / max HP (feedback, wrist card) | record +0x544 / +0x546 (u16) |

@@ -1338,6 +1338,11 @@ namespace VR::SpatialControls
 			At(v, ControlId::LeftStickX) = 0.0f;
 			At(v, ControlId::LeftStickY) = 0.0f;
 		}
+		// Breaking free of a grab, last: while the camera driver says the local character is held and a controller is
+		// shaken, the waggle and the Circle/Cross presses go in over everything above (a stop zone included).
+		GrabBreakout::Params grab_params;
+		const bool grab_held = Grabbed(&grab_params);
+		ApplyGrabBreakout(snapshot, grab_params, grab_held, s_menu_mode.load(std::memory_order_acquire), dt, st.breakout, v);
 		return v;
 	}
 
@@ -1627,6 +1632,241 @@ namespace VR::SpatialControls
 				"pointer: the defaults leave the confirm and the D-pad alone");
 			r = VRHandState{};
 			ComposeGamepadWith(s, off, st, kDt, kNone, false, true);
+		}
+
+		// Breaking free of a grab (ApplyGrabBreakout on the composed values, as ComposeGamepad runs it): nothing without
+		// the grab, nothing without a shake; with both, the stick waggles at 6 Hz and Circle (ButtonA) and Cross (ButtonB)
+		// take turns, 8 presses a second of about 60 ms, with a buzz on the shaking hand for each; a button the player
+		// holds is never let go; it stops the poll the grab ends, soon after the shaking stops, and in menu mode.
+		{
+			const GamepadParams bo_gp{};
+			const GrabBreakout::Params bo_p{};
+			constexpr float bo_dt = 1.0f / 60.0f;
+			constexpr float bo_two_pi = 6.28318530718f;
+			const auto bo_reset_hands = [&l, &r]() {
+				l = VRHandState{};
+				r = VRHandState{};
+				l.grip_pose.valid = true;
+				l.grip_pose.position_xyz = {-0.2f, 1.0f, -0.3f};
+				r.grip_pose.valid = true;
+				r.grip_pose.position_xyz = {0.2f, 1.0f, -0.3f};
+			};
+			// The scripted shake: the right grip moved bo_amp metres either way along X at bo_hz, positions only (no runtime
+			// velocity, as PINE test input sends); bo_hz 0 leaves it where it is.
+			float bo_hz = 0.0f;
+			float bo_amp = 0.0f;
+			int bo_n = 0;
+			// One 60 Hz poll through the Gamepad, then the breakout.
+			const auto bo_poll = [&](GamepadState& bo_state, bool bo_grabbed, bool bo_menu) {
+				if (bo_hz > 0.0f)
+				{
+					const float bo_t = static_cast<float>(bo_n) * bo_dt;
+					r.grip_pose.position_xyz[0] = 0.2f + bo_amp * std::sin(bo_two_pi * bo_hz * bo_t);
+				}
+				++bo_n;
+				ControlValues bo_out = ComposeGamepadWith(s, bo_gp, bo_state, bo_dt, kNone, false, bo_menu);
+				ApplyGrabBreakout(s, bo_p, bo_grabbed, bo_menu, bo_dt, bo_state.breakout, bo_out);
+				return bo_out;
+			};
+			const auto bo_x = [](const ControlValues& bo_vals) { return bo_vals[static_cast<u32>(ControlId::LeftStickX)]; };
+			const auto bo_busy = [&](const ControlValues& bo_vals) {
+				return on(bo_vals, ControlId::ButtonA) || on(bo_vals, ControlId::ButtonB) || bo_x(bo_vals) != 0.0f;
+			};
+			// `bo_polls` polls with nothing pressed or waggled for the player and no buzz.
+			const auto bo_quiet = [&](GamepadState& bo_state, bool bo_grabbed, bool bo_menu, int bo_polls) {
+				bool bo_ok = true;
+				for (int i = 0; i < bo_polls; ++i)
+				{
+					const ControlValues bo_vals = bo_poll(bo_state, bo_grabbed, bo_menu);
+					bo_ok = bo_ok && !bo_busy(bo_vals) && bo_state.breakout.buzz[0] == 0.0f && bo_state.breakout.buzz[1] == 0.0f;
+				}
+				return bo_ok;
+			};
+
+			// No grab: a hard shake presses nothing, though the detector sees it (so one already going counts at once).
+			{
+				GamepadState bo_st;
+				bo_reset_hands();
+				bo_hz = 5.0f; // 6 cm either way at 5 Hz: up to about 1.9 m/s, ten reversals a second
+				bo_amp = 0.06f;
+				bo_n = 0;
+				check(bo_quiet(bo_st, false, false, 90), "breakout: a shake presses nothing without the grab");
+				check(bo_st.breakout.hand[VRInputSnapshot::RIGHT].since_shake_s <= bo_p.hold_s &&
+						  bo_st.breakout.hand[VRInputSnapshot::LEFT].since_shake_s > bo_p.hold_s,
+					"breakout: the shaking hand is seen as shaking without the grab, the still one is not");
+			}
+
+			// No shake: still hands, then a slow sway (about 0.3 m/s, two reversals a second), press nothing while grabbed.
+			{
+				GamepadState bo_st;
+				bo_reset_hands();
+				bo_hz = 0.0f;
+				bo_n = 0;
+				check(bo_quiet(bo_st, true, false, 60), "breakout: still hands press nothing while grabbed");
+				bo_hz = 1.0f;
+				bo_amp = 0.05f;
+				check(bo_quiet(bo_st, true, false, 120), "breakout: a slow sway presses nothing while grabbed");
+			}
+
+			// Grabbed and shaking for 2 s: the alternation, the rates, the press length and the buzz.
+			{
+				GamepadState bo_st;
+				bo_reset_hands();
+				bo_hz = 5.0f;
+				bo_amp = 0.06f;
+				bo_n = 0;
+				bo_quiet(bo_st, false, false, 30); // shaking before the grab begins
+				int bo_a_edges = 0, bo_b_edges = 0, bo_both = 0, bo_flips = 0, bo_bad_x = 0, bo_buzz_r = 0, bo_buzz_l = 0;
+				int bo_run = 0, bo_odd_runs = 0, bo_last_edge = -1;
+				bool bo_prev_a = false, bo_prev_b = false, bo_turns = true, bo_first_ok = false;
+				float bo_prev_x = 0.0f;
+				for (int i = 0; i < 120; ++i)
+				{
+					const ControlValues bo_vals = bo_poll(bo_st, true, false);
+					const bool bo_a = on(bo_vals, ControlId::ButtonA);
+					const bool bo_b = on(bo_vals, ControlId::ButtonB);
+					const float bo_sx = bo_x(bo_vals);
+					if (i == 0)
+						bo_first_ok = bo_a && !bo_b && bo_sx == 1.0f;
+					bo_both += (bo_a && bo_b) ? 1 : 0;
+					bo_bad_x += (bo_sx != 1.0f && bo_sx != -1.0f) ? 1 : 0;
+					bo_flips += (i > 0 && bo_sx != bo_prev_x) ? 1 : 0;
+					if (bo_a && !bo_prev_a)
+					{
+						++bo_a_edges;
+						bo_turns = bo_turns && bo_last_edge != 0;
+						bo_last_edge = 0;
+					}
+					if (bo_b && !bo_prev_b)
+					{
+						++bo_b_edges;
+						bo_turns = bo_turns && bo_last_edge != 1;
+						bo_last_edge = 1;
+					}
+					// Press lengths: each run of pressed polls, once it ends, must be 3 or 4 polls (about 60 ms).
+					if (bo_a || bo_b)
+					{
+						++bo_run;
+					}
+					else if (bo_run > 0)
+					{
+						bo_odd_runs += (bo_run < 3 || bo_run > 4) ? 1 : 0;
+						bo_run = 0;
+					}
+					bo_buzz_r += (bo_st.breakout.buzz[VRInputSnapshot::RIGHT] > 0.0f) ? 1 : 0;
+					bo_buzz_l += (bo_st.breakout.buzz[VRInputSnapshot::LEFT] > 0.0f) ? 1 : 0;
+					bo_prev_a = bo_a;
+					bo_prev_b = bo_b;
+					bo_prev_x = bo_sx;
+				}
+				check(bo_first_ok, "breakout: the first poll grabbed and shaking presses Circle, the stick right");
+				check(bo_both == 0, "breakout: Circle and Cross are never pressed together");
+				check(bo_turns, "breakout: Circle and Cross take turns");
+				check(bo_a_edges >= 7 && bo_a_edges <= 9 && bo_b_edges >= 7 && bo_b_edges <= 9,
+					"breakout: 8 presses a second (about 8 Circle and 8 Cross in 2 s)");
+				check(bo_odd_runs == 0, "breakout: each press is held 3-4 polls (about 60 ms)");
+				check(bo_bad_x == 0 && bo_flips >= 22 && bo_flips <= 24, "breakout: the stick waggles +1/-1 at 6 Hz (about 23 flips in 2 s)");
+				check(bo_buzz_r == bo_a_edges + bo_b_edges && bo_buzz_l == 0,
+					"breakout: one buzz on the shaking hand per press, none on the still hand");
+
+				// The grab ends: everything stops that poll; a new grab starts over; menu mode presses nothing.
+				ControlValues bo_vals = bo_poll(bo_st, false, false);
+				check(!bo_busy(bo_vals) && bo_st.breakout.buzz[VRInputSnapshot::RIGHT] == 0.0f,
+					"breakout: everything stops the poll the grab ends");
+				bo_vals = bo_poll(bo_st, true, false);
+				check(on(bo_vals, ControlId::ButtonA) && !on(bo_vals, ControlId::ButtonB) && bo_x(bo_vals) == 1.0f,
+					"breakout: a new grab starts over with Circle and the stick right");
+				check(bo_quiet(bo_st, true, true, 10), "breakout: nothing in menu mode");
+
+				// The shaking stops (the hand held where it is): the presses carry on through the hold, then stop.
+				bo_hz = 0.0f;
+				int bo_last_busy = -1;
+				for (int i = 0; i < 60; ++i)
+				{
+					if (bo_busy(bo_poll(bo_st, true, false)))
+						bo_last_busy = i;
+				}
+				check(bo_last_busy >= 5 && bo_last_busy < 45, "breakout: the presses stop within 0.75 s of the shaking stopping");
+				check(bo_quiet(bo_st, true, false, 30), "breakout: and stay stopped while the hands are still");
+			}
+
+			// A button the player holds is never let go, and their own sideways push on the stick wins.
+			{
+				GamepadState bo_st;
+				bo_reset_hands();
+				bo_hz = 5.0f;
+				bo_amp = 0.06f;
+				bo_n = 0;
+				bo_quiet(bo_st, false, false, 30);
+				r.b = true; // the player holds B (Cross)
+				bool bo_b_kept = true, bo_prev_a = false;
+				int bo_a_edges = 0;
+				for (int i = 0; i < 60; ++i)
+				{
+					const ControlValues bo_vals = bo_poll(bo_st, true, false);
+					bo_b_kept = bo_b_kept && on(bo_vals, ControlId::ButtonB);
+					bo_a_edges += (on(bo_vals, ControlId::ButtonA) && !bo_prev_a) ? 1 : 0;
+					bo_prev_a = on(bo_vals, ControlId::ButtonA);
+				}
+				check(bo_b_kept && bo_a_edges >= 3, "breakout: a B the player holds stays held; the Circle presses carry on");
+				r.b = false;
+				r.trigger = 1.0f; // the player holds the trigger (RightTriggerPress, bound to Circle too)
+				bool bo_a_ever = false, bo_trigger_kept = true, bo_prev_b = false;
+				int bo_b_edges = 0;
+				for (int i = 0; i < 60; ++i)
+				{
+					const ControlValues bo_vals = bo_poll(bo_st, true, false);
+					bo_a_ever = bo_a_ever || on(bo_vals, ControlId::ButtonA);
+					bo_trigger_kept = bo_trigger_kept && on(bo_vals, ControlId::RightTriggerPress);
+					bo_b_edges += (on(bo_vals, ControlId::ButtonB) && !bo_prev_b) ? 1 : 0;
+					bo_prev_b = on(bo_vals, ControlId::ButtonB);
+				}
+				check(!bo_a_ever && bo_trigger_kept && bo_b_edges >= 3,
+					"breakout: no Circle presses over a held trigger; the Cross presses carry on");
+				r.trigger = 0.0f;
+				l.thumbstick_x = -1.0f; // the player pushes the left stick left
+				bool bo_own_x = true;
+				for (int i = 0; i < 30; ++i)
+					bo_own_x = bo_own_x && bo_x(bo_poll(bo_st, true, false)) < -0.99f;
+				check(bo_own_x, "breakout: the player's own sideways push wins over the waggle");
+			}
+
+			// A small quick shake (about 0.5 m/s, under shakeSpeed) counts by its reversals.
+			{
+				GamepadState bo_st;
+				bo_reset_hands();
+				bo_hz = 7.0f;
+				bo_amp = 0.012f;
+				bo_n = 0;
+				int bo_busy_polls = 0;
+				for (int i = 0; i < 60; ++i)
+					bo_busy_polls += bo_busy(bo_poll(bo_st, true, false)) ? 1 : 0;
+				check(bo_busy_polls > 30, "breakout: a small quick shake counts by its reversals");
+			}
+
+			// The runtime's grip velocity counts at once; a hand that loses tracking stops at once; a slow steady one
+			// presses nothing.
+			{
+				GamepadState bo_st;
+				bo_reset_hands();
+				bo_hz = 0.0f;
+				bo_n = 0;
+				r.grip_linear_velocity = {1.5f, 0.0f, 0.0f};
+				ControlValues bo_vals = bo_poll(bo_st, true, false);
+				check(on(bo_vals, ControlId::ButtonA) && bo_x(bo_vals) == 1.0f, "breakout: the runtime's grip velocity counts at once");
+				r.grip_pose.valid = false;
+				bo_vals = bo_poll(bo_st, true, false);
+				check(!bo_busy(bo_vals), "breakout: a hand that loses tracking stops at once");
+				r.grip_pose.valid = true;
+				r.grip_linear_velocity = {0.5f, 0.0f, 0.0f};
+				check(bo_quiet(bo_st, true, false, 30), "breakout: a slow steady hand presses nothing");
+			}
+
+			check(GrabBreakout::Fresh(1000, 1200) && !GrabBreakout::Fresh(1000, 1300) && !GrabBreakout::Fresh(0, 100) &&
+					  GrabBreakout::Fresh(1000, 990),
+				"breakout: a grab published over 250 ms ago, or never, reads as not grabbed");
+			l = VRHandState{};
+			r = VRHandState{};
 		}
 
 		if (failed)

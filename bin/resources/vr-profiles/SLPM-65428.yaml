@@ -229,6 +229,33 @@ SLPM-65428:
       # still stop you (the game's collision pushes the position back out).
       aim: { stance: 0x08, equals: 2, hand: right, move: 70, moveStick: left, pitch: 0xBC8, pitchSign: 1, pitchClamp: 8000 }
     fov: { address: 0x306380, encoding: f32, scale: 100.0 }   # vertical FOV, degrees (about 115 horizontal at 4:3)
+  # Shake to break free (VR controllers only). Measured offline on File #1 (J's Bar, savestate 5, a zombie grabs Kevin):
+  # a grab (local record stance +0x08 == 5) lasts about 10 s with no input; mashing Circle or Cross (about 8 Hz) or
+  # waggling the left stick left and right (about 6 Hz) halves it; all together break free in about 3.3 s; Square does
+  # nothing. So while grabbed, shaking either controller (its grip faster than shakeSpeed m/s, or reversing direction
+  # `reversals` times within reversalWindowMs while moving at least reversalSpeed m/s) waggles your left stick (stickHz
+  # full left-right cycles a second) and presses Circle and Cross in turn (pressHz presses a second, Circle first, pressMs
+  # each), with a short buzz (buzz, buzzMs) on the shaking hand for each press. It goes on holdMs after the last shake
+  # (the turn at the end of each stroke) and stops the poll the grab ends. A button you hold yourself is never let go:
+  # no Circle presses while you hold A or the trigger, no Cross while you hold B, and your own sideways push on the left
+  # stick wins over the waggle. grabbed: checks on the local record, all must hold: stance 5, and the status byte in
+  # normal play (below 0x18; down, dead and turned are 0x18 and up, see releaseWhen) so nothing is pressed into a death
+  # or a prompt. Never while a menu is up (lookAt.pauseWhen) and never on obsrv (first person's network rule); private
+  # co-op is fine, as it is only your own pad input. "Shake to break free!" shows on the first grab of a run.
+  breakout:
+    grabbed:
+      - { offset: 0x08, equals: 5, width: 1 }               # stance: grabbed
+      - { offset: 0xBA0, min: 0x00, max: 0x17, width: 1 }   # status: normal play (not down, dead or turned)
+    shakeSpeed: 1.0
+    reversals: 3
+    reversalWindowMs: 300
+    reversalSpeed: 0.25
+    holdMs: 250
+    stickHz: 6
+    pressHz: 8
+    pressMs: 60
+    buzz: 0.35
+    buzzMs: 20
   # VR controllers (only when launched with --vr; flat play is untouched).
   # A pad bound in Settings -> Controllers (e.g. a DualSense) keeps working alongside;
   # when both touch the same button, the latest change wins.

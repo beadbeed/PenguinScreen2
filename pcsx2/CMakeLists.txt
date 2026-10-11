@@ -1065,6 +1065,7 @@ set(pcsx2VRSources
 	VR/CameraDriver.cpp
 	VR/ControlQuads.cpp
 	VR/GameFeedback.cpp
+	VR/GrabBreakout.cpp
 	VR/HandModel.cpp
 	VR/HudCards.cpp
 	VR/MenuPointer.cpp
@@ -1092,6 +1093,7 @@ set(pcsx2VRHeaders
 	VR/CameraDriver.h
 	VR/ControlQuads.h
 	VR/GameFeedback.h
+	VR/GrabBreakout.h
 	VR/HandModel.h
 	VR/HudCards.h
 	VR/MenuPointer.h

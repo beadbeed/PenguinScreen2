@@ -2412,6 +2412,76 @@ namespace VR::CameraDriver
 			}
 			return p;
 		}
+
+		// Breaking free of a grab (profile breakout, VR::GrabBreakout): while the local character is held, shaking a
+		// controller makes the Gamepad press for the player (SpatialControls::SetGrabbed). s_grab_now is this vsync's
+		// verdict, set by Apply and published then cleared as Apply leaves on every path (PublishGrabOnExit), so a vsync
+		// that returns early publishes "not grabbed".
+		bool s_grab_now = false;
+		bool s_grab_published = false;    // the verdict last published
+		GrabBreakout::Params s_grab_params; // the profile's tuning, published with it
+		bool s_grab_toast_ready = false;  // this vsync a toast would be seen and could be acted on
+		bool s_grab_toast_shown = false;  // "Shake to break free!" is shown once per run, on the first grab
+		u64 s_grab_start_ms = 0;
+
+		bool HasGamepadControl(const ProfileDB::Profile& profile)
+		{
+			for (const ProfileDB::SpatialControlSpec& c : profile.controls)
+			{
+				if (c.kind == SpatialControls::DeviceKind::Gamepad)
+					return true;
+			}
+			return false;
+		}
+
+		// The local character is held: every breakout.grabbed check holds on its record (stance grabbed, and in the
+		// shipped profiles alive and not down, where Circle could answer a prompt), and no lookAt.pauseWhen menu is up
+		// (Circle confirms there). Reads only.
+		bool LocalGrabbed(const ProfileDB::Profile& profile, const ProfileDB::CameraProfile& cam, u32 base)
+		{
+			if (!profile.breakout.has_value() || profile.breakout->grabbed.empty())
+				return false;
+			if (cam.look_at.has_value() && !cam.look_at->pause_when.empty() && GuardListPass(cam.look_at->pause_when))
+				return false;
+			return RecordChecksPass(profile.breakout->grabbed, base);
+		}
+
+		// As Apply leaves: this vsync's verdict to the Gamepad, cleared for the next vsync, with a log line on each change
+		// and the toast on the run's first grab.
+		void PublishGrabbed()
+		{
+			const bool grabbed = s_grab_now;
+			const bool toast_ready = s_grab_toast_ready;
+			s_grab_now = false;
+			s_grab_toast_ready = false;
+			SpatialControls::SetGrabbed(grabbed, s_grab_params);
+			if (grabbed == s_grab_published)
+				return;
+			s_grab_published = grabbed;
+			const u64 now = NowMs();
+			if (grabbed)
+			{
+				s_grab_start_ms = now;
+				Console.WriteLn("(VR) CameraDriver: local character grabbed; shaking a controller presses to break free "
+				                "(left stick waggle, Circle and Cross in turn, on your own pad).");
+				if (toast_ready && !s_grab_toast_shown)
+				{
+					s_grab_toast_shown = true;
+					HudCards::Toast("Shake to break free!", 3.0f);
+				}
+			}
+			else
+			{
+				Console.WriteLn("(VR) CameraDriver: no longer grabbed (after %.1f s).",
+					static_cast<double>(now - s_grab_start_ms) / 1000.0);
+			}
+		}
+
+		// Publishes the grab verdict as Apply leaves, whichever way it leaves.
+		struct PublishGrabOnExit
+		{
+			~PublishGrabOnExit() { PublishGrabbed(); }
+		};
 	}
 
 	float PadLookDeflection(const ProfileDB::CameraPadLook& pl, float yaw_deg, PadLookState& st)
@@ -2482,6 +2552,7 @@ namespace VR::CameraDriver
 			}
 		};
 		PublishOnExit publish_on_exit;
+		PublishGrabOnExit publish_grab_on_exit;
 
 		s_vsync_counter++;
 		MaybeRunSelfTest();
@@ -2581,15 +2652,16 @@ namespace VR::CameraDriver
 		const bool guards_hold = (s_guard_fail_vsyncs == 0) ||
 		                         (s_armed_logged && s_guard_fail_vsyncs <= cam.disarm_after_vsyncs);
 		// LocalRecordAny: the record whenever the game is running past its guards, grabbed, down or dead too.
-		// Only for a profile with feedback cues (its only reader), so a pattern-scanned base is not hunted for
-		// while first person is off. It has its own disarm grace (ignoring releaseWhen, armed or not): the guards
-		// flicker for a vsync or two, and without the grace each flicker would reset the hurt and weapon cues.
+		// Only for a profile with feedback cues or a breakout block (its only readers), so a pattern-scanned base is
+		// not hunted for while first person is off. It has its own disarm grace (ignoring releaseWhen, armed or not):
+		// the guards flicker for a vsync or two, and without the grace each flicker would reset the hurt and weapon
+		// cues (and break up a grab's presses).
 		const bool guards_now_pass = GuardsPass(cam);
 		if (guards_now_pass)
 			s_any_guard_fail_vsyncs = 0;
 		else if (s_any_guard_fail_vsyncs < 0xFFFFFFFFu)
 			s_any_guard_fail_vsyncs++;
-		if (vm_state == VMState::Running && profile->feedback.has_value() &&
+		if (vm_state == VMState::Running && (profile->feedback.has_value() || profile->breakout.has_value()) &&
 			s_any_guard_fail_vsyncs <= cam.disarm_after_vsyncs)
 		{
 			const std::optional<u32> base_any = GetBase(cam, crc);
@@ -2607,6 +2679,22 @@ namespace VR::CameraDriver
 		}
 		s_online_safe = OnlineSafeNow(); // again, now that private co-op is known
 		const bool net_ok = (net_mode != NetMode::Restricted);
+		// Breaking free of a grab: read from the local record whether first person is armed or not (a grab hands the
+		// camera back; the 3D screen without the head-tracked camera counts too), only in VR off split-screen (the VR
+		// controllers do the pressing), only while the game runs, and never on obsrv (first person's network rule: the
+		// presses are pad input, which private co-op allows as the player's own).
+		if (profile->breakout.has_value())
+		{
+			s_grab_params = profile->breakout->shake;
+			s_grab_now = net_ok && vm_state == VMState::Running && EffectiveVREnabled(EmuConfig.VR.Enable) &&
+			             !SplitState::Active() && s_local_any_valid && LocalGrabbed(*profile, cam, s_local_any_base);
+			if (s_grab_now && !s_grab_published)
+			{
+				// The toast only where it is seen and can be acted on: live controllers and a Gamepad to press with.
+				const VRInputSnapshot grab_snap = GetInputSnapshot();
+				s_grab_toast_ready = grab_snap.generation != 0 && grab_snap.actions_active && HasGamepadControl(*profile);
+			}
+		}
 		const bool armed = switched_on && (vm_state == VMState::Running) && pose.valid && guards_hold && net_ok;
 		// Say once per game in the headset why first person is (or isn't) running online.
 		const bool would_arm = switched_on && (vm_state == VMState::Running) && pose.valid && guards_hold;
