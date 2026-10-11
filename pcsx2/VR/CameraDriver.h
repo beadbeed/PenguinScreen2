@@ -51,6 +51,11 @@ namespace VR::CameraDriver
 	// ahead lookAt.predict leads the head. Any thread.
 	float HeadPredictionHorizon();
 
+	// How fast RenderPose's turn_yaw is changing right now, in radians per second of OpenXR yaw: a smooth stick turn
+	// in progress (0 without one, or while first person is not active). The VR pacer turns the first-person screen
+	// on by it toward each display time between GS frames. Any thread.
+	float ScreenTurnRate();
+
 	// PCSX2_VR_FAKE_HEADPOSE: the fake head's yaw (radians, OpenXR, CCW positive) at time_ms on the
 	// SteadyNowMs() clock, so the compositor can compare where a frame is placed with where the fake head is
 	// when it is shown. False (yaw untouched) when the fake head is off. Any thread.

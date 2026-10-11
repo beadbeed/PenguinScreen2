@@ -1331,6 +1331,10 @@ namespace VR::CameraDriver
 		// head turns instead of stepping at the game's frame rate.
 		std::atomic<float> s_base_yaw_now{0.0f};
 
+		// How fast RenderPose's turn_yaw is changing (radians/s of OpenXR yaw) from a smooth stick turn: the VR pacer
+		// turns the first-person screen on by it toward each display time between GS frames. 0 without a turn.
+		std::atomic<float> s_screen_turn_rate{0.0f};
+
 		// When s_base_yaw_now was last written (NowMs).
 		std::atomic<u64> s_base_yaw_ms{0};
 
@@ -1519,6 +1523,7 @@ namespace VR::CameraDriver
 			const EulerAngles& e_cam, const HeadPose::Snapshot& pose, LookAtWrite* out)
 		{
 			s_aim_moving = false;
+			s_screen_turn_rate.store(0.0f, std::memory_order_release);
 			s_weapon_raised = false;
 			if (!base.has_value() || (!la.when.empty() && !GuardListPass(la.when)))
 				return false;
@@ -1765,6 +1770,8 @@ namespace VR::CameraDriver
 			const u64 now_ms = NowMs();
 			s_base_yaw_now.store(yaw_offset, std::memory_order_release);
 			s_base_yaw_ms.store(now_ms, std::memory_order_release);
+			// d(turn_yaw)/dt: RenderPose's turn is yawSign * WrapPi(B_r - B_now), and B_now moves at stick_rate.
+			s_screen_turn_rate.store(-la.yaw_sign * stick_rate, std::memory_order_release);
 			if (out)
 			{
 				out->base_yaw = WrapPi(cam_base - la.yaw_sign * s_ref_yaw);
@@ -2823,6 +2830,11 @@ namespace VR::CameraDriver
 	float HeadPredictionHorizon()
 	{
 		return PredictHorizon(s_predict_h);
+	}
+
+	float ScreenTurnRate()
+	{
+		return LookAtActive() ? s_screen_turn_rate.load(std::memory_order_acquire) : 0.0f;
 	}
 
 	bool FakeHeadYawAt(u64 time_ms, float* yaw)

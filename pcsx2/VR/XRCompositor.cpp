@@ -16,6 +16,8 @@
 #include "VR/VRInternal.h"
 #include "VR/VRInput.h"
 #include "VR/XRSession.h"
+#include "VR/VRVulkanBridge.h"
+#include "Config.h"
 
 #ifdef ENABLE_VULKAN
 #include "GS/GS.h"
@@ -31,6 +33,7 @@
 #include <atomic>
 #include <cmath>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -69,6 +72,11 @@ namespace VR::XRCompositor
 		ScreenAnchor s_anchor_snapshot;
 
 		bool s_xrfault_begin1_fired = false;
+
+		// GetEyeInfo: what the runtime last reported, and what the Eyes line last logged.
+		std::mutex s_eye_mutex;
+		EyeInfo s_eye_info;
+		EyeInfo s_eye_logged;
 	}
 
 #ifdef ENABLE_VULKAN
@@ -86,19 +94,130 @@ namespace VR::XRCompositor
 		constexpr VkDeviceSize kHandImageBytes =
 			static_cast<VkDeviceSize>(HandModel::kImageSize) * HandModel::kImageSize * 4u;
 
+		// Teardown never waits long on the GPU: a runtime that stopped answering must not hold up the GS thread.
+		constexpr int64_t kTeardownFenceNs = 250000000;
+		// How long Shutdown waits for the pacer before leaving it stuck in the runtime (detached).
+		constexpr int kPacerJoinTimeoutMs = 500;
+		// XR_ERROR_RUNTIME_FAILURE from xrBeginFrame/xrEndFrame this many times in a row counts as a lost runtime;
+		// so does a legacy begin still owed after this many presents.
+		constexpr u32 kMaxRuntimeFailures = 30;
+		// The published layers older than this mean the GS is idle (loading, paused offline, stalled): the pacer
+		// keeps only the screen and lever cards.
+		constexpr u64 kStaleMs = 250;
+		// The opaque background's swapchain, cleared to black once.
+		constexpr u32 kBackgroundSize = 32;
+
+		// Every layer one present can build: up to five screen slots (split screen in stereo uses four), two lever
+		// cards, two hands and the five HUD cards (laser, wrist, vignette, toast, blink). The submit array adds the
+		// background under them; SteamVR takes at most 16 a frame.
+		constexpr u32 kLayerCapacity = 5 + ControlQuads::kSlots + kHandSlots + HudCards::kCardCount;
+		static_assert(kLayerCapacity + 1 <= 16, "more composition layers than SteamVR takes in a frame");
+
+		// What a published layer is. Screen entries turn on toward the display time during a smooth stick turn,
+		// and only Screen and Lever entries are kept while the GS is idle.
+		constexpr u8 kRoleScreen = 0;
+		constexpr u8 kRoleLever = 1;
+		constexpr u8 kRoleHand = 2;
+		constexpr u8 kRoleHudLaser = 3;
+		constexpr u8 kRoleHudWrist = 4;
+		constexpr u8 kRoleHudView = 5; // view-locked cards: toast, blink, vignette
+		constexpr u8 kKindQuad = 0;
+		constexpr u8 kKindCylinder = 1;
+
+		// The layers the GS built at its last present, copied by value: the pacer submits them every display period
+		// until the next present replaces them (the runtime keeps showing each swapchain's last released image).
+		struct PublishedSet
+		{
+			struct Entry
+			{
+				u8 kind;
+				u8 role;
+				XrCompositionLayerQuad quad;
+				XrCompositionLayerCylinderKHR cyl;
+			};
+			Entry e[kLayerCapacity];
+			u32 count;
+			u64 publish_ms; // SteadyNowMs at publish
+			// The publish moment on the display clock (the steady clock moved by the latest frame's lead from its
+			// wait to its display time); 0 = unknown. Turns extrapolate from here.
+			XrTime publish_display_time;
+			bool fp_screen;
+			XrVector3f fp_head; // the head position the first-person screen is placed around
+			float turn_rate;    // CameraDriver::ScreenTurnRate at publish, first-person screen only
+			u64 serial;         // counts publishes, for the re-sent count
+			u64 fp_image;       // which game frame the screen entries show (the sync log), 0 = unknown
+		};
+
 		struct
 		{
 			std::thread pacer;
 			std::atomic_bool pacer_exit{false};
 			std::atomic_bool pacer_done{false};
+			// Bumped when a stuck pacer is detached: that thread sees it and touches nothing more if it ever returns.
+			std::atomic<u32> pacer_gen{0};
+			// Set when Shutdown detached a stuck pacer: no XR call may be made again (handles leak until exit).
+			std::atomic_bool abandoned{false};
 
 			std::mutex frame_mutex;
 			XrFrameState pending_frame_state{XR_TYPE_FRAME_STATE};
 			bool has_pending_frame = false;
+			s64 pending_wait_ns = 0; // legacy: steady ns when the parked frame's xrWaitFrame returned
 			bool initialized = false;
 
 			bool begin_owed = false;
 			XrTime begin_owed_display_time = 0;
+			u32 begin_owed_presents = 0;
+
+			// [VR] HeadsetRateSubmit and OpaqueBackground, read once at Initialize.
+			bool headset_rate = true;
+			bool opaque_bg = true;
+
+			// Written by the pacer after each xrWaitFrame.
+			std::atomic<XrTime> latest_display_time{0};
+			std::atomic<XrDuration> display_period_ns{0};
+			std::atomic<s64> display_clock_offset_ns{0}; // predictedDisplayTime minus steady ns at the wait's return
+			std::atomic_bool pacer_should_render{false};
+			std::atomic<u64> session_run_began_ms{0}; // SteadyNowMs when the pacer first saw this run of the session
+
+			// Headset rate: the head pose the pacer located for its latest frame. EndOfFrame copies it into head_pose
+			// and friends below, which are then the GS thread's own.
+			struct PacerHead
+			{
+				XrPosef pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+				bool valid = false;
+				bool position_valid = false;
+			};
+			std::mutex head_mutex;
+			PacerHead pacer_head;
+
+			// Lock order: submit_mutex, then the Vulkan queue lock (VR::ScopedXrQueueLock); never the reverse.
+			// The pacer holds submit_mutex from copying the published layers through xrEndFrame; a swapchain is
+			// destroyed under it, after its entries are dropped. publish_mutex only covers copies (no XR call inside).
+			std::timed_mutex submit_mutex;
+			std::mutex publish_mutex;
+			PublishedSet published = {};
+
+			// The opaque black background projection layer.
+			XrSwapchain bg_swapchain = XR_NULL_HANDLE;
+			bool bg_ready = false;
+			bool bg_logged = false;
+
+			// The runtime's recommended per-eye image width, for the headset's pixel density (Initialize).
+			u32 view_rec_width[2] = {0, 0};
+
+			// GS-side counts for the 5 s Frames line, taken by whichever thread logs it.
+			std::atomic<u32> stat_gs_frames{0};
+			std::atomic<u32> stat_copy_skipped{0};
+			std::atomic<u32> stat_copy_timeout{0};
+
+			// XR_ERROR_RUNTIME_FAILURE in a row from the frame calls (the pacer's xrWaitFrame counts too).
+			std::atomic<u32> runtime_failures{0};
+			// Whether the screen copies were last logged layered (1) or mono (0); -1 before the first copy.
+			int layered_logged = -1;
+
+			// PCSX2_VR_XRFAULT=hangwait: the pacer waits here forever.
+			std::mutex hang_mutex;
+			std::condition_variable hang_cv;
 
 			struct EyeChain
 			{
@@ -261,6 +380,90 @@ namespace VR::XRCompositor
 			vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 		}
 
+		// The XR and Vulkan calls that use the queue the session shares with the GS, each under the queue lock
+		// (VRVulkanBridge.h). xrWaitSwapchainImage and xrWaitFrame never take it.
+		XrResult LockedAcquire(XrSwapchain swapchain, uint32_t* index)
+		{
+			XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+			const VR::ScopedXrQueueLock lock;
+			return xrAcquireSwapchainImage(swapchain, &ai, index);
+		}
+
+		XrResult LockedRelease(XrSwapchain swapchain)
+		{
+			XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+			const VR::ScopedXrQueueLock lock;
+			return xrReleaseSwapchainImage(swapchain, &ri);
+		}
+
+		VkResult LockedQueueSubmit(VkQueue queue, const VkSubmitInfo& si, VkFence fence)
+		{
+			const VR::ScopedXrQueueLock lock;
+			return vkQueueSubmit(queue, 1, &si, fence);
+		}
+
+		XrResult LockedBeginFrame(XrSession session)
+		{
+			XrFrameBeginInfo bi = {XR_TYPE_FRAME_BEGIN_INFO};
+			const VR::ScopedXrQueueLock lock;
+			return xrBeginFrame(session, &bi);
+		}
+
+		XrResult LockedEndFrame(XrSession session, XrTime display_time, u32 layer_count,
+			const XrCompositionLayerBaseHeader* const* layers)
+		{
+			XrFrameEndInfo ei = {XR_TYPE_FRAME_END_INFO};
+			ei.displayTime = display_time;
+			ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+			ei.layerCount = layer_count;
+			ei.layers = layer_count ? layers : nullptr;
+			const VR::ScopedXrQueueLock lock;
+			return xrEndFrame(session, &ei);
+		}
+
+		// Drops every published entry that shows this swapchain (publish_mutex held by the caller).
+		void ForgetPublishedSwapchain(XrSwapchain swapchain)
+		{
+			PublishedSet& set = s.published;
+			u32 kept = 0;
+			for (u32 i = 0; i < set.count; i++)
+			{
+				const PublishedSet::Entry& entry = set.e[i];
+				const XrSwapchain shown = (entry.kind == kKindCylinder) ? entry.cyl.subImage.swapchain : entry.quad.subImage.swapchain;
+				if (shown == swapchain)
+					continue;
+				if (kept != i)
+					set.e[kept] = entry;
+				kept++;
+			}
+			set.count = kept;
+		}
+
+		// Destroys a swapchain the pacer may be submitting: waits for the pacer's submit in progress (submit_mutex),
+		// drops the published entries that show it, then destroys it. Bounded like the queue lock: a pacer stuck in
+		// xrEndFrame for 100 ms means the runtime stopped answering, so VR is abandoned and the swapchain left alive.
+		// With the compositor abandoned the handle is only forgotten.
+		void DestroySwapchainSynced(XrSwapchain swapchain)
+		{
+			if (swapchain == XR_NULL_HANDLE || s.abandoned.load(std::memory_order_acquire))
+				return;
+			std::unique_lock<std::timed_mutex> submit(s.submit_mutex, std::defer_lock);
+			if (!submit.try_lock_for(std::chrono::milliseconds(100)))
+			{
+				Console.Error("(VR) The VR pacer has been inside xrEndFrame for over 100 ms (runtime not answering): "
+							  "swapchain left alive, abandoning VR; emulation continues.");
+				XRSession::MarkLost();
+				std::lock_guard<std::mutex> publish(s.publish_mutex);
+				ForgetPublishedSwapchain(swapchain);
+				return;
+			}
+			{
+				std::lock_guard<std::mutex> publish(s.publish_mutex);
+				ForgetPublishedSwapchain(swapchain);
+			}
+			xrDestroySwapchain(swapchain);
+		}
+
 		void WaitAllFences()
 		{
 			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
@@ -269,9 +472,9 @@ namespace VR::XRCompositor
 				if (!s.fence_submitted[i])
 					continue;
 
-				const VkResult res = vkWaitForFences(h.device, 1, &s.fences[i], VK_TRUE, ONE_SECOND_NS);
+				const VkResult res = vkWaitForFences(h.device, 1, &s.fences[i], VK_TRUE, kTeardownFenceNs);
 				if (res == VK_TIMEOUT)
-					Console.Warning("(VR) Copy fence %u still busy after 1s during teardown.", i);
+					Console.Warning("(VR) Copy fence %u still busy after 250 ms during teardown.", i);
 				vkResetFences(h.device, 1, &s.fences[i]);
 				s.fence_submitted[i] = false;
 			}
@@ -284,7 +487,7 @@ namespace VR::XRCompositor
 			{
 				if (chain.swapchain != XR_NULL_HANDLE)
 				{
-					xrDestroySwapchain(chain.swapchain);
+					DestroySwapchainSynced(chain.swapchain);
 					chain.swapchain = XR_NULL_HANDLE;
 				}
 				chain.images.clear();
@@ -435,7 +638,7 @@ namespace VR::XRCompositor
 			VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
 			si.commandBufferCount = 1;
 			si.pCommandBuffers = &cmd;
-			vr = vkQueueSubmit(h.queue, 1, &si, s.fences[i]);
+			vr = LockedQueueSubmit(h.queue, si, s.fences[i]);
 			if (vr != VK_SUCCESS)
 			{
 				Console.Error("(VR) vkQueueSubmit failed (%d).", static_cast<int>(vr));
@@ -454,8 +657,7 @@ namespace VR::XRCompositor
 			}
 			else
 			{
-				XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-				XrResult res = xrAcquireSwapchainImage(chain.swapchain, &ai, &index);
+				XrResult res = LockedAcquire(chain.swapchain, &index);
 				if (XR_FAILED(res))
 				{
 					if (!s.warned_acquire)
@@ -499,8 +701,7 @@ namespace VR::XRCompositor
 
 			const bool submitted = RecordAndSubmitCopy(src, src_layer, chain.images[index].image);
 
-			XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-			res = xrReleaseSwapchainImage(chain.swapchain, &ri);
+			res = LockedRelease(chain.swapchain);
 			if (XR_FAILED(res))
 			{
 				if (!s.warned_release)
@@ -519,8 +720,8 @@ namespace VR::XRCompositor
 			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
 			if (h.IsValid() && s.lever_fence != VK_NULL_HANDLE && s.lever_fence_submitted)
 			{
-				if (vkWaitForFences(h.device, 1, &s.lever_fence, VK_TRUE, ONE_SECOND_NS) == VK_TIMEOUT)
-					Console.Warning("(VR) Control quads: lever upload fence still busy after 1s during teardown.");
+				if (vkWaitForFences(h.device, 1, &s.lever_fence, VK_TRUE, kTeardownFenceNs) == VK_TIMEOUT)
+					Console.Warning("(VR) Control quads: lever upload fence still busy after 250 ms during teardown.");
 				vkResetFences(h.device, 1, &s.lever_fence);
 				s.lever_fence_submitted = false;
 			}
@@ -528,7 +729,7 @@ namespace VR::XRCompositor
 			{
 				if (lc.swapchain != XR_NULL_HANDLE)
 				{
-					xrDestroySwapchain(lc.swapchain);
+					DestroySwapchainSynced(lc.swapchain);
 					lc.swapchain = XR_NULL_HANDLE;
 				}
 				lc.images.clear();
@@ -747,8 +948,7 @@ namespace VR::XRCompositor
 				}
 				else
 				{
-					XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-					if (XR_FAILED(xrAcquireSwapchainImage(lc.swapchain, &ai, &index)))
+					if (XR_FAILED(LockedAcquire(lc.swapchain, &index)))
 						continue;
 					lc.pending_index = index;
 					lc.wait_pending = true;
@@ -767,8 +967,7 @@ namespace VR::XRCompositor
 					{
 						if (vkWaitForFences(h.device, 1, &s.lever_fence, VK_TRUE, ONE_SECOND_NS) != VK_SUCCESS)
 						{
-							XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-							xrReleaseSwapchainImage(lc.swapchain, &ri);
+							LockedRelease(lc.swapchain);
 							break;
 						}
 						vkResetFences(h.device, 1, &s.lever_fence);
@@ -778,8 +977,7 @@ namespace VR::XRCompositor
 					bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 					if (vkBeginCommandBuffer(s.lever_cmd, &bi) != VK_SUCCESS)
 					{
-						XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-						xrReleaseSwapchainImage(lc.swapchain, &ri);
+						LockedRelease(lc.swapchain);
 						break;
 					}
 					recording = true;
@@ -797,14 +995,13 @@ namespace VR::XRCompositor
 					VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
 					si.commandBufferCount = 1;
 					si.pCommandBuffers = &s.lever_cmd;
-					submitted = (vkQueueSubmit(h.queue, 1, &si, s.lever_fence) == VK_SUCCESS);
+					submitted = (LockedQueueSubmit(h.queue, si, s.lever_fence) == VK_SUCCESS);
 					s.lever_fence_submitted = submitted;
 				}
 				for (int k = 0; k < pending_count; k++)
 				{
 					auto& lc = s.levers[pending_release[k]];
-					XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-					if (XR_SUCCEEDED(xrReleaseSwapchainImage(lc.swapchain, &ri)) && submitted)
+					if (XR_SUCCEEDED(LockedRelease(lc.swapchain)) && submitted)
 					{
 						lc.ever_released = true;
 						lc.last_key = pending_key[k];
@@ -864,8 +1061,8 @@ namespace VR::XRCompositor
 			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
 			if (h.IsValid() && s.hand_fence != VK_NULL_HANDLE && s.hand_fence_submitted)
 			{
-				if (vkWaitForFences(h.device, 1, &s.hand_fence, VK_TRUE, ONE_SECOND_NS) == VK_TIMEOUT)
-					Console.Warning("(VR) Hands: upload fence still busy after 1s during teardown.");
+				if (vkWaitForFences(h.device, 1, &s.hand_fence, VK_TRUE, kTeardownFenceNs) == VK_TIMEOUT)
+					Console.Warning("(VR) Hands: upload fence still busy after 250 ms during teardown.");
 				vkResetFences(h.device, 1, &s.hand_fence);
 			}
 			s.hand_fence_submitted = false;
@@ -873,7 +1070,7 @@ namespace VR::XRCompositor
 			{
 				if (hc.swapchain != XR_NULL_HANDLE)
 				{
-					xrDestroySwapchain(hc.swapchain);
+					DestroySwapchainSynced(hc.swapchain);
 					hc.swapchain = XR_NULL_HANDLE;
 				}
 				hc.images.clear();
@@ -1151,8 +1348,7 @@ namespace VR::XRCompositor
 				}
 				else
 				{
-					XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-					if (XR_FAILED(xrAcquireSwapchainImage(hc.swapchain, &ai, &index)))
+					if (XR_FAILED(LockedAcquire(hc.swapchain, &index)))
 						continue;
 					hc.pending_index = index;
 					hc.wait_pending = true;
@@ -1172,8 +1368,7 @@ namespace VR::XRCompositor
 					{
 						if (vkWaitForFences(h.device, 1, &s.hand_fence, VK_TRUE, ONE_SECOND_NS) != VK_SUCCESS)
 						{
-							XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-							xrReleaseSwapchainImage(hc.swapchain, &ri);
+							LockedRelease(hc.swapchain);
 							break;
 						}
 						vkResetFences(h.device, 1, &s.hand_fence);
@@ -1183,8 +1378,7 @@ namespace VR::XRCompositor
 					bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 					if (vkBeginCommandBuffer(s.hand_cmd, &bi) != VK_SUCCESS)
 					{
-						XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-						xrReleaseSwapchainImage(hc.swapchain, &ri);
+						LockedRelease(hc.swapchain);
 						break;
 					}
 					recording = true;
@@ -1207,14 +1401,13 @@ namespace VR::XRCompositor
 					VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
 					si.commandBufferCount = 1;
 					si.pCommandBuffers = &s.hand_cmd;
-					submitted = (vkQueueSubmit(h.queue, 1, &si, s.hand_fence) == VK_SUCCESS);
+					submitted = (LockedQueueSubmit(h.queue, si, s.hand_fence) == VK_SUCCESS);
 					s.hand_fence_submitted = submitted;
 				}
 				for (int k = 0; k < pending_count; k++)
 				{
 					auto& hc = s.hand_chains[pending[k]];
-					XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-					if (XR_SUCCEEDED(xrReleaseSwapchainImage(hc.swapchain, &ri)) && submitted)
+					if (XR_SUCCEEDED(LockedRelease(hc.swapchain)) && submitted)
 					{
 						hc.ever_released = true;
 						uploaded[pending[k]] = true;
@@ -1306,8 +1499,8 @@ namespace VR::XRCompositor
 			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
 			if (h.IsValid() && s.hud_fence != VK_NULL_HANDLE && s.hud_fence_submitted)
 			{
-				if (vkWaitForFences(h.device, 1, &s.hud_fence, VK_TRUE, ONE_SECOND_NS) == VK_TIMEOUT)
-					Console.Warning("(VR) HUD: upload fence still busy after 1s during teardown.");
+				if (vkWaitForFences(h.device, 1, &s.hud_fence, VK_TRUE, kTeardownFenceNs) == VK_TIMEOUT)
+					Console.Warning("(VR) HUD: upload fence still busy after 250 ms during teardown.");
 				vkResetFences(h.device, 1, &s.hud_fence);
 			}
 			s.hud_fence_submitted = false;
@@ -1315,7 +1508,7 @@ namespace VR::XRCompositor
 			{
 				if (hc.swapchain != XR_NULL_HANDLE)
 				{
-					xrDestroySwapchain(hc.swapchain);
+					DestroySwapchainSynced(hc.swapchain);
 					hc.swapchain = XR_NULL_HANDLE;
 				}
 				hc.images.clear();
@@ -1768,8 +1961,7 @@ namespace VR::XRCompositor
 				}
 				else
 				{
-					XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-					if (XR_FAILED(xrAcquireSwapchainImage(hc.swapchain, &ai, &index)))
+					if (XR_FAILED(LockedAcquire(hc.swapchain, &index)))
 						continue;
 					hc.pending_index = index;
 					hc.wait_pending = true;
@@ -1789,8 +1981,7 @@ namespace VR::XRCompositor
 					{
 						if (vkWaitForFences(h.device, 1, &s.hud_fence, VK_TRUE, ONE_SECOND_NS) != VK_SUCCESS)
 						{
-							XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-							xrReleaseSwapchainImage(hc.swapchain, &ri);
+							LockedRelease(hc.swapchain);
 							break;
 						}
 						vkResetFences(h.device, 1, &s.hud_fence);
@@ -1800,8 +1991,7 @@ namespace VR::XRCompositor
 					bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 					if (vkBeginCommandBuffer(s.hud_cmd, &bi) != VK_SUCCESS)
 					{
-						XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-						xrReleaseSwapchainImage(hc.swapchain, &ri);
+						LockedRelease(hc.swapchain);
 						break;
 					}
 					recording = true;
@@ -1821,15 +2011,14 @@ namespace VR::XRCompositor
 					VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
 					si.commandBufferCount = 1;
 					si.pCommandBuffers = &s.hud_cmd;
-					submitted = (vkQueueSubmit(h.queue, 1, &si, s.hud_fence) == VK_SUCCESS);
+					submitted = (LockedQueueSubmit(h.queue, si, s.hud_fence) == VK_SUCCESS);
 					s.hud_fence_submitted = submitted;
 				}
 				for (int k = 0; k < pending_count; k++)
 				{
 					const int card = pending[k];
 					auto& hc = s.hud_chains[card];
-					XrSwapchainImageReleaseInfo ri = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-					if (XR_SUCCEEDED(xrReleaseSwapchainImage(hc.swapchain, &ri)) && submitted)
+					if (XR_SUCCEEDED(LockedRelease(hc.swapchain)) && submitted)
 					{
 						hc.ever_released = true;
 						hc.shown_content = want[card].content;
@@ -1939,100 +2128,6 @@ namespace VR::XRCompositor
 			}
 		}
 
-		void PacerThreadMain()
-		{
-			Threading::SetNameOfCurrentThread("VR Pacer");
-
-			const XrSession session = XRSession::GetSession();
-
-			while (!s.pacer_exit.load(std::memory_order_acquire))
-			{
-				if (!XRSession::IsSessionRunning())
-				{
-					std::this_thread::sleep_for(std::chrono::milliseconds(20));
-					continue;
-				}
-
-				XrFrameState fs = {XR_TYPE_FRAME_STATE};
-				const XrResult res = xrWaitFrame(session, nullptr, &fs);
-				if (XR_FAILED(res))
-				{
-					if (res == XR_ERROR_SESSION_NOT_RUNNING)
-						continue;
-
-					if (!s.warned_pacer)
-					{
-						s.warned_pacer = true;
-						Console.Error("(VR) xrWaitFrame failed (%d); pacer parked. Session-loss handling "
-									  "arrives via events.",
-							static_cast<int>(res));
-					}
-					std::this_thread::sleep_for(std::chrono::milliseconds(100));
-					continue;
-				}
-
-				std::lock_guard<std::mutex> lock(s.frame_mutex);
-				s.pending_frame_state = fs;
-				s.has_pending_frame = true;
-			}
-
-			s.pacer_done.store(true, std::memory_order_release);
-		}
-
-		bool SettleOwedBegin(XrSession session)
-		{
-			if (!s.begin_owed)
-				return true;
-
-			XrFrameBeginInfo bi = {XR_TYPE_FRAME_BEGIN_INFO};
-			const XrResult res = xrBeginFrame(session, &bi);
-			if (res == XR_ERROR_SESSION_NOT_RUNNING)
-			{
-				s.begin_owed = false;
-				return true;
-			}
-			if (XR_FAILED(res))
-				return false;
-
-			XRInput::Update(s.begin_owed_display_time);
-
-			XrFrameEndInfo ei = {XR_TYPE_FRAME_END_INFO};
-			ei.displayTime = s.begin_owed_display_time;
-			ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-			ei.layerCount = 0;
-			ei.layers = nullptr;
-			xrEndFrame(session, &ei);
-			s.begin_owed = false;
-			return true;
-		}
-
-		void DrainOnePacedFrameForShutdown()
-		{
-			XrFrameState fs;
-			{
-				std::lock_guard<std::mutex> lock(s.frame_mutex);
-				if (!s.has_pending_frame)
-					return;
-				fs = s.pending_frame_state;
-				s.has_pending_frame = false;
-			}
-
-			if (!XRSession::HasSession())
-				return;
-
-			const XrSession session = XRSession::GetSession();
-			XrFrameBeginInfo bi = {XR_TYPE_FRAME_BEGIN_INFO};
-			if (XR_FAILED(xrBeginFrame(session, &bi)))
-				return;
-
-			XrFrameEndInfo ei = {XR_TYPE_FRAME_END_INFO};
-			ei.displayTime = fs.predictedDisplayTime;
-			ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-			ei.layerCount = 0;
-			ei.layers = nullptr;
-			xrEndFrame(session, &ei);
-		}
-
 		// OpenXR yaw (CCW positive) of a quaternion's forward (-Z) direction, as the first-person placement uses.
 		float ForwardYaw(float x, float y, float z, float w)
 		{
@@ -2090,12 +2185,1134 @@ namespace VR::XRCompositor
 				s_edge_n = 0;
 			}
 		}
+
+		s64 SteadyNowNs()
+		{
+			return static_cast<s64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count());
+		}
+
+		// Now on the display clock: the steady clock moved by the lead the latest waited frame had from its wait's
+		// return to its predicted display time. 0 until the pacer has waited a frame.
+		XrTime DisplayClockNow()
+		{
+			if (s.latest_display_time.load(std::memory_order_acquire) == 0)
+				return 0;
+			return static_cast<XrTime>(SteadyNowNs() + s.display_clock_offset_ns.load(std::memory_order_acquire));
+		}
+
+		// Frame-call results that mean the runtime is gone end VR at once (VRManager tears it down on the GS thread and
+		// play goes on flat); kMaxRuntimeFailures XR_ERROR_RUNTIME_FAILURE results in a row count as gone too.
+		void NoteFrameCallResult(XrResult res, const char* what)
+		{
+			if (res == XR_ERROR_SESSION_LOST || res == XR_ERROR_INSTANCE_LOST)
+			{
+				if (!XRSession::IsLost())
+					Console.Error("(VR) %s: the session or the runtime is lost (%d).", what, static_cast<int>(res));
+				XRSession::MarkLost();
+				s.runtime_failures.store(0, std::memory_order_relaxed);
+			}
+			else if (res == XR_ERROR_RUNTIME_FAILURE)
+			{
+				const u32 failures = s.runtime_failures.fetch_add(1, std::memory_order_relaxed) + 1;
+				if (failures >= kMaxRuntimeFailures)
+				{
+					Console.Error("(VR) %s: XR_ERROR_RUNTIME_FAILURE %u times in a row; treating the runtime as lost.", what,
+						failures);
+					XRSession::MarkLost();
+					s.runtime_failures.store(0, std::memory_order_relaxed);
+				}
+			}
+			else if (XR_SUCCEEDED(res))
+			{
+				s.runtime_failures.store(0, std::memory_order_relaxed);
+			}
+		}
+
+		// PCSX2_VR_XRFAULT: a comma list of offline test faults, parsed at Initialize and refused while the network
+		// adapter is on. begin1: one xrBeginFrame reads XR_ERROR_RUNTIME_FAILURE (the owed-begin recovery). lost@S:
+		// from S seconds into the session the next xrBeginFrame reads XR_ERROR_SESSION_LOST. hangwait@S: the pacer
+		// blocks forever instead of calling xrWaitFrame (the detach path). exit@S: the session is told to stop, then
+		// to exit, as the runtime would.
+		struct XrFaults
+		{
+			bool begin1 = false;
+			float lost_s = -1.0f;
+			float hangwait_s = -1.0f;
+			float exit_s = -1.0f;
+			bool lost_fired = false;
+			bool exit_fired = false;
+		};
+		XrFaults s_faults;
+
+		void ParseFaults()
+		{
+			s_faults = XrFaults();
+			s_xrfault_begin1_fired = false;
+			const char* env = std::getenv("PCSX2_VR_XRFAULT");
+			if (!env || !*env)
+				return;
+			if (EmuConfig.DEV9.EthEnable)
+			{
+				Console.Warning("(VR) PCSX2_VR_XRFAULT=%s refused: the network adapter is on (fault injection is offline only).", env);
+				return;
+			}
+			const std::string list(env);
+			size_t pos = 0;
+			while (pos <= list.size())
+			{
+				size_t comma = list.find(',', pos);
+				if (comma == std::string::npos)
+					comma = list.size();
+				const std::string token = list.substr(pos, comma - pos);
+				pos = comma + 1;
+				if (token.empty())
+					continue;
+				const size_t at = token.find('@');
+				const std::string name = token.substr(0, at);
+				float seconds = -1.0f;
+				if (at != std::string::npos)
+				{
+					const std::string number = token.substr(at + 1);
+					char* end = nullptr;
+					const double v = std::strtod(number.c_str(), &end);
+					if (end != number.c_str() && *end == '\0' && std::isfinite(v) && v >= 0.0)
+						seconds = static_cast<float>(v);
+				}
+				if (name == "begin1" && at == std::string::npos)
+					s_faults.begin1 = true;
+				else if (name == "lost" && seconds >= 0.0f)
+					s_faults.lost_s = seconds;
+				else if (name == "hangwait" && seconds >= 0.0f)
+					s_faults.hangwait_s = seconds;
+				else if (name == "exit" && seconds >= 0.0f)
+					s_faults.exit_s = seconds;
+				else
+					Console.Warning("(VR) PCSX2_VR_XRFAULT: '%s' not understood (begin1, lost@S, hangwait@S, exit@S); ignored.",
+						token.c_str());
+			}
+			Console.Warning("(VR) PCSX2_VR_XRFAULT active (offline test): begin1 %s, lost@ %.1f s, hangwait@ %.1f s, exit@ %.1f s "
+							"(-1 = off).",
+				s_faults.begin1 ? "on" : "off", s_faults.lost_s, s_faults.hangwait_s, s_faults.exit_s);
+		}
+
+		// Seconds since the pacer first saw this run of the session (it began), or -1 before that.
+		float SessionRunSeconds()
+		{
+			const u64 began = s.session_run_began_ms.load(std::memory_order_acquire);
+			if (began == 0)
+				return -1.0f;
+			const u64 now = CameraDriver::SteadyNowMs();
+			return (now > began) ? static_cast<float>(now - began) / 1000.0f : 0.0f;
+		}
+
+		// xrBeginFrame (under the queue lock) with the begin1 and lost@ faults played in front of it.
+		XrResult BeginFrameWithFaults(XrSession session)
+		{
+			if (s_faults.begin1 && !s_xrfault_begin1_fired)
+			{
+				s_xrfault_begin1_fired = true;
+				Console.Warning("(VR) XRFAULT=begin1: injecting one xrBeginFrame failure to exercise owed-begin recovery.");
+				return XR_ERROR_RUNTIME_FAILURE;
+			}
+			if (s_faults.lost_s >= 0.0f && !s_faults.lost_fired)
+			{
+				const float t = SessionRunSeconds();
+				if (t >= s_faults.lost_s)
+				{
+					s_faults.lost_fired = true;
+					Console.Warning("(VR) XRFAULT=lost: xrBeginFrame reads XR_ERROR_SESSION_LOST %.1f s into the session.", t);
+					return XR_ERROR_SESSION_LOST;
+				}
+			}
+			return LockedBeginFrame(session);
+		}
+
+		// The pacer's own faults. True when the pacer should go round again (exit@ just played out).
+		bool MaybeInjectPacerFault()
+		{
+			const float t = SessionRunSeconds();
+			if (t < 0.0f)
+				return false;
+			if (s_faults.hangwait_s >= 0.0f && t >= s_faults.hangwait_s)
+			{
+				Console.Warning("(VR) XRFAULT=hangwait: the pacer now blocks forever instead of calling xrWaitFrame "
+								"(exercises the detach path).");
+				std::unique_lock<std::mutex> lock(s.hang_mutex);
+				s.hang_cv.wait(lock, [] { return false; });
+				return true;
+			}
+			if (s_faults.exit_s >= 0.0f && !s_faults.exit_fired && t >= s_faults.exit_s)
+			{
+				s_faults.exit_fired = true;
+				Console.Warning("(VR) XRFAULT=exit: the session is told to stop, then to exit, %.1f s into it.", t);
+				XRSession::InjectStateForTest(XR_SESSION_STATE_STOPPING);
+				XRSession::InjectStateForTest(XR_SESSION_STATE_EXITING);
+				return true;
+			}
+			return false;
+		}
+
+		// The head (the VIEW space in the base space) at display time t, with its angular velocity, published for
+		// CameraDriver (HeadPose::Publish, or Invalidate when it is not tracked). False when not located.
+		bool LocateAndPublishHead(XrTime t, XrPosef* pose, bool* position_valid)
+		{
+			// The head's angular velocity rides along on the same locate, for camera.lookAt head prediction.
+			XrSpaceVelocity vel = {XR_TYPE_SPACE_VELOCITY};
+			XrSpaceLocation loc = {XR_TYPE_SPACE_LOCATION};
+			loc.next = &vel;
+			if (XR_FAILED(xrLocateSpace(s.view_space, XRSession::GetSpace(), t, &loc)) ||
+				!(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+			{
+				HeadPose::Invalidate();
+				return false;
+			}
+
+			HeadPose::Snapshot p;
+			p.orientation_x = loc.pose.orientation.x;
+			p.orientation_y = loc.pose.orientation.y;
+			p.orientation_z = loc.pose.orientation.z;
+			p.orientation_w = loc.pose.orientation.w;
+			if (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
+			{
+				p.position_x = loc.pose.position.x;
+				p.position_y = loc.pose.position.y;
+				p.position_z = loc.pose.position.z;
+				p.position_valid = true;
+			}
+			// Expressed in the base space (the room), which is the frame the prediction rotates in.
+			const bool angular = (vel.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) != 0;
+			if (angular && std::isfinite(vel.angularVelocity.x) && std::isfinite(vel.angularVelocity.y) &&
+				std::isfinite(vel.angularVelocity.z))
+			{
+				p.angular_velocity[0] = vel.angularVelocity.x;
+				p.angular_velocity[1] = vel.angularVelocity.y;
+				p.angular_velocity[2] = vel.angularVelocity.z;
+				p.angular_valid = true;
+			}
+			// Once: whether this runtime reports the head's velocity (SteamVR's null driver reports zeros).
+			static bool s_velocity_logged = false;
+			if (!s_velocity_logged)
+			{
+				s_velocity_logged = true;
+				Console.WriteLn("(VR) Head pose: runtime velocityFlags 0x%llX (angular %s, linear %s), angular (%.3f, %.3f, %.3f) rad/s.",
+					static_cast<unsigned long long>(vel.velocityFlags), angular ? "valid" : "not valid",
+					(vel.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) ? "valid" : "not valid",
+					vel.angularVelocity.x, vel.angularVelocity.y, vel.angularVelocity.z);
+			}
+			p.valid = true;
+			HeadPose::Publish(p);
+			*pose = loc.pose;
+			*position_valid = p.position_valid;
+			return true;
+		}
+
+		// The Eyes line (first located, then on an IPD change over 0.5 mm or a field-of-view change over 0.5 deg) and
+		// GetEyeInfo, from both views as the runtime located them.
+		void UpdateEyeInfo(const XrView* views, bool position_valid)
+		{
+			constexpr float kDeg = 180.0f / 3.14159265f;
+			EyeInfo now;
+			now.valid = true;
+			if (position_valid)
+			{
+				const float dx = views[1].pose.position.x - views[0].pose.position.x;
+				const float dy = views[1].pose.position.y - views[0].pose.position.y;
+				const float dz = views[1].pose.position.z - views[0].pose.position.z;
+				now.ipd_m = std::sqrt(dx * dx + dy * dy + dz * dz);
+			}
+			for (int eye = 0; eye < 2; eye++)
+			{
+				now.fov_deg[eye][0] = views[eye].fov.angleLeft * kDeg;
+				now.fov_deg[eye][1] = views[eye].fov.angleRight * kDeg;
+				now.fov_deg[eye][2] = views[eye].fov.angleUp * kDeg;
+				now.fov_deg[eye][3] = views[eye].fov.angleDown * kDeg;
+			}
+			const XrDuration period = s.display_period_ns.load(std::memory_order_acquire);
+			now.display_hz = (period > 0) ? static_cast<float>(1.0e9 / static_cast<double>(period)) : 0.0f;
+
+			bool changed = false;
+			{
+				std::lock_guard<std::mutex> lock(s_eye_mutex);
+				changed = !s_eye_logged.valid || std::abs(now.ipd_m - s_eye_logged.ipd_m) > 0.0005f;
+				for (int eye = 0; eye < 2 && !changed; eye++)
+				{
+					for (int k = 0; k < 4 && !changed; k++)
+						changed = std::abs(now.fov_deg[eye][k] - s_eye_logged.fov_deg[eye][k]) > 0.5f;
+				}
+				s_eye_info = now;
+				if (changed)
+					s_eye_logged = now;
+			}
+			if (!changed)
+				return;
+
+			const float union_h = std::max(std::max(-now.fov_deg[0][0], -now.fov_deg[1][0]),
+				std::max(now.fov_deg[0][1], now.fov_deg[1][1]));
+			const float union_up = std::max(now.fov_deg[0][2], now.fov_deg[1][2]);
+			const float union_down = std::max(-now.fov_deg[0][3], -now.fov_deg[1][3]);
+			Console.WriteLn("(VR) Eyes: IPD %.1f mm; left fov L/R/U/D %.1f/%.1f/%.1f/%.1f, right %.1f/%.1f/%.1f/%.1f; "
+							"union H +-%.1f V +%.1f/-%.1f deg; display %.1f Hz",
+				now.ipd_m * 1000.0f, now.fov_deg[0][0], now.fov_deg[0][1], now.fov_deg[0][2], now.fov_deg[0][3],
+				now.fov_deg[1][0], now.fov_deg[1][1], now.fov_deg[1][2], now.fov_deg[1][3], union_h, union_up, union_down,
+				now.display_hz);
+		}
+
+		// xrLocateViews for the background layer and the Eyes line. True when both views have a valid orientation.
+		bool LocateEyeViews(XrTime t, XrView* views)
+		{
+			XrViewLocateInfo li = {XR_TYPE_VIEW_LOCATE_INFO};
+			li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+			li.displayTime = t;
+			li.space = XRSession::GetSpace();
+			XrViewState vs = {XR_TYPE_VIEW_STATE};
+			views[0] = XrView{XR_TYPE_VIEW};
+			views[1] = XrView{XR_TYPE_VIEW};
+			uint32_t count = 0;
+			if (XR_FAILED(xrLocateViews(XRSession::GetSession(), &li, &vs, 2, &count, views)) || count != 2 ||
+				!(vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT))
+			{
+				return false;
+			}
+			UpdateEyeInfo(views, (vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0);
+			return true;
+		}
+
+		// The black background under every other layer: a projection layer over both eyes' views that always shows
+		// the one image cleared at Initialize.
+		void MakeBackgroundLayer(const XrView* views, XrCompositionLayerProjectionView* pv, XrCompositionLayerProjection* layer)
+		{
+			for (u32 i = 0; i < 2; i++)
+			{
+				pv[i] = XrCompositionLayerProjectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+				pv[i].pose = views[i].pose;
+				pv[i].fov = views[i].fov;
+				pv[i].subImage.swapchain = s.bg_swapchain;
+				pv[i].subImage.imageRect.offset = {0, 0};
+				pv[i].subImage.imageRect.extent = {static_cast<s32>(kBackgroundSize), static_cast<s32>(kBackgroundSize)};
+				pv[i].subImage.imageArrayIndex = 0;
+			}
+			*layer = XrCompositionLayerProjection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+			layer->layerFlags = 0;
+			layer->space = XRSession::GetSpace();
+			layer->viewCount = 2;
+			layer->views = pv;
+			if (!s.bg_logged)
+			{
+				s.bg_logged = true;
+				Console.WriteLn("(VR) Background: opaque black projection layer under the screens.");
+			}
+		}
+
+		void DestroyBackground()
+		{
+			if (s.bg_swapchain != XR_NULL_HANDLE && !s.abandoned.load(std::memory_order_acquire))
+				xrDestroySwapchain(s.bg_swapchain);
+			s.bg_swapchain = XR_NULL_HANDLE;
+			s.bg_ready = false;
+		}
+
+		// The background's swapchain: cleared to opaque black here, once, and never touched again (the runtime keeps
+		// showing the last released image). Runs before the pacer starts. Any failure is logged and the frames go
+		// without it.
+		void CreateBackground()
+		{
+			s.bg_ready = false;
+			s.bg_logged = false;
+			if (!s.opaque_bg)
+			{
+				Console.WriteLn("(VR) Background: off ([VR] OpaqueBackground); the runtime's environment shows around the screens.");
+				return;
+			}
+			const auto fail = [](const char* what, int code) {
+				Console.Warning("(VR) Background: %s failed (%d); frames go without the black projection layer.", what, code);
+				DestroyBackground();
+			};
+
+			XrSwapchainCreateInfo ci = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
+			ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+			ci.format = static_cast<int64_t>(s.swapchain_format);
+			ci.sampleCount = 1;
+			ci.width = kBackgroundSize;
+			ci.height = kBackgroundSize;
+			ci.faceCount = 1;
+			ci.arraySize = 1;
+			ci.mipCount = 1;
+			XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &s.bg_swapchain);
+			if (XR_FAILED(res))
+			{
+				s.bg_swapchain = XR_NULL_HANDLE;
+				fail("xrCreateSwapchain", static_cast<int>(res));
+				return;
+			}
+			uint32_t count = 0;
+			res = xrEnumerateSwapchainImages(s.bg_swapchain, 0, &count, nullptr);
+			if (XR_FAILED(res) || count == 0)
+			{
+				fail("xrEnumerateSwapchainImages", static_cast<int>(res));
+				return;
+			}
+			std::vector<XrSwapchainImageVulkan2KHR> images(count, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+			res = xrEnumerateSwapchainImages(s.bg_swapchain, count, &count,
+				reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data()));
+			if (XR_FAILED(res))
+			{
+				fail("xrEnumerateSwapchainImages", static_cast<int>(res));
+				return;
+			}
+			uint32_t index = 0;
+			res = LockedAcquire(s.bg_swapchain, &index);
+			if (XR_FAILED(res) || index >= count)
+			{
+				fail("xrAcquireSwapchainImage", static_cast<int>(res));
+				return;
+			}
+			XrSwapchainImageWaitInfo wi = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+			wi.timeout = ONE_SECOND_NS;
+			res = xrWaitSwapchainImage(s.bg_swapchain, &wi);
+			if (res != XR_SUCCESS)
+			{
+				// Not released: an image whose wait never completed is not ours to release.
+				fail("xrWaitSwapchainImage", static_cast<int>(res));
+				return;
+			}
+
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			const VkCommandBuffer cmd = s.cmd_buffers[0];
+			const VkImage image = images[index].image;
+			VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+			bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+			VkResult vr = vkBeginCommandBuffer(cmd, &bi);
+			if (vr == VK_SUCCESS)
+			{
+				ImageBarrier(cmd, image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+					VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+				VkClearColorValue black = {};
+				black.float32[3] = 1.0f;
+				const VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+				vkCmdClearColorImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+				ImageBarrier(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+					VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+					VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+				vr = vkEndCommandBuffer(cmd);
+			}
+			bool cleared = false;
+			if (vr == VK_SUCCESS)
+			{
+				VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+				si.commandBufferCount = 1;
+				si.pCommandBuffers = &cmd;
+				vr = LockedQueueSubmit(h.queue, si, s.fences[0]);
+				if (vr == VK_SUCCESS)
+				{
+					vr = vkWaitForFences(h.device, 1, &s.fences[0], VK_TRUE, ONE_SECOND_NS);
+					if (vr == VK_SUCCESS)
+					{
+						vkResetFences(h.device, 1, &s.fences[0]);
+						cleared = true;
+					}
+					else
+					{
+						// Still in flight: the first copy on this command buffer waits for it.
+						s.fence_submitted[0] = true;
+					}
+				}
+			}
+			res = LockedRelease(s.bg_swapchain);
+			if (!cleared)
+			{
+				fail("the clear", static_cast<int>(vr));
+				return;
+			}
+			if (XR_FAILED(res))
+			{
+				fail("xrReleaseSwapchainImage", static_cast<int>(res));
+				return;
+			}
+			s.bg_ready = true;
+			Console.WriteLn("(VR) Background: %ux%u swapchain cleared to opaque black (%u images).", kBackgroundSize,
+				kBackgroundSize, count);
+		}
+
+		// The runtime's recommended per-eye image size, for the headset's pixel density in the first-person line.
+		void QueryViewConfiguration()
+		{
+			s.view_rec_width[0] = s.view_rec_width[1] = 0;
+			uint32_t count = 0;
+			if (XR_FAILED(xrEnumerateViewConfigurationViews(XRSession::GetInstance(), XRSession::GetSystemId(),
+					XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &count, nullptr)) ||
+				count == 0)
+			{
+				return;
+			}
+			std::vector<XrViewConfigurationView> views(count, {XR_TYPE_VIEW_CONFIGURATION_VIEW});
+			if (XR_FAILED(xrEnumerateViewConfigurationViews(XRSession::GetInstance(), XRSession::GetSystemId(),
+					XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, count, &count, views.data())))
+			{
+				return;
+			}
+			for (uint32_t i = 0; i < count && i < 2; i++)
+				s.view_rec_width[i] = views[i].recommendedImageRectWidth;
+			Console.WriteLn("(VR) Headset eye images: recommended %ux%u per eye.", views[0].recommendedImageRectWidth,
+				views[0].recommendedImageRectHeight);
+		}
+
+		// When the first-person screen turns on: how much of the view it covers against the headset's field of view,
+		// and its pixel density at the centre against the headset's.
+		void LogFirstPersonScreen(const ScreenParams& sp)
+		{
+			constexpr float kDeg = 180.0f / 3.14159265f;
+			const float d = std::max(sp.fp_distance, 0.01f);
+			const float aspect = ComputeAspect();
+			const bool curved = (sp.fp_arc_deg >= 5.0f) && XRSession::HasCylinderLayer();
+			float width_m = 0.0f;
+			float height_m = 0.0f;
+			float half_w_deg = 0.0f;
+			if (curved)
+			{
+				width_m = d * sp.fp_arc_deg / kDeg;
+				height_m = width_m / std::max(aspect, 0.01f);
+				half_w_deg = 0.5f * sp.fp_arc_deg;
+			}
+			else
+			{
+				height_m = sp.fp_height;
+				width_m = height_m * aspect;
+				half_w_deg = std::atan(0.5f * width_m / d) * kDeg;
+			}
+			const float half_h_deg = std::atan(0.5f * height_m / d) * kDeg;
+			const u32 w_px = s.swapchain_width;
+			const u32 h_px = s.swapchain_height;
+			const float px_deg_h = curved ? (static_cast<float>(w_px) / std::max(sp.fp_arc_deg, 1.0f)) :
+			                                (static_cast<float>(w_px) * d / std::max(width_m, 0.001f) / kDeg);
+			const float px_deg_v = static_cast<float>(h_px) * d / std::max(height_m, 0.001f) / kDeg;
+
+			const EyeInfo eyes = GetEyeInfo();
+			if (!eyes.valid)
+			{
+				Console.WriteLn("(VR) First-person screen: +-%.1f x +-%.1f deg at %.2f m (%.2f x %.2f m); headset field of "
+								"view not known yet; centre %.1f x %.1f px/deg from %ux%u",
+					half_w_deg, half_h_deg, d, width_m, height_m, px_deg_h, px_deg_v, w_px, h_px);
+				return;
+			}
+			const float union_h = std::max(std::max(-eyes.fov_deg[0][0], -eyes.fov_deg[1][0]),
+				std::max(eyes.fov_deg[0][1], eyes.fov_deg[1][1]));
+			const float union_up = std::max(eyes.fov_deg[0][2], eyes.fov_deg[1][2]);
+			const float union_down = std::max(-eyes.fov_deg[0][3], -eyes.fov_deg[1][3]);
+			// The headset at its recommended size: width / (tan right + tan -left) pixels per radian at the centre.
+			float headset_px_deg = 0.0f;
+			int headset_eyes = 0;
+			for (int eye = 0; eye < 2; eye++)
+			{
+				const float span = std::tan(eyes.fov_deg[eye][1] / kDeg) + std::tan(-eyes.fov_deg[eye][0] / kDeg);
+				if (s.view_rec_width[eye] > 0 && span > 0.01f)
+				{
+					headset_px_deg += static_cast<float>(s.view_rec_width[eye]) / span / kDeg;
+					headset_eyes++;
+				}
+			}
+			if (headset_eyes > 0)
+				headset_px_deg /= static_cast<float>(headset_eyes);
+			Console.WriteLn("(VR) First-person screen: +-%.1f x +-%.1f deg at %.2f m (%.2f x %.2f m); margin vs headset: "
+							"yaw %+.1f up %+.1f down %+.1f deg; centre %.1f x %.1f px/deg from %ux%u; headset about %.1f px/deg",
+				half_w_deg, half_h_deg, d, width_m, height_m, half_w_deg - union_h, half_h_deg - union_up,
+				half_h_deg - union_down, px_deg_h, px_deg_v, w_px, h_px, headset_px_deg);
+		}
+
+		// Which game frame a render pose belongs to (its head pose's publish stamp and serial), for the sync log.
+		u64 ImageKey(const HeadPose::Snapshot& pose)
+		{
+			const u64 key = (pose.publish_ms << 16) ^ (pose.frame & 0xFFFFu);
+			return (key != 0) ? key : 1;
+		}
+
+		// Where the layers of one present live, to tell each layer's role by the array it points into.
+		struct LayerSources
+		{
+			const XrCompositionLayerQuad* quads;
+			const XrCompositionLayerCylinderKHR* cyls;
+			u32 screen_slots;
+			const XrCompositionLayerQuad* lever_quads;
+			const XrCompositionLayerQuad* hand_quads;
+			const XrCompositionLayerQuad* hud_quads;
+		};
+
+		// Copies each pointed-to layer by value, in order, with its role.
+		void FillPublishedSet(PublishedSet* out, const XrCompositionLayerBaseHeader* const* layers, u32 layer_count,
+			const LayerSources& src)
+		{
+			out->count = 0;
+			for (u32 i = 0; i < layer_count && out->count < kLayerCapacity; i++)
+			{
+				const void* const p = layers[i];
+				PublishedSet::Entry& e = out->e[out->count];
+				bool known = false;
+				for (u32 k = 0; k < src.screen_slots && !known; k++)
+				{
+					if (p == static_cast<const void*>(&src.quads[k]))
+					{
+						e.kind = kKindQuad;
+						e.role = kRoleScreen;
+						e.quad = src.quads[k];
+						known = true;
+					}
+					else if (p == static_cast<const void*>(&src.cyls[k]))
+					{
+						e.kind = kKindCylinder;
+						e.role = kRoleScreen;
+						e.cyl = src.cyls[k];
+						known = true;
+					}
+				}
+				for (int k = 0; k < ControlQuads::kSlots && !known; k++)
+				{
+					if (p == static_cast<const void*>(&src.lever_quads[k]))
+					{
+						e.kind = kKindQuad;
+						e.role = kRoleLever;
+						e.quad = src.lever_quads[k];
+						known = true;
+					}
+				}
+				for (int k = 0; k < kHandSlots && !known; k++)
+				{
+					if (p == static_cast<const void*>(&src.hand_quads[k]))
+					{
+						e.kind = kKindQuad;
+						e.role = kRoleHand;
+						e.quad = src.hand_quads[k];
+						known = true;
+					}
+				}
+				for (int k = 0; k < HudCards::kCardCount && !known; k++)
+				{
+					if (p == static_cast<const void*>(&src.hud_quads[k]))
+					{
+						e.kind = kKindQuad;
+						e.role = (k == HudCards::kLaser) ? kRoleHudLaser : (k == HudCards::kWrist) ? kRoleHudWrist : kRoleHudView;
+						e.quad = src.hud_quads[k];
+						known = true;
+					}
+				}
+				if (known)
+					out->count++;
+			}
+		}
+
+		// Headset rate: hands the layers this present built to the pacer, copied by value. keep_screen: the screen
+		// images were not all replaced this present (a copy skipped or timed out, or none made), so the previous
+		// set's Screen entries stay and each image keeps the pose it was rendered from instead of jumping to this
+		// frame's.
+		void PublishLayers(const XrCompositionLayerBaseHeader* const* layers, u32 layer_count, const LayerSources& src,
+			bool keep_screen, bool fp_screen, const XrVector3f& fp_head, u64 fp_image)
+		{
+			PublishedSet next = {};
+			FillPublishedSet(&next, layers, layer_count, src);
+			const float turn_rate = CameraDriver::ScreenTurnRate();
+			next.publish_ms = CameraDriver::SteadyNowMs();
+			next.publish_display_time = DisplayClockNow();
+			next.fp_screen = fp_screen;
+			next.fp_head = fp_head;
+			next.turn_rate = fp_screen ? turn_rate : 0.0f;
+			next.fp_image = fp_image;
+			s.stat_gs_frames.fetch_add(1, std::memory_order_relaxed);
+
+			std::lock_guard<std::mutex> lock(s.publish_mutex);
+			const PublishedSet& prev = s.published;
+			bool prev_screen = false;
+			for (u32 i = 0; i < prev.count && !prev_screen; i++)
+				prev_screen = (prev.e[i].role == kRoleScreen);
+			if (keep_screen && prev_screen)
+			{
+				PublishedSet merged = {};
+				for (u32 i = 0; i < prev.count; i++)
+				{
+					if (prev.e[i].role == kRoleScreen)
+						merged.e[merged.count++] = prev.e[i];
+				}
+				for (u32 i = 0; i < next.count && merged.count < kLayerCapacity; i++)
+				{
+					if (next.e[i].role != kRoleScreen)
+						merged.e[merged.count++] = next.e[i];
+				}
+				merged.publish_ms = next.publish_ms;
+				merged.publish_display_time = prev.publish_display_time;
+				merged.fp_screen = prev.fp_screen;
+				merged.fp_head = prev.fp_head;
+				merged.turn_rate = prev.fp_screen ? turn_rate : 0.0f;
+				merged.fp_image = prev.fp_image;
+				merged.serial = prev.serial + 1;
+				s.published = merged;
+				return;
+			}
+			next.serial = prev.serial + 1;
+			s.published = next;
+		}
+
+		// A smooth stick turn between GS frames: a Screen entry turned by a radians of OpenXR yaw about the vertical
+		// through head. Left-multiplied by Ry = (0, sin a/2, 0, cos a/2); a cylinder sits at head, so it only turns.
+		void ApplyTurn(PublishedSet::Entry& e, const XrVector3f& head, float a)
+		{
+			const float sh = std::sin(a * 0.5f);
+			const float ch = std::cos(a * 0.5f);
+			const float sa = std::sin(a);
+			const float ca = std::cos(a);
+			XrPosef& pose = (e.kind == kKindCylinder) ? e.cyl.pose : e.quad.pose;
+			const XrQuaternionf q = pose.orientation;
+			pose.orientation = {ch * q.x + sh * q.z, ch * q.y + sh * q.w, ch * q.z - sh * q.x, ch * q.w - sh * q.y};
+			const float dx = pose.position.x - head.x;
+			const float dz = pose.position.z - head.z;
+			pose.position.x = head.x + ca * dx + sa * dz;
+			pose.position.z = head.z - sa * dx + ca * dz;
+		}
+
+		// The submit array: the background first, then the set's entries (only Screen and Lever while the GS is
+		// idle), Screen entries turned by `turn`. Returns the layer count; the pointers point into `set`.
+		u32 BuildSubmitArray(PublishedSet& set, const XrCompositionLayerProjection* background, bool stale, float turn,
+			const XrCompositionLayerBaseHeader** out)
+		{
+			u32 n = 0;
+			if (background)
+				out[n++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(background);
+			for (u32 i = 0; i < set.count && n < kLayerCapacity + 1; i++)
+			{
+				PublishedSet::Entry& e = set.e[i];
+				if (stale && e.role != kRoleScreen && e.role != kRoleLever)
+					continue;
+				if (e.role == kRoleScreen && turn != 0.0f)
+					ApplyTurn(e, set.fp_head, turn);
+				out[n++] = (e.kind == kKindCylinder) ? reinterpret_cast<const XrCompositionLayerBaseHeader*>(&e.cyl) :
+				                                       reinterpret_cast<const XrCompositionLayerBaseHeader*>(&e.quad);
+			}
+			return n;
+		}
+
+		// The Frames line: what reached the runtime over the last 5 s, kept by the thread that ends the frames (the
+		// pacer, or the GS thread in legacy mode).
+		struct FrameStats
+		{
+			u64 window_ms = 0;
+			u32 submitted = 0;
+			u32 resent = 0;
+			u32 stale = 0;
+			u32 no_render = 0;
+			double wait_begin_sum_ms = 0.0;
+			u32 wait_begin_n = 0;
+			float wait_begin_max_ms = 0.0f;
+			float end_max_ms = 0.0f;
+			u32 layers = 0;
+			u64 last_serial = 0;
+		};
+
+		void NoteWaitToBegin(FrameStats& st, s64 wait_ns, s64 begin_ns)
+		{
+			if (wait_ns == 0 || begin_ns < wait_ns)
+				return;
+			const float ms = static_cast<float>(static_cast<double>(begin_ns - wait_ns) / 1.0e6);
+			st.wait_begin_sum_ms += ms;
+			st.wait_begin_n++;
+			st.wait_begin_max_ms = std::max(st.wait_begin_max_ms, ms);
+		}
+
+		void MaybeLogFrameStats(FrameStats& st)
+		{
+			const u64 now = CameraDriver::SteadyNowMs();
+			if (st.window_ms == 0)
+			{
+				st.window_ms = now;
+				return;
+			}
+			if (now - st.window_ms < 5000)
+				return;
+			const double secs = static_cast<double>(now - st.window_ms) / 1000.0;
+			const XrDuration period = s.display_period_ns.load(std::memory_order_acquire);
+			const double hz = (period > 0) ? 1.0e9 / static_cast<double>(period) : 0.0;
+			const u32 gs_frames = s.stat_gs_frames.exchange(0, std::memory_order_relaxed);
+			const u32 skipped = s.stat_copy_skipped.exchange(0, std::memory_order_relaxed);
+			const u32 timed_out = s.stat_copy_timeout.exchange(0, std::memory_order_relaxed);
+			Console.WriteLn("(VR) Frames: submitted %.1f/s (display %.1f Hz), new GS frames %.1f/s, re-sent %.1f/s, stale %u, "
+							"shouldRender=false %u, wait->begin mean %.1f max %.1f ms, xrEndFrame max %.1f ms, queue-lock wait "
+							"max %u us, copies skipped %u timed out %u, layers %u, mode %s",
+				st.submitted / secs, hz, gs_frames / secs, st.resent / secs, st.stale, st.no_render,
+				(st.wait_begin_n > 0) ? (st.wait_begin_sum_ms / st.wait_begin_n) : 0.0, st.wait_begin_max_ms, st.end_max_ms,
+				VR::TakeXrQueueLockMaxWaitUs(), skipped, timed_out, st.layers,
+				s.headset_rate ? "headset rate (VR pacer)" : "legacy (one per GS present)");
+			const u64 last_serial = st.last_serial;
+			st = FrameStats();
+			st.window_ms = now;
+			st.last_serial = last_serial;
+		}
+
+		// PCSX2_VR_SYNCLOG: how evenly the first-person screen turns through a smooth stick turn, from the Screen
+		// entry yaw actually submitted, per display frame (a display frame that showed the previous submit again, in
+		// legacy mode, is a step of 0). Only steps within one game frame count: a new game frame shows its own turn in
+		// the image instead.
+		void NoteScreenYaw(const PublishedSet& set, XrTime display_time)
+		{
+			static const bool s_synclog = (std::getenv("PCSX2_VR_SYNCLOG") != nullptr);
+			if (!s_synclog)
+				return;
+			static u64 s_prev_image = 0;
+			static float s_prev_yaw = 0.0f;
+			static XrTime s_prev_time = 0;
+			static double s_sum = 0.0;
+			static double s_sq = 0.0;
+			static u32 s_n = 0;
+			static u64 s_log_ms = 0;
+
+			bool have = false;
+			float yaw = 0.0f;
+			if (set.fp_screen && set.fp_image != 0)
+			{
+				for (u32 i = 0; i < set.count; i++)
+				{
+					const PublishedSet::Entry& e = set.e[i];
+					if (e.role != kRoleScreen)
+						continue;
+					const XrQuaternionf& q = (e.kind == kKindCylinder) ? e.cyl.pose.orientation : e.quad.pose.orientation;
+					yaw = ForwardYaw(q.x, q.y, q.z, q.w);
+					have = true;
+					break;
+				}
+			}
+			const XrDuration period = s.display_period_ns.load(std::memory_order_acquire);
+			if (have && s_prev_image == set.fp_image && s_prev_time != 0 && period > 0 && display_time > s_prev_time)
+			{
+				const double frames_f = static_cast<double>(display_time - s_prev_time) / static_cast<double>(period);
+				const int frames = std::clamp(static_cast<int>(std::lround(frames_f)), 1, 8);
+				const double step = std::remainder(static_cast<double>(yaw - s_prev_yaw), 2.0 * 3.14159265358979) *
+				                    (180.0 / 3.14159265358979);
+				s_sum += step;
+				s_sq += step * step;
+				s_n += static_cast<u32>(frames);
+			}
+			s_prev_image = have ? set.fp_image : 0;
+			s_prev_yaw = yaw;
+			s_prev_time = display_time;
+
+			const u64 now = CameraDriver::SteadyNowMs();
+			if (s_log_ms == 0)
+				s_log_ms = now;
+			if (now - s_log_ms < 1000)
+				return;
+			if (s_n > 0)
+			{
+				const double mean = s_sum / static_cast<double>(s_n);
+				const double var = std::max(0.0, s_sq / static_cast<double>(s_n) - mean * mean);
+				Console.WriteLn("(VR) pacer: fp screen yaw step per display frame mean %.2f std %.2f deg over %u frames", mean,
+					std::sqrt(var), s_n);
+			}
+			s_log_ms = now;
+			s_sum = 0.0;
+			s_sq = 0.0;
+			s_n = 0;
+		}
+
+		bool PacerDetached(u32 gen)
+		{
+			return s.pacer_gen.load(std::memory_order_acquire) != gen;
+		}
+
+		bool PacerShouldStop(u32 gen)
+		{
+			return s.pacer_exit.load(std::memory_order_acquire) || PacerDetached(gen);
+		}
+
+		// The VR pacer. Headset rate: it owns the frame loop, waiting, beginning and ending a frame every display
+		// period with the layers the GS published last (sent again while the GS is idle: loads, offline pauses,
+		// stalls), and it pumps the session events. Legacy: it only waits each frame and parks it for EndOfFrame.
+		// After every call that can block in the runtime it checks whether Shutdown gave up on it (detached), and then
+		// touches nothing more: all it uses lives in the static s, which is never freed.
+		void PacerThreadMain(u32 gen)
+		{
+			Threading::SetNameOfCurrentThread("VR Pacer");
+
+			const XrSession session = XRSession::GetSession();
+			const bool headset_rate = s.headset_rate;
+			FrameStats stats;
+			bool was_running = false;
+			bool begin_owed = false;
+			XrTime owed_display_time = 0;
+			bool warned_begin = false;
+			bool warned_end = false;
+			u64 next_eye_probe_ms = 0;
+
+			while (!PacerShouldStop(gen))
+			{
+				// In this mode VRManager leaves the events to the pacer, so state changes are handled while the GS is idle.
+				if (headset_rate)
+					XRSession::PumpEvents();
+
+				// VRManager tears VR down on the GS thread; nothing more to submit.
+				if (XRSession::IsLost())
+				{
+					std::this_thread::sleep_for(std::chrono::milliseconds(20));
+					continue;
+				}
+				if (!XRSession::IsSessionRunning())
+				{
+					was_running = false;
+					begin_owed = false;
+					s.session_run_began_ms.store(0, std::memory_order_release);
+					std::this_thread::sleep_for(std::chrono::milliseconds(10));
+					continue;
+				}
+				if (!was_running)
+				{
+					was_running = true;
+					s.session_run_began_ms.store(CameraDriver::SteadyNowMs(), std::memory_order_release);
+				}
+				if (MaybeInjectPacerFault())
+					continue;
+
+				// A frame waited but never begun would block the next xrWaitFrame for good: begin and end it first.
+				if (begin_owed)
+				{
+					const XrResult res = LockedBeginFrame(session);
+					if (PacerDetached(gen))
+						return;
+					NoteFrameCallResult(res, "xrBeginFrame");
+					if (XR_SUCCEEDED(res))
+					{
+						NoteFrameCallResult(LockedEndFrame(session, owed_display_time, 0, nullptr), "xrEndFrame");
+						if (PacerDetached(gen))
+							return;
+						begin_owed = false;
+					}
+					else if (res == XR_ERROR_SESSION_NOT_RUNNING)
+					{
+						begin_owed = false;
+					}
+					else
+					{
+						std::this_thread::sleep_for(std::chrono::milliseconds(10));
+					}
+					continue;
+				}
+
+				XrFrameState fs = {XR_TYPE_FRAME_STATE};
+				const XrResult wres = xrWaitFrame(session, nullptr, &fs);
+				const s64 wait_ns = SteadyNowNs();
+				if (PacerShouldStop(gen))
+					break;
+				if (XR_FAILED(wres))
+				{
+					if (wres == XR_ERROR_SESSION_NOT_RUNNING)
+					{
+						std::this_thread::sleep_for(std::chrono::milliseconds(5));
+						continue;
+					}
+					NoteFrameCallResult(wres, "xrWaitFrame");
+					if (!s.warned_pacer)
+					{
+						s.warned_pacer = true;
+						Console.Error("(VR) xrWaitFrame failed (%d); pacer parked. Session-loss handling "
+									  "arrives via events.",
+							static_cast<int>(wres));
+					}
+					std::this_thread::sleep_for(std::chrono::milliseconds(100));
+					continue;
+				}
+				s.latest_display_time.store(fs.predictedDisplayTime, std::memory_order_release);
+				s.display_period_ns.store(fs.predictedDisplayPeriod, std::memory_order_release);
+				s.display_clock_offset_ns.store(static_cast<s64>(fs.predictedDisplayTime) - wait_ns, std::memory_order_release);
+				s.pacer_should_render.store(fs.shouldRender != XR_FALSE, std::memory_order_release);
+
+				if (!headset_rate)
+				{
+					std::lock_guard<std::mutex> lock(s.frame_mutex);
+					s.pending_frame_state = fs;
+					s.pending_wait_ns = wait_ns;
+					s.has_pending_frame = true;
+					continue;
+				}
+
+				const s64 begin_ns = SteadyNowNs();
+				const XrResult bres = BeginFrameWithFaults(session);
+				if (PacerDetached(gen))
+					return;
+				NoteFrameCallResult(bres, "xrBeginFrame");
+				if (XR_FAILED(bres))
+				{
+					if (bres != XR_ERROR_SESSION_NOT_RUNNING && bres != XR_ERROR_SESSION_LOST && bres != XR_ERROR_INSTANCE_LOST)
+					{
+						if (!warned_begin)
+						{
+							warned_begin = true;
+							Console.Error("(VR) xrBeginFrame failed (%d); the pacer begins that frame again before waiting "
+										  "for another.",
+								static_cast<int>(bres));
+						}
+						begin_owed = true;
+						owed_display_time = fs.predictedDisplayTime;
+					}
+					continue;
+				}
+				NoteWaitToBegin(stats, wait_ns, begin_ns);
+
+				// Shutdown asked the pacer to leave: this frame is still ended (with nothing in it), then it goes.
+				const bool exiting = s.pacer_exit.load(std::memory_order_acquire);
+				XrView views[2] = {XrView{XR_TYPE_VIEW}, XrView{XR_TYPE_VIEW}};
+				bool views_ok = false;
+				if (!exiting)
+				{
+					XRInput::Update(fs.predictedDisplayTime);
+					if (PacerDetached(gen))
+						return;
+
+					XrPosef head = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+					bool head_valid = false;
+					bool head_position_valid = false;
+					if (s.view_space != XR_NULL_HANDLE)
+						head_valid = LocateAndPublishHead(fs.predictedDisplayTime, &head, &head_position_valid);
+					if (PacerDetached(gen))
+						return;
+					{
+						std::lock_guard<std::mutex> lock(s.head_mutex);
+						s.pacer_head.pose = head;
+						s.pacer_head.valid = head_valid;
+						s.pacer_head.position_valid = head_position_valid;
+					}
+
+					// Every frame for the background; about once a second without it, for the Eyes line alone.
+					const u64 probe_ms = CameraDriver::SteadyNowMs();
+					if (s.opaque_bg && s.bg_ready)
+					{
+						views_ok = LocateEyeViews(fs.predictedDisplayTime, views);
+					}
+					else if (probe_ms >= next_eye_probe_ms)
+					{
+						next_eye_probe_ms = probe_ms + 1000;
+						LocateEyeViews(fs.predictedDisplayTime, views);
+					}
+					if (PacerDetached(gen))
+						return;
+				}
+
+				PublishedSet set = {};
+				XrCompositionLayerProjectionView bg_views[2] = {};
+				XrCompositionLayerProjection bg = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+				const XrCompositionLayerBaseHeader* submit[kLayerCapacity + 1] = {};
+				u32 submit_count = 0;
+				bool stale = false;
+				XrResult eres = XR_SUCCESS;
+				float end_ms = 0.0f;
+				{
+					std::unique_lock<std::timed_mutex> submit_lock(s.submit_mutex);
+					if (!exiting)
+					{
+						{
+							std::lock_guard<std::mutex> lock(s.publish_mutex);
+							set = s.published;
+						}
+						stale = (set.count > 0 && set.publish_ms != 0 && CameraDriver::SteadyNowMs() > set.publish_ms + kStaleMs);
+						float turn = 0.0f;
+						if (set.fp_screen && set.turn_rate != 0.0f && set.publish_display_time != 0)
+						{
+							const double dt = std::clamp(
+								static_cast<double>(fs.predictedDisplayTime - set.publish_display_time) * 1.0e-9, 0.0, 0.1);
+							turn = set.turn_rate * static_cast<float>(dt);
+						}
+						if (views_ok)
+							MakeBackgroundLayer(views, bg_views, &bg);
+						submit_count = BuildSubmitArray(set, views_ok ? &bg : nullptr, stale, turn, submit);
+					}
+					const s64 end_start_ns = SteadyNowNs();
+					eres = LockedEndFrame(session, fs.predictedDisplayTime, fs.shouldRender ? submit_count : 0, submit);
+					end_ms = static_cast<float>(static_cast<double>(SteadyNowNs() - end_start_ns) / 1.0e6);
+				}
+				if (PacerDetached(gen))
+					return;
+				NoteFrameCallResult(eres, "xrEndFrame");
+				if (XR_FAILED(eres) && !warned_end)
+				{
+					warned_end = true;
+					Console.Error("(VR) xrEndFrame failed (%d).", static_cast<int>(eres));
+				}
+				if (exiting)
+					break;
+
+				if (XR_SUCCEEDED(eres))
+					stats.submitted++;
+				if (set.serial != 0 && set.serial == stats.last_serial)
+					stats.resent++;
+				stats.last_serial = set.serial;
+				if (stale)
+					stats.stale++;
+				if (!fs.shouldRender)
+					stats.no_render++;
+				stats.end_max_ms = std::max(stats.end_max_ms, end_ms);
+				stats.layers = fs.shouldRender ? submit_count : 0;
+				if (fs.shouldRender && XR_SUCCEEDED(eres))
+					NoteScreenYaw(set, fs.predictedDisplayTime);
+				MaybeLogFrameStats(stats);
+			}
+
+			if (!PacerDetached(gen))
+				s.pacer_done.store(true, std::memory_order_release);
+		}
+
+		// Legacy: a begin that failed is retried on the next present before anything else.
+		bool SettleOwedBegin(XrSession session)
+		{
+			if (!s.begin_owed)
+				return true;
+
+			const XrResult res = LockedBeginFrame(session);
+			NoteFrameCallResult(res, "xrBeginFrame");
+			if (res == XR_ERROR_SESSION_NOT_RUNNING)
+			{
+				s.begin_owed = false;
+				return true;
+			}
+			if (XR_FAILED(res))
+				return false;
+
+			XRInput::Update(s.begin_owed_display_time);
+
+			NoteFrameCallResult(LockedEndFrame(session, s.begin_owed_display_time, 0, nullptr), "xrEndFrame");
+			s.begin_owed = false;
+			return true;
+		}
+
+		// Legacy: begins and ends the frame the pacer parked, so its next xrWaitFrame returns and it can exit.
+		void DrainOnePacedFrameForShutdown()
+		{
+			XrFrameState fs;
+			{
+				std::lock_guard<std::mutex> lock(s.frame_mutex);
+				if (!s.has_pending_frame)
+					return;
+				fs = s.pending_frame_state;
+				s.has_pending_frame = false;
+			}
+
+			if (!XRSession::HasSession())
+				return;
+
+			const XrSession session = XRSession::GetSession();
+			if (XR_FAILED(LockedBeginFrame(session)))
+				return;
+			LockedEndFrame(session, fs.predictedDisplayTime, 0, nullptr);
+		}
 	}
 
 	bool Initialize()
 	{
 		if (s.initialized)
 			return true;
+
+		// A pacer left stuck in the runtime may still hold the compositor's locks: no new session in this process.
+		if (s.abandoned.load(std::memory_order_acquire))
+		{
+			Console.Error("(VR) Compositor: an earlier VR pacer is still stuck inside the runtime; VR stays off until the "
+						  "emulator restarts.");
+			return false;
+		}
+
+		// [VR] HeadsetRateSubmit and OpaqueBackground, read once (the GS thread, before the session runs).
+		s.headset_rate = EmuConfig.VR.HeadsetRateSubmit;
+		s.opaque_bg = EmuConfig.VR.OpaqueBackground;
 
 		s.screen_anchor_x = 0.0f;
 		s.screen_anchor_y = 0.0f;
@@ -2251,7 +3468,10 @@ namespace VR::XRCompositor
 		s.next_cmd_buffer = 0;
 		s.begin_owed = false;
 		s.begin_owed_display_time = 0;
-		s_xrfault_begin1_fired = false;
+		s.begin_owed_presents = 0;
+		s.runtime_failures.store(0, std::memory_order_relaxed);
+		s.layered_logged = -1;
+		ParseFaults();
 
 		s.warned_pacer = false;
 		s.warned_beginframe = false;
@@ -2268,6 +3488,28 @@ namespace VR::XRCompositor
 		{
 			std::lock_guard<std::mutex> lock(s.frame_mutex);
 			s.has_pending_frame = false;
+			s.pending_wait_ns = 0;
+		}
+		s.latest_display_time.store(0, std::memory_order_release);
+		s.display_period_ns.store(0, std::memory_order_release);
+		s.display_clock_offset_ns.store(0, std::memory_order_release);
+		s.pacer_should_render.store(false, std::memory_order_release);
+		s.session_run_began_ms.store(0, std::memory_order_release);
+		{
+			std::lock_guard<std::mutex> lock(s.head_mutex);
+			s.pacer_head = decltype(s.pacer_head)();
+		}
+		{
+			std::lock_guard<std::mutex> lock(s.publish_mutex);
+			s.published = PublishedSet{};
+		}
+		s.stat_gs_frames.store(0, std::memory_order_relaxed);
+		s.stat_copy_skipped.store(0, std::memory_order_relaxed);
+		s.stat_copy_timeout.store(0, std::memory_order_relaxed);
+		{
+			std::lock_guard<std::mutex> lock(s_eye_mutex);
+			s_eye_info = EyeInfo();
+			s_eye_logged = EyeInfo();
 		}
 		{
 			XrReferenceSpaceCreateInfo rsci = {XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
@@ -2280,9 +3522,14 @@ namespace VR::XRCompositor
 			}
 		}
 
-		s.initialized = true;
-		s.pacer = std::thread(PacerThreadMain);
+		CreateBackground();
+		QueryViewConfiguration();
 
+		s.initialized = true;
+		s.pacer = std::thread(PacerThreadMain, s.pacer_gen.load(std::memory_order_acquire));
+
+		Console.WriteLn("(VR) Frame submission: %s",
+			s.headset_rate ? "headset rate (VR pacer thread)" : "once per GS present (legacy)");
 		Console.WriteLn("(VR) Compositor initialized (%u copy command buffers; swapchain created on first frame).",
 			NUM_CMD_BUFFERS);
 		return true;
@@ -2293,132 +3540,140 @@ namespace VR::XRCompositor
 		if (!s.initialized)
 			return;
 
-		if (s.begin_owed)
-		{
-			if (XRSession::IsSessionRunning())
-				SettleOwedBegin(XRSession::GetSession());
-			else
-				s.begin_owed = false;
-			return;
-		}
-
+		// Headset rate: the VR pacer begins and ends a frame every display period; this present only refreshes the
+		// images and publishes the layers built from them (PublishLayers). Legacy: this present begins and ends the
+		// frame the pacer waited for.
 		XrFrameState fs = {XR_TYPE_FRAME_STATE};
+		XrSession session = XR_NULL_HANDLE;
+		bool should_render = false;
+		XrView eye_views[2] = {XrView{XR_TYPE_VIEW}, XrView{XR_TYPE_VIEW}};
+		bool eye_views_ok = false;
+		static FrameStats s_legacy_stats;
+		if (s.headset_rate)
 		{
-			std::lock_guard<std::mutex> lock(s.frame_mutex);
-			if (!s.has_pending_frame)
+			if (!XRSession::IsSessionRunning())
 				return;
-			fs = s.pending_frame_state;
-			s.has_pending_frame = false;
-		}
-
-		if (!XRSession::IsSessionRunning())
-			return;
-
-		const XrSession session = XRSession::GetSession();
-
-		XrFrameBeginInfo bi = {XR_TYPE_FRAME_BEGIN_INFO};
-		static const bool s_fault_begin1 = [] {
-			const char* v = std::getenv("PCSX2_VR_XRFAULT");
-			return v && std::strcmp(v, "begin1") == 0;
-		}();
-		XrResult res;
-		if (s_fault_begin1 && !s_xrfault_begin1_fired)
-		{
-			s_xrfault_begin1_fired = true;
-			res = XR_ERROR_RUNTIME_FAILURE;
-			Console.Warning("(VR) XRFAULT=begin1: injecting one xrBeginFrame failure to exercise owed-begin recovery.");
+			// The pacer's latest head pose becomes this present's (head_pose and friends are the GS thread's own copy).
+			{
+				std::lock_guard<std::mutex> lock(s.head_mutex);
+				s.head_pose = s.pacer_head.pose;
+				s.head_pose_valid = s.pacer_head.valid;
+				s.head_position_valid = s.pacer_head.position_valid;
+			}
+			should_render = s.pacer_should_render.load(std::memory_order_acquire);
 		}
 		else
 		{
-			res = xrBeginFrame(session, &bi);
-		}
-		if (XR_FAILED(res))
-		{
-			if (res == XR_ERROR_SESSION_NOT_RUNNING)
+			if (s.begin_owed)
+			{
+				if (XRSession::IsSessionRunning())
+				{
+					SettleOwedBegin(XRSession::GetSession());
+					// A begin that keeps failing means the runtime is gone: play goes on flat instead of retrying forever.
+					if (s.begin_owed && ++s.begin_owed_presents >= kMaxRuntimeFailures)
+					{
+						Console.Error("(VR) xrBeginFrame still owed after %u presents: treating the runtime as lost.",
+							s.begin_owed_presents);
+						XRSession::MarkLost();
+						s.begin_owed = false;
+					}
+				}
+				else
+				{
+					s.begin_owed = false;
+				}
 				return;
-			if (!s.warned_beginframe)
-			{
-				s.warned_beginframe = true;
-				Console.Error("(VR) xrBeginFrame failed (%d); will retry the begin/end pairing.", static_cast<int>(res));
 			}
-			s.begin_owed = true;
-			s.begin_owed_display_time = fs.predictedDisplayTime;
-			return;
+
+			s64 wait_ns = 0;
+			{
+				std::lock_guard<std::mutex> lock(s.frame_mutex);
+				if (!s.has_pending_frame)
+					return;
+				fs = s.pending_frame_state;
+				wait_ns = s.pending_wait_ns;
+				s.has_pending_frame = false;
+			}
+
+			if (!XRSession::IsSessionRunning())
+				return;
+
+			session = XRSession::GetSession();
+			const s64 begin_ns = SteadyNowNs();
+			const XrResult bres = BeginFrameWithFaults(session);
+			NoteFrameCallResult(bres, "xrBeginFrame");
+			if (XR_FAILED(bres))
+			{
+				if (bres == XR_ERROR_SESSION_NOT_RUNNING || bres == XR_ERROR_SESSION_LOST || bres == XR_ERROR_INSTANCE_LOST)
+					return;
+				if (!s.warned_beginframe)
+				{
+					s.warned_beginframe = true;
+					Console.Error("(VR) xrBeginFrame failed (%d); will retry the begin/end pairing.", static_cast<int>(bres));
+				}
+				s.begin_owed = true;
+				s.begin_owed_display_time = fs.predictedDisplayTime;
+				s.begin_owed_presents = 0;
+				return;
+			}
+			NoteWaitToBegin(s_legacy_stats, wait_ns, begin_ns);
+
+			XRInput::Update(fs.predictedDisplayTime);
+
+			if (s.view_space != XR_NULL_HANDLE)
+				s.head_pose_valid = LocateAndPublishHead(fs.predictedDisplayTime, &s.head_pose, &s.head_position_valid);
+
+			// Every frame for the background; about once a second without it, for the Eyes line alone.
+			static u64 s_next_eye_probe_ms = 0;
+			const u64 probe_ms = CameraDriver::SteadyNowMs();
+			if (s.opaque_bg && s.bg_ready)
+			{
+				eye_views_ok = LocateEyeViews(fs.predictedDisplayTime, eye_views);
+			}
+			else if (probe_ms >= s_next_eye_probe_ms)
+			{
+				s_next_eye_probe_ms = probe_ms + 1000;
+				LocateEyeViews(fs.predictedDisplayTime, eye_views);
+			}
+			should_render = (fs.shouldRender != XR_FALSE);
 		}
 
-		XRInput::Update(fs.predictedDisplayTime);
-
-		if (s.view_space != XR_NULL_HANDLE)
+		if (s_reanchor_requested.load(std::memory_order_acquire))
 		{
-			// The head's angular velocity rides along on the same locate, for camera.lookAt head prediction.
-			XrSpaceVelocity vel = {XR_TYPE_SPACE_VELOCITY};
-			XrSpaceLocation loc = {XR_TYPE_SPACE_LOCATION};
-			loc.next = &vel;
-			if (XR_SUCCEEDED(xrLocateSpace(s.view_space, XRSession::GetSpace(), fs.predictedDisplayTime, &loc)) &&
-				(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+			// Headset rate: the head pose the pacer located; legacy: located for this frame's display time.
+			XrPosef anchor_pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+			bool anchor_ok = false;
+			bool anchor_position = false;
+			if (s.headset_rate)
 			{
-				HeadPose::Snapshot p;
-				p.orientation_x = loc.pose.orientation.x;
-				p.orientation_y = loc.pose.orientation.y;
-				p.orientation_z = loc.pose.orientation.z;
-				p.orientation_w = loc.pose.orientation.w;
-				if (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
-				{
-					p.position_x = loc.pose.position.x;
-					p.position_y = loc.pose.position.y;
-					p.position_z = loc.pose.position.z;
-					p.position_valid = true;
-				}
-				// Expressed in the base space (the room), which is the frame the prediction rotates in.
-				const bool angular = (vel.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) != 0;
-				if (angular && std::isfinite(vel.angularVelocity.x) && std::isfinite(vel.angularVelocity.y) &&
-					std::isfinite(vel.angularVelocity.z))
-				{
-					p.angular_velocity[0] = vel.angularVelocity.x;
-					p.angular_velocity[1] = vel.angularVelocity.y;
-					p.angular_velocity[2] = vel.angularVelocity.z;
-					p.angular_valid = true;
-				}
-				// Once: whether this runtime reports the head's velocity (SteamVR's null driver reports zeros).
-				static bool s_velocity_logged = false;
-				if (!s_velocity_logged)
-				{
-					s_velocity_logged = true;
-					Console.WriteLn("(VR) Head pose: runtime velocityFlags 0x%llX (angular %s, linear %s), angular (%.3f, %.3f, %.3f) rad/s.",
-						static_cast<unsigned long long>(vel.velocityFlags), angular ? "valid" : "not valid",
-						(vel.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) ? "valid" : "not valid",
-						vel.angularVelocity.x, vel.angularVelocity.y, vel.angularVelocity.z);
-				}
-				p.valid = true;
-				HeadPose::Publish(p);
-				s.head_pose = loc.pose;
-				s.head_pose_valid = true;
-				s.head_position_valid = p.position_valid;
+				anchor_ok = s.head_pose_valid;
+				anchor_pose = s.head_pose;
+				anchor_position = s.head_position_valid;
 			}
-			else
+			else if (s.view_space != XR_NULL_HANDLE)
 			{
-				HeadPose::Invalidate();
-				s.head_pose_valid = false;
+				XrSpaceLocation loc = {XR_TYPE_SPACE_LOCATION};
+				if (XR_SUCCEEDED(xrLocateSpace(s.view_space, XRSession::GetSpace(), fs.predictedDisplayTime, &loc)) &&
+					(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+				{
+					anchor_ok = true;
+					anchor_pose = loc.pose;
+					anchor_position = (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0;
+				}
 			}
-		}
-
-		if (s_reanchor_requested.load(std::memory_order_acquire) && s.view_space != XR_NULL_HANDLE)
-		{
-			XrSpaceLocation loc = {XR_TYPE_SPACE_LOCATION};
-			if (XR_SUCCEEDED(xrLocateSpace(s.view_space, XRSession::GetSpace(), fs.predictedDisplayTime, &loc)) &&
-				(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+			if (anchor_ok)
 			{
-				const float qx = loc.pose.orientation.x, qy = loc.pose.orientation.y;
-				const float qz = loc.pose.orientation.z, qw = loc.pose.orientation.w;
+				const float qx = anchor_pose.orientation.x, qy = anchor_pose.orientation.y;
+				const float qz = anchor_pose.orientation.z, qw = anchor_pose.orientation.w;
 				const float fx = -2.0f * (qw * qy + qz * qx);
 				const float fz = -(1.0f - 2.0f * (qx * qx + qy * qy));
 				if ((fx * fx + fz * fz) > 1.0e-4f)
 					s.screen_anchor_yaw = std::atan2(-fx, -fz);
-				if (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
+				if (anchor_position)
 				{
-					s.screen_anchor_x = loc.pose.position.x;
-					s.screen_anchor_y = loc.pose.position.y;
-					s.screen_anchor_z = loc.pose.position.z;
+					s.screen_anchor_x = anchor_pose.position.x;
+					s.screen_anchor_y = anchor_pose.position.y;
+					s.screen_anchor_z = anchor_pose.position.z;
 				}
 				s_reanchor_requested.store(false, std::memory_order_release);
 				s.world_anchor_x = s.screen_anchor_x;
@@ -2439,13 +3694,23 @@ namespace VR::XRCompositor
 			}
 		}
 
+		// What the PublishedSet records about the first-person screen (filled in below where it is placed).
+		bool pub_fp_screen = false;
+		XrVector3f pub_fp_head = {0.0f, 0.0f, 0.0f};
+		u64 pub_fp_image = 0;
+
 		const bool layered = current && (static_cast<GSTextureVK*>(current)->GetArrayLayers() >= 2);
 		const bool stereo = layered || (eye != MonoEye);
+		if (current && (layered ? 1 : 0) != s.layered_logged)
+		{
+			s.layered_logged = layered ? 1 : 0;
+			Console.WriteLn("(VR) Screen frames: %s", layered ? "layered stereo (2 views)" : "mono");
+		}
 		bool force_zero_layers = false;
 		static const bool s_chainlog = (std::getenv("PCSX2_VR_CHAINLOG") != nullptr);
 		static u64 s_chainlog_visit = 0;
 		int cl_copy[2] = {-1, -1};
-		if (fs.shouldRender && current)
+		if (should_render && current)
 		{
 			GSTextureVK* src = static_cast<GSTextureVK*>(current);
 			const u32 w = static_cast<u32>(src->GetWidth());
@@ -2486,9 +3751,8 @@ namespace VR::XRCompositor
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}};
 		// Worst case 13 layers: four for the screen (split screen in stereo, two viewports per eye; five slots
 		// kept), two lever cards, two hands and the five HUD cards (laser, wrist, vignette, toast, blink), in a
-		// capacity of 14. SteamVR takes at most 16 a frame.
-		constexpr u32 kLayerCapacity = 5 + ControlQuads::kSlots + kHandSlots + HudCards::kCardCount;
-		static_assert(kLayerCapacity <= 16, "more composition layers than SteamVR takes in a frame");
+		// capacity of 14 (kLayerCapacity). The background goes under them in the submit array; SteamVR takes at
+		// most 16 a frame.
 		XrCompositionLayerQuad lever_quads[ControlQuads::kSlots] = {
 			{XR_TYPE_COMPOSITION_LAYER_QUAD}, {XR_TYPE_COMPOSITION_LAYER_QUAD}};
 		XrCompositionLayerQuad hand_quads[kHandSlots] = {
@@ -2555,8 +3819,11 @@ namespace VR::XRCompositor
 				}
 				Console.WriteLn("(VR) Screen: %s.", fp_want ? "first person (placed at the render pose, roll-level)" : "world-locked");
 				s_fp_screen_was_active = fp_want;
+				if (fp_want)
+					LogFirstPersonScreen(sp);
 			}
 			const bool fp_screen = s_fp_screen_was_active;
+			pub_fp_screen = fp_screen;
 
 			// First-person screen: placed in the room (base space) in front of the head pose the shown
 			// frame was rendered from (matched through the game's view matrix when the profile names it,
@@ -2581,6 +3848,8 @@ namespace VR::XRCompositor
 						fp_head = {stamped.position_x, stamped.position_y, stamped.position_z};
 					placed = true;
 				}
+				pub_fp_head = fp_head;
+				pub_fp_image = placed ? ImageKey(stamped) : 0;
 				const float fx = -2.0f * (q.x * q.z + q.w * q.y);
 				const float fy = -2.0f * (q.y * q.z - q.w * q.x);
 				const float fz = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
@@ -2835,7 +4104,7 @@ namespace VR::XRCompositor
 			GSTextureVK* cur = static_cast<GSTextureVK*>(current);
 			Console.WriteLn("(VR) CHAINLOG v=%llu render=%d cur=%s%ux%u/%uL layered=%d stereo=%d "
 							"c0={r=%d er=%d wp=%d} c1={r=%d er=%d wp=%d} branch=%s layers=%u",
-				static_cast<unsigned long long>(s_chainlog_visit++), fs.shouldRender ? 1 : 0,
+				static_cast<unsigned long long>(s_chainlog_visit++), should_render ? 1 : 0,
 				current ? "" : "NULL:", cur ? static_cast<u32>(cur->GetWidth()) : 0,
 				cur ? static_cast<u32>(cur->GetHeight()) : 0, cur ? cur->GetArrayLayers() : 0,
 				layered ? 1 : 0, stereo ? 1 : 0,
@@ -2849,25 +4118,75 @@ namespace VR::XRCompositor
 
 		// Hands go last so they draw over the screen and the lever cards.
 		const u32 hands_from = layer_count;
-		if (!force_zero_layers && fs.shouldRender)
+		if (!force_zero_layers && should_render)
 			BuildHandLayers(hand_quads, layers, layer_count, kLayerCapacity);
 
 		// HUD cards last of all, over the hands and everything else; only the laser sight goes in under the hands.
-		if (!force_zero_layers && fs.shouldRender)
+		if (!force_zero_layers && should_render)
 			BuildHudLayers(hud_quads, layers, layer_count, kLayerCapacity, hands_from);
 
-		XrFrameEndInfo ei = {XR_TYPE_FRAME_END_INFO};
-		ei.displayTime = fs.predictedDisplayTime;
-		ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-		ei.layerCount = layer_count;
-		ei.layers = layer_count ? layers : nullptr;
+		for (u32 l = 0; l < 2; l++)
+		{
+			if (cl_copy[l] == static_cast<int>(CopyResult::Skipped))
+				s.stat_copy_skipped.fetch_add(1, std::memory_order_relaxed);
+			else if (cl_copy[l] == static_cast<int>(CopyResult::TimeoutZeroLayer))
+				s.stat_copy_timeout.fetch_add(1, std::memory_order_relaxed);
+		}
 
-		res = xrEndFrame(session, &ei);
-		if (XR_FAILED(res) && !s.warned_endframe)
+		const LayerSources sources = {quads, cyls, 5, lever_quads, hand_quads, hud_quads};
+
+		if (s.headset_rate)
+		{
+			// The pose stays with its image: unless every screen image was replaced this present (a copy skipped or
+			// timed out, or none made at all), the previous Screen entries stay, each image at the pose it was
+			// rendered from instead of jumping to this frame's.
+			bool attempted = false;
+			bool all_copied = true;
+			for (u32 l = 0; l < 2; l++)
+			{
+				if (cl_copy[l] < 0)
+					continue;
+				attempted = true;
+				if (cl_copy[l] != static_cast<int>(CopyResult::Copied))
+					all_copied = false;
+			}
+			PublishLayers(layers, layer_count, sources, !attempted || !all_copied, pub_fp_screen, pub_fp_head, pub_fp_image);
+			return;
+		}
+
+		// Legacy: this present ends the frame, with the background under its layers.
+		PublishedSet set = {};
+		FillPublishedSet(&set, layers, layer_count, sources);
+		set.fp_screen = pub_fp_screen;
+		set.fp_head = pub_fp_head;
+		set.fp_image = pub_fp_image;
+		XrCompositionLayerProjectionView bg_views[2] = {};
+		XrCompositionLayerProjection bg = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+		if (eye_views_ok)
+			MakeBackgroundLayer(eye_views, bg_views, &bg);
+		const XrCompositionLayerBaseHeader* submit[kLayerCapacity + 1] = {};
+		const u32 submit_count = BuildSubmitArray(set, eye_views_ok ? &bg : nullptr, false, 0.0f, submit);
+
+		const s64 end_start_ns = SteadyNowNs();
+		const XrResult eres = LockedEndFrame(session, fs.predictedDisplayTime, submit_count, submit);
+		const float end_ms = static_cast<float>(static_cast<double>(SteadyNowNs() - end_start_ns) / 1.0e6);
+		NoteFrameCallResult(eres, "xrEndFrame");
+		if (XR_FAILED(eres) && !s.warned_endframe)
 		{
 			s.warned_endframe = true;
-			Console.Error("(VR) xrEndFrame failed (%d).", static_cast<int>(res));
+			Console.Error("(VR) xrEndFrame failed (%d).", static_cast<int>(eres));
 		}
+
+		s.stat_gs_frames.fetch_add(1, std::memory_order_relaxed);
+		if (XR_SUCCEEDED(eres))
+			s_legacy_stats.submitted++;
+		if (!should_render)
+			s_legacy_stats.no_render++;
+		s_legacy_stats.end_max_ms = std::max(s_legacy_stats.end_max_ms, end_ms);
+		s_legacy_stats.layers = submit_count;
+		if (XR_SUCCEEDED(eres))
+			NoteScreenYaw(set, fs.predictedDisplayTime);
+		MaybeLogFrameStats(s_legacy_stats);
 	}
 
 	void Shutdown()
@@ -2877,7 +4196,8 @@ namespace VR::XRCompositor
 
 		s.pacer_exit.store(true, std::memory_order_release);
 
-		if (XRSession::HasSession())
+		// Legacy: the pacer may be parked in xrWaitFrame until the frame it waited is begun and ended; drain it.
+		if (!s.headset_rate && XRSession::HasSession())
 		{
 			const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
 			while (!s.pacer_done.load(std::memory_order_acquire))
@@ -2888,20 +4208,40 @@ namespace VR::XRCompositor
 					break;
 				if (std::chrono::steady_clock::now() >= deadline)
 				{
-					Console.Warning("(VR) Pacer did not exit within 2s during shutdown; joining anyway.");
+					Console.Warning("(VR) Pacer did not exit within 2s during shutdown.");
 					break;
 				}
 				std::this_thread::sleep_for(std::chrono::milliseconds(50));
 			}
 		}
 
+		// Bounded: a pacer stuck inside the runtime must not hang the GS thread, and with it the emulator.
+		const auto join_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kPacerJoinTimeoutMs);
+		while (!s.pacer_done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < join_deadline)
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
 		if (s.pacer.joinable())
-			s.pacer.join();
+		{
+			if (s.pacer_done.load(std::memory_order_acquire))
+			{
+				s.pacer.join();
+			}
+			else
+			{
+				Console.Error("(VR) Pacer thread stuck in the runtime: detaching it; VR handles stay alive until exit.");
+				s.pacer_gen.fetch_add(1, std::memory_order_acq_rel);
+				s.abandoned.store(true, std::memory_order_release);
+				s.pacer.detach();
+				// It may be holding the Vulkan queue lock inside the runtime: the GS goes on without the lock.
+				VR::SetXrQueueLockEnabled(false);
+			}
+		}
+		const bool abandoned = s.abandoned.load(std::memory_order_acquire);
 
 		HeadPose::Invalidate();
 		if (s.view_space != XR_NULL_HANDLE)
 		{
-			xrDestroySpace(s.view_space);
+			if (!abandoned)
+				xrDestroySpace(s.view_space);
 			s.view_space = XR_NULL_HANDLE;
 		}
 
@@ -2911,15 +4251,17 @@ namespace VR::XRCompositor
 		if (vk_alive)
 			WaitAllFences();
 
+		// With the compositor abandoned these forget their swapchains instead of destroying them.
 		DestroyLeverResources();
 		DestroyHandResources();
 		DestroyHudResources();
+		DestroyBackground();
 
 		for (auto& chain : s.chains)
 		{
 			if (chain.swapchain != XR_NULL_HANDLE)
 			{
-				xrDestroySwapchain(chain.swapchain);
+				DestroySwapchainSynced(chain.swapchain);
 				chain.swapchain = XR_NULL_HANDLE;
 			}
 			chain.images.clear();
@@ -2960,6 +4302,16 @@ namespace VR::XRCompositor
 		s.initialized = false;
 		Console.WriteLn("(VR) Compositor shut down.");
 	}
+
+	bool Abandoned()
+	{
+		return s.abandoned.load(std::memory_order_acquire);
+	}
+
+	bool PacerOwnsFrames()
+	{
+		return s.initialized && s.headset_rate;
+	}
 #else
 	bool Initialize()
 	{
@@ -2970,7 +4322,23 @@ namespace VR::XRCompositor
 	void Shutdown() {}
 
 	void EndOfFrame(GSTexture* , u32 ) {}
+
+	bool Abandoned()
+	{
+		return false;
+	}
+
+	bool PacerOwnsFrames()
+	{
+		return false;
+	}
 #endif
+
+	EyeInfo GetEyeInfo()
+	{
+		std::lock_guard<std::mutex> lock(s_eye_mutex);
+		return s_eye_info;
+	}
 
 	void UpdateScreenParams(float distance_m, float height_m, float arc_deg, float vertical_offset_m,
 		bool follow_head)

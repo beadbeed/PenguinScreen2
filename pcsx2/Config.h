@@ -1336,6 +1336,11 @@ struct Pcsx2Config
 		bool GameRumble = true;
 		// Scales the game-feedback haptics (forwarded rumble, hit, shot and heartbeat cues); 0 turns them off.
 		float HapticStrength = 1.0f;
+		// Frames go to the headset from the VR pacer thread at the display rate; false = legacy, one frame per GS
+		// present.
+		bool HeadsetRateSubmit = true;
+		// An opaque black projection layer under the screens, so the runtime's environment never shows around them.
+		bool OpaqueBackground = true;
 
 		VROptions();
 		void LoadSave(SettingsWrapper& wrap);

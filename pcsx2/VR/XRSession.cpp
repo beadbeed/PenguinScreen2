@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstring>
 #include <iterator>
+#include <mutex>
 #include <vector>
 
 #ifdef ENABLE_VULKAN
@@ -33,8 +34,15 @@ namespace VR::XRSession
 		XrSpace s_space = XR_NULL_HANDLE;
 		XrSessionState s_session_state = XR_SESSION_STATE_UNKNOWN;
 		std::atomic_bool s_session_running{false};
-		bool s_lost = false;
+		// Set from the GS thread, the VR pacer and the Vulkan queue lock's timeout.
+		std::atomic_bool s_lost{false};
 		bool s_cylinder_supported = false;
+		// PumpEvents runs on the VR pacer (headset-rate submission) or the GS thread, and the fault injection plays
+		// state changes from the pacer: one at a time.
+		std::mutex s_pump_mutex;
+		// For the state log: when the session was created, and when it entered its current state.
+		std::chrono::steady_clock::time_point s_session_created{};
+		std::chrono::steady_clock::time_point s_state_since{};
 		// SteamVR only accepts bindings for its Steam Frame controller profile with this enabled.
 		constexpr const char* kFrameControllerExtension = "XR_VALVE_frame_controller_interaction";
 		bool s_frame_controller_supported = false;
@@ -83,8 +91,16 @@ namespace VR::XRSession
 
 		void HandleSessionStateChange(XrSessionState new_state)
 		{
-			Console.WriteLn("(VR) Session state: %s -> %s", SessionStateName(s_session_state), SessionStateName(new_state));
+			const auto now = std::chrono::steady_clock::now();
+			const long long since_created =
+				static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(now - s_session_created).count());
+			const long long in_previous =
+				static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(now - s_state_since).count());
+			Console.WriteLn("(VR) Session state: %s -> %s (%lld ms after session creation, %lld ms in %s)",
+				SessionStateName(s_session_state), SessionStateName(new_state), since_created, in_previous,
+				SessionStateName(s_session_state));
 			s_session_state = new_state;
+			s_state_since = now;
 
 			switch (new_state)
 			{
@@ -421,6 +437,8 @@ namespace VR::XRSession
 		}
 
 		s_session_state = XR_SESSION_STATE_UNKNOWN;
+		s_session_created = std::chrono::steady_clock::now();
+		s_state_since = s_session_created;
 		Console.WriteLn("(VR) XR session created (Vulkan, queue family %u).", queue_family);
 
 		if (!XRInput::Initialize())
@@ -492,6 +510,7 @@ namespace VR::XRSession
 
 	void PumpEvents()
 	{
+		std::lock_guard<std::mutex> pump_lock(s_pump_mutex);
 		if (s_instance == XR_NULL_HANDLE)
 			return;
 
@@ -583,7 +602,43 @@ namespace VR::XRSession
 
 	bool IsLost()
 	{
-		return s_lost;
+		return s_lost.load(std::memory_order_acquire);
+	}
+
+	void MarkLost()
+	{
+		s_lost.store(true, std::memory_order_release);
+	}
+
+	void ForgetWithoutDestroying()
+	{
+		// No s_pump_mutex here: the stuck thread may be the one holding it.
+		s_session_running.store(false, std::memory_order_release);
+		s_session = XR_NULL_HANDLE;
+		s_space = XR_NULL_HANDLE;
+		s_instance = XR_NULL_HANDLE;
+		s_system_id = XR_NULL_SYSTEM_ID;
+		s_session_state = XR_SESSION_STATE_UNKNOWN;
+		s_recenter_pending = false;
+		s_lost.store(false, std::memory_order_release);
+#ifdef ENABLE_VULKAN
+		s_xrGetVulkanGraphicsRequirements2KHR = nullptr;
+		s_xrCreateVulkanInstanceKHR = nullptr;
+		s_xrGetVulkanGraphicsDevice2KHR = nullptr;
+		s_xrCreateVulkanDeviceKHR = nullptr;
+#endif
+		// HasSession() and HasInstance() are false now, so this makes no XR calls.
+		XRInput::Shutdown();
+		Console.WriteLn("(VR) XR handles left undestroyed on purpose: the runtime is not answering.");
+	}
+
+	void InjectStateForTest(XrSessionState state)
+	{
+		std::lock_guard<std::mutex> pump_lock(s_pump_mutex);
+		if (s_session == XR_NULL_HANDLE)
+			return;
+		Console.Warning("(VR) Test: playing session state %s as if the runtime had sent it.", SessionStateName(state));
+		HandleSessionStateChange(state);
 	}
 
 	const char* GetStateName()

@@ -13,6 +13,7 @@
 
 #ifdef ENABLE_VR
 #include "VR/VRVulkanBridge.h"
+#include <optional>
 #endif
 
 #include "BuildVersion.h"
@@ -1132,6 +1133,10 @@ void GSDeviceVK::WaitForFenceCounter(u64 fence_counter)
 
 void GSDeviceVK::WaitForGPUIdle()
 {
+#ifdef ENABLE_VR
+	// vkDeviceWaitIdle uses every queue of the device, including the one the OpenXR session shares.
+	const VR::ScopedXrQueueLock xr_queue_lock;
+#endif
 	vkDeviceWaitIdle(m_device);
 }
 
@@ -1317,6 +1322,12 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
 		submit_info.pSignalSemaphores = &m_spin_resources[m_current_frame].semaphore;
 	}
 
+#ifdef ENABLE_VR
+	// The OpenXR session shares this queue (the VR pacer submits frames on it): held from the submit through the
+	// present, early returns included, and given back before the next swap chain image is acquired.
+	std::optional<VR::ScopedXrQueueLock> xr_queue_lock;
+	xr_queue_lock.emplace();
+#endif
 	res = vkQueueSubmit(m_graphics_queue, 1, &submit_info, resources.fence);
 	if (res != VK_SUCCESS)
 	{
@@ -1337,6 +1348,9 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
 		present_swap_chain->ResetImageAcquireResult();
 
 		res = vkQueuePresentKHR(m_present_queue, &present_info);
+#ifdef ENABLE_VR
+		xr_queue_lock.reset();
+#endif
 		if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
 		{
 			if (res == VK_ERROR_OUT_OF_DATE_KHR)
@@ -2004,6 +2018,13 @@ void GSDeviceVK::SubmitSpinCommand(u32 index, u32 cycles)
 		submit_info.pWaitSemaphores = &resources.semaphore;
 		submit_info.pWaitDstStageMask = sema_waits;
 	}
+#ifdef ENABLE_VR
+	// The spin queue is the graphics queue the OpenXR session shares (nothing more to take when called from inside
+	// SubmitCommandBuffer, which holds the lock already).
+	std::optional<VR::ScopedXrQueueLock> xr_queue_lock;
+	if (m_spin_queue_is_graphics_queue)
+		xr_queue_lock.emplace();
+#endif
 	vkQueueSubmit(m_spin_queue, 1, &submit_info, resources.fence);
 	resources.in_progress = true;
 	resources.cycles = cycles;
