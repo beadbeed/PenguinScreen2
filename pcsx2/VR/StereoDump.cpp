@@ -298,7 +298,6 @@ namespace VR::StereoDump
 		tex->CommitClear();
 
 		const VkCommandBuffer cmd = dev->GetCurrentCommandBuffer();
-		const GSTextureVK::Layout old_layout = tex->GetLayout();
 		tex->TransitionToLayout(cmd, GSTextureVK::Layout::TransferSrc);
 
 		VkBufferImageCopy regions[2] = {};
@@ -331,10 +330,6 @@ namespace VR::StereoDump
 		barrier.size = VK_WHOLE_SIZE;
 		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1,
 			&barrier, 0, nullptr);
-
-		// Hand the frame back in the layout the compositor expects to find it in.
-		if (old_layout != GSTextureVK::Layout::TransferSrc && old_layout != GSTextureVK::Layout::Undefined)
-			tex->TransitionToLayout(cmd, old_layout);
 
 		DumpInfo info;
 		info.frame = frame;

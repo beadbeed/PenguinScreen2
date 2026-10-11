@@ -12,6 +12,6 @@ class GSTexture;
 // it never waits on the GPU and never changes emulation speed.
 namespace VR::StereoDump
 {
-	// GS thread, once per presented frame, right before VR::EndOfFrame (nullptr for a blank frame).
+	// GS thread, once per presented frame, right after VR::EndOfFrame (nullptr for a blank frame).
 	void MaybeCapture(GSTexture* current);
 }
