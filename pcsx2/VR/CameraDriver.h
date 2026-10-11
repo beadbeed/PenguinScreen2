@@ -78,6 +78,7 @@ namespace VR::CameraDriver
 		NotRunning = 4,  // paused
 		NoHeadPose = 5,
 		GuardFailed = 6,
+		OnlineRestricted = 7, // online, and not in private co-op (obsrv, an unknown server, or the setting is off)
 	};
 
 	// What Apply() saw on the last vsync, for the PINE test runner (MsgVRTelemetry) and later the

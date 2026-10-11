@@ -779,7 +779,9 @@ void EmuThread::onApplicationStateChanged(Qt::ApplicationState state)
 	const bool focus_loss = (state != Qt::ApplicationActive);
 	if (focus_loss)
 	{
-		if (m_pause_on_focus_loss && !m_was_paused_by_focus_loss && VMManager::GetState() == VMState::Running)
+		// Never pause online (network adapter on): the server drops a client that goes quiet and the room can break.
+		if (m_pause_on_focus_loss && !m_was_paused_by_focus_loss && VMManager::GetState() == VMState::Running &&
+			!EmuConfig.DEV9.EthEnable)
 		{
 			m_was_paused_by_focus_loss = true;
 			VMManager::SetPaused(true);
@@ -1756,15 +1758,16 @@ void Host::OnInputDeviceDisconnected(const InputBindingKey key, const std::strin
 {
 	emit g_emu_thread->onInputDeviceDisconnected(identifier.empty() ? QString() : QString::fromUtf8(identifier.data(), identifier.size()));
 
-	// VR controllers come and go with the headset session; pausing for them online (network adapter on, or the
-	// VR online-safe setting) would get the player dropped from the server, so never pause for those.
+	// Never pause for a disconnect online (network adapter on): the server drops a client that goes quiet. VR
+	// controllers come and go with the headset session, so they never pause while the VR online-safe setting is on.
 #ifdef ENABLE_VR
-	const bool vr_online = (key.source_type == InputSourceType::VR) && (EmuConfig.DEV9.EthEnable || EmuConfig.VR.OnlineSafe);
+	const bool vr_safe = (key.source_type == InputSourceType::VR) && EmuConfig.VR.OnlineSafe;
 #else
-	constexpr bool vr_online = false;
+	constexpr bool vr_safe = false;
 #endif
+	const bool online = EmuConfig.DEV9.EthEnable;
 	if (VMManager::GetState() == VMState::Running && Host::GetBoolSettingValue("UI", "PauseOnControllerDisconnection", false) &&
-		InputManager::HasAnyBindingsForSource(key) && !vr_online)
+		InputManager::HasAnyBindingsForSource(key) && !online && !vr_safe)
 	{
 		std::string message =
 			fmt::format(TRANSLATE_FS("QtHost", "System paused because controller {} was disconnected."), identifier);

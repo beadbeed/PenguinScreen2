@@ -1938,6 +1938,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(ComfortVignette);
 	SettingsWrapEntry(VignetteStrength);
 	SettingsWrapEntry(OnlineSafe);
+	SettingsWrapEntry(PrivateCoopFirstPerson);
 	SettingsWrapEntry(Brightness);
 	SettingsWrapEntry(GameRumble);
 	SettingsWrapEntry(HapticStrength);

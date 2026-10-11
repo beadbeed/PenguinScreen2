@@ -399,6 +399,9 @@ namespace VR::ProfileDB
 		// Stay armed until the guards have failed this many vsyncs in a row, so a guard byte the game
 		// flips for a frame inside its own update doesn't hand the camera back for a frame.
 		u32 disarm_after_vsyncs = 0;
+		// u8 the game sets to 1 while it is in network play (Outbreak File #1 0x3065C2). Read every vsync to
+		// tell online from offline even when the network adapter setting can't (the setting is per emulator).
+		std::optional<u32> network_flag;
 	};
 
 	struct SpatialControlSpec

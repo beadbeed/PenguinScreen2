@@ -1306,6 +1306,15 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 			Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.disarmAfterVsyncs must be 0..600; keeping 0.", serial);
 	}
 
+	if (cnode.has_child("networkFlag"))
+	{
+		const std::optional<u32> a = parseAddress(nodeVal(cnode["networkFlag"]));
+		if (a.has_value() && a.value() < 0x2000000u) // EE RAM, up to 32 MB
+			cam.network_flag = a.value();
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.networkFlag is not an EE address; ignoring it.", serial);
+	}
+
 	if (cnode.has_child("silence") && cnode["silence"].is_seq())
 	{
 		for (const ryml::ConstNodeRef& sn : cnode["silence"].children())

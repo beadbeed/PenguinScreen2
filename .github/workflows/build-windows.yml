@@ -5,7 +5,7 @@ name: Build Windows (VR)
 
 on:
   push:
-    branches: [windows-steamvr]
+    branches: [windows-steamvr, coop-firstperson]
   workflow_dispatch:
 
 jobs:

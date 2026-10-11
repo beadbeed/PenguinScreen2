@@ -149,7 +149,29 @@ Our private server runs the same unpatched relay code as obsrv (Nagle on, the 0x
 
 ## 5. Co-op first person: what is being built (branch `coop-firstperson`)
 
-The Mac session started this on 10 Oct. If it isn't finished, carry on from this list, in order:
+**Status (Mac, 10 Oct), from the first commit on `coop-firstperson`:**
+- **Done (task 1):** the mode gate. A `[VR] PrivateCoopFirstPerson` setting (default off) with a
+  checkbox in Settings → VR. `camera.networkFlag` is in both profiles. `CameraDriver::ResolveNetMode`
+  picks Offline, PrivateCoop or Restricted every vsync. Restricted means first person doesn't arm
+  (`DisarmReason::OnlineRestricted` = 7, also known to `pine.py`). Each mode change is logged as
+  `(VR) CameraDriver: network mode ...`.
+- **Done (part of task 2):** no pause on focus loss or on any controller disconnect while the network
+  adapter is on (`QtHost.cpp`). The Online-Safe help text is corrected.
+- **Not done:** blocking hotkeys online, the PINE online refusals, task 3's 4-player focus-slot case,
+  task 4 (heartbeat) and task 5 (proof).
+- **Tested:** only `clang -fsyntax-only` on the Mac for `CameraDriver.cpp`, `VRProfileDB.cpp` and
+  `Pcsx2Config.cpp`, plus CI. `QtHost.cpp` and the `.ui` file are checked only by CI. Nothing has been
+  run.
+- **Offline test, no headset needed** (launch with the fake head):
+  - adapter off: the log says `network mode offline` and first person arms;
+  - adapter on with no private host override: `online, restricted` and it doesn't arm;
+  - adapter on, the checkbox on, and Internal DNS `www01.kddi-mmbb.jp` set to a non-208.72.237.x
+    address: `private co-op` and it arms.
+
+  Turn the adapter back off afterwards.
+- CI: pushes to `coop-firstperson` now build (added to `build-windows.yml`).
+
+Carry on from this list, in order:
 
 1. **Mode and gate.** `[VR] FirstPersonOnline = Off | PrivateCoop` (default Off). Resolve the mode every
    vsync:

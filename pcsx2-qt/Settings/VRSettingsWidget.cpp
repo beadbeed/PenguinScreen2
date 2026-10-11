@@ -36,6 +36,7 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.vignetteStrength, "VR", "VignetteStrength", 0.6f);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.laserSight, "VR", "LaserSight", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.onlineSafe, "VR", "OnlineSafe", false);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.privateCoopFirstPerson, "VR", "PrivateCoopFirstPerson", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.gameRumble, "VR", "GameRumble", true);
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.hapticStrength, "VR", "HapticStrength", 1.0f);
 
@@ -109,9 +110,15 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 		   "effect immediately."));
 
 	dialog()->registerWidgetHelp(m_ui.onlineSafe, tr("Online-Safe First Person"), tr("Unchecked"),
-		tr("First-person profiles change only what you see (camera, screen, your own body) and nothing other players "
-		   "would see, such as walking while aiming. Always on while the network adapter is enabled, whatever this box "
-		   "says. Takes effect immediately."));
+		tr("Turns off the first-person extras that change gameplay, such as walking while aiming and aim pitch from "
+		   "the controller. The first-person camera itself still turns your character, which other players see. "
+		   "Always on while the network adapter is enabled, whatever this box says. Takes effect immediately."));
+
+	dialog()->registerWidgetHelp(m_ui.privateCoopFirstPerson, tr("Private Co-op First Person"), tr("Unchecked"),
+		tr("Lets first person run online, but only on a private server: the network adapter's Internal DNS must send "
+		   "www01.kddi-mmbb.jp to an address that is not obsrv. On obsrv or any other server, first person stays off "
+		   "online and you get the 3D screen. Your partner sees your character turn where you look, a little late. "
+		   "Takes effect immediately."));
 
 	dialog()->registerWidgetHelp(m_ui.gameRumble, tr("Forward Game Rumble to the VR Controllers"), tr("Checked"),
 		tr("Sends the game's own controller vibration to the VR controllers: the large motor to both hands, the small "

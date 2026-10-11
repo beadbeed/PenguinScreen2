@@ -345,6 +345,13 @@
        </widget>
       </item>
       <item>
+       <widget class="QCheckBox" name="privateCoopFirstPerson">
+        <property name="text">
+         <string>Private Co-op First Person (online on a private server only)</string>
+        </property>
+       </widget>
+      </item>
+      <item>
        <widget class="QCheckBox" name="gameRumble">
         <property name="text">
          <string>Forward Game Rumble to the VR Controllers</string>
@@ -439,6 +446,7 @@
   <tabstop>vignetteStrength</tabstop>
   <tabstop>laserSight</tabstop>
   <tabstop>onlineSafe</tabstop>
+  <tabstop>privateCoopFirstPerson</tabstop>
   <tabstop>gameRumble</tabstop>
   <tabstop>hapticStrength</tabstop>
  </tabstops>

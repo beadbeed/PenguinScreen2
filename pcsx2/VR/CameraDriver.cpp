@@ -19,6 +19,7 @@
 #include "VMManager.h"
 
 #include "common/Console.h"
+#include "common/StringUtil.h"
 
 #include <algorithm>
 #include <array>
@@ -860,6 +861,54 @@ namespace VR::CameraDriver
 		bool OnlineSafeNow()
 		{
 			return EmuConfig.VR.OnlineSafe || EmuConfig.DEV9.EthEnable;
+		}
+
+		// Where first person may run, resolved every vsync. Unknown is treated as Restricted.
+		enum class NetMode : u8
+		{
+			Offline,     // network adapter off and the game not in network play: everything is allowed
+			PrivateCoop, // online on our private server with the user's opt-in: first person may arm
+			Restricted,  // online anywhere else (obsrv, an unknown server): first person never arms
+		};
+		NetMode s_net_mode = NetMode::Offline;
+		bool s_net_mode_logged = false;
+
+		// DEV9's Internal DNS sends the game's login host (www01.kddi-mmbb.jp) to an address that is not obsrv
+		// (208.72.237.0/24). This is how scripts/online-doctor.py --private points a client at our server.
+		bool LoginHostIsPrivate()
+		{
+			for (const Pcsx2Config::DEV9Options::HostEntry& h : EmuConfig.DEV9.EthHosts)
+			{
+				if (!h.Enabled || !StringUtil::compareNoCase(h.Url, "www01.kddi-mmbb.jp"))
+					continue;
+				const u8* a = h.Address;
+				const bool unset = (a[0] | a[1] | a[2] | a[3]) == 0;
+				const bool obsrv = a[0] == 208 && a[1] == 72 && a[2] == 237;
+				return !unset && !obsrv;
+			}
+			return false;
+		}
+
+		NetMode ResolveNetMode(const ProfileDB::CameraProfile& cam)
+		{
+			const bool game_online = cam.network_flag.has_value() && memRead8(cam.network_flag.value()) != 0;
+			if (!EmuConfig.DEV9.EthEnable && !game_online)
+				return NetMode::Offline;
+			// The game can't be online without the adapter, so a set flag with the adapter off means the read is
+			// wrong (another game, an overlay not resident): stay restricted rather than guess.
+			if (EmuConfig.DEV9.EthEnable && EmuConfig.VR.PrivateCoopFirstPerson && LoginHostIsPrivate())
+				return NetMode::PrivateCoop;
+			return NetMode::Restricted;
+		}
+
+		const char* NetModeName(NetMode m)
+		{
+			switch (m)
+			{
+				case NetMode::Offline: return "offline";
+				case NetMode::PrivateCoop: return "private co-op";
+				default: return "online, restricted";
+			}
 		}
 
 		bool s_silence_applied = false;
@@ -2341,9 +2390,20 @@ namespace VR::CameraDriver
 			s_guard_fail_vsyncs++;
 		const bool guards_hold = (s_guard_fail_vsyncs == 0) ||
 		                         (s_armed_logged && s_guard_fail_vsyncs <= cam.disarm_after_vsyncs);
-		const bool armed = switched_on && (vm_state == VMState::Running) && pose.valid && guards_hold;
+		const NetMode net_mode = ResolveNetMode(cam);
+		if (net_mode != s_net_mode || !s_net_mode_logged)
+		{
+			Console.WriteLn("(VR) CameraDriver: network mode %s%s.", NetModeName(net_mode),
+				net_mode == NetMode::Restricted ? ": first person stays off (turn on Private Co-op First Person and point "
+				                                  "the login host at the private server to use it online)" : "");
+			s_net_mode = net_mode;
+			s_net_mode_logged = true;
+		}
+		const bool net_ok = (net_mode != NetMode::Restricted);
+		const bool armed = switched_on && (vm_state == VMState::Running) && pose.valid && guards_hold && net_ok;
 		s_disarm_reason = armed                          ? DisarmReason::Armed :
 		                  !switched_on                   ? DisarmReason::SwitchedOff :
+		                  !net_ok                        ? DisarmReason::OnlineRestricted :
 		                  (vm_state != VMState::Running) ? DisarmReason::NotRunning :
 		                  !pose.valid                    ? DisarmReason::NoHeadPose :
 		                                                   DisarmReason::GuardFailed;

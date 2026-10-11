@@ -59,6 +59,8 @@ SLPM-65428:
   # File #1 addresses checked against our GAME.BIN; heading +0x92 from the camera/ModernCam research.
   # Research notes: tools/outbreak-vr and D:/Games/PS2/research on the test PC.
   camera:
+    networkFlag: 0x3065C2   # u8 1 while the game is in network play. Online, first person arms only in private co-op
+                          # (VR setting PrivateCoopFirstPerson + login host pointed at a non-obsrv server); see CameraDriver::ResolveNetMode.
     base: { indexed: 0x476DD0, indexAddr: 0x48BF7D, indexWidth: 1, stride: 0x10E0 }   # local character record
     guards:
       - { address: 0x540004, equals: 3 }             # GAME overlay resident

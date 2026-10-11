@@ -31,7 +31,7 @@ FAKE_BUTTONS = ("a", "b", "x", "y", "menu", "thumbstick_click", "dpad_up", "dpad
                 "dpad_right", "bumper", "view")
 # MsgVRTelemetry disarm reasons (CameraDriver::DisarmReason).
 DISARM_REASONS = ("armed", "no VM", "no profile/camera", "switched off", "VM not running", "no head pose",
-                  "profile guard failed")
+                  "profile guard failed", "online, restricted (not private co-op)")
 IDENTITY_POSE = ((0.0, 0.0, 0.0, 1.0), (0.0, 0.0, 0.0))
 
 

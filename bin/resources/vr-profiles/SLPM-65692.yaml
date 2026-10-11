@@ -57,6 +57,8 @@ SLPM-65692:
   # File #2 code words checked against our 2.DAT; heading +0x92 is carried over from File #1 and not yet confirmed live.
   # Research notes: tools/outbreak-vr and D:/Games/PS2/research on the test PC.
   camera:
+    networkFlag: 0x3137D2   # u8 1 while the game is in network play. Online, first person arms only in private co-op
+                          # (VR setting PrivateCoopFirstPerson + login host pointed at a non-obsrv server); see CameraDriver::ResolveNetMode.
     base: { indexed: 0x47BD30, indexAddr: 0x4912BD, indexWidth: 1, stride: 0x1100 }   # local character record
     guards:
       - { address: 0x543004, equals: 3 }             # GAME overlay resident
