@@ -1455,7 +1455,13 @@ namespace VR::CameraDriver
 				s_head_last = cur;
 			}
 			*differenced = false;
-			if (pose.angular_valid)
+			// The runtime's velocity only while its pose is recent: a frozen pose keeps reporting the last
+			// turn rate, which would spin the predicted camera on through a stall.
+			constexpr u64 kHeadAngularMaxAgeMs = 100;
+			const u64 pose_now = NowMs();
+			const bool angular_fresh = pose.publish_ms != 0 &&
+			                           (pose_now <= pose.publish_ms || pose_now - pose.publish_ms <= kHeadAngularMaxAgeMs);
+			if (pose.angular_valid && angular_fresh)
 			{
 				for (int i = 0; i < 3; i++)
 					omega[i] = pose.angular_velocity[i];
@@ -2239,6 +2245,37 @@ namespace VR::CameraDriver
 			std::lock_guard<std::mutex> lock(s_telemetry_mutex);
 			s_telemetry = t;
 		}
+
+		// The headset pose, taken as invalid once it is more than 1.5 s old: the Frame's link drops or the
+		// frame loop stalls, and a frozen head must not keep driving first person. The usual no-pose disarm
+		// hands the camera back (holds restored) until a fresh pose arrives.
+		constexpr u64 kHeadPoseMaxAgeMs = 1500;
+		bool s_head_pose_stale = false;
+
+		HeadPose::Snapshot FreshHeadPose()
+		{
+			HeadPose::Snapshot p = HeadPose::Get();
+			if (!p.valid || p.publish_ms == 0)
+				return p;
+			const u64 now = NowMs();
+			if (now > p.publish_ms + kHeadPoseMaxAgeMs)
+			{
+				if (!s_head_pose_stale)
+				{
+					s_head_pose_stale = true;
+					Console.Warning("(VR) CameraDriver: headset pose is %llu ms old (tracking or frames stopped): first person "
+					                "hands the camera back until it updates.",
+						static_cast<unsigned long long>(now - p.publish_ms));
+				}
+				p.valid = false;
+			}
+			else if (s_head_pose_stale)
+			{
+				s_head_pose_stale = false;
+				Console.WriteLn("(VR) CameraDriver: headset pose fresh again.");
+			}
+			return p;
+		}
 	}
 
 	float PadLookDeflection(const ProfileDB::CameraPadLook& pl, float yaw_deg, PadLookState& st)
@@ -2296,6 +2333,9 @@ namespace VR::CameraDriver
 			{
 				PublishComfortMotion();
 				PublishTelemetry();
+				// The right stick drives the menu D-pad while the item screen is up (pauseWhen hit); every
+				// disarmed way out leaves s_pause_hit false, so the stick goes back to turning.
+				SpatialControls::SetMenuMode(s_pause_hit);
 			}
 		};
 		PublishOnExit publish_on_exit;
@@ -2383,7 +2423,7 @@ namespace VR::CameraDriver
 		else if (XRInput::TestHeadPose(&pose_in))
 			s_test_head = true;
 		else
-			pose_in = HeadPose::Get();
+			pose_in = FreshHeadPose();
 		const HeadPose::Snapshot pose = pose_in;
 
 		// releaseWhen (grabbed, down, dead) counts as a failed guard, so the usual disarm grace hands the camera

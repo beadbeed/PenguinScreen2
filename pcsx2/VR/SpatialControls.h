@@ -546,6 +546,12 @@ namespace VR::SpatialControls
 	// 0.15 s, or at once while SetSprintBlocked says so. While on, the latch control reads pressed (ORed
 	// into it, so a tap of the control's own button can't release it) and LeftStickClick reads 0.
 	// ControlId::Count (the default) turns it off, leaving every other output as before.
+	//
+	// Menu mode (SetMenuMode: the camera driver's pauseWhen is hit, so the item screen, map or a menu is up):
+	// the raw right stick drives the D-pad, so one controller can work every menu. The dominant axis engages
+	// past 0.6 and lets go below 0.35; engaging presses that D-pad direction for 0.10 s, and holding repeats
+	// after 0.40 s, then every 0.15 s. Changing direction needs a release first. The presses are ORed into
+	// DpadUp/Down/Left/Right (stick Y +1 = Up), and the flicks read 0 meanwhile.
 	struct GamepadParams
 	{
 		ControlId sprint_latch = ControlId::Count;
@@ -559,6 +565,14 @@ namespace VR::SpatialControls
 		bool flick_down = false;
 		float flick_up_s = 0.0f; // how long each flick has been pressed, for the minimum press
 		float flick_down_s = 0.0f;
+		// Menu mode: the engaged direction (0 up, 1 down, 2 left, 3 right; -1 none, -2 waiting for the stick
+		// to centre after menu mode came on), how long it has been engaged, how long since the current press
+		// began, how long since it was let go, and whether a press is on.
+		int menu_dir = -1;
+		float menu_held_s = 0.0f;
+		float menu_press_s = 0.0f;
+		float menu_gap_s = 0.0f;
+		bool menu_pressing = false;
 		void Reset()
 		{
 			sprint = false;
@@ -566,6 +580,9 @@ namespace VR::SpatialControls
 			click_prev = false;
 			flick_up = flick_down = false;
 			flick_up_s = flick_down_s = 0.0f;
+			menu_dir = -1;
+			menu_held_s = menu_press_s = menu_gap_s = 0.0f;
+			menu_pressing = false;
 		}
 	};
 	ControlValues ComposeGamepad(const VRInputSnapshot& snapshot, const GamepadParams& p, GamepadState& st, float dt);
@@ -583,6 +600,10 @@ namespace VR::SpatialControls
 	// While set (a stop-first zone is held), the Gamepad's left stick reads 0 and its sprint latch lets go.
 	// Any thread.
 	void SetZoneStop(bool stop);
+
+	// While set (the camera driver's pauseWhen is hit: item screen, map, menus), the Gamepad's right stick
+	// drives the D-pad and its flicks read 0. Any thread.
+	void SetMenuMode(bool on);
 
 	// The Gamepad's sprint latch and ad-lib flicks on scripted input, and that without sprint_latch the
 	// click and the buttons pass through as before. False with *failed naming the first failed check.

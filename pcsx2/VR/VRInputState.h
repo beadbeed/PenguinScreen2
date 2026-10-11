@@ -37,6 +37,8 @@ struct VRHandState
   VRPose aim_pose;
   VRPose grip_pose;
   std::array<float, 3> grip_linear_velocity{0.f, 0.f, 0.f};
+  // Some action on this hand reported isActive, i.e. the runtime has a device bound for it.
+  bool input_active = false;
 };
 
 struct VRScreenHit

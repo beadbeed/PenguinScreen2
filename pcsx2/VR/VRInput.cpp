@@ -12,7 +12,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace VR
@@ -77,6 +79,27 @@ namespace VR
 
 		std::atomic<int> s_pulse_request[2] = {-1, -1};
 
+		// XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED arrived (XRSession::PumpEvents, any thread): the
+		// next Update reports the bindings again.
+		std::atomic<bool> s_profile_changed{false};
+
+		constexpr const char* HAND_NAME[2] = {"Left", "Right"};
+		constexpr const char* HAND_NAME_LOWER[2] = {"left", "right"};
+
+		// Controller presence (VRInput::UpdatePresence). A hand is live when some action on it has a bound
+		// source or its grip is tracked; it takes a short steady run to call it live, a longer one to call
+		// it gone, so a single dropped frame or a hand resting out of view says nothing.
+		constexpr std::uint64_t kHandLiveMs = 500;
+		constexpr std::uint64_t kHandAbsentMs = 3000;
+		// Focused time before the session-start check says which controllers never showed up.
+		constexpr std::uint64_t kStartCheckMs = 5000;
+		// A session whose first sync is unfocused (SteamVR dashboard up) and stays so this long gets a toast.
+		constexpr std::uint64_t kUnfocusedStartMs = 2000;
+		// One evaluated sync adds at most this much focused time (a stalled frame loop doesn't count).
+		constexpr std::uint64_t kPresenceMaxStepMs = 250;
+		constexpr float kPresenceToastSeconds = 4.0f;
+		constexpr std::uint64_t kToastRepeatMs = 20000;
+
 		int PackPulse(float amplitude, float seconds)
 		{
 			if (!std::isfinite(amplitude))
@@ -100,13 +123,56 @@ namespace VR
 			return false;
 		}
 
+		// For diagnostics only: a failure is worth a warning, not an error.
+		void WarnXR(XrResult res, const char* what)
+		{
+			char buf[XR_MAX_RESULT_STRING_SIZE] = "?";
+			if (XRSession::HasInstance())
+				xrResultToString(XRSession::GetInstance(), res, buf);
+			Console.Warning("(VR) %s failed: %s (%d)", what, buf, static_cast<int>(res));
+		}
+
+		std::string PathString(XrInstance instance, XrPath path)
+		{
+			char buf[XR_MAX_PATH_LENGTH] = {};
+			uint32_t len = 0;
+			if (XR_FAILED(xrPathToString(instance, path, XR_MAX_PATH_LENGTH, &len, buf)))
+				return "?";
+			buf[XR_MAX_PATH_LENGTH - 1] = '\0';
+			return std::string(buf);
+		}
+
+		// "Left Hand Steam Frame Controller Trigger"; the raw path when the runtime gives no name.
+		std::string SourceName(XrInstance instance, XrSession session, XrPath source)
+		{
+			XrInputSourceLocalizedNameGetInfo info = {XR_TYPE_INPUT_SOURCE_LOCALIZED_NAME_GET_INFO};
+			info.sourcePath = source;
+			info.whichComponents = XR_INPUT_SOURCE_LOCALIZED_NAME_USER_PATH_BIT |
+								   XR_INPUT_SOURCE_LOCALIZED_NAME_INTERACTION_PROFILE_BIT |
+								   XR_INPUT_SOURCE_LOCALIZED_NAME_COMPONENT_BIT;
+			uint32_t count = 0;
+			XrResult res = xrGetInputSourceLocalizedName(session, &info, 0, &count, nullptr);
+			if (XR_SUCCEEDED(res) && count > 0)
+			{
+				std::vector<char> buf(static_cast<size_t>(count) + 1, '\0');
+				res = xrGetInputSourceLocalizedName(session, &info, count, &count, buf.data());
+				buf.back() = '\0';
+				if (XR_SUCCEEDED(res) && buf[0] != '\0')
+					return std::string(buf.data());
+			}
+			if (XR_FAILED(res))
+				WarnXR(res, "xrGetInputSourceLocalizedName");
+			return PathString(instance, source);
+		}
+
 		void CopyPose(const XrPosef& in, VRPose* out)
 		{
 			out->orientation_xyzw = {in.orientation.x, in.orientation.y, in.orientation.z, in.orientation.w};
 			out->position_xyz = {in.position.x, in.position.y, in.position.z};
 		}
 
-		bool ReadBool(XrSession session, XrAction action, XrPath subaction_path)
+		// `active`, when given, is ORed with the action's isActive: the runtime has a source bound for it.
+		bool ReadBool(XrSession session, XrAction action, XrPath subaction_path, bool* active = nullptr)
 		{
 			if (action == XR_NULL_HANDLE)
 				return false;
@@ -119,10 +185,12 @@ namespace VR
 			if (XR_FAILED(xrGetActionStateBoolean(session, &get_info, &state)))
 				return false;
 
+			if (active && state.isActive == XR_TRUE)
+				*active = true;
 			return state.isActive == XR_TRUE && state.currentState == XR_TRUE;
 		}
 
-		float ReadFloat(XrSession session, XrAction action, XrPath subaction_path)
+		float ReadFloat(XrSession session, XrAction action, XrPath subaction_path, bool* active = nullptr)
 		{
 			if (action == XR_NULL_HANDLE)
 				return 0.f;
@@ -135,10 +203,13 @@ namespace VR
 			if (XR_FAILED(xrGetActionStateFloat(session, &get_info, &state)) || state.isActive != XR_TRUE)
 				return 0.f;
 
+			if (active)
+				*active = true;
+
 			return std::isfinite(state.currentState) ? state.currentState : 0.f;
 		}
 
-		XrVector2f ReadVector2(XrSession session, XrAction action, XrPath subaction_path)
+		XrVector2f ReadVector2(XrSession session, XrAction action, XrPath subaction_path, bool* active = nullptr)
 		{
 			if (action == XR_NULL_HANDLE)
 				return {0.f, 0.f};
@@ -150,6 +221,9 @@ namespace VR
 			XrActionStateVector2f state = {XR_TYPE_ACTION_STATE_VECTOR2F};
 			if (XR_FAILED(xrGetActionStateVector2f(session, &get_info, &state)) || state.isActive != XR_TRUE)
 				return {0.f, 0.f};
+
+			if (active)
+				*active = true;
 
 			if (!std::isfinite(state.currentState.x) || !std::isfinite(state.currentState.y))
 				return {0.f, 0.f};
@@ -566,6 +640,8 @@ namespace VR
 		m_locate_warned = false;
 		m_last_actions_active = -1;
 		s_actions_were_live = false;
+		s_profile_changed.store(false, std::memory_order_release);
+		ResetPresence();
 		s_publisher = this;
 		ResetSnapshot();
 		Console.WriteLn("(VR) Controller action set attached (spatial controls can read the hands).");
@@ -621,6 +697,7 @@ namespace VR
 
 		m_hand_paths = {};
 		m_attached = false;
+		ResetPresence();
 		if (s_publisher == this)
 		{
 			s_publisher = nullptr;
@@ -632,24 +709,26 @@ namespace VR
 	{
 		const XrPath hand_path = m_hand_paths[hand];
 
-		out->a = ReadBool(session, m_button_a, hand_path);
-		out->b = ReadBool(session, m_button_b, hand_path);
-		out->x = ReadBool(session, m_button_x, hand_path);
-		out->y = ReadBool(session, m_button_y, hand_path);
-		out->menu = ReadBool(session, m_button_menu, hand_path);
-		out->thumbstick_click = ReadBool(session, m_thumbstick_click, hand_path);
-		out->dpad_up = ReadBool(session, m_dpad_up, hand_path);
-		out->dpad_down = ReadBool(session, m_dpad_down, hand_path);
-		out->dpad_left = ReadBool(session, m_dpad_left, hand_path);
-		out->dpad_right = ReadBool(session, m_dpad_right, hand_path);
-		out->bumper = ReadBool(session, m_bumper, hand_path);
-		out->view = ReadBool(session, m_button_view, hand_path);
-		out->trigger = ReadFloat(session, m_trigger, hand_path);
-		out->grip = ReadFloat(session, m_grip, hand_path);
+		bool active = false;
+		out->a = ReadBool(session, m_button_a, hand_path, &active);
+		out->b = ReadBool(session, m_button_b, hand_path, &active);
+		out->x = ReadBool(session, m_button_x, hand_path, &active);
+		out->y = ReadBool(session, m_button_y, hand_path, &active);
+		out->menu = ReadBool(session, m_button_menu, hand_path, &active);
+		out->thumbstick_click = ReadBool(session, m_thumbstick_click, hand_path, &active);
+		out->dpad_up = ReadBool(session, m_dpad_up, hand_path, &active);
+		out->dpad_down = ReadBool(session, m_dpad_down, hand_path, &active);
+		out->dpad_left = ReadBool(session, m_dpad_left, hand_path, &active);
+		out->dpad_right = ReadBool(session, m_dpad_right, hand_path, &active);
+		out->bumper = ReadBool(session, m_bumper, hand_path, &active);
+		out->view = ReadBool(session, m_button_view, hand_path, &active);
+		out->trigger = ReadFloat(session, m_trigger, hand_path, &active);
+		out->grip = ReadFloat(session, m_grip, hand_path, &active);
 
-		const XrVector2f thumbstick = ReadVector2(session, m_thumbstick, hand_path);
+		const XrVector2f thumbstick = ReadVector2(session, m_thumbstick, hand_path, &active);
 		out->thumbstick_x = thumbstick.x;
 		out->thumbstick_y = thumbstick.y;
+		out->input_active = active;
 
 		if (time == 0)
 			return false;
@@ -730,9 +809,31 @@ namespace VR
 				HudCards::Toast("Controllers back");
 			if (actions_active)
 				s_actions_were_live = true;
+			// A session that opens on the SteamVR dashboard reads nothing yet: say so if it lasts.
+			if (m_last_actions_active == -1 && sync_result == XR_SESSION_NOT_FOCUSED)
+				m_unfocused_start_ms = NowMs();
 			m_last_actions_active = static_cast<int>(actions_active);
 			Console.WriteLn("(VR) Controller actions %s (session %sfocused).",
 				actions_active ? "active" : "inactive", actions_active ? "" : "not ");
+		}
+
+		if (actions_active)
+		{
+			m_unfocused_start_ms = 0;
+		}
+		else if (m_unfocused_start_ms != 0 && NowMs() - m_unfocused_start_ms >= kUnfocusedStartMs)
+		{
+			m_unfocused_start_ms = 0;
+			Console.WriteLn("(VR) The session started unfocused and is still unfocused after 2 s (SteamVR menu open?): controllers paused.");
+			ToastLimited("SteamVR menu open: controllers paused");
+		}
+
+		const bool profile_changed = s_profile_changed.exchange(false, std::memory_order_acq_rel);
+		if (profile_changed || (actions_active && !m_bindings_reported))
+		{
+			ReportBindings(profile_changed ? "interaction profile changed" : "first focused sync");
+			if (actions_active)
+				m_bindings_reported = true;
 		}
 
 		const XrTime time = display_time;
@@ -778,8 +879,291 @@ namespace VR
 			}
 		}
 
+		UpdatePresence(snapshot, actions_active);
+
 		PublishSnapshot(snapshot);
 		return true;
+	}
+
+	bool VRInput::ToastLimited(const std::string& text)
+	{
+		const std::uint64_t now = NowMs();
+		bool found = false;
+		for (std::pair<std::string, std::uint64_t>& entry : m_toast_times)
+		{
+			if (entry.first != text)
+				continue;
+			if (now - entry.second < kToastRepeatMs)
+				return false;
+			entry.second = now;
+			found = true;
+			break;
+		}
+		if (!found)
+			m_toast_times.emplace_back(text, now);
+		HudCards::Toast(text, kPresenceToastSeconds);
+		return true;
+	}
+
+	void VRInput::ResetPresence()
+	{
+		m_presence.fill(HandPresence{});
+		m_presence_paused = true;
+		m_presence_last_ms = 0;
+		m_focused_ms = 0;
+		m_start_checked = false;
+		m_unfocused_start_ms = 0;
+		m_bindings_reported = false;
+		m_touch_toasted = false;
+		m_toast_times.clear();
+	}
+
+	void VRInput::UpdatePresence(const VRInputSnapshot& snapshot, bool actions_active)
+	{
+		// An unfocused session reads nothing from either hand, and scripted PINE hands stand in for the
+		// real ones: neither says anything about the hardware, so the clocks stop.
+		XRInput::TestInput test;
+		if (!actions_active || LiveTestInput(&test))
+		{
+			m_presence_paused = true;
+			return;
+		}
+
+		const std::uint64_t now = NowMs();
+		bool live_now[HAND_COUNT];
+		for (int hand = 0; hand < HAND_COUNT; ++hand)
+		{
+			const VRHandState& h = snapshot.hands[hand];
+			live_now[hand] = h.input_active || h.grip_pose.valid;
+		}
+
+		if (m_presence_paused)
+		{
+			// Back from a pause: the runs start over, so paused time counts toward neither state.
+			for (int hand = 0; hand < HAND_COUNT; ++hand)
+			{
+				m_presence[hand].run_live = live_now[hand];
+				m_presence[hand].run_start_ms = now;
+			}
+		}
+		else
+		{
+			m_focused_ms += std::min<std::uint64_t>(now - m_presence_last_ms, kPresenceMaxStepMs);
+		}
+		m_presence_paused = false;
+		m_presence_last_ms = now;
+
+		bool to_live[HAND_COUNT] = {false, false};
+		bool to_absent[HAND_COUNT] = {false, false};
+		for (int hand = 0; hand < HAND_COUNT; ++hand)
+		{
+			HandPresence& p = m_presence[hand];
+			if (live_now[hand] != p.run_live)
+			{
+				p.run_live = live_now[hand];
+				p.run_start_ms = now;
+			}
+			const std::uint64_t run_ms = now - p.run_start_ms;
+			to_live[hand] = p.run_live && p.state != HandLiveness::Live && run_ms >= kHandLiveMs;
+			to_absent[hand] = !p.run_live && p.state != HandLiveness::Absent && run_ms >= kHandAbsentMs;
+		}
+
+		// Both hands lost in the same sync: one toast covers them.
+		const bool both_lost = to_absent[0] && to_absent[1] && m_presence[0].state == HandLiveness::Live &&
+							   m_presence[1].state == HandLiveness::Live;
+		bool both_lost_toasted = false;
+
+		for (int hand = 0; hand < HAND_COUNT; ++hand)
+		{
+			HandPresence& p = m_presence[hand];
+			const int other = 1 - hand;
+			if (to_live[hand])
+			{
+				p.state = HandLiveness::Live;
+				p.ever_live = true;
+				Console.WriteLn("(VR) %s controller: live", HAND_NAME[hand]);
+				if (p.announced_absent)
+				{
+					p.announced_absent = false;
+					char text[64];
+					std::snprintf(text, sizeof(text), "%s controller back", HAND_NAME[hand]);
+					ToastLimited(text);
+				}
+			}
+			else if (to_absent[hand])
+			{
+				const bool was_live = p.state == HandLiveness::Live;
+				p.state = HandLiveness::Absent;
+				Console.WriteLn("(VR) %s controller: absent (no bound input and no tracked grip for 3.0 s)", HAND_NAME[hand]);
+				if (!was_live)
+					continue;
+				if (both_lost)
+				{
+					if (!both_lost_toasted)
+					{
+						both_lost_toasted = true;
+						if (ToastLimited("Controllers not tracking - check SteamVR"))
+						{
+							m_presence[0].announced_absent = true;
+							m_presence[1].announced_absent = true;
+						}
+					}
+					continue;
+				}
+				const bool other_live = m_presence[other].state == HandLiveness::Live && !to_absent[other];
+				char text[64];
+				if (other_live)
+					std::snprintf(text, sizeof(text), "%s controller asleep - press a button on it", HAND_NAME[hand]);
+				else
+					std::snprintf(text, sizeof(text), "Controllers not tracking - check SteamVR");
+				if (ToastLimited(text))
+					p.announced_absent = true;
+			}
+		}
+
+		// Session start: which controllers never showed up. Once per session; a late hand still gets
+		// its "back" toast above.
+		if (!m_start_checked && m_focused_ms >= kStartCheckMs)
+		{
+			m_start_checked = true;
+			const bool left = m_presence[VRInputSnapshot::LEFT].ever_live;
+			const bool right = m_presence[VRInputSnapshot::RIGHT].ever_live;
+			if (!left && !right)
+			{
+				Console.Warning("(VR) No controller reported input or tracking in the first 5 s of focus.");
+				if (ToastLimited("No VR controllers connected"))
+				{
+					m_presence[0].announced_absent = true;
+					m_presence[1].announced_absent = true;
+				}
+			}
+			else if (!left || !right)
+			{
+				const int present = left ? VRInputSnapshot::LEFT : VRInputSnapshot::RIGHT;
+				const int missing = 1 - present;
+				Console.Warning("(VR) Only the %s controller reported input or tracking in the first 5 s of focus.",
+					HAND_NAME_LOWER[present]);
+				char text[64];
+				std::snprintf(text, sizeof(text), "Only the %s controller is connected", HAND_NAME_LOWER[present]);
+				if (ToastLimited(text))
+					m_presence[missing].announced_absent = true;
+			}
+			else
+			{
+				Console.WriteLn("(VR) Both controllers live at session start.");
+			}
+		}
+	}
+
+	void VRInput::ReportBindings(const char* why)
+	{
+		if (m_action_set == XR_NULL_HANDLE || !m_attached || !XRSession::HasInstance() || !XRSession::HasSession())
+			return;
+		const XrInstance instance = XRSession::GetInstance();
+		const XrSession session = XRSession::GetSession();
+		if (session == XR_NULL_HANDLE)
+			return;
+
+		Console.WriteLn("(VR) Controller bindings (%s):", why ? why : "requested");
+
+		XrPath touch_path = XR_NULL_PATH;
+		XrPath frame_path = XR_NULL_PATH;
+		if (XR_FAILED(xrStringToPath(instance, TOUCH_PROFILE, &touch_path)))
+			touch_path = XR_NULL_PATH;
+		if (XR_FAILED(xrStringToPath(instance, FRAME_PROFILE, &frame_path)))
+			frame_path = XR_NULL_PATH;
+
+		bool touch_in_use = false;
+		bool frame_in_use = false;
+		for (int hand = 0; hand < HAND_COUNT; ++hand)
+		{
+			XrInteractionProfileState state = {XR_TYPE_INTERACTION_PROFILE_STATE};
+			const XrResult res = xrGetCurrentInteractionProfile(session, m_hand_paths[hand], &state);
+			if (XR_FAILED(res))
+			{
+				WarnXR(res, "xrGetCurrentInteractionProfile");
+				continue;
+			}
+			const XrPath profile = state.interactionProfile;
+			const std::string name = (profile == XR_NULL_PATH) ? std::string("none") : PathString(instance, profile);
+			Console.WriteLn("(VR) %s hand profile: %s", HAND_NAME[hand], name.c_str());
+			if (profile != XR_NULL_PATH && profile == touch_path)
+				touch_in_use = true;
+			if (profile != XR_NULL_PATH && profile == frame_path)
+				frame_in_use = true;
+		}
+
+		struct NamedAction
+		{
+			XrAction action;
+			const char* name;
+		};
+		const NamedAction actions[] = {
+			{m_trigger, "trigger"},
+			{m_grip, "grip"},
+			{m_thumbstick, "thumbstick"},
+			{m_button_a, "A"},
+			{m_button_y, "Y"},
+			{m_dpad_up, "D-pad up"},
+			{m_button_view, "View"},
+		};
+
+		bool dpad_checked = false;
+		bool dpad_bound = false;
+		for (const NamedAction& named : actions)
+		{
+			if (named.action == XR_NULL_HANDLE)
+				continue;
+
+			XrBoundSourcesForActionEnumerateInfo info = {XR_TYPE_BOUND_SOURCES_FOR_ACTION_ENUMERATE_INFO};
+			info.action = named.action;
+			uint32_t count = 0;
+			XrResult res = xrEnumerateBoundSourcesForAction(session, &info, 0, &count, nullptr);
+			std::vector<XrPath> sources;
+			if (XR_SUCCEEDED(res) && count > 0)
+			{
+				sources.resize(count);
+				res = xrEnumerateBoundSourcesForAction(session, &info, count, &count, sources.data());
+				if (XR_SUCCEEDED(res))
+					sources.resize(std::min<size_t>(sources.size(), count));
+				else
+					sources.clear();
+			}
+			if (XR_FAILED(res))
+			{
+				WarnXR(res, "xrEnumerateBoundSourcesForAction");
+				continue;
+			}
+
+			std::string line;
+			for (const XrPath source : sources)
+			{
+				if (!line.empty())
+					line += "; ";
+				line += SourceName(instance, session, source);
+			}
+			Console.WriteLn("(VR) Bound %s: %s", named.name, line.empty() ? "(none)" : line.c_str());
+
+			if (named.action == m_dpad_up)
+			{
+				dpad_checked = true;
+				dpad_bound = !sources.empty();
+			}
+		}
+
+		if (XRSession::HasFrameControllerInteraction() && touch_in_use)
+		{
+			Console.Warning("(VR) SteamVR is using the Touch bindings: X/Y/Menu and the D-pad may be remapped; "
+							"check SteamVR > Controller bindings for PenguinScreen2.");
+			if (!m_touch_toasted)
+			{
+				m_touch_toasted = true;
+				ToastLimited("Touch bindings in use - check SteamVR");
+			}
+		}
+
+		if (frame_in_use && dpad_checked && !dpad_bound)
+			Console.Warning("(VR) D-pad not bound: the Steam Frame profile is active but SteamVR gave the D-pad no source.");
 	}
 
 	void VRInput::TriggerHaptic(int hand, float duration_seconds, float frequency_hz, float amplitude)
@@ -879,6 +1263,11 @@ namespace VR
 		bool IsInitialized()
 		{
 			return s_input.IsInitialized();
+		}
+
+		void OnInteractionProfileChanged()
+		{
+			s_profile_changed.store(true, std::memory_order_release);
 		}
 
 		void QueueHaptic(int hand, float amplitude)

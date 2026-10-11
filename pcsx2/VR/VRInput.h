@@ -12,6 +12,10 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace VR
 {
@@ -37,6 +41,11 @@ namespace VR
 		void TriggerHaptic(int hand, float duration_seconds = 0.f, float frequency_hz = 0.f, float amplitude = 1.f);
 		void StopHaptic(int hand);
 
+		// Logs each hand's current interaction profile and what SteamVR bound the main actions to, and
+		// warns when the Steam Frame is running on the Touch bindings or without a D-pad. `why` goes in
+		// the log line (first focused sync, profile changed).
+		void ReportBindings(const char* why);
+
 	private:
 		static constexpr int HAND_COUNT = 2;
 
@@ -48,6 +57,12 @@ namespace VR
 			const char* localized_name, XrAction* out);
 
 		bool ReadHand(XrSession session, int hand, XrTime time, VRHandState* out);
+
+		// Controller presence: says in the log and the headset when a hand goes quiet or comes back.
+		void UpdatePresence(const VRInputSnapshot& snapshot, bool actions_active);
+		void ResetPresence();
+		// HudCards::Toast for 4 s, but each text at most once per 20 s. False when held back.
+		bool ToastLimited(const std::string& text);
 
 		bool m_attached = false;
 		XrActionSet m_action_set = XR_NULL_HANDLE;
@@ -78,6 +93,32 @@ namespace VR
 
 		int m_last_actions_active = -1;
 		bool m_locate_warned = false;
+
+		enum class HandLiveness : u8
+		{
+			Unknown,
+			Live,
+			Absent,
+		};
+
+		struct HandPresence
+		{
+			HandLiveness state = HandLiveness::Unknown;
+			bool run_live = false;          // live_now over the current run
+			std::uint64_t run_start_ms = 0; // when the current run of run_live began
+			bool ever_live = false;         // became Live at least once this session
+			bool announced_absent = false;  // a toast said this hand is missing: its return gets one too
+		};
+
+		std::array<HandPresence, HAND_COUNT> m_presence{};
+		bool m_presence_paused = true;        // last sync was unfocused or under PINE test input
+		std::uint64_t m_presence_last_ms = 0; // last evaluated sync
+		std::uint64_t m_focused_ms = 0;       // focused, evaluated time this session
+		bool m_start_checked = false;         // the session-start controller check has run
+		std::uint64_t m_unfocused_start_ms = 0; // the session's first sync was unfocused, at this time
+		bool m_bindings_reported = false;     // ReportBindings ran for this session's first focused sync
+		bool m_touch_toasted = false;
+		std::vector<std::pair<std::string, std::uint64_t>> m_toast_times;
 	};
 
 	namespace XRInput
@@ -89,6 +130,10 @@ namespace VR
 		void Shutdown();
 
 		bool IsInitialized();
+
+		// The runtime's interaction profile changed (XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED): the
+		// next Update reports the bindings again. Any thread.
+		void OnInteractionProfileChanged();
 
 		void QueueHaptic(int hand, float amplitude);
 

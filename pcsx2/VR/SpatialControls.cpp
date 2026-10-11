@@ -1044,6 +1044,7 @@ namespace VR::SpatialControls
 
 		std::atomic_bool s_sprint_blocked{false};
 		std::atomic_bool s_zone_stop{false};
+		std::atomic_bool s_menu_mode{false};
 
 		constexpr float kSprintOn = 0.5f; // stick magnitude (after the deadzone) the click must come with
 		constexpr float kSprintHold = 0.25f; // the latch holds while the stick is pushed past this
@@ -1068,9 +1069,87 @@ namespace VR::SpatialControls
 			}
 		}
 
+		// Menu mode: the right stick as D-pad presses (see GamepadParams in the header).
+		constexpr float kMenuEngage = 0.6f;
+		constexpr float kMenuRelease = 0.35f;
+		constexpr float kMenuPressS = 0.10f;
+		constexpr float kMenuFirstRepeatS = 0.40f;
+		constexpr float kMenuRepeatS = 0.15f;
+		constexpr float kMenuGapS = 0.05f;
+		constexpr float kMenuEps = 1.0e-4f; // 60 Hz polls land on the thresholds; don't miss one by rounding
+		constexpr int kMenuNone = -1;
+		constexpr int kMenuWaitCentre = -2;
+
+		void ResetMenuStick(GamepadState& st, int dir)
+		{
+			st.menu_dir = dir;
+			st.menu_held_s = 0.0f;
+			st.menu_press_s = 0.0f;
+			st.menu_gap_s = 0.0f;
+			st.menu_pressing = false;
+		}
+
+		// One poll of menu mode on the raw right stick. The direction pressed this poll (0 up, 1 down, 2 left,
+		// 3 right), or -1.
+		int StepMenuStick(float x, float y, float dt, GamepadState& st)
+		{
+			if (st.menu_dir == kMenuWaitCentre)
+			{
+				// Menu mode came on with the stick already pushed (still turning): nothing until it centres.
+				if (std::max(std::fabs(x), std::fabs(y)) >= kMenuRelease)
+					return -1;
+				ResetMenuStick(st, kMenuNone);
+			}
+
+			if (st.menu_dir < 0)
+			{
+				const bool horizontal = std::fabs(x) > std::fabs(y);
+				const float mag = horizontal ? std::fabs(x) : std::fabs(y);
+				if (mag <= kMenuEngage)
+					return -1;
+				ResetMenuStick(st, horizontal ? (x > 0.0f ? 3 : 2) : (y > 0.0f ? 0 : 1));
+				st.menu_pressing = true;
+				return st.menu_dir;
+			}
+
+			// Engaged: the stick along the engaged direction decides the release, so swinging it round to
+			// another direction lets go first instead of switching mid-press.
+			const float along = (st.menu_dir == 0) ? y : (st.menu_dir == 1) ? -y : (st.menu_dir == 2) ? -x : x;
+			if (along < kMenuRelease)
+			{
+				ResetMenuStick(st, kMenuNone);
+				return -1;
+			}
+
+			st.menu_held_s += dt;
+			st.menu_press_s += dt;
+			if (st.menu_pressing)
+			{
+				if (st.menu_press_s >= kMenuPressS - kMenuEps)
+				{
+					st.menu_pressing = false;
+					st.menu_gap_s = 0.0f;
+				}
+			}
+			else
+			{
+				st.menu_gap_s += dt;
+				// The first press began at engage, so held and press time still match until the first repeat.
+				const bool first = st.menu_held_s <= st.menu_press_s + kMenuEps;
+				const bool due = first ? (st.menu_held_s >= kMenuFirstRepeatS - kMenuEps) :
+				                         (st.menu_press_s >= kMenuRepeatS - kMenuEps);
+				if (due && st.menu_gap_s >= kMenuGapS - kMenuEps)
+				{
+					st.menu_pressing = true;
+					st.menu_press_s = 0.0f;
+				}
+			}
+			return st.menu_pressing ? st.menu_dir : -1;
+		}
+
 		// ComposeGamepad with the cross-thread inputs passed in, so the self-test is deterministic.
 		ControlValues ComposeGamepadWith(const VRInputSnapshot& snapshot, const GamepadParams& p, GamepadState& st,
-			float dt, int suppressed, bool sprint_blocked)
+			float dt, int suppressed, bool sprint_blocked, bool menu_mode = false)
 		{
 			ControlValues v{};
 			if (snapshot.generation == 0 || !snapshot.actions_active)
@@ -1125,11 +1204,32 @@ namespace VR::SpatialControls
 				fx = axis(r.thumbstick_x);
 				fy = axis(r.thumbstick_y);
 			}
-			const bool vertical = std::fabs(fy) > 2.0f * std::fabs(fx);
-			StepFlick(vertical && fy > kFlickOn && !st.flick_down, fy < kFlickOff, dt, st.flick_up, st.flick_up_s);
-			StepFlick(vertical && -fy > kFlickOn && !st.flick_up, -fy < kFlickOff, dt, st.flick_down, st.flick_down_s);
-			At(v, ControlId::RightStickUp) = button(st.flick_up);
-			At(v, ControlId::RightStickDown) = button(st.flick_down);
+			if (menu_mode && suppressed != VRInputSnapshot::RIGHT)
+			{
+				// Menu mode: the stick steps the menu cursor instead; no ad-libs meanwhile. The real D-pad
+				// still passes (ORed).
+				st.flick_up = st.flick_down = false;
+				st.flick_up_s = st.flick_down_s = 0.0f;
+				const int dir = StepMenuStick(fx, fy, dt, st);
+				if (dir >= 0)
+				{
+					static constexpr ControlId kMenuDpad[4] = {
+						ControlId::DpadUp, ControlId::DpadDown, ControlId::DpadLeft, ControlId::DpadRight};
+					At(v, kMenuDpad[dir]) = 1.0f;
+				}
+				At(v, ControlId::RightStickUp) = 0.0f;
+				At(v, ControlId::RightStickDown) = 0.0f;
+			}
+			else
+			{
+				// Out of menu mode nothing is pressed; a stick still pushed when it comes on waits to centre.
+				ResetMenuStick(st, kMenuWaitCentre);
+				const bool vertical = std::fabs(fy) > 2.0f * std::fabs(fx);
+				StepFlick(vertical && fy > kFlickOn && !st.flick_down, fy < kFlickOff, dt, st.flick_up, st.flick_up_s);
+				StepFlick(vertical && -fy > kFlickOn && !st.flick_up, -fy < kFlickOff, dt, st.flick_down, st.flick_down_s);
+				At(v, ControlId::RightStickUp) = button(st.flick_up);
+				At(v, ControlId::RightStickDown) = button(st.flick_down);
+			}
 
 			// Sprint latch, on the stick as the game gets it (deadzone and suppression applied): walk-and-shoot's
 			// stick reads 0, so it neither latches nor holds the latch.
@@ -1188,11 +1288,16 @@ namespace VR::SpatialControls
 		s_zone_stop.store(stop, std::memory_order_release);
 	}
 
+	void SetMenuMode(bool on)
+	{
+		s_menu_mode.store(on, std::memory_order_release);
+	}
+
 	ControlValues ComposeGamepad(const VRInputSnapshot& snapshot, const GamepadParams& p, GamepadState& st, float dt)
 	{
 		const bool zone_stop = s_zone_stop.load(std::memory_order_acquire);
 		ControlValues v = ComposeGamepadWith(snapshot, p, st, dt, s_suppressed_move_hand.load(std::memory_order_acquire),
-			s_sprint_blocked.load(std::memory_order_acquire) || zone_stop);
+			s_sprint_blocked.load(std::memory_order_acquire) || zone_stop, s_menu_mode.load(std::memory_order_acquire));
 		if (zone_stop)
 		{
 			At(v, ControlId::LeftStickX) = 0.0f;
@@ -1343,6 +1448,113 @@ namespace VR::SpatialControls
 			check(!on(v, ControlId::RightStickUp), "flick: not while the right stick is suppressed");
 			v = run(off, st, 1, false, kNone);
 			check(on(v, ControlId::RightStickUp), "flick: presses once the stick is no longer suppressed");
+		}
+
+		// Menu mode: the right stick steps the D-pad.
+		{
+			const GamepadParams off{};
+			l = VRHandState{};
+			r = VRHandState{};
+			// One 60 Hz poll in or out of menu mode.
+			const auto poll = [&s](const GamepadParams& p, GamepadState& st, bool menu) {
+				return ComposeGamepadWith(s, p, st, 1.0f / 60.0f, -1, false, menu);
+			};
+			// `polls` polls in menu mode: rising edges and polls pressed of one D-pad direction.
+			const auto count = [&](GamepadState& st, ControlId id, int polls, int* edges, int* pressed) {
+				bool prev = false;
+				*edges = 0;
+				*pressed = 0;
+				for (int i = 0; i < polls; ++i)
+				{
+					const bool now = on(poll(off, st, true), id);
+					if (now && !prev)
+						++*edges;
+					if (now)
+						++*pressed;
+					prev = now;
+				}
+			};
+
+			{
+				GamepadState st;
+				r.thumbstick_x = 1.0f;
+				int edges = 0, pressed = 0;
+				count(st, ControlId::DpadRight, 15, &edges, &pressed);
+				check(edges == 1 && pressed >= 5 && pressed <= 7, "menu: engaging presses the D-pad once for about 0.10 s");
+				r.thumbstick_x = 0.0f;
+				count(st, ControlId::DpadRight, 6, &edges, &pressed);
+				check(edges == 0 && st.menu_dir < 0, "menu: centring releases");
+			}
+			{
+				GamepadState st;
+				r.thumbstick_y = 1.0f;
+				int edges = 0, pressed = 0;
+				count(st, ControlId::DpadUp, 60, &edges, &pressed);
+				check(edges >= 4 && edges <= 6, "menu: holding 1.0 s repeats a bounded number of times");
+				r = VRHandState{};
+				count(st, ControlId::DpadUp, 2, &edges, &pressed);
+			}
+			{
+				GamepadState st;
+				r.thumbstick_y = 1.0f;
+				ControlValues v{};
+				for (int i = 0; i < 3; ++i)
+					v = poll(off, st, true);
+				check(!on(v, ControlId::RightStickUp) && !on(v, ControlId::RightStickDown) && on(v, ControlId::DpadUp),
+					"menu: a straight-up flick reads 0, the D-pad steps instead");
+				r.thumbstick_y = -1.0f;
+				v = poll(off, st, true);
+				check(!on(v, ControlId::RightStickDown) && !on(v, ControlId::DpadDown), "menu: a direction change needs a release first");
+				r = VRHandState{};
+				poll(off, st, true);
+			}
+			{
+				GamepadState st;
+				r.thumbstick_x = 1.0f;
+				ControlValues v = poll(off, st, true);
+				check(on(v, ControlId::DpadRight), "menu: pressed while in menu mode");
+				v = poll(off, st, false);
+				check(!on(v, ControlId::DpadRight) && !on(v, ControlId::DpadLeft) && !on(v, ControlId::DpadUp) &&
+						  !on(v, ControlId::DpadDown),
+					"menu: leaving menu mode releases in the same poll");
+				v = poll(off, st, true);
+				check(!on(v, ControlId::DpadRight), "menu: a stick still pushed when menu mode comes on waits to centre");
+				r = VRHandState{};
+				poll(off, st, true);
+			}
+			{
+				GamepadState st;
+				r.thumbstick_x = 0.5f;
+				r.thumbstick_y = 0.5f;
+				bool any = false;
+				for (int i = 0; i < 30; ++i)
+				{
+					const ControlValues v = poll(off, st, true);
+					any = any || on(v, ControlId::DpadUp) || on(v, ControlId::DpadDown) || on(v, ControlId::DpadLeft) ||
+					      on(v, ControlId::DpadRight);
+				}
+				check(!any, "menu: a 0.5/0.5 diagonal presses nothing");
+				r = VRHandState{};
+			}
+			{
+				GamepadState st;
+				l.dpad_left = true;
+				ControlValues v = poll(off, st, true);
+				check(on(v, ControlId::DpadLeft), "menu: the real D-pad still passes with the stick centred");
+				r.thumbstick_x = 1.0f;
+				v = poll(off, st, true);
+				check(on(v, ControlId::DpadLeft) && on(v, ControlId::DpadRight), "menu: the real D-pad is ORed with a stick press");
+				l = VRHandState{};
+				r = VRHandState{};
+				poll(off, st, true);
+			}
+			{
+				GamepadState st;
+				r.thumbstick_x = 1.0f;
+				const ControlValues v = ComposeGamepadWith(s, off, st, 1.0f / 60.0f, VRInputSnapshot::RIGHT, false, true);
+				check(!on(v, ControlId::DpadRight), "menu: a suppressed right stick steps nothing");
+				r = VRHandState{};
+			}
 		}
 
 		if (failed)
