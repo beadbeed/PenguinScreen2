@@ -5,6 +5,7 @@
 
 #include "common/Pcsx2Defs.h"
 
+#include "VR/GrabBreakout.h"
 #include "VR/SpatialControls.h"
 
 #include <limits>
@@ -686,6 +687,16 @@ namespace VR::ProfileDB
 		std::vector<Pouch> list; // 1 to 8
 	};
 
+	// breakout: shaking a controller breaks free of a grab (VR::GrabBreakout). The camera driver counts the local character
+	// as held while every grabbed check holds on the record camera.base finds (CameraDriver::LocalRecordAny, so first
+	// person need not be armed) and no lookAt.pauseWhen menu is up, never on obsrv; the Gamepad then presses for the player
+	// with the shake tuning while a controller is shaken.
+	struct BreakoutParams
+	{
+		std::vector<RecordCheck> grabbed; // all must hold; at least one
+		GrabBreakout::Params shake;
+	};
+
 	struct Profile
 	{
 		std::string serial;
@@ -716,6 +727,7 @@ namespace VR::ProfileDB
 		std::optional<CameraProfile> camera;
 		std::optional<SplitParams> split;
 		std::vector<SpatialControlSpec> controls;
+		std::optional<BreakoutParams> breakout;
 		std::string notes;
 	};
 

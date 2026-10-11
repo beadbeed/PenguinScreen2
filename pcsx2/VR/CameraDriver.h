@@ -73,8 +73,8 @@ namespace VR::CameraDriver
 
 	// CPU thread, after Apply: true while the game runs, the camera guards pass (or failed for no longer than
 	// the profile's disarm grace) and this vsync resolved camera.base, whether or not first person is armed. Valid while grabbed, down or dead too (it ignores
-	// releaseWhen, the head pose and the network mode). For reads only (GameFeedback's hurt and weapon cues);
-	// resolved only for profiles with a feedback block.
+	// releaseWhen, the head pose and the network mode). For reads only (GameFeedback's hurt and weapon cues, and the
+	// grab breakout's grabbed checks); resolved only for profiles with a feedback or breakout block.
 	bool LocalRecordAny(u32* base);
 
 	void OnStateLoaded();

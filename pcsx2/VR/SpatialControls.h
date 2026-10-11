@@ -5,6 +5,7 @@
 
 #include "common/Pcsx2Defs.h"
 
+#include "VR/GrabBreakout.h"
 #include "VR/VRInputState.h"
 
 #include <array>
@@ -564,6 +565,8 @@ namespace VR::SpatialControls
 	};
 	struct GamepadState
 	{
+		// Breaking free of a grab (ApplyGrabBreakout): the shake detector, the press schedule and this poll's buzz.
+		GrabBreakout::State breakout;
 		bool sprint = false;
 		float centred_s = 0.0f;
 		bool click_prev = false;
@@ -581,6 +584,7 @@ namespace VR::SpatialControls
 		bool menu_pressing = false;
 		void Reset()
 		{
+			breakout.Reset();
 			sprint = false;
 			centred_s = 0.0f;
 			click_prev = false;
@@ -592,6 +596,23 @@ namespace VR::SpatialControls
 		}
 	};
 	ControlValues ComposeGamepad(const VRInputSnapshot& snapshot, const GamepadParams& p, GamepadState& st, float dt);
+
+	// Breaking free of a grab (VR/GrabBreakout.h; these three are defined in GrabBreakout.cpp). The camera driver says
+	// every vsync whether the local character is held (the profile's breakout.grabbed checks on the local record, no menu
+	// up, never on obsrv) and with which tuning; ComposeGamepad applies it to every poll. Any thread.
+	void SetGrabbed(bool grabbed, const GrabBreakout::Params& params);
+
+	// The last SetGrabbed, read as not grabbed once it is more than GrabBreakout::kStaleMs old (Apply stopped running: a
+	// pause, a stall, the game gone). *params (may be null) gets the tuning it came with. Any thread.
+	bool Grabbed(GrabBreakout::Params* params = nullptr);
+
+	// One poll of the breakout onto the Gamepad's composed values v. While grabbed, out of menu mode, and a hand shaking:
+	// the left stick's X waggles (unless the player pushes it sideways at least half way themselves), and Circle (ButtonA)
+	// and Cross (ButtonB) are pressed in turn, ORed in and only onto a button the player is not holding (Circle's presses
+	// stay out while ButtonA or RightTriggerPress, also Circle, is held). st.buzz names the hands to buzz for a press begun
+	// this poll. Otherwise v is left as composed: nothing is ever pressed without the grab, and nothing after it ends.
+	void ApplyGrabBreakout(const VRInputSnapshot& snapshot, const GrabBreakout::Params& p, bool grabbed, bool menu_mode,
+		float dt, GrabBreakout::State& st, ControlValues& v);
 
 	// While a hand is given, the Gamepad device's stick on that hand (VRInputSnapshot::LEFT/RIGHT) reads 0:
 	// the camera driver is using it to move the character itself (walking while aiming), so the game must

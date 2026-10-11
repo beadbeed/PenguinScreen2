@@ -243,6 +243,26 @@ SLPM-65692:
       # 0 turns both off.
       predict: 0.8
     fov: { address: 0x313590, encoding: f32, scale: 100.0 }   # vertical FOV, degrees (about 115 horizontal at 4:3)
+  # Shake to break free (VR controllers only), as File #1 (see SLPM-65428.yaml for the measurements): while grabbed,
+  # shaking either controller waggles your left stick and presses Circle and Cross in turn on your own pad, with a short
+  # buzz on the shaking hand for each press; a button you hold yourself is never let go, and it stops the poll the grab
+  # ends. Stance 5 for grabbed is carried over from File #1 (same engine, not yet checked on File #2: no savestate with
+  # an enemy yet); the status byte +0xBB8 is 0x00 in normal play (0x08 and up: down, dead, turned). Never while a menu
+  # is up and never on obsrv; private co-op is fine (only your own pad input).
+  breakout:
+    grabbed:
+      - { offset: 0x08, equals: 5, width: 1 }               # stance: grabbed (as File #1)
+      - { offset: 0xBB8, min: 0x00, max: 0x07, width: 1 }   # status: normal play (not down, dead or turned)
+    shakeSpeed: 1.0
+    reversals: 3
+    reversalWindowMs: 300
+    reversalSpeed: 0.25
+    holdMs: 250
+    stickHz: 6
+    pressHz: 8
+    pressMs: 60
+    buzz: 0.35
+    buzzMs: 20
   # VR controllers (only when launched with --vr; flat play is untouched).
   # A pad bound in Settings -> Controllers (e.g. a DualSense) keeps working alongside;
   # when both touch the same button, the latest change wins.

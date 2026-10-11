@@ -125,6 +125,44 @@ the game's memory and does nothing without a running VR session.
 
 Each part is optional; the card leaves out whatever it can't read sensibly.
 
+## `breakout`: shake to break free
+
+When the game holds your character (a zombie's grab in Resident Evil
+Outbreak), shaking either VR controller makes your pad struggle for you: the
+left stick waggles left and right, and Circle and Cross are pressed in turn,
+with a short buzz on the shaking hand for each press. It works whether or not
+the first-person camera is active (a grab hands the camera back to the game),
+needs a `Gamepad` control in `controls`, and does nothing without a running VR
+session. The presses are your own pad input, so they are allowed in private
+co-op, but never on any other online server, never while the item screen, map
+or pause is up (`camera.lookAt.pauseWhen`), and never once the grab ends: they
+stop on the same input poll.
+
+```yaml
+breakout:
+  grabbed:
+    - { offset: 0x08, equals: 5, width: 1 }               # stance: grabbed
+    - { offset: 0xBA0, min: 0x00, max: 0x17, width: 1 }   # status: normal play
+  shakeSpeed: 1.0
+  pressHz: 8
+```
+
+| Key | Meaning |
+|---|---|
+| `grabbed` | checks on the record `camera.base` finds, written like `camera.base`'s `check` list (`offset`, then `equals`, `notEquals`, or `min` and `max`, and `width`). All must hold while your character is held. Required; one entry that does not parse makes the emulator ignore the whole block |
+| `shakeSpeed` | a hand counts as shaking while its controller moves faster than this, in metres per second (`0.2` to `5.0`, default `1.0`) |
+| `reversals`, `reversalWindowMs`, `reversalSpeed` | or while it reverses direction this many times (`0` to `8`, default `3`; `0` turns this test off) within this many milliseconds (`100` to `1000`, default `300`), moving at least `reversalSpeed` metres per second (`0.05` to `3.0`, default `0.25`). This catches a small, quick shake |
+| `holdMs` | a hand keeps counting as shaking this long after its last shake (`0` to `1000`, default `250`), so the turn at the end of each stroke does not stop the presses |
+| `stickHz` | full left-right cycles of the left stick per second while shaking (`0` to `15`, default `6`; `0`: no waggle) |
+| `pressHz`, `pressMs` | Circle and Cross presses per second, Circle first and then taking turns (`0` to `15`, default `8`; `0`: no presses), each held this many milliseconds (`20` to `500`, default `60`). A press that would last as long as the time between presses is shortened to half of it |
+| `buzz`, `buzzMs` | the buzz on the shaking hand for each press: strength `0` to `1` (default `0.35`; `0`: none) and milliseconds (`5` to `100`, default `20`). The Haptic Strength setting scales it |
+
+A button you hold yourself is never let go: while you hold A or the trigger,
+no Circle presses are added, and while you hold B, no Cross presses. A
+sideways push of your own on the left stick, at least half way, wins over the
+waggle. The first grab after the emulator starts shows "Shake to break free!"
+in the headset.
+
 ## `menuPointer`: point-and-click menus
 
 With the Menu Pointer setting on (the default), a menu opened during

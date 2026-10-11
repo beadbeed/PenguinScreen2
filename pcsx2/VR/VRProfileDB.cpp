@@ -3121,6 +3121,69 @@ static void checkPouches(const std::string_view serial, VR::ProfileDB::Profile& 
 	}
 }
 
+// breakout: shaking a controller breaks free of a grab (VR::GrabBreakout). The presses are the player's own pad input and
+// run only while the grabbed checks hold, so a grabbed list with any bad entry (which would widen it) drops the whole
+// block with a warning; a bad tuning number keeps its default.
+static std::optional<VR::ProfileDB::BreakoutParams> parseBreakout(const std::string_view serial, const ryml::ConstNodeRef& node)
+{
+	using VR::ProfileDB::BreakoutParams;
+	warnUnknownKeys(serial, node, "breakout", {"grabbed", "shakeSpeed", "reversals", "reversalWindowMs", "reversalSpeed",
+		"holdMs", "stickHz", "pressHz", "pressMs", "buzz", "buzzMs"});
+	const auto reject = [serial](const char* why) -> std::optional<BreakoutParams> {
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' breakout {}; the whole block is IGNORED, so shaking never breaks "
+						   "free of a grab in this game.", serial, why);
+		return std::nullopt;
+	};
+	BreakoutParams bp;
+	if (!node.has_child("grabbed") || !node["grabbed"].is_seq() || node["grabbed"].num_children() == 0)
+		return reject("needs a grabbed list of checks on the camera.base record ({ offset, equals | notEquals | min + max, width })");
+	if (!parseRecordCheckList(serial, node["grabbed"], "breakout.grabbed", bp.grabbed) ||
+		bp.grabbed.size() != node["grabbed"].num_children())
+		return reject("has a grabbed entry that does not parse");
+
+	VR::GrabBreakout::Params& sp = bp.shake;
+	// Decimal, in the key's own unit; stored scaled (milliseconds to seconds).
+	const auto read_float = [&](const char* key, float lo, float hi, float scale, float& dst) {
+		if (!node.has_child(key))
+			return;
+		const std::optional<float> v = StringUtil::FromChars<float>(nodeVal(node[key]));
+		if (v.has_value() && std::isfinite(v.value()) && v.value() >= lo && v.value() <= hi)
+			dst = v.value() * scale;
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' breakout {} must be from {} to {}; keeping {}.", serial, key, lo, hi,
+				dst / scale);
+	};
+	read_float("shakeSpeed", 0.2f, 5.0f, 1.0f, sp.shake_speed);
+	read_float("reversalWindowMs", 100.0f, 1000.0f, 0.001f, sp.reversal_window_s);
+	read_float("reversalSpeed", 0.05f, 3.0f, 1.0f, sp.reversal_speed);
+	read_float("holdMs", 0.0f, 1000.0f, 0.001f, sp.hold_s);
+	read_float("stickHz", 0.0f, 15.0f, 1.0f, sp.stick_hz);
+	read_float("pressHz", 0.0f, 15.0f, 1.0f, sp.press_hz);
+	read_float("pressMs", 20.0f, 500.0f, 0.001f, sp.press_s);
+	read_float("buzz", 0.0f, 1.0f, 1.0f, sp.buzz);
+	read_float("buzzMs", 5.0f, 100.0f, 0.001f, sp.buzz_s);
+	if (node.has_child("reversals"))
+	{
+		const std::optional<s64> v = parseDecOrHex(nodeVal(node["reversals"]));
+		if (v.has_value() && v.value() >= 0 && v.value() <= 8)
+			sp.reversals = static_cast<u8>(v.value());
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' breakout reversals must be a whole number from 0 to 8; keeping {}.",
+				serial, static_cast<unsigned>(sp.reversals));
+	}
+	// A press as long as the time between presses would be one long hold, which the game does not count as mashing.
+	if (sp.press_hz > 0.0f && sp.press_s >= 1.0f / sp.press_hz)
+	{
+		const float half = 0.5f / sp.press_hz;
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' breakout pressMs {} leaves no gap between presses at pressHz {}; using {}.",
+			serial, sp.press_s * 1000.0f, sp.press_hz, half * 1000.0f);
+		sp.press_s = half;
+	}
+	if (sp.stick_hz <= 0.0f && sp.press_hz <= 0.0f)
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' breakout has stickHz and pressHz both 0, so shaking presses nothing.", serial);
+	return bp;
+}
+
 
 bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::NodeRef& node, Profile& out)
 {
@@ -3486,6 +3549,17 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 
 	if (node.has_child("split") && node["split"].is_map())
 		out.split = parseSplit(serial, node["split"]);
+
+	if (node.has_child("breakout") && node["breakout"].is_map())
+	{
+		out.breakout = parseBreakout(serial, node["breakout"]);
+		// The grab is read from the record camera.base finds, like the feedback cues.
+		if (out.breakout.has_value() && !(out.camera.has_value() && out.camera->base.has_value()))
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a breakout block but no camera.base; the grab is read from that "
+							   "record, so shaking never breaks free here.", serial);
+	}
+	else if (node.has_child("breakout"))
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a breakout that is not a map; ignoring it.", serial);
 
 	if (node.has_child("controls"))
 	{

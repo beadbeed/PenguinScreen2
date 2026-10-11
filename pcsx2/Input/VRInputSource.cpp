@@ -84,6 +84,21 @@ namespace
 			default: return "+";
 		}
 	}
+
+	// Breaking free of a grab: a short buzz on each shaking hand for every press the Gamepad made for the player this
+	// poll (SpatialControls::ApplyGrabBreakout), scaled by the VR Haptic Strength setting like the game cues (input is
+	// polled on the CPU thread, which owns EmuConfig).
+	void QueueBreakoutBuzz(const VR::GrabBreakout::State& st)
+	{
+		const float setting = EmuConfig.VR.HapticStrength;
+		const float strength = std::isfinite(setting) ? std::clamp(setting, 0.0f, 1.0f) : 1.0f;
+		for (int hand = 0; hand < 2; ++hand)
+		{
+			const float amplitude = st.buzz[hand] * strength;
+			if (amplitude > 0.0f)
+				VR::XRInput::QueuePulse(hand, amplitude, st.buzz_s);
+		}
+	}
 }
 
 std::optional<u32> VRInputSource::FindDeviceIndex(std::string_view id)
@@ -833,6 +848,7 @@ void VRInputSource::PollEvents()
 				break;
 			case SC::DeviceKind::Gamepad:
 				values = SC::ComposeGamepad(snap, in.gamepad, in.gamepad_state, dt);
+				QueueBreakoutBuzz(in.gamepad_state.breakout);
 				break;
 			case SC::DeviceKind::Zone:
 			{
