@@ -744,7 +744,8 @@ namespace VR
 			SeatSession::Start(SeatCastTarget());
 
 		// With headset-rate submission the VR pacer pumps the events, so state changes are handled while the GS is idle.
-		if (!XRCompositor::PacerOwnsFrames())
+		// A pacer stuck in the runtime pumps nothing: then this thread does, so a loss still reaches the teardown below.
+		if (!XRCompositor::PacerOwnsFrames() || XRCompositor::PacerStalled())
 			XRSession::PumpEvents();
 
 		if (XRSession::IsLost())

@@ -44,6 +44,13 @@ namespace VR::XRCompositor
 	// the session events; false with legacy one-frame-per-present submission or no compositor. GS thread.
 	bool PacerOwnsFrames();
 
+	// True while PacerOwnsFrames() but the VR pacer has not come round its loop for about 250 ms (stuck in
+	// xrWaitFrame or another runtime call: the runtime died or stopped pacing), or has exited. VRManager then pumps
+	// the session events itself so a loss still reaches the teardown, and EndOfFrame skips the screen, hand and HUD
+	// uploads.
+	// GS thread.
+	bool PacerStalled();
+
 	// The headset's eyes as the runtime last located them (xrLocateViews): IPD, each eye's field of view in degrees
 	// (left, right, up, down, signed as OpenXR reports them: left and down negative) and the display rate. Any thread.
 	struct EyeInfo

@@ -104,6 +104,9 @@ namespace VR::XRCompositor
 		// The published layers older than this mean the GS is idle (loading, paused offline, stalled): the pacer
 		// keeps only the screen and lever cards.
 		constexpr u64 kStaleMs = 250;
+		// A pacer heartbeat older than this means the pacer is stuck in the runtime (PacerStalled). Its longest
+		// deliberate sleep is 100 ms, and a display period is 8-17 ms.
+		constexpr u64 kPacerStallMs = 250;
 		// The opaque background's swapchain, cleared to black once.
 		constexpr u32 kBackgroundSize = 32;
 
@@ -210,6 +213,10 @@ namespace VR::XRCompositor
 			std::atomic<u32> stat_copy_skipped{0};
 			std::atomic<u32> stat_copy_timeout{0};
 
+			// Headset rate: SteadyNowMs at the top of every pacer loop and when its xrWaitFrame returns. An old value
+			// means the pacer is stuck in the runtime; the GS thread then pumps the session events (PacerStalled).
+			std::atomic<u64> pacer_heartbeat_ms{0};
+
 			// XR_ERROR_RUNTIME_FAILURE in a row from the frame calls (the pacer's xrWaitFrame counts too).
 			std::atomic<u32> runtime_failures{0};
 			// Whether the screen copies were last logged layered (1) or mono (0); -1 before the first copy.
@@ -226,6 +233,9 @@ namespace VR::XRCompositor
 				bool ever_released = false;
 				bool wait_pending = false;
 				uint32_t pending_index = 0;
+				// Headset rate: this present's image is copied but not yet released. EndOfFrame releases it together
+				// with publishing its layers, under submit_mutex, so the pacer never shows it at the previous pose.
+				bool release_pending = false;
 			};
 			EyeChain chains[2];
 			u32 swapchain_width = 0;
@@ -260,6 +270,9 @@ namespace VR::XRCompositor
 				bool ever_released = false;
 				bool wait_pending = false;
 				uint32_t pending_index = 0;
+				// Headset rate: as EyeChain::release_pending; pending_submitted says whether its upload was submitted.
+				bool release_pending = false;
+				bool pending_submitted = false;
 			};
 			HandChain hand_chains[kHandSlots];
 			VkBuffer hand_staging = VK_NULL_HANDLE;
@@ -493,6 +506,7 @@ namespace VR::XRCompositor
 				chain.images.clear();
 				chain.ever_released = false;
 				chain.wait_pending = false;
+				chain.release_pending = false;
 			}
 			s.swapchain_width = 0;
 			s.swapchain_height = 0;
@@ -648,8 +662,17 @@ namespace VR::XRCompositor
 			return true;
 		}
 
+		// Legacy: copies and releases. Headset rate: copies and leaves the image acquired (release_pending); EndOfFrame
+		// releases it under submit_mutex together with publishing the layers that show it (ReleaseAndPublish), so
+		// the pacer can never show the new image at the previous present's pose. Copied then means "copied, release
+		// still to come"; a failed release turns it into Skipped there.
 		CopyResult CopyToSwapchain(GSTextureVK* src, u32 src_layer, decltype(s.chains[0])& chain)
 		{
+			// An image still waiting for its release (the last publish could not take submit_mutex, so the runtime
+			// was marked lost): leave the chain alone until teardown destroys it.
+			if (chain.release_pending)
+				return CopyResult::Skipped;
+
 			uint32_t index = 0;
 			if (chain.wait_pending)
 			{
@@ -700,6 +723,13 @@ namespace VR::XRCompositor
 			chain.wait_pending = false;
 
 			const bool submitted = RecordAndSubmitCopy(src, src_layer, chain.images[index].image);
+
+			if (s.headset_rate)
+			{
+				// Released (even when the copy was not submitted: a waited image must go back) in ReleaseAndPublish.
+				chain.release_pending = true;
+				return submitted ? CopyResult::Copied : CopyResult::Skipped;
+			}
 
 			res = LockedRelease(chain.swapchain);
 			if (XR_FAILED(res))
@@ -1077,6 +1107,8 @@ namespace VR::XRCompositor
 				hc.ever_released = false;
 				hc.wait_pending = false;
 				hc.pending_index = 0;
+				hc.release_pending = false;
+				hc.pending_submitted = false;
 			}
 			if (h.IsValid())
 			{
@@ -1227,6 +1259,8 @@ namespace VR::XRCompositor
 					return fail("xrEnumerateSwapchainImages", static_cast<int>(res));
 				hc.ever_released = false;
 				hc.wait_pending = false;
+				hc.release_pending = false;
+				hc.pending_submitted = false;
 				image_count = count;
 			}
 			Console.WriteLn("(VR) Hands: impostor swapchains created (%d x %ux%u, %u images, %llu-byte staging; "
@@ -1341,6 +1375,9 @@ namespace VR::XRCompositor
 				if (!want[i])
 					continue;
 				auto& hc = s.hand_chains[i];
+				// Headset rate: an image whose release never happened (runtime marked lost) is left to teardown.
+				if (hc.release_pending)
+					continue;
 				uint32_t index = 0;
 				if (hc.wait_pending)
 				{
@@ -1368,7 +1405,16 @@ namespace VR::XRCompositor
 					{
 						if (vkWaitForFences(h.device, 1, &s.hand_fence, VK_TRUE, ONE_SECOND_NS) != VK_SUCCESS)
 						{
-							LockedRelease(hc.swapchain);
+							// Headset rate: released with the publish (ReleaseAndPublish), never between it and the pacer.
+							if (s.headset_rate)
+							{
+								hc.release_pending = true;
+								hc.pending_submitted = false;
+							}
+							else
+							{
+								LockedRelease(hc.swapchain);
+							}
 							break;
 						}
 						vkResetFences(h.device, 1, &s.hand_fence);
@@ -1378,7 +1424,15 @@ namespace VR::XRCompositor
 					bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 					if (vkBeginCommandBuffer(s.hand_cmd, &bi) != VK_SUCCESS)
 					{
-						LockedRelease(hc.swapchain);
+						if (s.headset_rate)
+						{
+							hc.release_pending = true;
+							hc.pending_submitted = false;
+						}
+						else
+						{
+							LockedRelease(hc.swapchain);
+						}
 						break;
 					}
 					recording = true;
@@ -1407,6 +1461,14 @@ namespace VR::XRCompositor
 				for (int k = 0; k < pending_count; k++)
 				{
 					auto& hc = s.hand_chains[pending[k]];
+					if (s.headset_rate)
+					{
+						// Released with the publish (ReleaseAndPublish); a failed release drops the hand's layer there.
+						hc.release_pending = true;
+						hc.pending_submitted = submitted;
+						uploaded[pending[k]] = submitted;
+						continue;
+					}
 					if (XR_SUCCEEDED(LockedRelease(hc.swapchain)) && submitted)
 					{
 						hc.ever_released = true;
@@ -2849,6 +2911,100 @@ namespace VR::XRCompositor
 			s.published = next;
 		}
 
+		// Headset rate: releases the screen and hand images this present copied (left acquired by CopyToSwapchain and
+		// BuildHandLayers) and publishes the layers that show them, all under submit_mutex. The runtime shows a
+		// swapchain's last released image, so a release before the publish would let the pacer end a frame with the
+		// new image at the previous present's pose (and, in layered stereo, one eye new and the other old). Lock order
+		// as documented at s.submit_mutex: submit_mutex, then the queue lock (LockedRelease). Bounded like
+		// DestroySwapchainSynced: a pacer inside xrEndFrame for over 100 ms means the runtime stopped answering.
+		// cl_copy: each eye's CopyResult this present (-1: none tried); a failed release turns Copied into Skipped.
+		// chain_was_released: each eye chain's ever_released before this present's copies, which set it on Copied
+		// ahead of the release so this present's layers are built; restored when the release fails.
+		void ReleaseAndPublish(const XrCompositionLayerBaseHeader* const* layers, u32 layer_count, const LayerSources& src,
+			int* cl_copy, const bool* chain_was_released, bool fp_screen, const XrVector3f& fp_head, u64 fp_image)
+		{
+			std::unique_lock<std::timed_mutex> submit(s.submit_mutex, std::defer_lock);
+			if (!submit.try_lock_for(std::chrono::milliseconds(100)))
+			{
+				// The images stay acquired (release_pending): nothing more is copied into them, and the loss teardown
+				// destroys the swapchains (or leaves them alive with the pacer detached).
+				Console.Error("(VR) The VR pacer has been inside xrEndFrame for over 100 ms (runtime not answering): "
+							  "frame not published, abandoning VR; emulation continues.");
+				XRSession::MarkLost();
+				return;
+			}
+
+			// Swapchains whose release failed and that must not appear in the published set.
+			XrSwapchain dropped[2 + kHandSlots] = {};
+			u32 dropped_count = 0;
+			for (u32 l = 0; l < 2; l++)
+			{
+				auto& chain = s.chains[l];
+				if (!chain.release_pending)
+					continue;
+				chain.release_pending = false;
+				const XrResult res = LockedRelease(chain.swapchain);
+				if (XR_SUCCEEDED(res))
+					continue;
+				if (!s.warned_release)
+				{
+					s.warned_release = true;
+					Console.Error("(VR) xrReleaseSwapchainImage failed (%d).", static_cast<int>(res));
+				}
+				if (cl_copy[l] == static_cast<int>(CopyResult::Copied))
+				{
+					cl_copy[l] = static_cast<int>(CopyResult::Skipped);
+					s.stat_copy_skipped.fetch_add(1, std::memory_order_relaxed);
+				}
+				chain.ever_released = chain_was_released[l];
+				// A chain never released has no image the runtime could show: no layer may point at it. One released
+				// before still shows its previous image, which the kept Screen entries (keep_screen below) go with.
+				if (!chain.ever_released)
+					dropped[dropped_count++] = chain.swapchain;
+			}
+			for (int i = 0; i < kHandSlots; i++)
+			{
+				auto& hc = s.hand_chains[i];
+				if (!hc.release_pending)
+					continue;
+				hc.release_pending = false;
+				const XrResult res = LockedRelease(hc.swapchain);
+				if (XR_SUCCEEDED(res))
+				{
+					if (hc.pending_submitted)
+						hc.ever_released = true;
+				}
+				else
+				{
+					// A hand's layer is only ever this present's image at this present's pose: drop it.
+					dropped[dropped_count++] = hc.swapchain;
+				}
+				hc.pending_submitted = false;
+			}
+
+			// The pose stays with its image: unless every screen image was replaced this present (a copy skipped or
+			// timed out, a release failed, or none made at all), the previous Screen entries stay, each image at the
+			// pose it was rendered from instead of jumping to this frame's.
+			bool attempted = false;
+			bool all_copied = true;
+			for (u32 l = 0; l < 2; l++)
+			{
+				if (cl_copy[l] < 0)
+					continue;
+				attempted = true;
+				if (cl_copy[l] != static_cast<int>(CopyResult::Copied))
+					all_copied = false;
+			}
+			PublishLayers(layers, layer_count, src, !attempted || !all_copied, fp_screen, fp_head, fp_image);
+
+			if (dropped_count > 0)
+			{
+				std::lock_guard<std::mutex> publish(s.publish_mutex);
+				for (u32 k = 0; k < dropped_count; k++)
+					ForgetPublishedSwapchain(dropped[k]);
+			}
+		}
+
 		// A smooth stick turn between GS frames: a Screen entry turned by a radians of OpenXR yaw about the vertical
 		// through head. Left-multiplied by Ry = (0, sin a/2, 0, cos a/2); a cylinder sits at head, so it only turns.
 		void ApplyTurn(PublishedSet::Entry& e, const XrVector3f& head, float a)
@@ -3039,7 +3195,10 @@ namespace VR::XRCompositor
 
 			while (!PacerShouldStop(gen))
 			{
-				// In this mode VRManager leaves the events to the pacer, so state changes are handled while the GS is idle.
+				s.pacer_heartbeat_ms.store(CameraDriver::SteadyNowMs(), std::memory_order_release);
+
+				// In this mode VRManager leaves the events to the pacer (unless it stalls, PacerStalled), so state
+				// changes are handled while the GS is idle.
 				if (headset_rate)
 					XRSession::PumpEvents();
 
@@ -3095,6 +3254,7 @@ namespace VR::XRCompositor
 				const s64 wait_ns = SteadyNowNs();
 				if (PacerShouldStop(gen))
 					break;
+				s.pacer_heartbeat_ms.store(CameraDriver::SteadyNowMs(), std::memory_order_release);
 				if (XR_FAILED(wres))
 				{
 					if (wres == XR_ERROR_SESSION_NOT_RUNNING)
@@ -3462,6 +3622,8 @@ namespace VR::XRCompositor
 			chain.swapchain = XR_NULL_HANDLE;
 			chain.images.clear();
 			chain.ever_released = false;
+			chain.wait_pending = false;
+			chain.release_pending = false;
 		}
 		s.swapchain_width = 0;
 		s.swapchain_height = 0;
@@ -3495,6 +3657,7 @@ namespace VR::XRCompositor
 		s.display_clock_offset_ns.store(0, std::memory_order_release);
 		s.pacer_should_render.store(false, std::memory_order_release);
 		s.session_run_began_ms.store(0, std::memory_order_release);
+		s.pacer_heartbeat_ms.store(CameraDriver::SteadyNowMs(), std::memory_order_release);
 		{
 			std::lock_guard<std::mutex> lock(s.head_mutex);
 			s.pacer_head = decltype(s.pacer_head)();
@@ -3561,6 +3724,11 @@ namespace VR::XRCompositor
 				s.head_position_valid = s.pacer_head.position_valid;
 			}
 			should_render = s.pacer_should_render.load(std::memory_order_acquire);
+			// A pacer stuck in the runtime (dead or no longer pacing): no screen, hand or HUD swapchain calls into it
+			// from this thread either (a lever card only re-uploads when its content changes). The screen layers
+			// already published stay; VRManager pumps the events meanwhile, so a loss still reaches the teardown.
+			if (PacerStalled())
+				should_render = false;
 		}
 		else
 		{
@@ -3710,6 +3878,9 @@ namespace VR::XRCompositor
 		static const bool s_chainlog = (std::getenv("PCSX2_VR_CHAINLOG") != nullptr);
 		static u64 s_chainlog_visit = 0;
 		int cl_copy[2] = {-1, -1};
+		// Headset rate: Copied sets ever_released below ahead of the release (ReleaseAndPublish), which restores
+		// these if the release fails.
+		const bool chain_was_released[2] = {s.chains[0].ever_released, s.chains[1].ever_released};
 		if (should_render && current)
 		{
 			GSTextureVK* src = static_cast<GSTextureVK*>(current);
@@ -4137,20 +4308,10 @@ namespace VR::XRCompositor
 
 		if (s.headset_rate)
 		{
-			// The pose stays with its image: unless every screen image was replaced this present (a copy skipped or
-			// timed out, or none made at all), the previous Screen entries stay, each image at the pose it was
-			// rendered from instead of jumping to this frame's.
-			bool attempted = false;
-			bool all_copied = true;
-			for (u32 l = 0; l < 2; l++)
-			{
-				if (cl_copy[l] < 0)
-					continue;
-				attempted = true;
-				if (cl_copy[l] != static_cast<int>(CopyResult::Copied))
-					all_copied = false;
-			}
-			PublishLayers(layers, layer_count, sources, !attempted || !all_copied, pub_fp_screen, pub_fp_head, pub_fp_image);
+			// The images copied this present are released together with publishing their layers, so the pacer never
+			// ends a frame with a new image at the old pose; the pose also stays with its image when a copy failed.
+			ReleaseAndPublish(layers, layer_count, sources, cl_copy, chain_was_released, pub_fp_screen, pub_fp_head,
+				pub_fp_image);
 			return;
 		}
 
@@ -4266,6 +4427,8 @@ namespace VR::XRCompositor
 			}
 			chain.images.clear();
 			chain.ever_released = false;
+			chain.wait_pending = false;
+			chain.release_pending = false;
 		}
 		s.swapchain_width = 0;
 		s.swapchain_height = 0;
@@ -4312,6 +4475,16 @@ namespace VR::XRCompositor
 	{
 		return s.initialized && s.headset_rate;
 	}
+
+	bool PacerStalled()
+	{
+		if (!s.initialized || !s.headset_rate)
+			return false;
+		if (s.pacer_done.load(std::memory_order_acquire))
+			return true;
+		const u64 beat = s.pacer_heartbeat_ms.load(std::memory_order_acquire);
+		return beat != 0 && CameraDriver::SteadyNowMs() > beat + kPacerStallMs;
+	}
 #else
 	bool Initialize()
 	{
@@ -4329,6 +4502,11 @@ namespace VR::XRCompositor
 	}
 
 	bool PacerOwnsFrames()
+	{
+		return false;
+	}
+
+	bool PacerStalled()
 	{
 		return false;
 	}

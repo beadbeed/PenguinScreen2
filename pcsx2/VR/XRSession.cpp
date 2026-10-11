@@ -510,7 +510,11 @@ namespace VR::XRSession
 
 	void PumpEvents()
 	{
-		std::lock_guard<std::mutex> pump_lock(s_pump_mutex);
+		// Never waits: the other pumping thread (the VR pacer, or the GS thread while the pacer is stalled) may be
+		// stuck inside xrPollEvent, and whoever holds the lock handles the events anyway.
+		std::unique_lock<std::mutex> pump_lock(s_pump_mutex, std::try_to_lock);
+		if (!pump_lock.owns_lock())
+			return;
 		if (s_instance == XR_NULL_HANDLE)
 			return;
 
