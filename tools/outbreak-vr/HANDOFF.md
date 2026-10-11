@@ -4,6 +4,59 @@ Read this first when you resume. It covers what happened after the PC shut off, 
 decisions, what the Mac found, and what to do next. Alex's Mac holds the full reports in
 `~/Documents/github/outbreak-vr/docs/reviews/` (not on GitHub). This file is the short form.
 
+## PC reply (Windows PC session, 2026-10-11)
+
+**Section 0:**
+- Nothing was unpushed (63cc827 had gone up before the shutdown).
+- `steamvr.vrsettings` is the original: no forcedDriver, requireHmd, driver_null, power or dashboard changes.
+- No leftover `vrprofiles` override for either Outbreak serial.
+
+**Branches:** `coop-firstperson` was fast-forwarded into `pc-firstperson`, and both now point at the same commit. Keep using
+`coop-firstperson` for Mac work; the PC merges it.
+
+**Changed (331dde9):**
+- **Private co-op plays first person in full.** Walking while aiming and aim pitch follow the Online-Safe setting
+  there, instead of being forced off by the network adapter. Alex's 10 Oct rule allows game writes online, and
+  partners take your character as state values. `OnlineSafeNow()` = setting, or adapter on and not PrivateCoop.
+  obsrv and unknown servers stay Restricted (3D screen).
+- **A headset toast once per game:** "Private co-op: first person online" or "Online: 3D screen (not private co-op)".
+  The DISARMED log now names the online restriction (it used to say "profile guard failed").
+- **Task 3 (never focus a partner):**
+  - The focus hold goes to slot 3 only while that record is empty, checked as max HP 0 (File #1 `+0x546`, File #2
+    `+0x542`).
+  - When you are slot 3, it goes to slot 2 if that is empty.
+  - A full room holds nothing, so your body may show there.
+  - Checked offline: unused records are all zero; used ones have max HP and `+0x00` = `0x01`.
+- **Tools:**
+  - `vrtest.py`, `fp_proto.py` and `test_fakevr.py` refuse to run with the adapter on or the game's network flag set
+    (`pine.require_offline`).
+  - `vrtest.py`'s online-safe scenarios now use the VR setting only.
+  - The sweeps `trap` their override away.
+  - `null_driver.py on` keeps the real backup if the null HMD is already on.
+  - `netmode.py` finds the PC's `inis\PenguinScreen2.ini` (it only looked for `PCSX2.ini`) and refuses while the
+    emulator runs.
+- **File #2 profile:** the stale heading comment is fixed.
+
+**Checked your File #1 heartbeat patch against memory (offline, File #1 slot 4):**
+- The continue path now also runs `0x633590`. That word is the exit branch's delay slot, `ld ra,0(sp)` (the exit is
+  `0x6337A8` = the same `ld ra`, so the `b` went to `0x6337AC`). No call comes before it, so `ra` still equals its saved
+  copy: harmless.
+- The sub-action filter is a list of compares that branch to the send (`0x63379C`: `a1=2`, `jal 0x64C620`).
+  It ends with `beq v1,a1` (sub-action 1) and `beq v1,zero` (sub-action 0).
+- The patch leaves `a1 = 1` on the continue path, so **aim idle (stance 2, sub-action 1 — read live) is sent**.
+  That was intended or lucky, but either way it works.
+- File #2 `0x638F00` reads `2403001E` in-game, as the profile expects.
+- Note: sub-action 0 (standing idle) is sent too, so "only when moving" in section 3 is not quite right.
+
+**Small audit correction:** "body hidden / body follows view checked on File #2 only" — File #1 was checked too, on 10 Oct
+(`test_fakevr.py features`: focus slot 3, body-follow within 0.6°). The harness's body-follow scenario is File #1 too.
+
+**Still open:**
+- Task 5 (the two-machine proof) waits for Alex's go, and only he logs in to the server.
+- With the adapter on, the Qt menu/toolbar Pause and the Game List button (which pauses) are now refused with an OSD
+  message. Dialogs that pause through `pauseAndLockVM` (change disc, input recording, ...) still can; they are
+  deliberate actions, so they were left as they are.
+
 ## 0. Before anything else
 
 1. **Commit and push unpushed work.** Run `git status` and `git log origin/pc-firstperson..` in the

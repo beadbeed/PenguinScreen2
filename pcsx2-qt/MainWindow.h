@@ -200,6 +200,7 @@ private Q_SLOTS:
 	void onVMStarting();
 	void onVMStarted();
 	void onVMPaused();
+	void onPauseActionToggled(bool checked);
 	void onVMResumed();
 	void onVMStopped();
 

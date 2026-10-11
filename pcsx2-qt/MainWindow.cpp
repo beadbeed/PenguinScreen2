@@ -627,10 +627,10 @@ void MainWindow::connectVMThreadSignals(EmuThread* thread)
 	connect(thread, &EmuThread::onAchievementsHardcoreModeChanged, this, &MainWindow::onAchievementsHardcoreModeChanged);
 
 	connect(m_ui.actionReset, &QAction::triggered, this, &MainWindow::requestReset);
-	connect(m_ui.actionPause, &QAction::toggled, thread, &EmuThread::setVMPaused);
+	connect(m_ui.actionPause, &QAction::toggled, this, &MainWindow::onPauseActionToggled);
 	connect(m_ui.actionFullscreen, &QAction::triggered, thread, &EmuThread::toggleFullscreen);
 	connect(m_ui.actionToolbarReset, &QAction::triggered, this, &MainWindow::requestReset);
-	connect(m_ui.actionToolbarPause, &QAction::toggled, thread, &EmuThread::setVMPaused);
+	connect(m_ui.actionToolbarPause, &QAction::toggled, this, &MainWindow::onPauseActionToggled);
 	connect(m_ui.actionToolbarFullscreen, &QAction::triggered, thread, &EmuThread::toggleFullscreen);
 	connect(m_ui.actionToggleSoftwareRendering, &QAction::triggered, thread, &EmuThread::toggleSoftwareRendering);
 	connect(m_ui.actionDebugger, &QAction::triggered, this, &MainWindow::openDebugger);
@@ -1411,6 +1411,30 @@ bool MainWindow::shouldAbortForMemcardBusy(const VMLock& lock)
 	return false;
 }
 
+// Online (network adapter on) the game must never pause: the server drops a client that goes quiet. Says why.
+static bool PauseLockedOnline()
+{
+	if (!s_vm_valid || s_vm_paused || !EmuConfig.DEV9.EthEnable)
+		return false;
+	Host::AddKeyedOSDMessage("PauseOnlineLocked",
+		QCoreApplication::translate("MainWindow", "Pausing is disabled while the network adapter is on.").toStdString(),
+		Host::OSD_QUICK_DURATION);
+	return true;
+}
+
+void MainWindow::onPauseActionToggled(bool checked)
+{
+	if (checked && PauseLockedOnline())
+	{
+		QSignalBlocker sb(m_ui.actionPause);
+		QSignalBlocker sbt(m_ui.actionToolbarPause);
+		m_ui.actionPause->setChecked(false);
+		m_ui.actionToolbarPause->setChecked(false);
+		return;
+	}
+	g_emu_thread->setVMPaused(checked);
+}
+
 void MainWindow::switchToGameListView()
 {
 	if (isShowingGameList())
@@ -1418,6 +1442,10 @@ void MainWindow::switchToGameListView()
 		m_game_list_widget->setFocus();
 		return;
 	}
+
+	// Showing the game list pauses the game, which must never happen online.
+	if (m_display_created && PauseLockedOnline())
+		return;
 
 	if (m_display_created)
 	{
