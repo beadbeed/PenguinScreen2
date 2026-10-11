@@ -50,6 +50,38 @@ SLPM-65692:
       - { node: 0x767318, index: 1, x: 550, y: 108, rect: [0.895, 0.184, 0.982, 0.307], left: 0, down: 3 }           # cell 1
       - { node: 0x7673B0, index: 2, x: 498, y: 160, rect: [0.807, 0.307, 0.895, 0.430], up: 0, right: 3 }            # cell 2
       - { node: 0x767448, index: 3, x: 550, y: 160, rect: [0.895, 0.307, 0.982, 0.430], up: 1, left: 2 }             # cell 3
+  # Belt pouches (VR only, first person), as File #1's: four pouches on your chest laid out like the item screen's 2 x 2
+  # grid. Reach a hand into one and it ticks: once and lightly for an empty cell, twice and firmer while the cell holds
+  # an item (the local record's item byte +0xC94 + k for cell k, 0 = empty; checked offline: Kevin's cell 0 holds his
+  # .45 magazine; read only). Squeeze the grip in one: with the item screen closed it opens through the belt zone as a
+  # squeeze at your left hip does (you stop, then Start), and the menu pointer steers the cursor to that pouch's cell
+  # (the same D-pad presses as pointing, so it follows the Menu Pointer setting); with the screen up a squeeze just moves
+  # the cursor there. The trigger (Circle) still picks it: nothing is ever confirmed for you, and a squeeze is refused
+  # while an item's command submenu is open (suspendWhen: the cursor struct 0x7671F0 + 0x20). Only while first person is
+  # armed, so never on obsrv.
+  # Layout, in metres from your eyes the way the zones are placed (side + right, height + up, forward + ahead), measured
+  # sitting upright and looking ahead; each pouch is a ball 6.5 cm round its point:
+  #              left                    right
+  #   chest      cell 0 (-0.10, -0.25)   cell 1 (0.10, -0.25)   forward 0.14
+  #   ribs       cell 2 (-0.10, -0.39)   cell 3 (0.10, -0.39)   forward 0.16
+  # anchor: seat hangs them from your neck and turns them with the forward you last recentered to, so looking down at a
+  # pouch, or glancing at it, does not move it; if they feel turned, sit facing forward and recenter (both stick clicks,
+  # or the Steam button's recenter). They clear the holster, belt and backpack zones' centres; where a pouch reaches
+  # into the edge of a hip zone's ball, a hand inside the pouch belongs to the pouch alone.
+  pouches:
+    anchor: seat
+    open: belt
+    hand: either
+    radius: 0.065
+    suspendWhen: [{ address: 0x767210, equals: 1, width: 1 }]   # an item's command submenu is open
+    list:
+      - { cell: 0, item: 0xC94, side: -0.10, height: -0.25, forward: 0.14 }   # upper left chest  -> item cell 0
+      - { cell: 1, item: 0xC95, side: 0.10, height: -0.25, forward: 0.14 }    # upper right chest -> item cell 1
+      - { cell: 2, item: 0xC96, side: -0.10, height: -0.39, forward: 0.16 }   # lower left        -> item cell 2
+      - { cell: 3, item: 0xC97, side: 0.10, height: -0.39, forward: 0.16 }    # lower right       -> item cell 3
+      # The equipped box at the belt buckle, as on File #1, once menuPointer maps it as cell 4 (research: node 0x768F98,
+      # index 0, x 550, y 216):
+      # - { cell: 4, side: 0.0, height: -0.52, forward: 0.18 }
   screen: { distance: 2.5, height: 1.3, arc: 0, menu: { distance: 0.70, height: 0.36, drop: 0.30 }, firstPerson: { distance: 1.5, height: 3.575, arc: 0, poseLagMs: 40 } }
   # Headset only: a gamma lift so the dark rooms read on a headset's LCD without washing out the blacks.
   # Applied only while first person drives the camera (firstPersonOnly defaults to true), so menus and the

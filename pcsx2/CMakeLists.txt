@@ -1062,6 +1062,7 @@ set(pcsx2arm64Headers
 
 # PCSX2-VR: OpenXR support
 set(pcsx2VRSources
+	VR/BeltPouches.cpp
 	VR/CameraDriver.cpp
 	VR/ControlQuads.cpp
 	VR/GameFeedback.cpp
@@ -1089,6 +1090,7 @@ set(pcsx2VRSources
 )
 
 set(pcsx2VRHeaders
+	VR/BeltPouches.h
 	VR/CameraDriver.h
 	VR/ControlQuads.h
 	VR/GameFeedback.h

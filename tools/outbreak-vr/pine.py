@@ -9,7 +9,7 @@ Fork extensions for headset-free VR tests: fake_input() / FakeController drive t
 with scripted controllers (only when the emulator was started with PCSX2_VR_TEST_INPUT=1, and refused
 with online-safe or the network adapter on); telemetry() reads what the first-person camera did;
 menu_pointer() reads the menu pointer and point-to-select, and set_test_screen_hit() points it without
-an OpenXR runtime (refused like fake_input()).
+an OpenXR runtime (refused like fake_input()); pouches() reads the belt pouches.
 """
 import math
 import os
@@ -264,6 +264,33 @@ class Pine:
         payload = struct.pack("<BBBBHff", MSG_VR_MENU_POINTER, 1, 1, int(hand) & 0xFF, max(0, min(int(ttl_ms), 0xFFFF)),
                               float(u), float(v))
         return self._transact(payload)[0] == 1
+
+    def pouches(self):
+        """The belt pouches (MsgVRMenuPointer op 2, read-only, allowed any time): whether they run (first person armed with
+        a pouches profile), the pouch each hand is in (-1 none), each pouch's centre in the XR base space (where the hands
+        are, so a scripted grip pose can be put there as is), radius, menuPointer cell and item state (1 holds an item, 0
+        empty, -1 not read), the menu pointer's waiting pouch request (-1 none) and the counters: reaches (ticks),
+        item_ticks (of which double ticks), squeezes, opens (open presses through the open zone), requests (sent to the
+        menu pointer), refused (squeezes that did nothing), and the menu pointer's mp_requests / mp_started / mp_refused /
+        mp_lapsed."""
+        body = self._transact(struct.pack("<BB", MSG_VR_MENU_POINTER, 2))
+        size = struct.unpack("<I", body[:4])[0]
+        data = body[4:4 + size]
+        if len(data) < 208 or data[0] < 1:
+            raise PineError("unexpected pouches reply (%d bytes)" % len(data))
+        ver, flags, count, hover_l, hover_r, request = struct.unpack_from("<BBBbbb", data, 0)
+        (reaches, item_ticks, squeezes, opens, requests, refused,
+         mp_requests, mp_started, mp_refused, mp_lapsed) = struct.unpack_from("<10I", data, 8)
+        pouches = []
+        for i in range(min(count, 8)):
+            x, y, z, radius, cell, item, item_byte = struct.unpack_from("<4fbbB", data, 48 + i * 20)
+            pouches.append(dict(centre=(x, y, z), radius=radius, cell=cell, item=item, item_byte=item_byte))
+        return dict(version=ver, active=bool(flags & 0x01), screen_up=bool(flags & 0x02), menu_mode=bool(flags & 0x04),
+                    head_anchor=bool(flags & 0x08), open_pressing=bool(flags & 0x10), suspended=bool(flags & 0x20),
+                    owned=(bool(flags & 0x40), bool(flags & 0x80)), hover=(hover_l, hover_r), request=request,
+                    pouches=pouches, reaches=reaches, item_ticks=item_ticks, squeezes=squeezes, opens=opens,
+                    requests=requests, refused=refused, mp_requests=mp_requests, mp_started=mp_started,
+                    mp_refused=mp_refused, mp_lapsed=mp_lapsed)
 
 
 class FakeController:

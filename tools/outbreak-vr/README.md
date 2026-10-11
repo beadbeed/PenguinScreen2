@@ -6,7 +6,7 @@ and test the first-person camera. They talk to a running PenguinScreen2 through 
 
 | File | What it does |
 |---|---|
-| `pine.py` | PINE client: read/write EE RAM, full 32 MB dump (~1.3 s, stalls the game briefly: offline only), savestates, MemWatch (fork's write/read watch, reports the writer PC and GPRs), scripted VR controllers (`fake_input`, `FakeController`; needs `PCSX2_VR_TEST_INPUT=1`, refused while online-safe or the network adapter is on) and first-person camera telemetry (`telemetry`). |
+| `pine.py` | PINE client: read/write EE RAM, full 32 MB dump (~1.3 s, stalls the game briefly: offline only), savestates, MemWatch (fork's write/read watch, reports the writer PC and GPRs), scripted VR controllers (`fake_input`, `FakeController`; needs `PCSX2_VR_TEST_INPUT=1`, refused while online-safe or the network adapter is on), first-person camera telemetry (`telemetry`), the menu pointer (`menu_pointer`, `set_test_screen_hit`) and the belt pouches (`pouches`). |
 | `vrtest.py` | Headset-free first-person test runner for File #1: drives the VR input path with scripted controllers and checks memory and telemetry (arm, smooth turn, holster, point-to-aim, walk-and-shoot and aim pitch with their online-safe variants, belt, body-follow, savestate yaw). PASS/FAIL per scenario, exit code, optional JUnit XML and HTML report with Headset Window captures. Refuses to run with the network adapter on. Run `pitch` with `--slot 3` (it fails from slot 4, a test-save quirk). |
 | `netmode.py` | Switches the emulator's network settings: `private <ip>` (our private server, Private Co-op First Person on), `obsrv` (first person off online, 3D screen), `off`, `status`. Close the emulator first. See `HANDOFF.md` for the co-op setup. |
 | `vpad.py` / `padd.py` | Virtual Xbox 360 pad through ViGEm (`pip install vgamepad`); `padd.py` keeps one plugged in and takes JSON commands on 127.0.0.1:28100, so the game can be driven without focusing its window. |
@@ -20,7 +20,7 @@ and test the first-person camera. They talk to a running PenguinScreen2 through 
 | `sync_sweep.sh` / `sway_metric.py` | On the null headset: world wobble in the Headset Window for render-pose sync variants (`time`, or a `syncFramesBack` value). With `PCSX2_VR_SYNCLOG=1` the emulog also gets, once a second, `(VR) predict:` (how far frames still turn when shown, and the horizons) and `(VR) edge: rms/max deg, H ms` (how far the first-person frame sits from the head as it is shown, the leading-edge band that `lookAt.predict` shrinks; against the fake head when `PCSX2_VR_FAKE_HEADPOSE` is set). |
 | `session_recorder.py` | Started by `launch_vr.ps1` and `Launch-PenguinScreen2-SteamVR.cmd`: records game state (~4/s) and a screenshot every 5 s to `D:\Games\PS2\sessions\<time>` until the emulator closes, plus the emulog. Screenshots only when the network adapter is on. |
 | `hmdshot.py`, `input_log.py`, `record_play.py` | Headset Window screenshot; pad input + screenshots while someone plays; memory snapshots + screenshots while someone plays. |
-| `menutest.py` | Headset-free menu pointer tests for File #1's item screen (offline only): pointer hit maths, steering to each cell, fast click, the confirm latch, overrides, closing mid-steer, the menu tablet, and the cell rects checked against captures. `--slot` loads a savestate first, `--report` saves captures, `--test-uv` points with PINE test hits instead of aiming (works with no OpenXR runtime). |
+| `menutest.py` | Headset-free menu pointer tests for File #1's item screen (offline only): pointer hit maths, steering to each cell, fast click, the confirm latch, overrides, closing mid-steer, the menu tablet, and the cell rects checked against captures; and the belt pouches on File #1 or File #2 (`pouches`, `pouch-open`, `pouch-submenu`: the reach ticks against the item bytes, each squeeze bringing the cursor to its cell within 1 s, opening the item screen from a pouch, a squeeze refused with a command submenu open, never a confirm). `--slot` loads a savestate first, `--report` saves captures, `--test-uv` points with PINE test hits instead of aiming (works with no OpenXR runtime). |
 
 HUD cards on the null headset: `PCSX2_VR_HUD_TEST=1` shows a test toast every 3 s (it cycles through the
 whole font), `PCSX2_VR_FAKE_HANDS` also shows the wrist card on the fake left hand at any angle (NO DATA
@@ -69,6 +69,21 @@ aborted (why) ...`, `confirm passed ...` / `confirm swallowed ...`, `(VR) HUD: m
 `(VR) Screen: tablet (menu): ...` and `(VR) Screen transform (menu pointer): ...`. PINE `MsgVRMenuPointer` (0xE5):
 op 0 reads the state (`pine.menu_pointer()`, any time), op 1 sets a test hit (`pine.set_test_screen_hit()`, refused
 like the test input). `PCSX2_VR_SELFTEST` runs `(VR) MenuPointer self-test:` once.
+
+Belt pouches (profile `pouches:`, both Files; only while first person is armed, so never on obsrv): a 2 x 2 chest rig
+laid out like the item grid (cells 0 and 1 at the upper chest, 2 and 3 at the lower ribs; File #1 also the equipped
+box at the belt buckle), hung from a neck pivot under the head and turned to the forward you last recentered to, so
+looking down at a pouch does not move it. An open hand reaching into one ticks once, lightly, for an empty cell and
+twice, firmer, when the local record's item byte (File #1 +0xC84 + k, File #2 +0xC94 + k) is not 0. A squeeze opens
+the item screen through the belt zone if it is closed (stop, then Start) and asks the menu pointer for the cell
+(`MenuPointer::RequestCell`: the same closed-loop D-pad steering once the screen has been up 300 ms, refused while an
+item's command submenu is open (the cursor struct + 0x20) or after a confirm, never a confirm); with the screen up a
+squeeze just moves the cursor. A hand in a pouch is the pouch's alone (the zones do not see it there) and its grip is
+not a menu pointer override. Logs: `(VR) Pouches: N pouch(es) on the seat ...` once per game, `(VR) Pouches: pouch K
+(cell C, holds an item|empty) squeezed with the left|right hand; ...` per squeeze, and the menu pointer's `a pouch asked
+for cell C; steering there from cell F.`, `... refused (why).` and `... lapsed ...`. PINE `MsgVRMenuPointer` op 2 reads
+the pouches (`pine.pouches()`: each pouch's centre in the XR base space, the hand in each, the counters).
+`PCSX2_VR_SELFTEST` runs `(VR) BeltPouches self-test:` once.
 
 Comfort vignette (VR settings `ComfortVignette`, off by default, and `VignetteStrength`, 0.2-1.0, default 0.6):
 while first person moves the view without the head, a view-locked quad 0.5 m ahead (6 m square, about 161 deg

@@ -1,7 +1,8 @@
 """Headset-free tests for the VR menu pointer on File #1's item screen (SLPM-65428), over PINE: the pointer's hit on
 the menu screen, steering the game's own cursor to each cell, the fast click, the confirm latch, overrides, closing
-the screen mid-steer, the menu tablet and the cell rects. Reads the menu pointer with MsgVRMenuPointer op 0
-(pine.menu_pointer()) and the game's cursor struct at 0x720B80. Prints PASS / FAIL / SKIP per scenario; exits 1 if
+the screen mid-steer, the menu tablet and the cell rects; and the belt pouches on File #1 or File #2 (SLPM-65692).
+Reads the menu pointer with MsgVRMenuPointer op 0 (pine.menu_pointer()), the pouches with op 2 (pine.pouches()) and
+the game's cursor struct (File #1 0x720B80, File #2 0x7671F0). Prints PASS / FAIL / SKIP per scenario; exits 1 if
 any failed.
 
 Offline only: it loads savestates and sends scripted input, which must never happen online (it refuses with the
@@ -16,6 +17,7 @@ no OpenXR runtime at all for --test-uv. Be standing idle in a room with first pe
   python menutest.py rects --test-uv --slot 6 --report out/   # the cell rects against captures of the window
   python menutest.py --tablet-ini on               # emulator closed: [VR] MenuTablet = true (ini backed up)
   python menutest.py --tablet-ini off              # restores the ini byte for byte
+  python menutest.py pouches pouch-open pouch-submenu --slot 6   # the belt pouches (File #2: --slot 1 or 2)
 
 Scenarios: pointer-hit (the hit maths at 9 points, a turned-away aim misses, the left hand alone hits), cells (cells
 1, 3, 2, 0, the equipped box and 0 again, each within 0.8 s, presses <= path + 1, a landing tick per cell),
@@ -25,8 +27,16 @@ pressed for 1 s), close-in-flight (closing the screen mid-steer: no D-pad from t
 not move), tablet (needs MenuTablet on: its size, tilt and the hit maths), rects (each cell's white highlight box,
 found in a capture, lies in the profile's rect).
 
-Menu safety: the only confirm sent is one trigger pull on a cell (fast-click, latch), which opens that cell's command
-submenu; the runner then backs out with B (Cross) and never confirms a submenu entry.
+Belt pouches (either File; the grip is put at each pouch's centre as pine.pouches() reports it, so any anchor works):
+pouches (with the item screen up, an open hand reaching into each pouch ticks once, twice when the local record's
+item byte says its cell holds an item, and a squeeze brings the cursor to the pouch's cell within 1 s with nothing
+confirmed: no confirm passes, the command submenu flag stays 0, the screen stays up, no menu button press),
+pouch-open (with the item screen closed a squeeze opens it through the belt zone and the cursor reaches the pouch's
+cell within 1 s of the screen coming up, nothing confirmed), pouch-submenu (with an item's command submenu open a
+squeeze is refused and nothing is pressed for 1 s; B backs out). On File #2 only these run; the rest SKIP.
+
+Menu safety: the only confirm sent is one trigger pull on a cell (fast-click, latch, pouch-submenu), which opens that
+cell's command submenu; the runner then backs out with B (Cross) and never confirms a submenu entry.
 """
 import argparse
 import html
@@ -67,6 +77,23 @@ TABLET_DISTANCE, TABLET_HEIGHT, TABLET_DROP = 0.70, 0.36, 0.30
 BELT = zone(-0.22, -0.50, 0.12)
 LEFT, RIGHT = 0, 1
 ARM_DELAY_S = 0.45  # the profile's armDelayMs (300) with a margin
+
+# The belt pouches (the profiles' pouches:) on either File: the menu flag (item screen, map or pause), the item screen's
+# cursor struct (u32 1 while up; node pointer at +0x4, u16 index +0xC, x +0xE, y +0x10), the local record (records +
+# local slot * stride) and its item bytes (+items + k for cell k, 0 = empty), the command submenu flag (the cursor
+# struct + 0x20, 1 while an item's EQUIP/RELOAD/USE... submenu is open), and the menuPointer cells as (node, index, x,
+# y) in the profile's order.
+GAMES = {
+    "SLPM-65428": dict(menu_open=0x48BF7E, item_up=0x720B80, records=0x476DD0, stride=0x10E0, local_slot=0x48BF7D,
+                       items=0xC84, submenu=0x720BA0,
+                       cells=((0x720C10, 0, 498, 108), (0x720CA8, 1, 550, 108), (0x720D40, 2, 498, 160),
+                              (0x720DD8, 3, 550, 160), (0x722928, 0, 550, 216))),
+    "SLPM-65692": dict(menu_open=0x4912BE, item_up=0x7671F0, records=0x47BD30, stride=0x1100, local_slot=0x4912BD,
+                       items=0xC94, submenu=0x767210,
+                       cells=((0x767280, 0, 498, 108), (0x767318, 1, 550, 108), (0x7673B0, 2, 498, 160),
+                              (0x767448, 3, 550, 160))),
+}
+POUCH_SCENARIOS = ("pouches", "pouch-open", "pouch-submenu")
 
 
 class Fail(Exception):
@@ -204,6 +231,8 @@ class Runner:
         self.current = None
         self.test_hit = None
         self.aiming = {}  # hand -> (u, v, yaw_off) the hand aims at, for re-sends with buttons
+        self.serial = SERIAL  # the game running (main sets it): the pouch scenarios read its GAMES entry
+        self.game = GAMES[SERIAL]
 
     # --- game state -----------------------------------------------------------------------------------------------
     def cursor(self):
@@ -354,6 +383,93 @@ class Runner:
         time.sleep(0.15)  # the last landing tick
         m1 = self.mp()
         return took, m1["presses"] - m0["presses"], m1["ticks"] - m0["ticks"]
+
+    # --- belt pouches (either File: self.game) ----------------------------------------------------------------------
+    def g_menu_open(self):
+        return self.p.read8(self.game["menu_open"]) == 1
+
+    def g_item_up(self):
+        return self.p.read32(self.game["item_up"]) == 1
+
+    def g_cursor(self):
+        s = self.game["item_up"]
+        return self.p.read32(s + 0x4), self.p.read16(s + 0xC), self.p.read16(s + 0xE), self.p.read16(s + 0x10)
+
+    def g_cell(self):
+        c = self.g_cursor()
+        for i, cell in enumerate(self.game["cells"]):
+            if c == cell:
+                return i
+        return -1
+
+    def g_submenu(self):
+        return self.p.read8(self.game["submenu"])
+
+    def g_items(self):
+        """The local character's four item bytes, cell 0 first (0 = an empty cell)."""
+        slot = self.p.read8(self.game["local_slot"])
+        base = self.game["records"] + slot * self.game["stride"] + self.game["items"]
+        return [self.p.read8(base + k) for k in range(4)]
+
+    def g_open_items(self, fc):
+        """Opens the item screen with the belt zone (first person must be armed) and waits for point-to-select to run."""
+        if self.g_menu_open():
+            raise Fail("a menu is already open (load a calm savestate with --slot)")
+        self.squeeze_belt(fc)
+        fc.clear_hand(LEFT)
+        if wait_until(lambda: self.g_menu_open() and self.g_item_up(), 3.0) is None:
+            raise Fail("the item screen did not open on the belt squeeze (menu byte %d)" % self.p.read8(self.game["menu_open"]))
+        m = {}
+
+        def running():
+            m.update(self.mp())
+            return m["gate"]
+
+        if wait_until(running, 2.0) is None:
+            raise Fail("point-to-select did not start (menu mode %s, refused online %s, self-check failed %s; "
+                       "the MenuPointer setting on?)" % (m.get("menu_mode"), m.get("refused_online"),
+                                                         m.get("selfcheck_failed")))
+        time.sleep(ARM_DELAY_S)
+
+    def g_close_items(self, fc):
+        if not self.g_menu_open():
+            return
+        self.point_clear(fc)
+        self.squeeze_belt(fc)
+        fc.clear_hand(LEFT)
+        if wait_until(lambda: not self.g_menu_open(), 3.0) is None:
+            raise Fail("the item screen did not close on the belt squeeze")
+        time.sleep(0.3)
+
+    def pouch_state(self):
+        """pine.pouches(), failing unless the pouches run (first person armed, a pouches block in the profile)."""
+        try:
+            t = self.p.pouches()
+        except PineError as e:
+            raise Fail("PINE MsgVRMenuPointer op 2 failed (%s): a build without the belt pouches?" % e)
+        if not t["active"]:
+            tel = self.p.telemetry()
+            raise Fail("the belt pouches are not running (armed %s, disarm reason: %s; a pouches block in the profile?)" % (
+                tel["armed"], tel["disarm_reason"]))
+        return t
+
+    def mapped_pouches(self, t):
+        """(pouch, cell) for each pouch whose cell this runner can read the cursor on, in the profile's order."""
+        return [(k, pc["cell"]) for k, pc in enumerate(t["pouches"]) if 0 <= pc["cell"] < len(self.game["cells"])]
+
+    def pouch_hand(self, fc, hand, pouch, squeeze):
+        """The hand's grip at the pouch's centre as the emulator places it now (pine.pouches(), the XR base space, where
+        the hands are), open (squeeze 0) or squeezed (1); no aim, so it points at nothing."""
+        centre = self.p.pouches()["pouches"][pouch]["centre"]
+        fc.set_hand(hand, grip=pose(pos=centre), squeeze=squeeze)
+
+    def squeeze_pouch(self, fc, hand, pouch, hold=0.3):
+        """Reaches into the pouch with an open hand, squeezes for hold seconds and opens the hand again (still there)."""
+        self.pouch_hand(fc, hand, pouch, 0.0)
+        time.sleep(0.2)
+        self.pouch_hand(fc, hand, pouch, 1.0)
+        time.sleep(hold)
+        self.pouch_hand(fc, hand, pouch, 0.0)
 
 
 # --- scenarios: each returns a one-line detail on PASS, raises Fail / Skip ---------------------------------------------
@@ -574,6 +690,147 @@ def sc_tablet(r):
     return "tablet %.2f m tall, facing %.1f deg up; 9 grid points within %.4f" % (2 * m["half_height"], tilt, worst)
 
 
+# --- belt pouches (either File) -------------------------------------------------------------------------------------
+
+def sc_pouches(r):
+    with r.controller() as fc:
+        r.wait_armed()
+        mapped = r.mapped_pouches(r.pouch_state())
+        check(len(mapped) >= 2, "only %d pouch(es) map to cells this runner reads (%s)" % (len(mapped), mapped))
+        r.g_open_items(fc)
+        cur = r.g_cell()
+        check(cur >= 0, "the item screen opened on no mapped cell (cursor %s)" % (r.g_cursor(),))
+        items = r.g_items()
+        # Every pouch once, the cursor moving each time: the cell it opened on last.
+        order = [pc for pc in mapped if pc[1] != cur] + [pc for pc in mapped if pc[1] == cur]
+        details = []
+        for k, cell in order:
+            b0 = r.p.pouches()
+            m0 = r.mp()
+            r.pouch_hand(fc, LEFT, k, 0.0)  # reach in with an open hand
+            time.sleep(0.25)
+            b1 = r.p.pouches()
+            check(b1["hover"][LEFT] == k, "the left hand at pouch %d's centre is in pouch %d" % (k, b1["hover"][LEFT]))
+            check(b1["reaches"] == b0["reaches"] + 1, "reaching into pouch %d gave %d tick(s), expected 1" % (
+                k, b1["reaches"] - b0["reaches"]))
+            held = cell < 4 and items[cell] != 0
+            item = b1["pouches"][k]["item"]
+            if item >= 0:
+                check(item == (1 if held else 0), "pouch %d reads item %d, but the item byte of cell %d is %d" % (
+                    k, item, cell, items[cell] if cell < 4 else -1))
+                check(b1["item_ticks"] - b0["item_ticks"] == (1 if held else 0),
+                      "pouch %d gave %d double tick(s) for a cell that %s" % (
+                          k, b1["item_ticks"] - b0["item_ticks"], "holds an item" if held else "is empty"))
+            r.pouch_hand(fc, LEFT, k, 1.0)  # squeeze
+            took = wait_until(lambda: r.g_cell() == cell, 1.0, 0.005)
+            r.pouch_hand(fc, LEFT, k, 0.0)
+            time.sleep(0.2)
+            m1 = r.mp()
+            b2 = r.p.pouches()
+            check(took is not None, "pouch %d: the cursor did not reach cell %d within 1 s (cursor %s; requests sent +%d, "
+                  "taken +%d, refused +%d)" % (k, cell, r.g_cursor(), b2["requests"] - b0["requests"],
+                                              b2["mp_started"] - b0["mp_started"], b2["mp_refused"] - b0["mp_refused"]))
+            check(m1["confirms_passed"] == m0["confirms_passed"], "a confirm reached the game after squeezing pouch %d" % k)
+            check(r.g_submenu() == 0, "a command submenu opened after squeezing pouch %d" % k)
+            check(r.g_menu_open() and r.g_item_up(), "the item screen is not up any more after squeezing pouch %d" % k)
+            check(b2["opens"] == b0["opens"], "squeezing pouch %d with the item screen up pressed the menu button" % k)
+            details.append("pouch %d -> cell %d %.2f s%s" % (k, cell, took, " (item)" if held else ""))
+            fc.clear_hand(LEFT)
+            time.sleep(0.3)
+        r.shot("pouches")
+        r.g_close_items(fc)
+    return "; ".join(details)
+
+
+def sc_pouch_open(r):
+    with r.controller() as fc:
+        r.wait_armed()
+        check(not r.g_menu_open(), "a menu is already open (load a calm savestate with --slot)")
+        mapped = [pc for pc in r.mapped_pouches(r.pouch_state()) if pc[1] != 0]  # the screen opens on cell 0
+        check(mapped, "no pouch maps to a cell other than cell 0")
+        k, cell = next((pc for pc in mapped if pc[1] == 3), mapped[-1])
+        b0 = r.p.pouches()
+        m0 = r.mp()
+        r.pouch_hand(fc, RIGHT, k, 0.0)
+        time.sleep(0.25)
+        t0 = time.time()
+        r.pouch_hand(fc, RIGHT, k, 1.0)
+        up = wait_until(lambda: r.g_menu_open() and r.g_item_up(), 3.0, 0.005)
+        t_up = time.time()
+        r.pouch_hand(fc, RIGHT, k, 0.0)
+        check(up is not None, "the item screen did not open on squeezing pouch %d (open presses +%d, menu byte %d)" % (
+            k, r.p.pouches()["opens"] - b0["opens"], r.p.read8(r.game["menu_open"])))
+        took = wait_until(lambda: r.g_cell() == cell, 1.0, 0.005)
+        time.sleep(0.2)
+        m1 = r.mp()
+        b1 = r.p.pouches()
+        check(took is not None, "the cursor did not reach cell %d within 1 s of the item screen opening (cursor %s; "
+              "request taken +%d, refused +%d, lapsed +%d)" % (cell, r.g_cursor(), b1["mp_started"] - b0["mp_started"],
+                                                             b1["mp_refused"] - b0["mp_refused"],
+                                                             b1["mp_lapsed"] - b0["mp_lapsed"]))
+        check(b1["opens"] == b0["opens"] + 1 and b1["requests"] == b0["requests"] + 1,
+              "the squeeze sent %d open press(es) and %d request(s), expected one of each" % (
+                  b1["opens"] - b0["opens"], b1["requests"] - b0["requests"]))
+        check(m1["confirms_passed"] == m0["confirms_passed"], "a confirm reached the game")
+        check(r.g_submenu() == 0, "a command submenu opened")
+        r.shot("pouch-open")
+        fc.clear_hand(RIGHT)
+        r.g_close_items(fc)
+    return "pouch %d opened the item screen %.2f s after the squeeze; the cursor was on cell %d %.2f s after it came up" % (
+        k, t_up - t0, cell, took)
+
+
+def sc_pouch_submenu(r):
+    with r.controller() as fc:
+        r.wait_armed()
+        mapped = r.mapped_pouches(r.pouch_state())
+        r.g_open_items(fc)
+        items = r.g_items()
+        # A cell whose confirm opens a command submenu: the cursor's own if it holds an item, else the first that does
+        # (brought there with its pouch), else File #1's equipped box (the special item).
+        cur = r.g_cell()
+        with_item = [c for c in range(4) if items[c] != 0]
+        target = cur if cur in with_item else (with_item[0] if with_item else (4 if len(r.game["cells"]) > 4 else cur))
+        if target != cur:
+            k = next((pk for pk, pc in mapped if pc == target), None)
+            check(k is not None, "no pouch for cell %d, which holds an item" % target)
+            r.squeeze_pouch(fc, LEFT, k)
+            check(wait_until(lambda: r.g_cell() == target, 1.0, 0.005) is not None,
+                  "pouch %d did not bring the cursor to cell %d" % (k, target))
+            fc.clear_hand(LEFT)
+            time.sleep(0.3)
+        m0 = r.mp()
+        # The only confirm: one trigger pull on the cursor's own cell (the right hand aims at nothing), which opens that
+        # cell's command submenu; B backs out of it below.
+        fc.set_hand(RIGHT, trigger=1.0)
+        time.sleep(0.2)
+        fc.set_hand(RIGHT, trigger=0.0)
+        time.sleep(0.5)
+        check(r.mp()["confirms_passed"] == m0["confirms_passed"] + 1, "the trigger on cell %d did not pass" % target)
+        flag = r.g_submenu()
+        r.shot("submenu")
+        other = next((pc for pc in mapped if pc[1] != target), None)
+        check(other is not None, "no pouch for a cell other than %d" % target)
+        b0 = r.p.pouches()
+        m1 = r.mp()
+        r.squeeze_pouch(fc, LEFT, other[0])
+        time.sleep(1.0)
+        b1 = r.p.pouches()
+        m2 = r.mp()
+        refused = (b1["refused"] - b0["refused"]) + (b1["mp_refused"] - b0["mp_refused"])
+        check(m2["presses"] == m1["presses"], "with the submenu open the squeeze pressed the D-pad %d time(s)" % (
+            m2["presses"] - m1["presses"]))
+        check(r.g_cell() == target, "the cursor left cell %d with the submenu open (cursor %s)" % (target, r.g_cursor()))
+        check(refused >= 1, "the squeeze was not refused (pouch side +%d, menu pointer +%d; requests taken +%d)" % (
+            b1["refused"] - b0["refused"], b1["mp_refused"] - b0["mp_refused"], b1["mp_started"] - b0["mp_started"]))
+        fc.clear_hand(LEFT)
+        r.press_b(fc)  # back out of the command submenu with Cross
+        r.shot("after-b")
+        r.g_close_items(fc)
+    return "a confirm on cell %d opened its submenu (flag %d); pouch %d's squeeze was refused, nothing pressed for 1 s; " \
+           "B backed out" % (target, flag, other[0])
+
+
 # --- rects: the white highlight box in a capture of the emulator window -----------------------------------------------
 
 def read_png(path):
@@ -717,9 +974,12 @@ SCENARIOS = [
     ("close-in-flight", sc_close_in_flight),
     ("tablet", sc_tablet),
     ("rects", sc_rects),
+    ("pouches", sc_pouches),
+    ("pouch-open", sc_pouch_open),
+    ("pouch-submenu", sc_pouch_submenu),
 ]
 # "all" runs these; rects is run on its own (it captures the emulator window).
-ALL = ("pointer-hit", "cells", "fast-click", "latch", "override", "close-in-flight", "tablet")
+ALL = ("pointer-hit", "cells", "fast-click", "latch", "override", "close-in-flight", "tablet") + POUCH_SCENARIOS
 
 
 def tablet_ini(mode, ini=INI):
@@ -766,7 +1026,7 @@ def tablet_ini(mode, ini=INI):
     return 0
 
 
-def write_report(folder, results, shots):
+def write_report(folder, results, shots, serial=SERIAL):
     rows = []
     for name, result, detail, secs in results:
         imgs = "".join('<a href="%s"><img src="%s" width="480"></a>' % (html.escape(s), html.escape(s))
@@ -777,7 +1037,7 @@ def write_report(folder, results, shots):
             "body{font-family:sans-serif;margin:16px}td{vertical-align:top;padding:4px 8px;border-bottom:1px solid #ccc}"
             "pre{white-space:pre-wrap;margin:0}.pass td:nth-child(2){color:#070}.fail td:nth-child(2),"
             ".error td:nth-child(2){color:#b00}.skip td:nth-child(2){color:#777}</style>"
-            "<h1>menutest %s, %s</h1><table>%s</table>" % (SERIAL, SERIAL, time.strftime("%Y-%m-%d %H:%M"), "".join(rows)))
+            "<h1>menutest %s, %s</h1><table>%s</table>" % (serial, serial, time.strftime("%Y-%m-%d %H:%M"), "".join(rows)))
     with open(os.path.join(folder, "report.html"), "w", encoding="utf-8") as f:
         f.write(page)
 
@@ -788,7 +1048,7 @@ def main():
     ap.add_argument("scenarios", nargs="*", help="'all' (" + ", ".join(ALL) + ") or names: " + ", ".join(names))
     ap.add_argument("--list", action="store_true", help="list the scenarios")
     ap.add_argument("--pine-slot", type=int, default=28011)
-    ap.add_argument("--slot", type=int, help="savestate slot to load before every scenario (File #1 slot 6)")
+    ap.add_argument("--slot", type=int, help="savestate slot to load before every scenario (File #1 slot 6, File #2 slot 1 or 2)")
     ap.add_argument("--settle", type=float, default=3.0, help="seconds to wait after loading a state")
     ap.add_argument("--report", help="write report.html and captures into this folder")
     ap.add_argument("--test-uv", action="store_true",
@@ -818,8 +1078,8 @@ def main():
     except PineError as e:
         print("PINE: %s (emulator running, EnablePINE on, a build with MsgVRMenuPointer?)" % e)
         return 2
-    if serial != SERIAL:
-        print("these scenarios are for %s; the emulator is running %r" % (SERIAL, serial))
+    if serial not in GAMES:
+        print("these scenarios are for %s; the emulator is running %r" % (" and ".join(GAMES), serial))
         return 2
     try:
         p.fake_input(head=None, ttl_ms=0)
@@ -830,6 +1090,8 @@ def main():
         return 2
 
     runner = Runner(p, args)
+    runner.serial = serial
+    runner.game = GAMES[serial]
     if args.test_uv:
         runner.test_hit = TestHit(p)
     results = []
@@ -840,6 +1102,8 @@ def main():
             runner.aiming.clear()
             t0 = time.time()
             try:
+                if serial != SERIAL and name not in POUCH_SCENARIOS:
+                    raise Skip("File #1 only (on %s only the pouch scenarios run)" % serial)
                 if args.slot is not None:
                     p.load_state(args.slot)
                     time.sleep(args.settle)
@@ -863,7 +1127,7 @@ def main():
     print("%d passed, %d failed, %d skipped" % (sum(1 for res in results if res[1] == "PASS"), failed,
                                                 sum(1 for res in results if res[1] == "SKIP")))
     if args.report:
-        write_report(args.report, results, runner.shots)
+        write_report(args.report, results, runner.shots, runner.serial)
     p.close()
     return 1 if failed else 0
 
