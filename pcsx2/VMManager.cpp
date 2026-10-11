@@ -2011,6 +2011,15 @@ u32 VMManager::DeleteSaveStates(const char* game_serial, u32 game_crc, bool also
 
 bool VMManager::LoadState(const char* filename, Error* error)
 {
+	// Refuse here, before DoLoadState: a DoLoadState failure resets the VM below, which online would reboot the game
+	// and drop the room.
+	if (IsOnlineLocked())
+	{
+		Console.Warning("(VMManager) Load state refused: the network adapter is on.");
+		Error::SetString(error, TRANSLATE_STR("VMManager", "Save states are disabled while the network adapter is on."));
+		return false;
+	}
+
 	if (Achievements::IsHardcoreModeActive())
 	{
 		Error::SetString(error,
@@ -2036,6 +2045,13 @@ bool VMManager::LoadState(const char* filename, Error* error)
 
 bool VMManager::LoadStateFromSlot(s32 slot, bool backup, Error* error)
 {
+	if (IsOnlineLocked())
+	{
+		Console.Warning("(VMManager) Load state refused: the network adapter is on.");
+		Error::SetString(error, TRANSLATE_STR("VMManager", "Save states are disabled while the network adapter is on."));
+		return false;
+	}
+
 	const std::string filename = GetCurrentSaveStateFileName(slot, backup);
 	if (filename.empty() || !FileSystem::FileExists(filename.c_str()))
 	{
@@ -2993,6 +3009,15 @@ void VMManager::CheckForDEV9ConfigChanges(const Pcsx2Config& old_config)
 		return;
 
 	DEV9CheckChanges(old_config);
+
+	// The adapter can be switched on mid-session: drop any turbo/unlimited/slow-motion mode and re-clamp the speed to
+	// 100% now, rather than on the next unrelated speed update. Switching it off restores the normal speed rules.
+	if (EmuConfig.DEV9.EthEnable != old_config.DEV9.EthEnable)
+	{
+		if (IsOnlineLocked())
+			s_limiter_mode = LimiterModeType::Nominal;
+		UpdateTargetSpeed();
+	}
 }
 
 void VMManager::CheckForMemoryCardConfigChanges(const Pcsx2Config& old_config)
