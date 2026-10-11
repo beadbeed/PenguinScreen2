@@ -99,13 +99,15 @@ SLPM-65428:
     separation: 0.012
     convergence: 55.0
     zDrivenDepth: true
-    # First-person screen (1.5 m away, 4.77 m wide): about orthostereo, so the screen plane sits at
-    # 1.5 m (convergence = 150 game units at 100 units/m) and far content gets an IPD of separation
-    # (0.063 m / 4.77 m). nearest: true depth continues in front of the screen plane down to 0.75 m
-    # (crossed disparity up to -separation) instead of flattening everything nearer onto the 1.5 m plane;
-    # textured, perspective-Q draws only, so 2D overlays stay put. VR NearDepthMetres overrides it (below
-    # 0 turns it off). A starting point to tune in the headset.
-    firstPerson: { separation: 0.0132, convergence: 150, nearest: 0.75 }
+    # First-person screen (1.5 m away, 4.77 m wide). auto derives separation = IPD / screen width and
+    # convergence = distance x unitsPerMeter from the headset and the first-person screen as placed, so far
+    # content lands one IPD apart and the screen plane sits at the screen's distance, eased in over 0.5 s on
+    # each arm. The numbers are the fallback until the headset reports its eyes, or with VR
+    # FirstPersonAutoStereo off (0.0132 = 0.063 m / 4.77 m, 150 = 1.5 m x 100 units/m). VR
+    # FirstPersonStereoStrength scales it. nearest: true depth continues in front of the screen plane down
+    # to 0.75 m perceived instead of flattening everything nearer onto it; textured, perspective-Q draws
+    # only, so 2D overlays stay put. VR NearDepthMetres overrides it (below 0 turns it off).
+    firstPerson: { separation: 0.0132, convergence: 150, nearest: 0.75, auto: true }
   # First-person camera (only with --vr and the VR 'Head-Tracked Camera' setting, on by default).
   # Outbreak builds its view from an eye and a target vector. During normal room play (GAME overlay
   # resident, scenario in game, room camera in normal mode) the room camera's three cut handlers and the

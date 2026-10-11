@@ -90,6 +90,8 @@ namespace VR::XRCompositor
 		std::mutex s_eye_mutex;
 		EyeInfo s_eye_info;
 		EyeInfo s_eye_logged;
+		// GetFirstPersonScreenInfo: the first-person screen as last placed (guarded by s_screen_mutex).
+		FirstPersonScreenInfo s_fp_screen_info;
 	}
 
 #ifdef ENABLE_VULKAN
@@ -2518,6 +2520,44 @@ namespace VR::XRCompositor
 			}
 		}
 
+		// The first-person screen's geometry as it is placed: one source for LogFirstPersonScreen and
+		// GetFirstPersonScreenInfo, so the log and the size auto stereo uses can never disagree.
+		FirstPersonScreenInfo ComputeFirstPersonScreen(const ScreenParams& sp)
+		{
+			constexpr float kDeg = 180.0f / 3.14159265f;
+			FirstPersonScreenInfo info;
+			info.valid = sp.has_fp;
+			info.distance_m = std::max(sp.fp_distance, 0.01f);
+			info.aspect = ComputeAspect();
+			info.curved = (sp.fp_arc_deg >= 5.0f) && XRSession::HasCylinderLayer();
+			if (info.curved)
+			{
+				info.width_m = info.distance_m * sp.fp_arc_deg / kDeg;
+				info.height_m = info.width_m / std::max(info.aspect, 0.01f);
+			}
+			else
+			{
+				info.height_m = sp.fp_height;
+				info.width_m = info.height_m * info.aspect;
+			}
+			return info;
+		}
+
+		// Refreshes GetFirstPersonScreenInfo from the current screen parameters and aspect (every present).
+		void PublishFirstPersonScreen()
+		{
+			ScreenParams sp;
+			{
+				std::lock_guard<std::mutex> lock(s_screen_mutex);
+				sp = s_screen_params;
+			}
+			const FirstPersonScreenInfo info = ComputeFirstPersonScreen(sp);
+			{
+				std::lock_guard<std::mutex> lock(s_screen_mutex);
+				s_fp_screen_info = info;
+			}
+		}
+
 		// OpenXR yaw (CCW positive) of a quaternion's forward (-Z) direction, as the first-person placement uses.
 		float ForwardYaw(float x, float y, float z, float w)
 		{
@@ -3052,24 +3092,12 @@ namespace VR::XRCompositor
 		void LogFirstPersonScreen(const ScreenParams& sp)
 		{
 			constexpr float kDeg = 180.0f / 3.14159265f;
-			const float d = std::max(sp.fp_distance, 0.01f);
-			const float aspect = ComputeAspect();
-			const bool curved = (sp.fp_arc_deg >= 5.0f) && XRSession::HasCylinderLayer();
-			float width_m = 0.0f;
-			float height_m = 0.0f;
-			float half_w_deg = 0.0f;
-			if (curved)
-			{
-				width_m = d * sp.fp_arc_deg / kDeg;
-				height_m = width_m / std::max(aspect, 0.01f);
-				half_w_deg = 0.5f * sp.fp_arc_deg;
-			}
-			else
-			{
-				height_m = sp.fp_height;
-				width_m = height_m * aspect;
-				half_w_deg = std::atan(0.5f * width_m / d) * kDeg;
-			}
+			const FirstPersonScreenInfo geo = ComputeFirstPersonScreen(sp);
+			const float d = geo.distance_m;
+			const bool curved = geo.curved;
+			const float width_m = geo.width_m;
+			const float height_m = geo.height_m;
+			const float half_w_deg = curved ? (0.5f * sp.fp_arc_deg) : (std::atan(0.5f * width_m / d) * kDeg);
 			const float half_h_deg = std::atan(0.5f * height_m / d) * kDeg;
 			const u32 w_px = s.swapchain_width;
 			const u32 h_px = s.swapchain_height;
@@ -4464,6 +4492,10 @@ namespace VR::XRCompositor
 			s_eye_logged = EyeInfo();
 		}
 		{
+			std::lock_guard<std::mutex> lock(s_screen_mutex);
+			s_fp_screen_info = FirstPersonScreenInfo();
+		}
+		{
 			XrReferenceSpaceCreateInfo rsci = {XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
 			rsci.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
 			rsci.poseInReferenceSpace.orientation.w = 1.0f;
@@ -4502,6 +4534,7 @@ namespace VR::XRCompositor
 		if (!s.initialized)
 			return;
 		s_present_wait_left_ns = kPresentWaitBudgetNs;
+		PublishFirstPersonScreen();
 
 		// Headset rate: the VR pacer begins and ends a frame every display period; this present only refreshes the
 		// images and publishes the layers built from them (PublishLayers). Legacy: this present begins and ends the
@@ -5341,6 +5374,10 @@ namespace VR::XRCompositor
 		}
 		s.next_cmd_buffer = 0;
 
+		{
+			std::lock_guard<std::mutex> lock(s_screen_mutex);
+			s_fp_screen_info = FirstPersonScreenInfo();
+		}
 		s.initialized = false;
 		Console.WriteLn("(VR) Compositor shut down.");
 	}
@@ -5395,6 +5432,12 @@ namespace VR::XRCompositor
 	{
 		std::lock_guard<std::mutex> lock(s_eye_mutex);
 		return s_eye_info;
+	}
+
+	FirstPersonScreenInfo GetFirstPersonScreenInfo()
+	{
+		std::lock_guard<std::mutex> lock(s_screen_mutex);
+		return s_fp_screen_info;
 	}
 
 	void UpdateScreenParams(float distance_m, float height_m, float arc_deg, float vertical_offset_m,

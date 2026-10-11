@@ -66,4 +66,15 @@ namespace VR::XRCompositor
 		float display_hz = 0.0f;
 	};
 	EyeInfo GetEyeInfo();
+
+	// The first-person screen as placed (the same geometry the 'First-person screen' line logs), refreshed every
+	// present: its distance, real width (the arc length for a cylinder) and height in metres, the aspect it was sized
+	// with, and whether it is a cylinder. valid = the profile has a first-person screen. Any thread.
+	struct FirstPersonScreenInfo
+	{
+		bool valid = false;
+		float distance_m = 0.0f, width_m = 0.0f, height_m = 0.0f, aspect = 0.0f;
+		bool curved = false;
+	};
+	FirstPersonScreenInfo GetFirstPersonScreenInfo();
 }

@@ -4,6 +4,7 @@
 #include "VR/VRManager.h"
 #include "VR/CameraDriver.h"
 #include "VR/HeadPose.h"
+#include "VR/StereoAuto.h"
 #include "VR/StereoState.h"
 #include "VR/VRProfileDB.h"
 #include "VR/SplitState.h"
@@ -210,6 +211,97 @@ namespace VR
 		// near_floor of the last first-person publish, so a NearDepthMetres change republishes even
 		// though the scene itself did not change.
 		float s_scene_published_near_floor = 0.0f;
+		// Separation and convergence of the last publish (0 unless first person), so each eased step republishes.
+		float s_scene_published_sep = 0.0f;
+		float s_scene_published_conv = 0.0f;
+
+		// First-person auto stereo ease (StereoAuto). Armed by the publish that puts first person up; any other
+		// publish or an early return disarms it, so the next first person eases in again from zero separation. The
+		// published values come only from this latched ramp (from -> target over kEaseVsyncs vsyncs), never straight
+		// from the per-vsync derive, so IPD jitter cannot republish every vsync.
+		bool s_fp_armed = false;
+		StereoAuto::Result s_fp_target{};
+		float s_fp_from_sep = 0.0f;
+		float s_fp_from_conv = 0.0f;
+		u32 s_fp_step = 0;
+		u64 s_fp_ramp_start_ms = 0;
+		bool s_fp_ease_logged = false;
+		u64 s_fp_retarget_log_ms = 0;
+
+		// PCSX2_VR_FAKE_IPD_MM=<mm> (40-90): first-person auto stereo uses this IPD instead of the runtime's, for
+		// headset-free tests. Offline only: 0 (the runtime's IPD) while the network adapter is on.
+		float FakeIpdMetres()
+		{
+			static const float s_fake_mm = []() {
+				const char* env = std::getenv("PCSX2_VR_FAKE_IPD_MM");
+				if (!env || env[0] == '\0')
+					return 0.0f;
+				char* end = nullptr;
+				const float mm = std::strtof(env, &end);
+				if (end == env || !std::isfinite(mm) || mm < 40.0f || mm > 90.0f)
+				{
+					Console.Warning("(VR) PCSX2_VR_FAKE_IPD_MM='%s' is not an IPD of 40-90 mm; ignoring it.", env);
+					return 0.0f;
+				}
+				return mm;
+			}();
+			if (s_fake_mm <= 0.0f)
+				return 0.0f;
+			if (VMManager::IsOnlineLocked())
+			{
+				static bool s_refused_logged = false;
+				if (!s_refused_logged)
+				{
+					s_refused_logged = true;
+					Console.WriteLn("(VR) PCSX2_VR_FAKE_IPD_MM refused: the network adapter is on (test hooks are offline only).");
+				}
+				return 0.0f;
+			}
+			static bool s_used_logged = false;
+			if (!s_used_logged)
+			{
+				s_used_logged = true;
+				Console.WriteLn("(VR) PCSX2_VR_FAKE_IPD_MM: first-person auto stereo uses IPD %.1f mm instead of the runtime's (test only).",
+					s_fake_mm);
+			}
+			return s_fake_mm / 1000.0f;
+		}
+
+		// The first-person stereo line: the target values, where they came from, then what happens next (tail).
+		void LogFirstPersonStereo(const StereoAuto::Result& t, float nearest, float units, bool roll_parallax,
+			const std::string& tail)
+		{
+			std::string line = fmt::format("(VR) First-person stereo: sep {:.4f}, conv {:.0f} ({:.2f} m), ", t.sep, t.conv,
+				t.conv / units);
+			if (nearest > 0.0f)
+				line += fmt::format("nearest {:.2f} m (floor {:.2f})", nearest, t.near_floor);
+			else
+				line += "nearest off";
+			line += fmt::format(", roll parallax {}; ", roll_parallax ? "on" : "off");
+			if (t.source == StereoAuto::Source::Auto)
+			{
+				line += fmt::format("auto from IPD {:.1f} mm ({}) on a {:.2f} x {:.2f} m screen at {:.2f} m, strength {:.2f}",
+					t.ipd_m * 1000.0f, t.ipd_is_test ? "test" : "runtime", t.width_m, t.height_m, t.distance_m, t.strength);
+				if (t.ndc_ratio != 1.0f)
+					line += fmt::format(", NDC width ratio {:.3f}", t.ndc_ratio);
+				if (t.sep_railed)
+					line += fmt::format(", separation capped at {:.4f} (rail)", t.sep);
+				if (t.conv_railed)
+					line += fmt::format(", convergence clamped to {:.0f} (rail)", t.conv);
+			}
+			else
+			{
+				line += fmt::format("profile values ({}", StereoAuto::ReasonText(t.reason));
+				if (t.reason == StereoAuto::Reason::IpdOutOfRange)
+					line += fmt::format(": IPD {:.1f} mm", t.ipd_m * 1000.0f);
+				line += fmt::format("), strength {:.2f}", t.strength);
+			}
+			if (t.floor_railed)
+				line += ", floor capped at -2 (rail)";
+			line += "; ";
+			line += tail;
+			Console.WriteLn("%s", line.c_str());
+		}
 
 		// Presentation lift, published every vsync by ApplySceneStereo (CPU thread) for PresentationLift
 		// (GS thread), which must not touch the profile DB or EmuConfig.
@@ -486,6 +578,7 @@ namespace VR
 
 	void ApplySceneStereo()
 	{
+		StereoAuto::MaybeRunSelfTest();
 		const Pcsx2Config::VROptions& cfg = EmuConfig.VR;
 		// GS-thread gates, refreshed every vsync: roll parallax follows the setting, and the stereo dump
 		// is offline only (never while the network adapter is on, nor under PCSX2_TEST_ONLINE_LOCKS).
@@ -499,6 +592,7 @@ namespace VR
 			s_scene_memo_valid = false;
 			s_scene_pending = -1;
 			s_scene_pending_count = 0;
+			s_fp_armed = false;
 			return;
 		}
 
@@ -514,6 +608,7 @@ namespace VR
 			s_scene_memo_valid = false;
 			s_scene_pending = -1;
 			s_scene_pending_count = 0;
+			s_fp_armed = false;
 			return;
 		}
 
@@ -543,9 +638,15 @@ namespace VR
 		// First person: how near true stereo depth reaches (metres, 0 = off). The linear map
 		// sep * (1 - conv * q) equals an off-axis camera pair for w >= conv; letting it go negative down to
 		// 1 - conv / (nearest * units) extends that to `nearest` instead of flattening onto the conv plane.
+		// Separation and convergence come from StereoAuto: the headset IPD over the first-person screen's width and the
+		// screen distance (profiles with stereo.firstPerson.auto), else the profile numbers; the floor is generalised
+		// so 'nearest' is always the closest perceived distance. Each arm eases the separation in from zero.
 		float fp_nearest = 0.0f;
-		float fp_near_floor = 0.0f;
 		float fp_units = 100.0f;
+		StereoAuto::Result fp_now{};
+		float fp_sep = 0.0f;
+		float fp_conv = 0.0f;
+		float fp_floor = 0.0f;
 		if (match == kFirstPersonScene)
 		{
 			if (cfg.NearDepthMetres > 0.0f)
@@ -560,20 +661,87 @@ namespace VR
 					fp_units = u;
 			}
 
-			if (fp_nearest > 0.0f)
+			StereoAuto::Inputs in;
+			in.profile_auto = base.fp_auto;
+			in.setting_auto = cfg.FirstPersonAutoStereo;
+			const XRCompositor::EyeInfo eyes = XRCompositor::GetEyeInfo();
+			in.eyes_valid = eyes.valid;
+			in.ipd_m = eyes.ipd_m;
+			if (eyes.valid)
 			{
-				const float conv = base.fp_convergence.value_or(base.convergence);
-				const float floor_v = 1.0f - conv / (fp_nearest * fp_units);
-				fp_near_floor = std::isfinite(floor_v) ? std::clamp(floor_v, -2.0f, 0.0f) : 0.0f;
+				const float fake_ipd = FakeIpdMetres();
+				if (fake_ipd > 0.0f)
+				{
+					in.ipd_m = fake_ipd;
+					in.ipd_is_test = true;
+				}
+			}
+			const XRCompositor::FirstPersonScreenInfo screen = XRCompositor::GetFirstPersonScreenInfo();
+			in.screen_valid = screen.valid;
+			in.screen_distance_m = screen.distance_m;
+			in.screen_width_m = screen.width_m;
+			in.screen_height_m = screen.height_m;
+			in.screen_curved = screen.curved;
+			in.units_per_meter = fp_units;
+			in.profile_sep = base.fp_separation.value_or(base.separation);
+			in.profile_conv = base.fp_convergence.value_or(base.convergence);
+			in.nearest_m = fp_nearest;
+			in.strength = cfg.FirstPersonStereoStrength;
+			in.ndc_width_ratio = base.fp_ndc_width_ratio;
+			fp_now = StereoAuto::Derive(in);
+
+			if (s_fp_armed)
+			{
+				if (StereoAuto::NeedsRetarget(s_fp_target, fp_now))
+				{
+					// Ease from where the ramp is now to the new target (the IPD arrived, a strength edit, an aspect change).
+					s_fp_from_sep = StereoAuto::EaseValue(s_fp_from_sep, s_fp_target.sep, s_fp_step);
+					s_fp_from_conv = StereoAuto::EaseValue(s_fp_from_conv, s_fp_target.conv, s_fp_step);
+					s_fp_target = fp_now;
+					s_fp_step = 0;
+					s_fp_ramp_start_ms = CameraDriver::SteadyNowMs();
+					s_fp_ease_logged = false;
+					if (s_fp_retarget_log_ms == 0 || s_fp_ramp_start_ms >= s_fp_retarget_log_ms + 2000)
+					{
+						s_fp_retarget_log_ms = s_fp_ramp_start_ms;
+						LogFirstPersonStereo(s_fp_target, fp_nearest, fp_units, cfg.RollParallax,
+							fmt::format("retargeting over {} vsyncs (target changed)", StereoAuto::kEaseVsyncs));
+					}
+				}
+				else
+				{
+					// A near_floor-only change (NearDepthMetres edited) applies at once and leaves the ramp alone.
+					if (std::abs(fp_now.near_floor - s_fp_target.near_floor) > 1e-4f)
+					{
+						s_fp_target.near_floor = fp_now.near_floor;
+						s_fp_target.floor_railed = fp_now.floor_railed;
+						LogFirstPersonStereo(s_fp_target, fp_nearest, fp_units, cfg.RollParallax, "nearest changed");
+					}
+					if (s_fp_step < StereoAuto::kEaseVsyncs)
+						s_fp_step++;
+				}
+				fp_sep = StereoAuto::EaseValue(s_fp_from_sep, s_fp_target.sep, s_fp_step);
+				fp_conv = StereoAuto::EaseValue(s_fp_from_conv, s_fp_target.conv, s_fp_step);
+				fp_floor = s_fp_target.near_floor;
+			}
+			else
+			{
+				// An arm starts from zero separation, convergence already at its target.
+				fp_sep = 0.0f;
+				fp_conv = fp_now.conv;
+				fp_floor = fp_now.near_floor;
 			}
 		}
 
-		// Only near_floor changed (the setting was edited while first person stays armed): republish now.
-		const bool fp_floor_only = s_scene_memo_valid && match == kFirstPersonScene &&
-		                           s_scene_published == kFirstPersonScene &&
-		                           fp_near_floor != s_scene_published_near_floor;
+		// First person stays up but what it publishes changed (an eased step, a retarget, a near_floor edit, or the
+		// ease just finished and its line is due): republish now, past the scene debounce.
+		const bool fp_values_changed = s_scene_memo_valid && match == kFirstPersonScene &&
+		                               s_scene_published == kFirstPersonScene &&
+		                               (fp_sep != s_scene_published_sep || fp_conv != s_scene_published_conv ||
+		                                   fp_floor != s_scene_published_near_floor ||
+		                                   (s_fp_armed && s_fp_step >= StereoAuto::kEaseVsyncs && !s_fp_ease_logged));
 
-		if (s_scene_memo_valid && !fp_floor_only)
+		if (s_scene_memo_valid && !fp_values_changed)
 		{
 			if (match == s_scene_published)
 			{
@@ -602,6 +770,7 @@ namespace VR
 		stereo.z_driven_depth = base.z_driven_depth;
 		CopyCollimate(stereo, base);
 		CopyResolvedMap(stereo, base.resolved);
+		bool fp_arm_now = false;
 		if (match >= 0)
 		{
 			const ProfileDB::StereoSceneRule& rule = base.scenes[static_cast<size_t>(match)];
@@ -609,13 +778,42 @@ namespace VR
 			stereo.convergence = rule.convergence.value_or(stereo.convergence);
 			if (rule.map_override.has_value())
 				CopyResolvedMap(stereo, *rule.map_override);
+			s_fp_armed = false;
 		}
 		else if (match == kFirstPersonScene)
 		{
-			stereo.separation = base.fp_separation.value_or(stereo.separation);
-			stereo.convergence = base.fp_convergence.value_or(stereo.convergence);
+			if (!s_fp_armed)
+			{
+				// Arm: separation ramps from 0 to the target over kEaseVsyncs vsyncs, convergence starts at its target.
+				fp_arm_now = true;
+				s_fp_armed = true;
+				s_fp_target = fp_now;
+				s_fp_from_sep = 0.0f;
+				s_fp_from_conv = fp_now.conv;
+				s_fp_step = 0;
+				s_fp_ramp_start_ms = CameraDriver::SteadyNowMs();
+				s_fp_ease_logged = false;
+				fp_sep = 0.0f;
+				fp_conv = fp_now.conv;
+				fp_floor = fp_now.near_floor;
+			}
+			stereo.separation = fp_sep;
+			stereo.convergence = fp_conv;
 			stereo.first_person = true;
-			stereo.near_floor = fp_near_floor;
+			stereo.near_floor = fp_floor;
+			stereo.fp_auto = (s_fp_target.source == StereoAuto::Source::Auto);
+			stereo.fp_ipd_m = s_fp_target.ipd_m;
+			stereo.fp_screen_w_m = s_fp_target.width_m;
+			stereo.fp_screen_h_m = s_fp_target.height_m;
+			stereo.fp_screen_d_m = s_fp_target.distance_m;
+			stereo.fp_strength = s_fp_target.strength;
+			stereo.fp_sep_target = s_fp_target.sep;
+			stereo.fp_ease = static_cast<float>(s_fp_step) / static_cast<float>(StereoAuto::kEaseVsyncs);
+			stereo.fp_ndc_ratio = s_fp_target.ndc_ratio;
+		}
+		else
+		{
+			s_fp_armed = false;
 		}
 
 		MTGS::RunOnGSThread([stereo]() { StereoState::Publish(stereo); });
@@ -636,23 +834,24 @@ namespace VR
 		}
 		else if (match == kFirstPersonScene)
 		{
-			if (!fp_floor_only)
+			// Once per arm: the target values (the ramp itself starts from zero separation).
+			if (fp_arm_now)
 			{
+				const bool fp_is_auto = (s_fp_target.source == StereoAuto::Source::Auto);
 				Host::AddKeyedOSDMessage("VRStereoScene",
-					fmt::format("Stereo: first person (sep {:.4f}, conv {:.4g})", stereo.separation, stereo.convergence), 3.0f);
+					fmt::format("Stereo: first person (sep {:.4f}{}, conv {:.4g})", s_fp_target.sep, fp_is_auto ? " auto" : "",
+						s_fp_target.conv),
+					3.0f);
+				LogFirstPersonStereo(s_fp_target, fp_nearest, fp_units, cfg.RollParallax,
+					fmt::format("easing in over {} vsyncs", StereoAuto::kEaseVsyncs));
 			}
-			// Once per first-person arm (and again if only near_floor changed).
-			if (fp_nearest > 0.0f)
+			if (s_fp_step >= StereoAuto::kEaseVsyncs && !s_fp_ease_logged)
 			{
-				Console.WriteLn("(VR) First-person stereo: sep %.4f, conv %.0f (%.2f m), nearest %.2f m (floor %.2f), roll parallax %s",
-					stereo.separation, stereo.convergence, stereo.convergence / fp_units, fp_nearest, fp_near_floor,
-					cfg.RollParallax ? "on" : "off");
-			}
-			else
-			{
-				Console.WriteLn("(VR) First-person stereo: sep %.4f, conv %.0f (%.2f m), nearest off, roll parallax %s",
-					stereo.separation, stereo.convergence, stereo.convergence / fp_units,
-					cfg.RollParallax ? "on" : "off");
+				s_fp_ease_logged = true;
+				const u64 now_ms = CameraDriver::SteadyNowMs();
+				Console.WriteLn("(VR) First-person stereo: eased in to sep %.4f, conv %.0f after %u vsyncs (%llu ms).",
+					fp_sep, fp_conv, s_fp_step,
+					static_cast<unsigned long long>((now_ms >= s_fp_ramp_start_ms) ? (now_ms - s_fp_ramp_start_ms) : 0));
 			}
 		}
 		else if (s_scene_memo_valid)
@@ -661,7 +860,10 @@ namespace VR
 		}
 
 		s_scene_published = match;
-		s_scene_published_near_floor = fp_near_floor;
+		const bool fp_published = (match == kFirstPersonScene);
+		s_scene_published_sep = fp_published ? fp_sep : 0.0f;
+		s_scene_published_conv = fp_published ? fp_conv : 0.0f;
+		s_scene_published_near_floor = fp_published ? fp_floor : 0.0f;
 		s_scene_memo_valid = true;
 		s_scene_pending = match;
 		s_scene_pending_count = 0;

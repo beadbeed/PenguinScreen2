@@ -121,6 +121,12 @@ namespace VR::ProfileDB
 		// stereo.firstPerson.nearest (metres, 0.45-1.5): true near depth reaches down to this distance
 		// instead of flattening at the convergence plane.
 		std::optional<float> fp_nearest;
+		// stereo.firstPerson.auto: derive separation and convergence from the headset IPD and the first-person
+		// screen as placed ([VR] FirstPersonAutoStereo); separation and convergence above are then the fallback.
+		bool fp_auto = false;
+		// stereo.firstPerson.ndcWidthRatio (0.5-2.0, default 1.0): how much wider the first-person draws' NDC is
+		// than the displayed picture; the auto separation is divided by it so far content still lands one IPD apart.
+		float fp_ndc_width_ratio = 1.0f;
 
 		std::optional<HudCollimate> hud_collimate;
 

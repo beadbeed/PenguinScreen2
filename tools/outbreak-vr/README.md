@@ -84,15 +84,30 @@ captures on the null headset.
 
 First-person stereo depth (VR settings `NearDepthMetres`, default 0 = the profile's `stereo.firstPerson.nearest`,
 below 0 off, 0.45-1.5 m overrides; `RollParallax`, on by default; ini only): true stereo depth now reaches in front of
-the 1.5 m convergence plane down to `nearest` (0.75 m in both profiles: crossed disparity down to -separation)
-instead of flattening everything nearer onto that plane, for perspective-textured draws only (constant-Q,
-untextured and 2D/FST draws stay as before), and the parallax turns with head roll (full up to 25 deg, fading to
-none at 40 deg) so a tilted head sees no vertical disparity. Each first-person arm logs
-`(VR) First-person stereo: sep ..., conv ... (1.50 m), nearest 0.75 m (floor -1.00), roll parallax on`.
+the screen plane down to `nearest` (0.75 m in both profiles, as you see it, at any strength) instead of flattening
+everything nearer onto that plane, for perspective-textured draws only (constant-Q, untextured and 2D/FST draws stay
+as before), and the parallax turns with head roll (full up to 25 deg, fading to none at 40 deg) so a tilted head sees
+no vertical disparity. First-person auto stereo (profile key `stereo.firstPerson.auto: true`, in both profiles):
+separation = the headset's IPD / the first-person screen's real width and convergence = its distance x
+`unitsPerMeter`, so far content lands exactly one IPD apart whatever the aspect ratio. Each arm eases the separation
+in from 0 over 30 vsyncs (0.5 s); a later change (the IPD arriving, a strength edit, an aspect change) eases to the
+new values. VR `FirstPersonStereoStrength` (0.5-1.5, default 1.0, also on the VR settings page) scales it: below 1
+flattens toward the screen, above 1 deepens near objects while distant ones never pass parallel.
+`FirstPersonAutoStereo = false` (ini only) uses the profile's numbers, as do a headset that has not reported its eyes,
+an IPD outside 45-80 mm and a screen outside the rails. `stereo.firstPerson.ndcWidthRatio` (default 1.0) divides the
+auto separation if the draws' NDC is wider than the picture; the once-per-run `(VR) First-person multiview draw: NDC
+spans ... (NDC-to-display width ratio 1.000)` line measures it. Each arm logs `(VR) First-person stereo: sep 0.0132,
+conv 150 (1.50 m), nearest 0.75 m (floor -1.00), roll parallax on; auto from IPD 63.0 mm (runtime) on a 4.77 x 3.58 m
+screen at 1.50 m, strength 1.00; easing in over 30 vsyncs` (or `; profile values (<reason>), strength 1.00; ...`),
+then `(VR) First-person stereo: eased in to sep ..., conv ... after 30 vsyncs (... ms).`; a retarget ends
+`retargeting over 30 vsyncs (target changed)` and a `NearDepthMetres` edit `nearest changed`.
+`PCSX2_VR_FAKE_IPD_MM=<40-90>` replaces the runtime's IPD (logged as `(test)`); offline only, refused (logged once)
+while the network adapter is on. `PCSX2_VR_SELFTEST=1` logs `(VR) Auto-stereo self-test: 0 failure(s).`
 
 Stereo dump and `stereo_metric.py` (headset-free, offline only): `PCSX2_VR_STEREODUMP=<dir>[,everyN]` (default
 every 30 frames) copies both eyes of the first-person multiview frame to `<dir>/stereo_<frame>_L.png` and `_R.png`
-with a JSON sidecar (frame, w, h, sep, conv, near_floor, roll_deg, aspect), logging `(VR) Stereo dump: <path>` for
+with a JSON sidecar (frame, w, h, sep, conv, near_floor, roll_deg, aspect, plus auto, ipd_mm, screen_w_m,
+screen_h_m, screen_d_m, strength, sep_target, ease, ndc_ratio and t_ms), logging `(VR) Stereo dump: <path>` for
 each pair; it never waits on the GPU, and is refused (logged once) while the network adapter is on.
 `PCSX2_VR_FAKE_HEADROLL=<deg>` adds a constant head roll to the fake head (positive = left ear down; on its own it
 gives a still head at yaw 0 / pitch 0 with that roll) and logs `(VR) CameraDriver: fake head roll ... -> euler roll
@@ -101,7 +116,15 @@ on 48x48 tiles of the gradient images: dx percentiles in pixels and in units of 
 +1, the 5th percentile shows the crossed near field) and the median disparity angle on the display.
 `--expect-floor -1` checks the 5th percentile is -1 x sep*width within 15% and never 2 px beyond;
 `--expect-roll 10` checks the angle is within 1 deg (at 40 deg and more there is no disparity to measure, which
-passes). Exit code 0 = pass. Example: null headset, File #1 J's Bar, first person armed, offline,
+passes). `--expect-ortho` (needs auto true and ease 1) checks sep = min(strength, 1) x IPD / screen width within 1%
+and that the 99th percentile of dx is at most sep*width + 1.5 px, so far content is never more than one IPD apart:
+`python stereo_metric.py D:\Games\PS2\stereo --expect-ortho`. `--compare REF` fits this pair's disparity against
+another pair of the same view and checks the slope and intercept the two sidecars predict, e.g. strength 1.5 against
+1.0: `python stereo_metric.py D:\Games\PS2\s15 --compare D:\Games\PS2\s1` (slope 1.50, intercept -10.2 px at 1536 px
+wide). `--ease` checks every arm ramp in a directory (dump with `,2`): sep follows sep_target x smoothstep(ease),
+rises monotonically, takes 350-700 ms and the picture follows it: `python stereo_metric.py D:\Games\PS2\ease --ease`.
+Exit code 0 = pass, 1 = fail, 2 = bad input (or no ramp captured). Example: null headset, File #1 J's Bar, first
+person armed, offline,
 `PCSX2_VR_STEREODUMP=D:\Games\PS2\stereo,15`, walk up to the bar counter, then
 `python stereo_metric.py D:\Games\PS2\stereo --expect-floor -1`.
 

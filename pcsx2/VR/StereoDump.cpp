@@ -19,6 +19,7 @@
 #include "fmt/format.h"
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -84,6 +85,17 @@ namespace VR::StereoDump
 			bool roll_valid = false;
 			float aspect = 4.0f / 3.0f;
 			bool bgra = false;
+			// First-person auto stereo (StereoState::Params fp_*), and when the frame was captured.
+			bool fp_auto = false;
+			float ipd_mm = 0.0f;
+			float screen_w_m = 0.0f;
+			float screen_h_m = 0.0f;
+			float screen_d_m = 0.0f;
+			float strength = 1.0f;
+			float sep_target = 0.0f;
+			float ease = 1.0f;
+			float ndc_ratio = 1.0f;
+			u64 t_ms = 0;
 		};
 
 		// Persistently mapped host-visible readback buffer (GS thread only).
@@ -170,9 +182,13 @@ namespace VR::StereoDump
 			const std::string json = fmt::format(
 				"{{\n  \"frame\": {},\n  \"w\": {},\n  \"h\": {},\n  \"sep\": {:.6f},\n  \"conv\": {:.4f},\n"
 				"  \"near_floor\": {:.6f},\n  \"roll_deg\": {:.4f},\n  \"roll_parallax\": {},\n  \"roll_valid\": {},\n"
-				"  \"aspect\": {:.6f}\n}}\n",
+				"  \"aspect\": {:.6f},\n  \"auto\": {},\n  \"ipd_mm\": {:.3f},\n  \"screen_w_m\": {:.4f},\n  \"screen_h_m\": {:.4f},\n"
+				"  \"screen_d_m\": {:.4f},\n  \"strength\": {:.4f},\n  \"sep_target\": {:.8f},\n  \"ease\": {:.6f},\n"
+				"  \"ndc_ratio\": {:.4f},\n  \"t_ms\": {}\n}}\n",
 				info.frame, info.width, info.height, info.separation, info.convergence, info.near_floor, info.roll_deg,
-				info.roll_parallax ? "true" : "false", info.roll_valid ? "true" : "false", info.aspect);
+				info.roll_parallax ? "true" : "false", info.roll_valid ? "true" : "false", info.aspect,
+				info.fp_auto ? "true" : "false", info.ipd_mm, info.screen_w_m, info.screen_h_m, info.screen_d_m, info.strength,
+				info.sep_target, info.ease, info.ndc_ratio, info.t_ms);
 			FileSystem::WriteStringToFile(path.c_str(), json);
 		}
 
@@ -344,6 +360,17 @@ namespace VR::StereoDump
 		info.roll_deg = info.roll_valid ? roll * (180.0f / 3.14159265358979323846f) : 0.0f;
 		info.aspect = (GSConfig.AspectRatio == AspectRatioType::R16_9) ? (16.0f / 9.0f) : (4.0f / 3.0f);
 		info.bgra = bgra;
+		info.fp_auto = st.fp_auto;
+		info.ipd_mm = st.fp_ipd_m * 1000.0f;
+		info.screen_w_m = st.fp_screen_w_m;
+		info.screen_h_m = st.fp_screen_h_m;
+		info.screen_d_m = st.fp_screen_d_m;
+		info.strength = st.fp_strength;
+		info.sep_target = st.fp_sep_target;
+		info.ease = st.fp_ease;
+		info.ndc_ratio = st.fp_ndc_ratio;
+		info.t_ms = static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count());
 
 		s_pending_info = info;
 		s_pending_fence = dev->GetCurrentFenceCounter();

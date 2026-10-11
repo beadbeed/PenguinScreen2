@@ -1943,6 +1943,8 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(PrivateCoopFirstPerson);
 	SettingsWrapEntry(NearDepthMetres);
 	SettingsWrapEntry(RollParallax);
+	SettingsWrapEntry(FirstPersonAutoStereo);
+	SettingsWrapEntry(FirstPersonStereoStrength);
 	SettingsWrapEntry(Brightness);
 	SettingsWrapEntry(GameRumble);
 	SettingsWrapEntry(HapticStrength);
@@ -1964,6 +1966,9 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 			NearDepthMetres = 0.0f;
 		else if (NearDepthMetres > 0.0f)
 			NearDepthMetres = std::clamp(NearDepthMetres, 0.45f, 1.5f);
+		FirstPersonStereoStrength = std::isfinite(FirstPersonStereoStrength) ?
+		                                std::clamp(FirstPersonStereoStrength, MIN_FP_STEREO_STRENGTH, MAX_FP_STEREO_STRENGTH) :
+		                                1.0f;
 		Brightness = std::clamp(Brightness, MIN_BRIGHTNESS, MAX_BRIGHTNESS);
 		HapticStrength = std::clamp(HapticStrength, 0.0f, 1.0f);
 		VignetteStrength = std::isfinite(VignetteStrength) ?
@@ -1974,9 +1979,10 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 
 bool Pcsx2Config::VROptions::operator==(const VROptions& right) const
 {
-	// SnapTurn, ComfortBlink, LaserSight, ComfortVignette, VignetteStrength, OnlineSafe, Brightness, GameRumble
-	// and HapticStrength are read from EmuConfig every vsync; leaving them out keeps a settings tweak from
-	// rebuilding (and so re-announcing) every VR control.
+	// SnapTurn, ComfortBlink, LaserSight, MenuPointer, MenuTablet, ComfortVignette, VignetteStrength, OnlineSafe,
+	// FirstPersonAutoStereo, FirstPersonStereoStrength, Brightness, GameRumble and HapticStrength are read from
+	// EmuConfig every vsync; leaving them out keeps a settings tweak from rebuilding (and so re-announcing) every
+	// VR control.
 	return OpEqu(Enable) && OpEqu(ScreenDistance) && OpEqu(ScreenHeight) &&
 	       OpEqu(ScreenVerticalOffset) &&
 	       OpEqu(ScreenArcDeg) && OpEqu(StereoMode) && OpEqu(StereoUseProfile) &&

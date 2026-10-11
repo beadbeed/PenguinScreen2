@@ -3039,7 +3039,7 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 		if (snode.has_child("firstPerson") && snode["firstPerson"].is_map())
 		{
 			const ryml::ConstNodeRef fp = snode["firstPerson"];
-			warnUnknownKeys(serial, fp, "stereo.firstPerson", {"separation", "convergence", "nearest"});
+			warnUnknownKeys(serial, fp, "stereo.firstPerson", {"separation", "convergence", "nearest", "auto", "ndcWidthRatio"});
 			if (fp.has_child("separation"))
 			{
 				const std::optional<float> v = StringUtil::FromChars<float>(nodeVal(fp["separation"]));
@@ -3063,6 +3063,23 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 					sp.fp_nearest = v.value();
 				else
 					Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a stereo.firstPerson nearest outside 0.45-1.5 m; ignoring it.", serial);
+			}
+			if (fp.has_child("auto"))
+				sp.fp_auto = StringUtil::compareNoCase(nodeVal(fp["auto"]), "true");
+			if (sp.fp_auto && (!sp.fp_separation.has_value() || !sp.fp_convergence.has_value()))
+			{
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' stereo.firstPerson auto needs separation and convergence as its "
+								   "fallback; auto ignored.",
+					serial);
+				sp.fp_auto = false;
+			}
+			if (fp.has_child("ndcWidthRatio"))
+			{
+				const std::optional<float> v = StringUtil::FromChars<float>(nodeVal(fp["ndcWidthRatio"]));
+				if (v.has_value() && std::isfinite(v.value()) && v.value() >= 0.5f && v.value() <= 2.0f)
+					sp.fp_ndc_width_ratio = v.value();
+				else
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a stereo.firstPerson ndcWidthRatio outside 0.5-2.0; using 1.0.", serial);
 			}
 		}
 

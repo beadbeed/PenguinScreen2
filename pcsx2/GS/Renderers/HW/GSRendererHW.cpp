@@ -6133,6 +6133,17 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 			DevCon.WriteLn("(VR) First multiview draw: vr_stereo = {%.4f, %.3f}.",
 				m_conf.cb_vs.vr_stereo.x, m_conf.cb_vs.vr_stereo.y);
 		}
+		// Separation is in the render target's NDC; orthostereo assumes that spans the displayed width
+		// (stereo.firstPerson.ndcWidthRatio otherwise). Once per process, on the first first-person draw.
+		static bool s_logged_fp_ndc = false;
+		if (!s_logged_fp_ndc && st.first_person)
+		{
+			s_logged_fp_ndc = true;
+			const float ndc_w = (m_conf.cb_vs.vertex_scale.x > 0.0f) ? (1.0f / (8.0f * m_conf.cb_vs.vertex_scale.x)) : 0.0f;
+			const GSVector2i res = PCRTCDisplays.GetResolution();
+			Console.WriteLn("(VR) First-person multiview draw: NDC spans %.0f px, display %dx%d (NDC-to-display width ratio %.3f).",
+				ndc_w, res.x, res.y, (res.x > 0) ? (ndc_w / static_cast<float>(res.x)) : 0.0f);
+		}
 	}
 	if (VR::DepthHistogramArmed()) [[unlikely]]
 	{
