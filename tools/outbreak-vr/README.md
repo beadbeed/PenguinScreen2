@@ -220,7 +220,7 @@ then `(VR) First-person stereo: eased in to sep ..., conv ... after 30 vsyncs (.
 `PCSX2_VR_FAKE_IPD_MM=<40-90>` replaces the runtime's IPD (logged as `(test)`); offline only, refused (logged once)
 while the network adapter is on. `PCSX2_VR_SELFTEST=1` logs `(VR) Auto-stereo self-test: 0 failure(s).`
 
-First-person field of view (VR settings `FirstPersonFov = Auto | Profile`, default Auto, and `FirstPersonFovMarginDeg`,
+First-person field of view (VR settings `FirstPersonFov = Auto | Profile`, default Profile until Alex has tried the build, and `FirstPersonFovMarginDeg`,
 default 6, 0-20; both on the VR settings page): with Auto the game camera's vertical FOV (`camera.fov`, 0x306380 /
 0x313590) is fitted to the headset on each first-person arm, so the game draws the room out to the edge of the view
 instead of the old 100 deg picture with black around it. The FOV is twice the further of the eyes' furthest up and down
@@ -240,7 +240,7 @@ First-person screen: +-64.0 x +-57.0 deg at 1.50 m (6.16 x 4.62 m), camera FOV 1
 +12.0 up +6.0 down +3.0 deg; ...`. On SteamVR's null headset (+-45 deg) the fit needs 96, so the floor holds: 100 deg,
 margin yaw +12.8 up +5.0 down +5.0. `PCSX2_VR_SELFTEST=1` logs `(VR) CameraDriver FOV self-test: 0 mismatch(es).`
 
-Edge fill (VR setting `EdgeFill`, default on, read when VR starts; needs `OpaqueBackground`): behind the first-person
+Edge fill (VR setting `EdgeFill`, default off until Alex has tried the build, read when VR starts; needs `OpaqueBackground`): behind the first-person
 screen the background projection layer shows a dim (half brightness), blurred continuation of the picture's edges instead
 of black, so a head turn faster than the screen's margin shows more of the room rather than a black border. It is
 head-locked, in the background's own slot (no extra layer; SteamVR is not relied on to take a projection view wider than

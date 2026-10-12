@@ -1350,21 +1350,22 @@ struct Pcsx2Config
 		// furthest reach plus FirstPersonFovMarginDeg, never below the profile's camera.fov nor above 130 deg, eased in
 		// over half a second) and the first-person screen is sized to match, so the game draws the room out to the edge of
 		// the view; Profile keeps the profile's camera.fov. Only for profiles whose first-person screen is sized to it.
+		// Profile by default until Alex has tried the build in the headset (Auto makes the centre of the picture softer).
 		enum struct FirstPersonFovMode : int
 		{
 			Auto = 0,
 			Profile = 1,
 		};
 		static const char* FirstPersonFovModeNames[];
-		FirstPersonFovMode FirstPersonFov = FirstPersonFovMode::Auto;
+		FirstPersonFovMode FirstPersonFov = FirstPersonFovMode::Profile;
 		// Degrees added to the headset's field of view by FirstPersonFov = Auto (half above and below the view, and as
 		// much to each side), so a turn of the head is seen before the edge of the picture.
 		static constexpr float MIN_FP_FOV_MARGIN_DEG = 0.0f, MAX_FP_FOV_MARGIN_DEG = 20.0f, DEFAULT_FP_FOV_MARGIN_DEG = 6.0f;
 		float FirstPersonFovMarginDeg = DEFAULT_FP_FOV_MARGIN_DEG;
 		// First person: around the first-person screen the headset shows a dim, blurred continuation of the picture's edges
 		// instead of black (a fast head turn shows more room, not a black border). Needs OpaqueBackground; read when VR
-		// starts.
-		bool EdgeFill = true;
+		// starts. Off by default until Alex has tried the build in the headset.
+		bool EdgeFill = false;
 
 		// Headset brightness: scales the gamma of the presentation lift (1.0 = neutral) on top of the
 		// profile's own. Applied only while a VR session runs, so flat play is never touched.

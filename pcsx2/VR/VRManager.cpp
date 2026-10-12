@@ -684,6 +684,16 @@ namespace VR
 			in.screen_curved = screen.curved;
 			in.units_per_meter = fp_units;
 			in.profile_sep = base.fp_separation.value_or(base.separation);
+			{
+				// The profile's separation is tuned for the screen its camera.fov gives. With FirstPersonFov = Auto the
+				// screen grows with the fitted FOV, so the same NDC separation would put far content more than an IPD apart
+				// (eyes turned outward past parallel) whenever the fallback is used (auto stereo off, an IPD out of range):
+				// scale it so its physical disparity stays the profile's.
+				const CameraDriver::FovState fov = CameraDriver::GetFovState();
+				constexpr float kHalfDegToRad = 3.14159265f / 360.0f;
+				if (fov.sizes_screen && fov.profile_deg > 0.0f && fov.target_deg > fov.profile_deg && fov.target_deg < 179.0f)
+					in.profile_sep *= std::tan(fov.profile_deg * kHalfDegToRad) / std::tan(fov.target_deg * kHalfDegToRad);
+			}
 			in.profile_conv = base.fp_convergence.value_or(base.convergence);
 			in.nearest_m = fp_nearest;
 			in.strength = cfg.FirstPersonStereoStrength;
