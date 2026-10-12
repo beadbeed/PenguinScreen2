@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -680,6 +681,11 @@ void VRInputSource::Emit(Instance& in, const SC::ControlValues& values)
 	// values go out once, so the other pad keeps working, and nothing repeats while a binding is being
 	// captured (it would end up in the new binding).
 	const bool capturing = InputManager::HasHook();
+	// PCSX2_VR_PADLOG=1 (debugging): log every change of a composed control, to find presses nobody made.
+	static const bool s_padlog = []() {
+		const char* env = std::getenv("PCSX2_VR_PADLOG");
+		return env && env[0] == '1';
+	}();
 	for (const SC::ControlDef& c : in.def->controls)
 	{
 		const u32 i = static_cast<u32>(c.id);
@@ -687,6 +693,9 @@ void VRInputSource::Emit(Instance& in, const SC::ControlValues& values)
 		const bool repeat_held = !capturing && values[i] != 0.0f && SC::ControlTypeOf(c.id) != SC::ControlType::Button;
 		if (!changed && !repeat_held)
 			continue;
+		if (s_padlog && changed)
+			Console.WriteLn("(VR) PADLOG %s %s %.3f -> %.3f", in.spec.id.c_str(), SC::ControlName(c.id),
+				static_cast<double>(in.last[i]), static_cast<double>(values[i]));
 		in.last[i] = values[i];
 		in.ever_emitted = true;
 		if (changed)
