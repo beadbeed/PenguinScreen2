@@ -47,6 +47,52 @@ namespace VR::CameraDriver
 	// turn that lookAt.predict renders ahead. Each call also measures the prediction horizon.
 	bool RenderPose(HeadPose::Snapshot* out, float* turn_yaw);
 
+	// GS thread, alongside RenderPose: the vertical FOV (degrees) the frame being presented was rendered with, from the
+	// same matched write. False when not known (no matched frame, or camera.fov does not size the first-person screen).
+	bool RenderFov(float* fov_deg);
+
+	// First-person field of view (VR setting FirstPersonFov). camera.fov is taken as the game camera's vertical FOV in
+	// degrees when the profile's flat screen.firstPerson is sized to it (ScreenMatchesFov); the first-person screen then
+	// follows the FOV each frame was rendered with. Auto fits the FOV to the headset on each first-person arm
+	// (AutoFirstPersonFovDeg), easing it in from camera.fov over kFovEaseVsyncs; it changes while armed only once, when
+	// the headset's eyes first arrive. Profile writes camera.fov unchanged. The maths below is pure.
+	inline constexpr float kMaxAutoFovDeg = 130.0f;
+	inline constexpr float kDefaultFovMarginDeg = 6.0f;
+	inline constexpr u32 kFovEaseVsyncs = 30;
+
+	// The vertical FOV that covers both eyes plus margin_deg. fov_deg[eye][L, R, U, D] in degrees as
+	// XRCompositor::EyeInfo has them (left and down negative). The game's projection is symmetric about its axis, so it
+	// takes twice the further of the eyes' furthest up and down reach (each plus half the margin), widened if a picture
+	// `aspect` times as wide as tall would not reach their furthest left or right (plus half the margin) either. Clamped
+	// to [profile_fov_deg, max(profile_fov_deg, kMaxAutoFovDeg)]; profile_fov_deg when the eyes are not usable.
+	float AutoFirstPersonFovDeg(const float fov_deg[2][4], float aspect, float margin_deg, float profile_fov_deg);
+
+	// The height of a flat screen distance_m away that spans fov_deg vertically: 2 * distance * tan(fov / 2). 0 for a
+	// FOV outside 1-179 deg or a distance not above 0.
+	float ScreenHeightForFov(float distance_m, float fov_deg);
+
+	// True when a flat screen distance_m away and height_m tall spans fov_deg (within 2%): the profile's first-person
+	// screen is sized to camera.fov read as a vertical FOV in degrees, so that FOV may be refitted and the screen follows.
+	bool ScreenMatchesFov(float distance_m, float height_m, float fov_deg);
+
+	// from + (to - from) * smoothstep(step / kFovEaseVsyncs).
+	float EaseFov(float from, float to, u32 step);
+
+	// What camera.fov writes, for the compositor (the first-person screen's size, its log) and auto stereo. Any thread.
+	struct FovState
+	{
+		bool sizes_screen = false; // camera.fov is a vertical FOV in degrees that sizes the first-person screen
+		bool auto_fit = false;     // the target is fitted to the headset (FirstPersonFov = Auto, eyes known)
+		float fov_deg = 0.0f;      // written on the latest armed vsync (0: none yet)
+		float target_deg = 0.0f;   // what this arm eases to
+		float profile_deg = 0.0f;  // camera.fov's own value (the floor)
+		float margin_deg = 0.0f;   // FirstPersonFovMarginDeg as applied
+		float aspect = 0.0f;       // the first-person screen's aspect the fit used
+		float reach_up_deg = 0.0f, reach_down_deg = 0.0f, reach_side_deg = 0.0f; // the eyes' furthest reach (auto_fit)
+		const char* source = "";   // why: "auto", or the reason the profile's value is used
+	};
+	FovState GetFovState();
+
 	// The measured head-pose-to-present horizon in seconds (clamped to 0-0.12, 0 until measured): how far
 	// ahead lookAt.predict leads the head. Any thread.
 	float HeadPredictionHorizon();

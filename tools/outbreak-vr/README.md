@@ -213,6 +213,42 @@ then `(VR) First-person stereo: eased in to sep ..., conv ... after 30 vsyncs (.
 `PCSX2_VR_FAKE_IPD_MM=<40-90>` replaces the runtime's IPD (logged as `(test)`); offline only, refused (logged once)
 while the network adapter is on. `PCSX2_VR_SELFTEST=1` logs `(VR) Auto-stereo self-test: 0 failure(s).`
 
+First-person field of view (VR settings `FirstPersonFov = Auto | Profile`, default Auto, and `FirstPersonFovMarginDeg`,
+default 6, 0-20; both on the VR settings page): with Auto the game camera's vertical FOV (`camera.fov`, 0x306380 /
+0x313590) is fitted to the headset on each first-person arm, so the game draws the room out to the edge of the view
+instead of the old 100 deg picture with black around it. The FOV is twice the further of the eyes' furthest up and down
+reach (both eyes, from the runtime's views; the game's projection is symmetric) plus the margin, widened if the 4:3
+picture would not reach the furthest side plus half the margin, never below the profile's 100 (the floor) nor above
+130 (the cap; the game builds its projection as cot(fov/2) through libvu0's sincos, fine far beyond that). It eases in
+from 100 over 30 vsyncs on each arm and changes while armed only once, when the headset's eyes first arrive; a setting
+change applies at the next arm. Only for a profile whose flat `screen.firstPerson` height is 2 x distance x
+tan(camera.fov / 2) (both Outbreak profiles): the first-person screen is then sized to the FOV each frame was rendered
+with (carried with the render pose through the view-matrix match), and the same size feeds auto stereo and the log.
+Objects keep their size; the same picture covers more of the view, so the centre gets softer (100 to about 114 deg is
+about 23% fewer pixels per degree; the internal resolution is left alone). Each new choice logs `(VR) First-person FOV: 114.0 deg vertical, fitted to the
+headset (the eyes reach up 51.0, down 54.0, sideways 52.0 deg; margin 6.0, screen aspect 1.33; camera.fov 100.0 is
+the floor, 130 the cap); easing in from 100.0 over 30 vsyncs.` (or `(profile: VR FirstPersonFov = Profile)`, `(profile
+until the headset reports its eyes)`), and the first-person screen line names it with the margin it gives: `(VR)
+First-person screen: +-64.0 x +-57.0 deg at 1.50 m (6.16 x 4.62 m), camera FOV 114.0 deg (auto); margin vs headset: yaw
++12.0 up +6.0 down +3.0 deg; ...`. On SteamVR's null headset (+-45 deg) the fit needs 96, so the floor holds: 100 deg,
+margin yaw +12.8 up +5.0 down +5.0. `PCSX2_VR_SELFTEST=1` logs `(VR) CameraDriver FOV self-test: 0 mismatch(es).`
+
+Edge fill (VR setting `EdgeFill`, default on, read when VR starts; needs `OpaqueBackground`): behind the first-person
+screen the background projection layer shows a dim (half brightness), blurred continuation of the picture's edges instead
+of black, so a head turn faster than the screen's margin shows more of the room rather than a black border. It is
+head-locked, in the background's own slot (no extra layer; SteamVR is not relied on to take a projection view wider than
+the eye's, which a world-locked fill would need): each eye's half holds the picture where the first-person screen sits
+in that eye's view with the head where the frame was rendered from (half the IPD to the side, turned by any display
+cant), its edge texels stretched beyond it. Built on the GS thread each GS frame with GPU copies and blits only (box
+filter down to 32 px wide, dimmed by averaging each texel with a black one, scaled up 5x, cut into a 2 x 128 x 128
+canvas, copied into its swapchain) in its own command buffer; it never waits (a fill still on the GPU or a swapchain
+image not back skips that frame's update) and goes black behind menus, cutscenes and the world screen and on any
+failure. Logs `(VR) Edge fill: enabled ([VR] EdgeFill): ...` at VR start, `(VR) Edge fill: blur chain for a 1536x1344
+frame: 1024x896, 6 level(s) down to 32x28, dimmed and scaled up to 160x140.` and `(VR) Edge fill: on behind the
+first-person screen: head-locked, 128x128 per eye, ...` the first time it shows; a failure logs `(VR) Edge fill: ...
+failed (...); the background stays black for this session.` `PCSX2_VR_SELFTEST=1` logs `(VR) Edge fill self-test: N
+check(s) passed, 0 failed.` The Eyes line ends `; views canted out N deg` for a headset whose views are turned outward.
+
 Stereo dump and `stereo_metric.py` (headset-free, offline only): `PCSX2_VR_STEREODUMP=<dir>[,everyN]` (default
 every 30 frames) copies both eyes of the first-person multiview frame to `<dir>/stereo_<frame>_L.png` and `_R.png`
 with a JSON sidecar (frame, w, h, sep, conv, near_floor, roll_deg, aspect, plus auto, ipd_mm, screen_w_m,

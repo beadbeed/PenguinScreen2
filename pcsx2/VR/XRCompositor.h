@@ -57,19 +57,24 @@ namespace VR::XRCompositor
 	bool PacerStalled();
 
 	// The headset's eyes as the runtime last located them (xrLocateViews): IPD, each eye's field of view in degrees
-	// (left, right, up, down, signed as OpenXR reports them: left and down negative) and the display rate. Any thread.
+	// (left, right, up, down, signed as OpenXR reports them: left and down negative), how far each view is turned outward
+	// from straight ahead (canted displays; 0 for parallel views) and the display rate. Any thread.
 	struct EyeInfo
 	{
 		bool valid = false;
 		float ipd_m = 0.0f;
 		float fov_deg[2][4] = {};
+		float cant_deg = 0.0f;
 		float display_hz = 0.0f;
 	};
 	EyeInfo GetEyeInfo();
 
 	// The first-person screen as placed (the same geometry the 'First-person screen' line logs), refreshed every
 	// present: its distance, real width (the arc length for a cylinder) and height in metres, the aspect it was sized
-	// with, and whether it is a cylinder. valid = the profile has a first-person screen. Any thread.
+	// with, and whether it is a cylinder. A flat screen is sized to the FOV camera.fov settles to on this first-person arm
+	// when that FOV sizes it (CameraDriver::GetFovState().target_deg), else to the profile's screen.firstPerson height;
+	// the screen as placed follows each frame's own FOV, the same once the arm's half-second ease is done. valid = the
+	// profile has a first-person screen. Any thread.
 	struct FirstPersonScreenInfo
 	{
 		bool valid = false;

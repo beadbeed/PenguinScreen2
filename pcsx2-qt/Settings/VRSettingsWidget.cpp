@@ -13,6 +13,18 @@
 
 #include <QtWidgets/QLabel>
 
+// [VR] FirstPersonFov: what the combo shows, and what goes in the ini.
+static const char* s_first_person_fov_names[] = {
+	QT_TRANSLATE_NOOP("VRSettingsWidget", "Fit the Headset (Auto)"),
+	QT_TRANSLATE_NOOP("VRSettingsWidget", "Game Profile"),
+	nullptr,
+};
+static const char* s_first_person_fov_values[] = {
+	"Auto",
+	"Profile",
+	nullptr,
+};
+
 VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* parent)
 	: SettingsWidget(settings_dialog, parent)
 {
@@ -35,6 +47,10 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.comfortBlink, "VR", "ComfortBlink", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.comfortVignette, "VR", "ComfortVignette", false);
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.vignetteStrength, "VR", "VignetteStrength", 0.6f);
+	SettingWidgetBinder::BindWidgetToEnumSetting(sif, m_ui.firstPersonFov, "VR", "FirstPersonFov", s_first_person_fov_names,
+		s_first_person_fov_values, s_first_person_fov_values[0], "VRSettingsWidget");
+	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.firstPersonFovMargin, "VR", "FirstPersonFovMarginDeg", 6.0f);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.edgeFill, "VR", "EdgeFill", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.laserSight, "VR", "LaserSight", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.menuPointer, "VR", "MenuPointer", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.menuTablet, "VR", "MenuTablet", false);
@@ -112,6 +128,23 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 		tr("How dark the Comfort Vignette's edges get while turning or walking at full speed, from 0.20 (a light "
 		   "shade) to 1.00 (black). Takes effect immediately."));
 
+	dialog()->registerWidgetHelp(m_ui.firstPersonFov, tr("First-Person Field of View"), tr("Fit the Headset (Auto)"),
+		tr("In first-person profiles, how wide the game's own camera sees. Fit the Headset widens it to your headset's "
+		   "field of view plus the margin (never narrower than the game profile's view, at most 130°), so the game draws "
+		   "the room out to the edge of what you see instead of a picture with black around it; things keep their real "
+		   "size, you just see more of the room. Because the same picture covers more of your view, it looks a little "
+		   "softer. Game Profile keeps the profile's view. Applies each time first person starts (after a door, a menu "
+		   "or a cutscene), easing in over half a second."));
+
+	dialog()->registerWidgetHelp(m_ui.firstPersonFovMargin, tr("First-Person Field of View Margin"), tr("6.0°"),
+		tr("How many degrees Fit the Headset adds to your headset's field of view, half on each side, so a quick turn of "
+		   "your head shows more of the room before the edge of the picture. Applies the next time first person starts."));
+
+	dialog()->registerWidgetHelp(m_ui.edgeFill, tr("Edge Fill"), tr("Checked"),
+		tr("In first person, the space around the picture shows a dim, blurred continuation of its edges instead of "
+		   "black, so a fast head turn shows more of the room rather than a black border. It moves with your head, like "
+		   "a soft vignette. Only changes what you see in the headset. Takes effect the next time VR starts."));
+
 	dialog()->registerWidgetHelp(m_ui.laserSight, tr("Laser Sight"), tr("Checked"),
 		tr("In first-person profiles, while your weapon is raised, draws a thin red beam from the muzzle of the pistol "
 		   "in your hand straight along where it points, fading out over about 6 metres. It is drawn over the picture "
@@ -169,6 +202,9 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 	updateVignetteFields();
 	connect(m_ui.comfortVignette, &QCheckBox::checkStateChanged, this, &VRSettingsWidget::updateVignetteFields);
 
+	updateFovFields();
+	connect(m_ui.firstPersonFov, &QComboBox::currentIndexChanged, this, &VRSettingsWidget::updateFovFields);
+
 	m_status_banner = new QLabel(this);
 	m_status_banner->setWordWrap(true);
 	m_status_banner->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -224,6 +260,16 @@ void VRSettingsWidget::updateVignetteFields()
 	const bool on = dialog()->getEffectiveBoolValue("VR", "ComfortVignette", false);
 	m_ui.vignetteStrength->setEnabled(on);
 	m_ui.vignetteStrengthLabel->setEnabled(on);
+}
+
+void VRSettingsWidget::updateFovFields()
+{
+	// The margin only does something with Fit the Headset (per game, the effective value: the global one while the combo
+	// inherits it).
+	const bool fit = dialog()->getEffectiveStringValue("VR", "FirstPersonFov", s_first_person_fov_values[0]) ==
+	                 s_first_person_fov_values[0];
+	m_ui.firstPersonFovMargin->setEnabled(fit);
+	m_ui.firstPersonFovMarginLabel->setEnabled(fit);
 }
 
 void VRSettingsWidget::updateTuningFields()

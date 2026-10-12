@@ -26,6 +26,7 @@ private:
 	void updateProfileDetails(int index);
 	void updateTuningFields();
 	void updateVignetteFields();
+	void updateFovFields();
 
 	void updateVRStatusBanner();
 

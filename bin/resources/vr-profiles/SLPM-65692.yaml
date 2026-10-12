@@ -23,7 +23,9 @@ SLPM-65692:
   # person drives the camera, the firstPerson screen is used instead: sized to the game camera's FOV
   # (camera.fov below, 100 deg vertical: height = 2 * distance * tan(50 deg)), flat so perspective holds,
   # and placed where the shown frame was rendered from (camera.lookAt viewMatrix; poseLagMs is the
-  # fallback guess), so the runtime can reproject it as the head turns. menu: the menu tablet (VR setting Menu
+  # fallback guess), so the runtime can reproject it as the head turns. As on File #1, VR FirstPersonFov = Auto
+  # (the default) may widen camera.fov to the headset's view (100 the floor, 130 the cap) and the screen follows
+  # it; this height is the Profile setting's. menu: the menu tablet (VR setting Menu
   # Tablet, off by default), as File #1's. The beam, the dot and the pointing hands work in menus here too.
   # Point-to-select on the item screen (as File #1). File #2's cursor struct is at 0x7671F0, the same layout as File
   # #1's 0x720B80 (found offline 2026-10-11 in Training Ground: open on (498,108), Right -> (550,108), Down -> (550,160)
@@ -247,7 +249,7 @@ SLPM-65692:
       # The head is led too, by its angular velocity times that latency times this damping (0.8).
       # 0 turns both off.
       predict: 0.8
-    fov: { address: 0x313590, encoding: f32, scale: 100.0 }   # vertical FOV, degrees (about 115 horizontal at 4:3)
+    fov: { address: 0x313590, encoding: f32, scale: 100.0 }   # vertical FOV, degrees (about 115 horizontal at 4:3); the floor of VR FirstPersonFov = Auto
   # Shake to break free (VR controllers only), as File #1 (see SLPM-65428.yaml for the measurements): while grabbed,
   # shaking either controller waggles your left stick and presses Circle and Cross in turn on your own pad, with a short
   # buzz on the shaking hand for each press; a button you hold yourself is never let go, and it stops the poll the grab

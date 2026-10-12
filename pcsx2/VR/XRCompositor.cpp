@@ -30,6 +30,7 @@
 #include "common/Console.h"
 #include "common/Threading.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
@@ -38,6 +39,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -2605,9 +2607,28 @@ namespace VR::XRCompositor
 			}
 		}
 
-		// The first-person screen's geometry as it is placed: one source for LogFirstPersonScreen and
-		// GetFirstPersonScreenInfo, so the log and the size auto stereo uses can never disagree.
-		FirstPersonScreenInfo ComputeFirstPersonScreen(const ScreenParams& sp)
+		// The flat first-person screen's height: sized to fov_deg, a vertical FOV camera.fov writes (CameraDriver), as
+		// 2 * distance * tan(fov / 2), so the picture spans exactly the angle the game drew it with; the profile's
+		// screen.firstPerson height when no such FOV is known (fov_deg 0) or the screen is curved (its arc decides).
+		float FirstPersonHeight(const ScreenParams& sp, float fov_deg)
+		{
+			const bool curved = (sp.fp_arc_deg >= 5.0f) && XRSession::HasCylinderLayer();
+			const float from_fov = curved ? 0.0f : CameraDriver::ScreenHeightForFov(std::max(sp.fp_distance, 0.01f), fov_deg);
+			return (from_fov > 0.0f) ? from_fov : sp.fp_height;
+		}
+
+		// The FOV that sizes the first-person screen (0: the profile's height): the one camera.fov writes now, or (target)
+		// the one this arm settles to once its half-second ease is done.
+		float ScreenFov(bool target)
+		{
+			const CameraDriver::FovState st = CameraDriver::GetFovState();
+			return st.sizes_screen ? (target ? st.target_deg : st.fov_deg) : 0.0f;
+		}
+
+		// The first-person screen's geometry for a vertical FOV fov_deg (0: the profile's height): one source for the
+		// placement, LogFirstPersonScreen and GetFirstPersonScreenInfo, so the log and the size auto stereo uses can never
+		// disagree with the screen as placed.
+		FirstPersonScreenInfo ComputeFirstPersonScreen(const ScreenParams& sp, float fov_deg)
 		{
 			constexpr float kDeg = 180.0f / 3.14159265f;
 			FirstPersonScreenInfo info;
@@ -2622,13 +2643,16 @@ namespace VR::XRCompositor
 			}
 			else
 			{
-				info.height_m = sp.fp_height;
+				info.height_m = FirstPersonHeight(sp, fov_deg);
 				info.width_m = info.height_m * info.aspect;
 			}
 			return info;
 		}
 
-		// Refreshes GetFirstPersonScreenInfo from the current screen parameters and aspect (every present).
+		// Refreshes GetFirstPersonScreenInfo from the current screen parameters, aspect and the FOV this arm settles to
+		// (every present), the same size the 'First-person screen' line logs: auto stereo then retargets once per FOV
+		// choice, in step with the FOV's own ease (and its own ease in from zero on each arm), instead of chasing every
+		// step of it. The placement sizes each frame by the FOV that frame was rendered with, which is this once eased in.
 		void PublishFirstPersonScreen()
 		{
 			ScreenParams sp;
@@ -2636,7 +2660,7 @@ namespace VR::XRCompositor
 				std::lock_guard<std::mutex> lock(s_screen_mutex);
 				sp = s_screen_params;
 			}
-			const FirstPersonScreenInfo info = ComputeFirstPersonScreen(sp);
+			const FirstPersonScreenInfo info = ComputeFirstPersonScreen(sp, ScreenFov(true));
 			{
 				std::lock_guard<std::mutex> lock(s_screen_mutex);
 				s_fp_screen_info = info;
@@ -2945,11 +2969,23 @@ namespace VR::XRCompositor
 			}
 			const XrDuration period = s.display_period_ns.load(std::memory_order_acquire);
 			now.display_hz = (period > 0) ? static_cast<float>(1.0e9 / static_cast<double>(period)) : 0.0f;
+			// Canted displays: half the yaw from the left view to the right one, outward positive (the left view turned
+			// left, the right one right); 0 for parallel views. q and -q are the same turn.
+			{
+				const XrQuaternionf& a = views[0].pose.orientation;
+				const XrQuaternionf& b = views[1].pose.orientation;
+				const float rw = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z;
+				const float ry = a.w * b.y - a.y * b.w - a.z * b.x + a.x * b.z;
+				const float sign = (rw < 0.0f) ? -1.0f : 1.0f;
+				const float cant = -std::atan2(sign * ry, sign * rw) * kDeg;
+				now.cant_deg = (std::isfinite(cant) && std::abs(cant) < 30.0f) ? cant : 0.0f;
+			}
 
 			bool changed = false;
 			{
 				std::lock_guard<std::mutex> lock(s_eye_mutex);
-				changed = !s_eye_logged.valid || std::abs(now.ipd_m - s_eye_logged.ipd_m) > 0.0005f;
+				changed = !s_eye_logged.valid || std::abs(now.ipd_m - s_eye_logged.ipd_m) > 0.0005f ||
+				          std::abs(now.cant_deg - s_eye_logged.cant_deg) > 0.5f;
 				for (int eye = 0; eye < 2 && !changed; eye++)
 				{
 					for (int k = 0; k < 4 && !changed; k++)
@@ -2966,11 +3002,14 @@ namespace VR::XRCompositor
 				std::max(now.fov_deg[0][1], now.fov_deg[1][1]));
 			const float union_up = std::max(now.fov_deg[0][2], now.fov_deg[1][2]);
 			const float union_down = std::max(-now.fov_deg[0][3], -now.fov_deg[1][3]);
+			char cant[48] = "";
+			if (std::abs(now.cant_deg) >= 0.05f)
+				std::snprintf(cant, sizeof(cant), "; views canted out %.1f deg", now.cant_deg);
 			Console.WriteLn("(VR) Eyes: IPD %.1f mm; left fov L/R/U/D %.1f/%.1f/%.1f/%.1f, right %.1f/%.1f/%.1f/%.1f; "
-							"union H +-%.1f V +%.1f/-%.1f deg; display %.1f Hz",
+							"union H +-%.1f V +%.1f/-%.1f deg%s; display %.1f Hz",
 				now.ipd_m * 1000.0f, now.fov_deg[0][0], now.fov_deg[0][1], now.fov_deg[0][2], now.fov_deg[0][3],
 				now.fov_deg[1][0], now.fov_deg[1][1], now.fov_deg[1][2], now.fov_deg[1][3], union_h, union_up, union_down,
-				now.display_hz);
+				cant, now.display_hz);
 		}
 
 		// xrLocateViews for the background layer and the Eyes line. True when both views have a valid orientation.
@@ -2993,18 +3032,778 @@ namespace VR::XRCompositor
 			return true;
 		}
 
-		// The black background under every other layer: a projection layer over both eyes' views that always shows
-		// the one image cleared at Initialize.
-		void MakeBackgroundLayer(const XrView* views, XrCompositionLayerProjectionView* pv, XrCompositionLayerProjection* layer)
+		// Edge fill ([VR] EdgeFill, on by default; needs the opaque background). Behind the first-person screen the
+		// background layer shows a dim, blurred continuation of the picture instead of black, so a head turn faster than
+		// the screen's margin shows more of the room rather than a black border.
+		//
+		// Head-locked, in the background's own slot (no extra layer): the background is a projection layer the runtime
+		// draws at each eye's own view, and SteamVR is not relied on to take a projection view wider than the eye's (which
+		// a world-locked fill would need to reach past the screen), nor may a quad replace it (SteamVR's own scene would
+		// show around the screens again). So each eye's half of the fill holds the picture where the first-person screen
+		// sits in that eye's view when the head is where the frame was rendered from (half the IPD to the side, turned by
+		// any display cant), its edge texels stretched over the rest of the view. Still, it lines up with the screen; in a
+		// fast turn the strip the screen uncovers shows that blurred room a few degrees off, like a coloured comfort
+		// vignette, and the screen's own margin hides most of it.
+		//
+		// Built on the GS thread from the presented frame with GPU copies and blits only, recorded in its own command
+		// buffer and submitted on the compositor's queue (no CPU readback): the frame box-filtered down to
+		// kFillSmallWidth wide (a first scale of 1 to 2, then exact halvings, so it is stable and does not shimmer), dimmed
+		// to half by averaging each texel with a black one (copied into the even columns of an image whose odd columns stay
+		// black, then halved across), scaled back up kFillUpscale times, cut and stretched into each eye's half of a canvas,
+		// and copied into the fill's swapchain. Never waits: a fill still on the GPU, or a swapchain image not back yet,
+		// skips this present's update and the runtime keeps showing the last one. Black behind anything else, and on any
+		// failure (the fill then stays off for the session).
+		constexpr u32 kFillEyeSize = 128;    // each eye's half of the canvas, square: the runtime stretches it over the view
+		constexpr u32 kFillSmallWidth = 32;  // the blur
+		constexpr u32 kFillUpscale = 5;      // the cut's resolution: about half a degree
+		constexpr u32 kFillMaxRegions = 9;   // per eye: the picture, its four edges stretched, its four corners
+		constexpr int64_t kFillWaitNs = 1000000;
+		constexpr u32 kFillBusyReport = 120; // skipped updates (the GPU behind) before the log says so, once
+
+		struct FillPlan
 		{
+			u32 l0_w = 0, l0_h = 0; // the chain's first level: the frame scaled down by 1 to 2
+			u32 levels = 0;         // the chain's levels (0: no plan); the last is small_w x small_h
+			u32 small_w = 0, small_h = 0;
+		};
+
+		// The box-filter chain for a src_w x src_h frame: a first level small_w * 2^k wide (at most the frame's width,
+		// above half of it), then halvings down to small_w (kFillSmallWidth, or the frame's width if narrower).
+		FillPlan PlanFill(u32 src_w, u32 src_h)
+		{
+			FillPlan p;
+			if (src_w < 2 || src_h < 2 || src_w > 16384 || src_h > 16384)
+				return p;
+			p.small_w = std::min(kFillSmallWidth, src_w);
+			p.small_h = std::max(1u, static_cast<u32>(std::lround(static_cast<double>(src_h) * p.small_w / src_w)));
+			u32 k = 0;
+			while (k < 12 && (p.small_w << (k + 1)) <= src_w)
+				k++;
+			p.l0_w = p.small_w << k;
+			p.l0_h = p.small_h << k;
+			p.levels = k + 1;
+			return p;
+		}
+
+		// One blit of the fill: a rectangle of the scaled-up picture into a rectangle of one eye's canvas (texels).
+		struct FillRegion
+		{
+			s32 sx0, sy0, sx1, sy1;
+			s32 dx0, dy0, dx1, dy1;
+		};
+
+		// One eye's view and the picture in it, as tangents: left, right, up, down (left and down negative).
+		struct FillEye
+		{
+			float view[4];
+			float picture[4];
+		};
+
+		// The picture where the first-person screen (width_m x height_m, distance_m ahead of the head) sits in eye e's view
+		// with the head where its frame was rendered from: seen from half the IPD to that side, and turned by the eye's
+		// outward cant (its edges exactly, the inside linearly). False when either is unusable.
+		bool FillEyeTangents(int eye, const EyeInfo& eyes, float distance_m, float width_m, float height_m, FillEye* out)
+		{
+			constexpr float kRad = 3.14159265f / 180.0f;
+			if (!std::isfinite(distance_m) || !std::isfinite(width_m) || !std::isfinite(height_m) || !(distance_m > 0.0f) ||
+				!(width_m > 0.0f) || !(height_m > 0.0f))
+				return false;
+			for (int k = 0; k < 4; k++)
+			{
+				const float a = eyes.fov_deg[eye][k];
+				if (!std::isfinite(a) || std::abs(a) >= 89.0f)
+					return false;
+				out->view[k] = std::tan(a * kRad);
+			}
+			const float ipd = (std::isfinite(eyes.ipd_m) && eyes.ipd_m > 0.0f && eyes.ipd_m < 0.1f) ? eyes.ipd_m : 0.0f;
+			const float side = (eye == 0) ? -0.5f * ipd : 0.5f * ipd; // metres to the right of the head
+			const float cant = std::isfinite(eyes.cant_deg) ? std::clamp(eyes.cant_deg, -30.0f, 30.0f) * kRad : 0.0f;
+			const float turn = (eye == 0) ? cant : -cant; // the eye's yaw off the head, left positive
+			const float a_l = std::atan((-0.5f * width_m - side) / distance_m) + turn;
+			const float a_r = std::atan((0.5f * width_m - side) / distance_m) + turn;
+			if (std::abs(a_l) >= 1.55f || std::abs(a_r) >= 1.55f)
+				return false;
+			out->picture[0] = std::tan(a_l);
+			out->picture[1] = std::tan(a_r);
+			out->picture[2] = 0.5f * height_m / distance_m;
+			out->picture[3] = -0.5f * height_m / distance_m;
+			return out->view[1] > out->view[0] && out->view[2] > out->view[3];
+		}
+
+		// The blits that fill one eye's cw x ch canvas from the pw x ph picture: the picture where it lands in the view
+		// (cut to it), its first and last columns stretched left and right of it, its top and bottom rows above and below,
+		// its corner texels into the corners. They tile the canvas exactly. 0 for unusable input.
+		u32 PlanFillBlits(const FillEye& fe, u32 pw, u32 ph, u32 cw, u32 ch, FillRegion* out)
+		{
+			const float* v = fe.view;
+			const float* p = fe.picture;
+			for (int k = 0; k < 4; k++)
+			{
+				if (!std::isfinite(v[k]) || !std::isfinite(p[k]))
+					return 0;
+			}
+			if (!(v[1] > v[0]) || !(v[2] > v[3]) || !(p[1] > p[0]) || !(p[2] > p[3]) || pw == 0 || ph == 0 || cw == 0 ||
+				ch == 0)
+				return 0;
+			// The picture's rectangle in canvas texels (x right, y down from the view's top).
+			const float x0 = (p[0] - v[0]) / (v[1] - v[0]) * static_cast<float>(cw);
+			const float x1 = (p[1] - v[0]) / (v[1] - v[0]) * static_cast<float>(cw);
+			const float y0 = (v[2] - p[2]) / (v[2] - v[3]) * static_cast<float>(ch);
+			const float y1 = (v[2] - p[3]) / (v[2] - v[3]) * static_cast<float>(ch);
+			const auto clamp_round = [](float f, s32 lo, s32 hi) {
+				if (!(f > static_cast<float>(lo)))
+					return lo;
+				if (!(f < static_cast<float>(hi)))
+					return hi;
+				return std::clamp(static_cast<s32>(std::lround(f)), lo, hi);
+			};
+			const s32 icw = static_cast<s32>(cw), ich = static_cast<s32>(ch);
+			const s32 ipw = static_cast<s32>(pw), iph = static_cast<s32>(ph);
+			// Its edges on the canvas, rounded and clipped to it, and the picture texels between them (at least one).
+			const s32 cx0 = clamp_round(x0, 0, icw), cx1 = clamp_round(x1, 0, icw);
+			const s32 cy0 = clamp_round(y0, 0, ich), cy1 = clamp_round(y1, 0, ich);
+			const s32 sx0 = clamp_round((static_cast<float>(cx0) - x0) / (x1 - x0) * static_cast<float>(pw), 0, ipw - 1);
+			const s32 sx1 = std::max(clamp_round((static_cast<float>(cx1) - x0) / (x1 - x0) * static_cast<float>(pw), 0, ipw), sx0 + 1);
+			const s32 sy0 = clamp_round((static_cast<float>(cy0) - y0) / (y1 - y0) * static_cast<float>(ph), 0, iph - 1);
+			const s32 sy1 = std::max(clamp_round((static_cast<float>(cy1) - y0) / (y1 - y0) * static_cast<float>(ph), 0, iph), sy0 + 1);
+			u32 n = 0;
+			const auto add = [&](s32 ax0, s32 ay0, s32 ax1, s32 ay1, s32 bx0, s32 by0, s32 bx1, s32 by1) {
+				if (bx1 > bx0 && by1 > by0 && ax1 > ax0 && ay1 > ay0 && n < kFillMaxRegions)
+					out[n++] = FillRegion{ax0, ay0, ax1, ay1, bx0, by0, bx1, by1};
+			};
+			add(sx0, sy0, sx1, sy1, cx0, cy0, cx1, cy1);                 // the picture
+			add(0, sy0, 1, sy1, 0, cy0, cx0, cy1);                        // left of it
+			add(ipw - 1, sy0, ipw, sy1, cx1, cy0, icw, cy1);              // right of it
+			add(sx0, 0, sx1, 1, cx0, 0, cx1, cy0);                        // above it
+			add(sx0, iph - 1, sx1, iph, cx0, cy1, cx1, ich);              // below it
+			add(0, 0, 1, 1, 0, 0, cx0, cy0);                              // the corners
+			add(ipw - 1, 0, ipw, 1, cx1, 0, icw, cy0);
+			add(0, iph - 1, 1, iph, 0, cy1, cx0, ich);
+			add(ipw - 1, iph - 1, ipw, iph, cx1, cy1, icw, ich);
+			return n;
+		}
+
+		// A device image the fill blits through, in GENERAL layout once laid out (UNORM: the frame's bytes as they are,
+		// so the blur averages gamma-encoded values like the screen shows them).
+		struct FillImage
+		{
+			VkImage image = VK_NULL_HANDLE;
+			VkDeviceMemory memory = VK_NULL_HANDLE;
+		};
+
+		struct
+		{
+			bool enabled = false;  // [VR] EdgeFill with the opaque background (Initialize)
+			bool disabled = false; // a failure turned it off for the session
+			// The swapchain's last released image is a fill from the present first-person spell: written on the GS thread,
+			// read by the pacer (with the swapchain handle) under submit_mutex as it builds the background.
+			std::atomic_bool live{false};
+			XrSwapchain swapchain = XR_NULL_HANDLE; // 2 * kFillEyeSize x kFillEyeSize, both eyes side by side
+			std::vector<XrSwapchainImageVulkan2KHR> images;
+			bool wait_pending = false;
+			uint32_t pending_index = 0;
+			VkCommandBuffer cmd = VK_NULL_HANDLE;
+			VkFence fence = VK_NULL_HANDLE;
+			bool fence_submitted = false;
+			// For a src_w x src_h frame (plan): the box-filter chain (mip levels), misc (the dim's interleave at (0, 0),
+			// 2 * small_w x small_h, and the canvas below it at (0, small_h)), the dimmed small picture and its upscale.
+			FillPlan plan;
+			u32 src_w = 0, src_h = 0;
+			FillImage chain, misc, dimmed, up;
+			bool images_ready = false; // in GENERAL, misc cleared to black
+			bool live_logged = false;
+			u32 busy_skips = 0;
+			bool busy_logged = false;
+		} s_fill;
+
+		void DestroyFillImages(const Internal::VulkanHandles& h)
+		{
+			FillImage* const all[4] = {&s_fill.chain, &s_fill.misc, &s_fill.dimmed, &s_fill.up};
+			for (FillImage* img : all)
+			{
+				if (h.IsValid())
+				{
+					if (img->image != VK_NULL_HANDLE)
+						vkDestroyImage(h.device, img->image, nullptr);
+					if (img->memory != VK_NULL_HANDLE)
+						vkFreeMemory(h.device, img->memory, nullptr);
+				}
+				*img = FillImage{};
+			}
+			s_fill.plan = FillPlan{};
+			s_fill.src_w = 0;
+			s_fill.src_h = 0;
+			s_fill.images_ready = false;
+		}
+
+		// Shutdown (the pacer gone): every fill resource. With the compositor abandoned the swapchain is only forgotten.
+		void DestroyFillResources()
+		{
+			s_fill.live.store(false, std::memory_order_release);
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			if (h.IsValid() && s_fill.fence != VK_NULL_HANDLE && s_fill.fence_submitted &&
+				vkWaitForFences(h.device, 1, &s_fill.fence, VK_TRUE, kTeardownFenceNs) == VK_TIMEOUT)
+			{
+				Console.Warning("(VR) Edge fill: its blit fence was still busy after 250 ms during teardown.");
+			}
+			s_fill.fence_submitted = false;
+			if (s_fill.swapchain != XR_NULL_HANDLE && !s.abandoned.load(std::memory_order_acquire))
+				xrDestroySwapchain(s_fill.swapchain);
+			s_fill.swapchain = XR_NULL_HANDLE;
+			s_fill.images.clear();
+			s_fill.wait_pending = false;
+			s_fill.pending_index = 0;
+			DestroyFillImages(h);
+			if (h.IsValid())
+			{
+				if (s_fill.fence != VK_NULL_HANDLE)
+					vkDestroyFence(h.device, s_fill.fence, nullptr);
+				if (s_fill.cmd != VK_NULL_HANDLE && s.cmd_pool != VK_NULL_HANDLE)
+					vkFreeCommandBuffers(h.device, s.cmd_pool, 1, &s_fill.cmd);
+			}
+			s_fill.fence = VK_NULL_HANDLE;
+			s_fill.cmd = VK_NULL_HANDLE;
+		}
+
+		// Any failure: the fill stays off for the session and the background black.
+		void FailFill(const char* what, int code)
+		{
+			s_fill.disabled = true;
+			s_fill.live.store(false, std::memory_order_release);
+			Console.Warning("(VR) Edge fill: %s failed (%d); the background stays black for this session.", what, code);
+		}
+
+		bool CreateFillImage(const Internal::VulkanHandles& h, u32 width, u32 height, u32 levels, FillImage* img)
+		{
+			VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+			ci.imageType = VK_IMAGE_TYPE_2D;
+			ci.format = VK_FORMAT_R8G8B8A8_UNORM;
+			ci.extent = {width, height, 1};
+			ci.mipLevels = levels;
+			ci.arrayLayers = 1;
+			ci.samples = VK_SAMPLE_COUNT_1_BIT;
+			ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+			ci.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+			ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+			ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			VkResult vr = vkCreateImage(h.device, &ci, nullptr, &img->image);
+			if (vr != VK_SUCCESS)
+			{
+				img->image = VK_NULL_HANDLE;
+				FailFill("vkCreateImage", static_cast<int>(vr));
+				return false;
+			}
+			VkMemoryRequirements mr = {};
+			vkGetImageMemoryRequirements(h.device, img->image, &mr);
+			VkPhysicalDeviceMemoryProperties mp = {};
+			vkGetPhysicalDeviceMemoryProperties(h.physical_device, &mp);
+			// Device-local if there is one that fits, else any that does.
+			u32 type = UINT32_MAX;
+			for (int pass = 0; pass < 2 && type == UINT32_MAX; pass++)
+			{
+				for (u32 i = 0; i < mp.memoryTypeCount; i++)
+				{
+					if ((mr.memoryTypeBits & (1u << i)) &&
+						(pass == 1 || (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)))
+					{
+						type = i;
+						break;
+					}
+				}
+			}
+			if (type == UINT32_MAX)
+			{
+				FailFill("image memory type lookup", 0);
+				return false;
+			}
+			VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+			mai.allocationSize = mr.size;
+			mai.memoryTypeIndex = type;
+			vr = vkAllocateMemory(h.device, &mai, nullptr, &img->memory);
+			if (vr != VK_SUCCESS)
+			{
+				img->memory = VK_NULL_HANDLE;
+				FailFill("vkAllocateMemory", static_cast<int>(vr));
+				return false;
+			}
+			vr = vkBindImageMemory(h.device, img->image, img->memory, 0);
+			if (vr != VK_SUCCESS)
+			{
+				FailFill("vkBindImageMemory", static_cast<int>(vr));
+				return false;
+			}
+			return true;
+		}
+
+		// The fill's command buffer, fence and swapchain (once), and its images for a src_w x src_h frame (again when the
+		// frame's size changes; the caller has made sure the previous fill is off the GPU). False to skip this present;
+		// a failure also turns the fill off (FailFill).
+		bool EnsureFillResources(const Internal::VulkanHandles& h, u32 src_w, u32 src_h)
+		{
+			if (s_fill.cmd == VK_NULL_HANDLE)
+			{
+				VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+				cai.commandPool = s.cmd_pool;
+				cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+				cai.commandBufferCount = 1;
+				const VkResult vr = vkAllocateCommandBuffers(h.device, &cai, &s_fill.cmd);
+				if (vr != VK_SUCCESS)
+				{
+					s_fill.cmd = VK_NULL_HANDLE;
+					FailFill("vkAllocateCommandBuffers", static_cast<int>(vr));
+					return false;
+				}
+			}
+			if (s_fill.fence == VK_NULL_HANDLE)
+			{
+				VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+				const VkResult vr = vkCreateFence(h.device, &fci, nullptr, &s_fill.fence);
+				if (vr != VK_SUCCESS)
+				{
+					s_fill.fence = VK_NULL_HANDLE;
+					FailFill("vkCreateFence", static_cast<int>(vr));
+					return false;
+				}
+				s_fill.fence_submitted = false;
+			}
+			if (s_fill.swapchain == XR_NULL_HANDLE)
+			{
+				// The screen's format: the canvas's bytes are copied in as they are, like the screen's.
+				XrSwapchainCreateInfo ci = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
+				ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+				ci.format = static_cast<int64_t>(s.swapchain_format);
+				ci.sampleCount = 1;
+				ci.width = 2 * kFillEyeSize;
+				ci.height = kFillEyeSize;
+				ci.faceCount = 1;
+				ci.arraySize = 1;
+				ci.mipCount = 1;
+				XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &s_fill.swapchain);
+				if (XR_FAILED(res))
+				{
+					s_fill.swapchain = XR_NULL_HANDLE;
+					FailFill("xrCreateSwapchain", static_cast<int>(res));
+					return false;
+				}
+				uint32_t count = 0;
+				res = xrEnumerateSwapchainImages(s_fill.swapchain, 0, &count, nullptr);
+				if (XR_FAILED(res) || count == 0)
+				{
+					FailFill("xrEnumerateSwapchainImages", static_cast<int>(res));
+					return false;
+				}
+				s_fill.images.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+				res = xrEnumerateSwapchainImages(s_fill.swapchain, count, &count,
+					reinterpret_cast<XrSwapchainImageBaseHeader*>(s_fill.images.data()));
+				if (XR_FAILED(res))
+				{
+					FailFill("xrEnumerateSwapchainImages", static_cast<int>(res));
+					return false;
+				}
+				s_fill.wait_pending = false;
+			}
+			if (s_fill.chain.image != VK_NULL_HANDLE && s_fill.src_w == src_w && s_fill.src_h == src_h)
+				return true;
+
+			DestroyFillImages(h);
+			const FillPlan p = PlanFill(src_w, src_h);
+			if (p.levels == 0)
+				return false;
+			if (!CreateFillImage(h, p.l0_w, p.l0_h, p.levels, &s_fill.chain) ||
+				!CreateFillImage(h, std::max(2 * p.small_w, 2 * kFillEyeSize), p.small_h + kFillEyeSize, 1, &s_fill.misc) ||
+				!CreateFillImage(h, p.small_w, p.small_h, 1, &s_fill.dimmed) ||
+				!CreateFillImage(h, p.small_w * kFillUpscale, p.small_h * kFillUpscale, 1, &s_fill.up))
+			{
+				return false;
+			}
+			s_fill.plan = p;
+			s_fill.src_w = src_w;
+			s_fill.src_h = src_h;
+			s_fill.images_ready = false;
+			Console.WriteLn("(VR) Edge fill: blur chain for a %ux%u frame: %ux%u, %u level(s) down to %ux%u, dimmed and "
+							"scaled up to %ux%u.",
+				src_w, src_h, p.l0_w, p.l0_h, p.levels, p.small_w, p.small_h, p.small_w * kFillUpscale,
+				p.small_h * kFillUpscale);
+			return true;
+		}
+
+		// Everything recorded so far reads and writes before anything after it (the fill's images stay in GENERAL).
+		void FillBarrier(VkCommandBuffer cmd)
+		{
+			VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+			mb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+			mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+			vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0,
+				nullptr);
+		}
+
+		VkImageBlit FillBlit(u32 src_level, s32 sx0, s32 sy0, s32 sx1, s32 sy1, u32 dst_level, s32 dx0, s32 dy0, s32 dx1,
+			s32 dy1)
+		{
+			VkImageBlit b = {};
+			b.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, src_level, 0, 1};
+			b.srcOffsets[0] = {sx0, sy0, 0};
+			b.srcOffsets[1] = {sx1, sy1, 1};
+			b.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, dst_level, 0, 1};
+			b.dstOffsets[0] = {dx0, dy0, 0};
+			b.dstOffsets[1] = {dx1, dy1, 1};
+			return b;
+		}
+
+		// This present's fill (GS thread, after the screen copies and before the layers are published): from the frame
+		// src (its first layer), for the flat first-person screen as placed this present. Clears the fill's live flag
+		// when it cannot be built; leaves it as it is when this present's update is only skipped (the last one stays).
+		void UpdateEdgeFill(GSTextureVK* src, float distance_m, float width_m, float height_m)
+		{
+			if (!s_fill.enabled || s_fill.disabled || !s.bg_ready)
+				return;
+			const EyeInfo eyes = GetEyeInfo();
+			FillEye fe[2];
+			if (!eyes.valid || !FillEyeTangents(0, eyes, distance_m, width_m, height_m, &fe[0]) ||
+				!FillEyeTangents(1, eyes, distance_m, width_m, height_m, &fe[1]))
+			{
+				s_fill.live.store(false, std::memory_order_release);
+				return;
+			}
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			if (!h.IsValid() || s.cmd_pool == VK_NULL_HANDLE)
+				return;
+			const u32 src_w = static_cast<u32>(src->GetWidth());
+			const u32 src_h = static_cast<u32>(src->GetHeight());
+
+			// The last fill must be off the GPU before its images are written again: never wait for it.
+			if (s_fill.fence_submitted)
+			{
+				const VkResult fr = vkGetFenceStatus(h.device, s_fill.fence);
+				if (fr == VK_NOT_READY)
+				{
+					if (++s_fill.busy_skips == kFillBusyReport && !s_fill.busy_logged)
+					{
+						s_fill.busy_logged = true;
+						Console.WriteLn("(VR) Edge fill: %u updates skipped so far with the last one still on the GPU (the "
+										"fill then shows the one before).",
+							kFillBusyReport);
+					}
+					return;
+				}
+				if (fr != VK_SUCCESS)
+				{
+					FailFill("vkGetFenceStatus", static_cast<int>(fr));
+					return;
+				}
+				vkResetFences(h.device, 1, &s_fill.fence);
+				s_fill.fence_submitted = false;
+			}
+			if (!EnsureFillResources(h, src_w, src_h))
+				return;
+
+			const FillPlan& p = s_fill.plan;
+			const u32 up_w = p.small_w * kFillUpscale;
+			const u32 up_h = p.small_h * kFillUpscale;
+			FillRegion regions[2][kFillMaxRegions];
+			u32 counts[2] = {0, 0};
+			for (int e = 0; e < 2; e++)
+				counts[e] = PlanFillBlits(fe[e], up_w, up_h, kFillEyeSize, kFillEyeSize, regions[e]);
+			if (counts[0] == 0 || counts[1] == 0)
+			{
+				s_fill.live.store(false, std::memory_order_release);
+				return;
+			}
+
+			uint32_t index = 0;
+			if (s_fill.wait_pending)
+			{
+				index = s_fill.pending_index;
+			}
+			else
+			{
+				const XrResult ar = LockedAcquire(s_fill.swapchain, &index);
+				if (XR_FAILED(ar) || index >= s_fill.images.size())
+				{
+					FailFill("xrAcquireSwapchainImage", static_cast<int>(ar));
+					return;
+				}
+				s_fill.pending_index = index;
+				s_fill.wait_pending = true;
+			}
+			// XR_TIMEOUT_EXPIRED is a success code: the image is not ours yet; the next present waits on it again.
+			const XrResult wr = BudgetedWaitSwapchainImage(s_fill.swapchain, kFillWaitNs);
+			if (wr == XR_TIMEOUT_EXPIRED)
+				return;
+			if (XR_FAILED(wr))
+			{
+				FailFill("xrWaitSwapchainImage", static_cast<int>(wr));
+				return;
+			}
+			s_fill.wait_pending = false;
+			const VkImage dst = s_fill.images[index].image;
+
+			// From here the waited image must go back to the runtime whatever happens.
+			const VkCommandBuffer cmd = s_fill.cmd;
+			VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+			bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+			VkResult vr = vkBeginCommandBuffer(cmd, &bi);
+			if (vr != VK_SUCCESS)
+			{
+				LockedRelease(s_fill.swapchain);
+				FailFill("vkBeginCommandBuffer", static_cast<int>(vr));
+				return;
+			}
+			const VkImage chain = s_fill.chain.image;
+			const VkImage misc = s_fill.misc.image;
+			const VkImage dimmed = s_fill.dimmed.image;
+			const VkImage up = s_fill.up.image;
+			if (!s_fill.images_ready)
+			{
+				// First use: every image to GENERAL for good, misc cleared to black (the interleave's odd columns are
+				// never written again, so they stay black).
+				const VkImage imgs[4] = {chain, misc, dimmed, up};
+				const u32 levels[4] = {p.levels, 1, 1, 1};
+				VkImageMemoryBarrier ib[4];
+				for (int i = 0; i < 4; i++)
+				{
+					ib[i] = VkImageMemoryBarrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+					ib[i].srcAccessMask = 0;
+					ib[i].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+					ib[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+					ib[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+					ib[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+					ib[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+					ib[i].image = imgs[i];
+					ib[i].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels[i], 0, 1};
+				}
+				vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+					nullptr, 4, ib);
+				VkClearColorValue black = {};
+				black.float32[3] = 1.0f;
+				const VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+				vkCmdClearColorImage(cmd, misc, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &range);
+				s_fill.images_ready = true;
+			}
+			// After whatever the last fill read and wrote (an earlier submission on this queue) and the clear.
+			FillBarrier(cmd);
+			src->TransitionToLayout(cmd, GSTextureVK::Layout::TransferSrc);
+
+			// 1. The frame to the chain's first level (a scale of 1 to 2: every texel counts).
+			const s32 sw = static_cast<s32>(src_w), sh = static_cast<s32>(src_h);
+			const s32 smw = static_cast<s32>(p.small_w), smh = static_cast<s32>(p.small_h);
+			VkImageBlit b = FillBlit(0, 0, 0, sw, sh, 0, 0, 0, static_cast<s32>(p.l0_w), static_cast<s32>(p.l0_h));
+			vkCmdBlitImage(cmd, src->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, chain, VK_IMAGE_LAYOUT_GENERAL, 1, &b,
+				VK_FILTER_LINEAR);
+			// 2. Exact halvings, each texel the mean of four.
+			for (u32 lvl = 1; lvl < p.levels; lvl++)
+			{
+				FillBarrier(cmd);
+				b = FillBlit(lvl - 1, 0, 0, static_cast<s32>(std::max(1u, p.l0_w >> (lvl - 1))),
+					static_cast<s32>(std::max(1u, p.l0_h >> (lvl - 1))), lvl, 0, 0, static_cast<s32>(std::max(1u, p.l0_w >> lvl)),
+					static_cast<s32>(std::max(1u, p.l0_h >> lvl)));
+				vkCmdBlitImage(cmd, chain, VK_IMAGE_LAYOUT_GENERAL, chain, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_LINEAR);
+			}
+			// 3. The dim: each small column into an even column of the interleave (its odd columns black).
+			FillBarrier(cmd);
+			VkImageCopy cols[kFillSmallWidth] = {};
+			for (u32 x = 0; x < p.small_w; x++)
+			{
+				cols[x].srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, p.levels - 1, 0, 1};
+				cols[x].srcOffset = {static_cast<s32>(x), 0, 0};
+				cols[x].dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+				cols[x].dstOffset = {static_cast<s32>(2 * x), 0, 0};
+				cols[x].extent = {1, p.small_h, 1};
+			}
+			vkCmdCopyImage(cmd, chain, VK_IMAGE_LAYOUT_GENERAL, misc, VK_IMAGE_LAYOUT_GENERAL, p.small_w, cols);
+			// 4. Halved across: each texel sampled exactly between its own and the black beside it, so half as bright.
+			FillBarrier(cmd);
+			b = FillBlit(0, 0, 0, 2 * smw, smh, 0, 0, 0, smw, smh);
+			vkCmdBlitImage(cmd, misc, VK_IMAGE_LAYOUT_GENERAL, dimmed, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_LINEAR);
+			// 5. Scaled back up, smooth, for a fine cut.
+			FillBarrier(cmd);
+			b = FillBlit(0, 0, 0, smw, smh, 0, 0, 0, static_cast<s32>(up_w), static_cast<s32>(up_h));
+			vkCmdBlitImage(cmd, dimmed, VK_IMAGE_LAYOUT_GENERAL, up, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_LINEAR);
+			// 6. Each eye's half of the canvas (below the interleave in misc): the picture cut to that eye's view, its
+			// edges stretched past it.
+			FillBarrier(cmd);
+			VkImageBlit eb[2 * kFillMaxRegions];
+			u32 nb = 0;
+			for (int e = 0; e < 2; e++)
+			{
+				const s32 ox = e * static_cast<s32>(kFillEyeSize);
+				for (u32 i = 0; i < counts[e]; i++)
+				{
+					const FillRegion& r = regions[e][i];
+					eb[nb++] = FillBlit(0, r.sx0, r.sy0, r.sx1, r.sy1, 0, ox + r.dx0, smh + r.dy0, ox + r.dx1, smh + r.dy1);
+				}
+			}
+			vkCmdBlitImage(cmd, up, VK_IMAGE_LAYOUT_GENERAL, misc, VK_IMAGE_LAYOUT_GENERAL, nb, eb, VK_FILTER_LINEAR);
+			// 7. The canvas into the swapchain image, byte for byte.
+			FillBarrier(cmd);
+			ImageBarrier(cmd, dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+				VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+			VkImageCopy canvas = {};
+			canvas.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+			canvas.srcOffset = {0, smh, 0};
+			canvas.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+			canvas.dstOffset = {0, 0, 0};
+			canvas.extent = {2 * kFillEyeSize, kFillEyeSize, 1};
+			vkCmdCopyImage(cmd, misc, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &canvas);
+			ImageBarrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+				VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+
+			vr = vkEndCommandBuffer(cmd);
+			if (vr != VK_SUCCESS)
+			{
+				LockedRelease(s_fill.swapchain);
+				FailFill("vkEndCommandBuffer", static_cast<int>(vr));
+				return;
+			}
+			VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+			si.commandBufferCount = 1;
+			si.pCommandBuffers = &cmd;
+			vr = LockedQueueSubmit(h.queue, si, s_fill.fence);
+			if (vr != VK_SUCCESS)
+			{
+				LockedRelease(s_fill.swapchain);
+				FailFill("vkQueueSubmit", static_cast<int>(vr));
+				return;
+			}
+			s_fill.fence_submitted = true;
+			const XrResult rr = LockedRelease(s_fill.swapchain);
+			if (XR_FAILED(rr))
+			{
+				FailFill("xrReleaseSwapchainImage", static_cast<int>(rr));
+				return;
+			}
+			s_fill.live.store(true, std::memory_order_release);
+			if (!s_fill.live_logged)
+			{
+				s_fill.live_logged = true;
+				constexpr float kDeg = 180.0f / 3.14159265f;
+				Console.WriteLn("(VR) Edge fill: on behind the first-person screen: head-locked, %ux%u per eye, from a %ux%u "
+								"box blur of the %ux%u frame at half brightness; picture +-%.1f x +-%.1f deg at %.2f m; %u + "
+								"%u blit region(s) for the eyes.",
+					kFillEyeSize, kFillEyeSize, p.small_w, p.small_h, src_w, src_h,
+					std::atan(0.5f * width_m / distance_m) * kDeg, std::atan(0.5f * height_m / distance_m) * kDeg, distance_m,
+					counts[0], counts[1]);
+			}
+		}
+
+		// PCSX2_VR_SELFTEST: the edge fill's plan (the chain's sizes, each eye's picture, the blits tiling the canvas).
+		void SelfTestEdgeFill()
+		{
+			int pass = 0, fail = 0;
+			const auto check = [&](bool ok, const char* name) {
+				if (ok)
+					pass++;
+				else
+				{
+					fail++;
+					Console.WriteLn("(VR) Edge fill self-test FAIL: %s", name);
+				}
+			};
+			const auto plan_is = [](const FillPlan& p, u32 l0w, u32 l0h, u32 levels, u32 sw, u32 sh) {
+				return p.l0_w == l0w && p.l0_h == l0h && p.levels == levels && p.small_w == sw && p.small_h == sh;
+			};
+			check(plan_is(PlanFill(1536, 1344), 1024, 896, 6, 32, 28), "3x frame: 1.5 down, then five halvings");
+			check(plan_is(PlanFill(512, 448), 512, 448, 5, 32, 28), "1x frame: four halvings");
+			check(plan_is(PlanFill(640, 448), 512, 352, 5, 32, 22), "640 wide: 1.25 down, then four halvings");
+			check(plan_is(PlanFill(24, 20), 24, 20, 1, 24, 20), "a frame narrower than the blur");
+			check(PlanFill(1, 448).levels == 0 && PlanFill(512, 0).levels == 0, "no plan for an empty frame");
+
+			// The blits tile the canvas exactly and stay inside the picture.
+			const auto tiles = [](const FillRegion* g, u32 count, s32 cw, s32 ch, s32 pw, s32 ph) {
+				u64 area = 0;
+				for (u32 i = 0; i < count; i++)
+				{
+					if (g[i].dx0 < 0 || g[i].dy0 < 0 || g[i].dx1 > cw || g[i].dy1 > ch || g[i].dx1 <= g[i].dx0 ||
+						g[i].dy1 <= g[i].dy0 || g[i].sx0 < 0 || g[i].sy0 < 0 || g[i].sx1 > pw || g[i].sy1 > ph ||
+						g[i].sx1 <= g[i].sx0 || g[i].sy1 <= g[i].sy0)
+						return false;
+					area += static_cast<u64>(g[i].dx1 - g[i].dx0) * static_cast<u64>(g[i].dy1 - g[i].dy0);
+					for (u32 j = 0; j < i; j++)
+					{
+						if (!(g[i].dx1 <= g[j].dx0 || g[j].dx1 <= g[i].dx0 || g[i].dy1 <= g[j].dy0 || g[j].dy1 <= g[i].dy0))
+							return false;
+					}
+				}
+				return area == static_cast<u64>(cw) * static_cast<u64>(ch);
+			};
+			FillRegion r[kFillMaxRegions];
+			// Covering the view (Auto FOV): one cut, the middle of the picture.
+			FillEye cover = {{-1.0f, 1.0f, 1.0f, -1.0f}, {-1.5f, 1.5f, 1.2f, -1.2f}};
+			u32 n = PlanFillBlits(cover, 160, 140, 128, 128, r);
+			check(n == 1 && tiles(r, n, 128, 128, 160, 140) && r[0].sx0 == 27 && r[0].sx1 == 133 && r[0].sy0 == 12 &&
+					  r[0].sy1 == 128,
+				"a picture covering the view: one cut");
+			// Inside the view (a narrower profile FOV): the picture and eight stretched edges and corners.
+			FillEye inside = {{-1.5f, 1.5f, 1.5f, -1.5f}, {-1.0f, 1.0f, 0.8f, -0.8f}};
+			n = PlanFillBlits(inside, 160, 140, 128, 128, r);
+			check(n == 9 && tiles(r, n, 128, 128, 160, 140) && r[0].sx0 == 0 && r[0].sx1 == 160 && r[0].sy0 == 0 &&
+					  r[0].sy1 == 140,
+				"a picture inside the view: nine blits");
+			// Off to one side and above, and an asymmetric eye.
+			FillEye off = {{-1.0f, 1.0f, 1.0f, -1.0f}, {-3.0f, -2.0f, 3.0f, 2.0f}};
+			n = PlanFillBlits(off, 160, 140, 128, 128, r);
+			check(n >= 1 && tiles(r, n, 128, 128, 160, 140), "a picture outside the view: its corner stretched over it");
+			FillEye asym = {{-1.2f, 0.9f, 1.1f, -1.3f}, {-1.1f, 1.3f, 1.0f, -1.0f}};
+			n = PlanFillBlits(asym, 160, 140, 128, 128, r);
+			check(n >= 2 && tiles(r, n, 128, 128, 160, 140), "an asymmetric eye");
+			FillEye bad = {{-1.0f, 1.0f, 1.0f, -1.0f}, {std::numeric_limits<float>::quiet_NaN(), 1.0f, 1.0f, -1.0f}};
+			check(PlanFillBlits(bad, 160, 140, 128, 128, r) == 0 && PlanFillBlits(cover, 0, 140, 128, 128, r) == 0,
+				"no blits for unusable input");
+
+			// Each eye's picture: the screen seen from half the IPD to that side (and turned by a cant).
+			EyeInfo eyes;
+			eyes.valid = true;
+			for (int e = 0; e < 2; e++)
+			{
+				eyes.fov_deg[e][0] = -45.0f;
+				eyes.fov_deg[e][1] = 45.0f;
+				eyes.fov_deg[e][2] = 45.0f;
+				eyes.fov_deg[e][3] = -45.0f;
+			}
+			FillEye l = {};
+			FillEye rt = {};
+			check(FillEyeTangents(0, eyes, 1.5f, 4.767f, 3.575f, &l) && std::abs(l.picture[0] + 1.589f) < 2e-3f &&
+					  std::abs(l.picture[1] - 1.589f) < 2e-3f && std::abs(l.picture[2] - 1.1917f) < 1e-3f &&
+					  std::abs(l.view[0] + 1.0f) < 1e-4f,
+				"no IPD: the screen's own tangents");
+			eyes.ipd_m = 0.064f;
+			check(FillEyeTangents(0, eyes, 1.5f, 4.767f, 3.575f, &l) && FillEyeTangents(1, eyes, 1.5f, 4.767f, 3.575f, &rt) &&
+					  std::abs(l.picture[0] - (-1.589f + 0.02133f)) < 2e-3f && std::abs(rt.picture[1] - (1.589f - 0.02133f)) < 2e-3f,
+				"the left eye sees the screen further right, the right eye further left");
+			eyes.ipd_m = 0.0f;
+			eyes.cant_deg = 5.0f;
+			check(FillEyeTangents(0, eyes, 1.5f, 3.0f, 2.0f, &l) && std::abs(l.picture[1] - std::tan(std::atan(1.0f) + 5.0f * 3.14159265f / 180.0f)) < 1e-3f,
+				"an outward cant turns the left eye's picture right");
+			check(!FillEyeTangents(0, eyes, 0.0f, 3.0f, 2.0f, &l), "no picture at zero distance");
+			Console.WriteLn("(VR) Edge fill self-test: %d check(s) passed, %d failed.", pass, fail);
+		}
+
+		// The background under every other layer: a projection layer over both eyes' views that shows the one image
+		// cleared to black at Initialize, or (fill: behind the first-person screen, with a live edge fill) each eye's half
+		// of the edge fill.
+		void MakeBackgroundLayer(const XrView* views, XrCompositionLayerProjectionView* pv, XrCompositionLayerProjection* layer,
+			bool fill)
+		{
+			fill = fill && s_fill.swapchain != XR_NULL_HANDLE;
 			for (u32 i = 0; i < 2; i++)
 			{
 				pv[i] = XrCompositionLayerProjectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
 				pv[i].pose = views[i].pose;
 				pv[i].fov = views[i].fov;
-				pv[i].subImage.swapchain = s.bg_swapchain;
-				pv[i].subImage.imageRect.offset = {0, 0};
-				pv[i].subImage.imageRect.extent = {static_cast<s32>(kBackgroundSize), static_cast<s32>(kBackgroundSize)};
+				if (fill)
+				{
+					pv[i].subImage.swapchain = s_fill.swapchain;
+					pv[i].subImage.imageRect.offset = {static_cast<s32>(i * kFillEyeSize), 0};
+					pv[i].subImage.imageRect.extent = {static_cast<s32>(kFillEyeSize), static_cast<s32>(kFillEyeSize)};
+				}
+				else
+				{
+					pv[i].subImage.swapchain = s.bg_swapchain;
+					pv[i].subImage.imageRect.offset = {0, 0};
+					pv[i].subImage.imageRect.extent = {static_cast<s32>(kBackgroundSize), static_cast<s32>(kBackgroundSize)};
+				}
 				pv[i].subImage.imageArrayIndex = 0;
 			}
 			*layer = XrCompositionLayerProjection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
@@ -3172,12 +3971,24 @@ namespace VR::XRCompositor
 				views[0].recommendedImageRectHeight);
 		}
 
-		// When the first-person screen turns on: how much of the view it covers against the headset's field of view,
-		// and its pixel density at the centre against the headset's.
+		// The vertical FOV the first-person screen was last logged for (0: the profile's height), so a change while it is
+		// up (the headset's eyes arriving after the arm) is logged again. GS thread.
+		float s_fp_logged_fov = -1.0f;
+
+		// When the first-person screen turns on (and when the FOV sizing it changes while it is up): the camera FOV, how
+		// much of the view the screen covers against the headset's field of view, and its pixel density at the centre
+		// against the headset's. Logged for the FOV this arm settles to, so the margin is the one that holds once the
+		// half-second ease is done.
 		void LogFirstPersonScreen(const ScreenParams& sp)
 		{
 			constexpr float kDeg = 180.0f / 3.14159265f;
-			const FirstPersonScreenInfo geo = ComputeFirstPersonScreen(sp);
+			const CameraDriver::FovState fov = CameraDriver::GetFovState();
+			const float fov_deg = fov.sizes_screen ? fov.target_deg : 0.0f;
+			s_fp_logged_fov = fov_deg;
+			char fov_text[128] = "sized by the profile";
+			if (fov_deg > 0.0f)
+				std::snprintf(fov_text, sizeof(fov_text), "camera FOV %.1f deg (%s)", fov_deg, fov.source);
+			const FirstPersonScreenInfo geo = ComputeFirstPersonScreen(sp, fov_deg);
 			const float d = geo.distance_m;
 			const bool curved = geo.curved;
 			const float width_m = geo.width_m;
@@ -3193,9 +4004,9 @@ namespace VR::XRCompositor
 			const EyeInfo eyes = GetEyeInfo();
 			if (!eyes.valid)
 			{
-				Console.WriteLn("(VR) First-person screen: +-%.1f x +-%.1f deg at %.2f m (%.2f x %.2f m); headset field of "
-								"view not known yet; centre %.1f x %.1f px/deg from %ux%u",
-					half_w_deg, half_h_deg, d, width_m, height_m, px_deg_h, px_deg_v, w_px, h_px);
+				Console.WriteLn("(VR) First-person screen: +-%.1f x +-%.1f deg at %.2f m (%.2f x %.2f m), %s; headset field "
+								"of view not known yet; centre %.1f x %.1f px/deg from %ux%u",
+					half_w_deg, half_h_deg, d, width_m, height_m, fov_text, px_deg_h, px_deg_v, w_px, h_px);
 				return;
 			}
 			const float union_h = std::max(std::max(-eyes.fov_deg[0][0], -eyes.fov_deg[1][0]),
@@ -3216,9 +4027,10 @@ namespace VR::XRCompositor
 			}
 			if (headset_eyes > 0)
 				headset_px_deg /= static_cast<float>(headset_eyes);
-			Console.WriteLn("(VR) First-person screen: +-%.1f x +-%.1f deg at %.2f m (%.2f x %.2f m); margin vs headset: "
-							"yaw %+.1f up %+.1f down %+.1f deg; centre %.1f x %.1f px/deg from %ux%u; headset about %.1f px/deg",
-				half_w_deg, half_h_deg, d, width_m, height_m, half_w_deg - union_h, half_h_deg - union_up,
+			Console.WriteLn("(VR) First-person screen: +-%.1f x +-%.1f deg at %.2f m (%.2f x %.2f m), %s; margin vs "
+							"headset: yaw %+.1f up %+.1f down %+.1f deg; centre %.1f x %.1f px/deg from %ux%u; headset about "
+							"%.1f px/deg",
+				half_w_deg, half_h_deg, d, width_m, height_m, fov_text, half_w_deg - union_h, half_h_deg - union_up,
 				half_h_deg - union_down, px_deg_h, px_deg_v, w_px, h_px, headset_px_deg);
 		}
 
@@ -4579,7 +5391,7 @@ namespace VR::XRCompositor
 							turn = set.turn_rate * static_cast<float>(dt);
 						}
 						if (views_ok)
-							MakeBackgroundLayer(views, bg_views, &bg);
+							MakeBackgroundLayer(views, bg_views, &bg, set.fp_screen && s_fill.live.load(std::memory_order_acquire));
 						submit_count = BuildSubmitArray(set, views_ok ? &bg : nullptr, stale, turn, submit);
 					}
 					const s64 end_start_ns = SteadyNowNs();
@@ -4719,9 +5531,12 @@ namespace VR::XRCompositor
 		// Pure maths, so it runs even when the session below fails.
 		if (std::getenv("PCSX2_VR_HANDS_SELFTEST") != nullptr)
 			HandModel::SelfTest();
-		// The pacer's menu pointer placement, with the other menu pointer self-tests.
+		// The pacer's menu pointer placement, with the other menu pointer self-tests, and the edge fill's plan.
 		if (std::getenv("PCSX2_VR_SELFTEST") != nullptr)
+		{
 			SelfTestMenuPointerNow();
+			SelfTestEdgeFill();
+		}
 
 		s.screen_anchor_x = 0.0f;
 		s.screen_anchor_y = 0.0f;
@@ -4943,6 +5758,21 @@ namespace VR::XRCompositor
 
 		CreateBackground();
 		QueryViewConfiguration();
+
+		// [VR] EdgeFill, read once like OpaqueBackground: it shows in the background's slot, so it needs that layer. Its
+		// swapchain and images are made the first time the first-person screen is up.
+		s_fill.enabled = EmuConfig.VR.EdgeFill && s.opaque_bg && s.bg_ready;
+		s_fill.disabled = false;
+		s_fill.live.store(false, std::memory_order_release);
+		s_fill.live_logged = false;
+		s_fill.busy_skips = 0;
+		s_fill.busy_logged = false;
+		if (s_fill.enabled)
+			Console.WriteLn("(VR) Edge fill: enabled ([VR] EdgeFill): behind the first-person screen the background shows the "
+							"picture's edges continued, blurred and at half brightness, rebuilt on the GPU each GS frame.");
+		else
+			Console.WriteLn("(VR) Edge fill: off (%s); the background stays black.",
+				!EmuConfig.VR.EdgeFill ? "[VR] EdgeFill = false" : "needs the opaque background");
 
 		s.initialized = true;
 		s.pacer = std::thread(PacerThreadMain, s.pacer_gen.load(std::memory_order_acquire));
@@ -5208,6 +6038,9 @@ namespace VR::XRCompositor
 		// The flat screen quad the menu pointer aims at this present (VR::PublishScreenTransform); invalid unless one is
 		// placed below.
 		VRScreenTransform pub{};
+		// The flat first-person screen as placed this present, for the edge fill behind it.
+		bool fill_geo = false;
+		float fill_distance = 0.0f, fill_width = 0.0f, fill_height = 0.0f;
 		if (!force_zero_layers)
 		{
 			ScreenParams sp;
@@ -5290,6 +6123,14 @@ namespace VR::XRCompositor
 				if (mode_want == 2)
 					LogFirstPersonScreen(sp);
 			}
+			else if (s_fp_screen_was_active)
+			{
+				// The FOV sizing the first-person screen changed while it is up (the headset's eyes arrived after the
+				// arm): its line again, with the new coverage.
+				const CameraDriver::FovState fov_state = CameraDriver::GetFovState();
+				if (fov_state.sizes_screen && std::abs(fov_state.target_deg - s_fp_logged_fov) > 0.05f)
+					LogFirstPersonScreen(sp);
+			}
 			const bool fp_screen = s_fp_screen_was_active;
 			const bool tablet = !fp_screen && s_tablet_was_active;
 			pub_fp_screen = fp_screen;
@@ -5301,6 +6142,11 @@ namespace VR::XRCompositor
 			// world holds still while the head turns instead of an old frame being glued to the face.
 			XrPosef fp_pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
 			XrVector3f fp_head = {0.0f, 0.0f, 0.0f};
+			// Sized to the FOV the shown frame was rendered with (matched with its render pose), else to the one camera.fov
+			// writes now; 0: the profile's screen.firstPerson height (FirstPersonHeight).
+			float fp_fov_deg = 0.0f;
+			if (fp_screen && !CameraDriver::RenderFov(&fp_fov_deg))
+				fp_fov_deg = ScreenFov(false);
 			if (fp_screen)
 			{
 				XrQuaternionf q = s.head_pose.orientation;
@@ -5335,11 +6181,18 @@ namespace VR::XRCompositor
 			}
 			// The menu tablet is always a flat quad, without the vertical offset.
 			const float distance = fp_screen ? sp.fp_distance : (tablet ? sp.menu_distance : sp.distance);
-			const float height = fp_screen ? sp.fp_height : (tablet ? sp.menu_height : sp.height);
+			const float height = fp_screen ? FirstPersonHeight(sp, fp_fov_deg) : (tablet ? sp.menu_height : sp.height);
 			const float arc_deg = fp_screen ? sp.fp_arc_deg : (tablet ? 0.0f : sp.arc_deg);
 			const float voffset = (fp_screen || tablet) ? 0.0f : sp.voffset;
 			const float aspect = ComputeAspect();
 			const bool curved = (arc_deg >= 5.0f) && XRSession::HasCylinderLayer();
+			if (fp_screen && !curved && distance > 0.0f)
+			{
+				fill_geo = true;
+				fill_distance = distance;
+				fill_height = height;
+				fill_width = height * aspect;
+			}
 
 			const float ayaw_sin = std::sin(s.world_anchor_yaw);
 			const float ayaw_cos = std::cos(s.world_anchor_yaw);
@@ -5649,6 +6502,13 @@ namespace VR::XRCompositor
 				s.stat_copy_timeout.fetch_add(1, std::memory_order_relaxed);
 		}
 
+		// The edge fill behind the first-person screen, released here, before the layers that go with it are published
+		// (anything else has the black background behind it).
+		if (fill_geo && should_render && current)
+			UpdateEdgeFill(static_cast<GSTextureVK*>(current), fill_distance, fill_width, fill_height);
+		else
+			s_fill.live.store(false, std::memory_order_release);
+
 		const LayerSources sources = {quads, cyls, 5, lever_quads, hand_quads, hud_quads, hand_att, hud_att, &s_pointer_pub};
 
 		if (s.headset_rate)
@@ -5669,7 +6529,7 @@ namespace VR::XRCompositor
 		XrCompositionLayerProjectionView bg_views[2] = {};
 		XrCompositionLayerProjection bg = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
 		if (eye_views_ok)
-			MakeBackgroundLayer(eye_views, bg_views, &bg);
+			MakeBackgroundLayer(eye_views, bg_views, &bg, pub_fp_screen && s_fill.live.load(std::memory_order_acquire));
 		const XrCompositionLayerBaseHeader* submit[kLayerCapacity + 1] = {};
 		const u32 submit_count = BuildSubmitArray(set, eye_views_ok ? &bg : nullptr, false, 0.0f, submit);
 
@@ -5764,6 +6624,7 @@ namespace VR::XRCompositor
 		DestroyHandResources();
 		DestroyHudResources();
 		DestroyBackground();
+		DestroyFillResources();
 
 		for (auto& chain : s.chains)
 		{
