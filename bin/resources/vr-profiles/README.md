@@ -201,7 +201,7 @@ menuPointer:
 | `pressVsyncs`, `gapVsyncs` | each D-pad press is held this many vsyncs, then released at least this many (default `2` and `2`) |
 | `settleVsyncs` | how long to wait for the cursor to move after a press before giving up (default `10`). The second press in one opening of the menu that the cursor does not answer turns point-to-select off until the menu opens again |
 | `maxPresses` | the most presses for one move (default `6`) |
-| `dwellMs` | how long you must point at a cell before the cursor goes there (default `60`) |
+| `dwellMs` | how long you must point at a cell before the cursor goes there (default `60`; the Outbreak profiles use `150`, since a real hand drifts across a cell's edge) |
 | `armDelayMs` | nothing moves for this long after the menu opens (default `300`) |
 | `enterInset` | a cell counts only inside its `rect` shrunk by this fraction of its size on each side (default `0.12`); you leave it only outside its full `rect` |
 
@@ -216,10 +216,11 @@ B or Menu, or the cursor moves without the pointer (the left stick, the game
 itself); your move stands until you point at a different cell than the one the
 dot was on, and the dot wobbling while your thumb works a stick does not count.
 A pull goes to the cell the dot was on as the trigger began to move, so the dip
-a pull gives the controller never sends the confirm to another cell.
-If the cursor's node
-matches a cell but its index, `x` or `y` do not, the layout is not the one
-mapped, and point-to-select stays off until the menu opens again. Any invalid
+a pull gives the controller never sends the confirm to another cell. A trigger
+or A still held as the controls come back from a gap (the SteamVR dashboard)
+does nothing, in a menu or out of one, until you let it go once. If the
+cursor's node matches a cell but its index, `x` or `y` do not, the layout is
+not the one mapped, and point-to-select stays off until the menu opens again. Any invalid
 part of the block makes the emulator ignore the whole block, with a log line
 saying why.
 

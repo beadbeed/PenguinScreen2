@@ -723,11 +723,13 @@ namespace VR::MenuPointer
 			out.opened = true;
 			// No landing tick for the cell the menu opens on.
 			st.last_cell = current;
-			// A confirm that reads pulled on the poll the gate opens was held through the gap before it (the SteamVR
-			// dashboard, a stale snapshot: the controls read released meanwhile, so it looks fresh), or pulled in the
-			// same poll the menu came up. Either way the player did not pull it for this menu: it is held, not an edge,
-			// and held back until let go (VRInputSource's release-first latch keeps it from the game too), so it neither
-			// confirms the cell the cursor is on nor steers to the dot's cell to confirm there.
+			// A confirm that reads pulled on the poll the gate opens was held through a gap before it that the
+			// actions_live check at the top did not see (the controls read released meanwhile, so it looks fresh), or
+			// pulled in the same poll the menu came up. Either way the player did not pull it for this menu: it is held,
+			// not an edge, and held back until let go (the confirm hold keeps it from the game; after a real gap
+			// VRInputSource's release-first latch does too, and both let go on the same release), so it neither
+			// confirms the cell the cursor is on nor steers to the dot's cell to confirm there. A hold the top check
+			// already caught makes no edge, so it never comes here.
 			if (confirm_edge)
 			{
 				confirm_edge = false;
@@ -2847,6 +2849,57 @@ namespace VR::MenuPointer
 			s.Pull();
 			check(s.passed == 1 && s.out.confirm_cell == 3, "and the next pull confirms as usual");
 			s.LetGo();
+		}
+
+		// The two gap checks together (the controls coming back, StepIn::actions_live; the gate opening with a confirm
+		// edge): a hold both could see is swallowed once and let go by one release, so the next real pull is never
+		// swallowed again, whether the gate opens on the same poll as the controls or later.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.Point(3);
+			s.Run(40);
+			s.ResetCounts();
+			s.in.actions_live = false;
+			s.in.gate = false;
+			s.in.screen_up = true;
+			s.Run(10);
+			s.in.actions_live = true;
+			s.in.gate = true;
+			s.in.trigger = 1.0f;
+			s.in.confirm = true;
+			s.Poll();
+			check(s.out.opened && s.out.confirm_hold && s.st.swallow && s.passed == 0 && s.swallowed == 0,
+				"the controls and the gate back on one poll, the trigger held: one hold, no swallowed confirm counted");
+			s.Run(5);
+			s.LetGo();
+			check(!s.out.confirm_hold && !s.st.swallow, "one release lets it go");
+			s.Run(30);
+			s.Pull();
+			check(s.passed == 1 && !s.out.confirm_hold && s.phantom == 0, "and the next pull passes, not swallowed again");
+			s.LetGo();
+
+			Sim t;
+			t.p = &p;
+			t.Open();
+			t.ResetCounts();
+			t.in.actions_live = false;
+			t.in.gate = false;
+			t.in.screen_up = true;
+			t.Run(5);
+			t.in.actions_live = true;
+			t.in.confirm = true;
+			t.Run(3);
+			t.in.gate = true;
+			t.Run(10);
+			check(t.passed == 0 && t.out.confirm_hold && t.phantom == 0,
+				"the controls back before the gate, the trigger held from the gap: still held back as the gate opens");
+			t.LetGo();
+			t.Run(30);
+			t.Pull();
+			check(t.passed == 1 && t.phantom == 0, "and a pull after letting go passes");
+			t.LetGo();
 		}
 
 		// --- Belt pouch requests (RequestCell) ----------------------------------------------------------------------
