@@ -4,9 +4,33 @@ Read this first when you resume. It covers what happened after the PC shut off, 
 decisions, what the Mac found, and what to do next. Alex's Mac holds the full reports in
 `~/Documents/github/outbreak-vr/docs/reviews/` (not on GitHub). This file is the short form.
 
+## PC update 4 (Windows PC, 2026-10-11 night): wave 7
+
+**Item names and kinds:** `pcsx2/VR/ItemData.*` maps 234 item ids (shared by both Files) to a short name and a kind.
+The table comes from Outbreak-Research/Documentation's item table; it is MIT-licensed, and the license text is in
+`ItemData.cpp`.
+
+**Item names in play:**
+- reaching into a belt pouch with the item screen closed shows the item's name, e.g. "Kevin's 45 Auto 7". The buckle
+  pouch reads the special item (`+0xC88` on File #1, `+0xC98` on File #2);
+- the wrist card names the equipped weapon ("45 AUTO 7");
+- the HUD font gains the apostrophe and the ampersand.
+
+**Weapon-aware hands:** the right hand shows the equipped weapon's kind:
+- pistol (handguns, nail gun, stun gun);
+- long gun, in 4 looks, with the left hand drawn as a supporting grip near the fore-end;
+- melee, sized by id (knives, pipes, poles, axe, hammer, crutch, wrench);
+- thrown items, and spray cans.
+
+The laser shows only for guns, and the shot kick is scaled by kind.
+
+**Tested headset-free:** every self-test passes (item names 31, BeltPouches 65, MenuPointer 144, HUD 0 failures); the
+menutest pouches pass; hovering the buckle pouch shows "Kevin's 45 Auto 7" on File #1 slots 4 and 6. The weapon hands
+need a VR session to see.
+
 ## PC update 3 (Windows PC, 2026-10-11 evening): wave 6
 
-`pc-firstperson` and `coop-firstperson` are both at c084c95. CI built it, and it is installed on the PC.
+(Superseded by update 4.) Wave 6 was c084c95.
 
 **What wave 6 adds:**
 - **Menu safety:**
