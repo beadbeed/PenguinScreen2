@@ -1069,6 +1069,7 @@ set(pcsx2VRSources
 	VR/GrabBreakout.cpp
 	VR/HandModel.cpp
 	VR/HudCards.cpp
+	VR/ItemData.cpp
 	VR/MenuPointer.cpp
 	VR/SplitState.cpp
 	VR/SeatCast.cpp
@@ -1098,6 +1099,7 @@ set(pcsx2VRHeaders
 	VR/GrabBreakout.h
 	VR/HandModel.h
 	VR/HudCards.h
+	VR/ItemData.h
 	VR/MenuPointer.h
 	VR/SplitState.h
 	VR/SeatCast.h
