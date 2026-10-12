@@ -16,10 +16,10 @@ Written by the Windows PC session on 2026-10-12, at the end of a long autonomous
 
 | | |
 |---|---|
-| Branches | `pc-firstperson` = `coop-firstperson` = `wave4-integration` (the branch with the CI cache) = the commit that adds this page (code as of `0a9fa63`) |
-| Installed on the PC | `D:\Games\PS2\PenguinScreen2`, CI build of `0a9fa63` (run 38202143514) |
+| Branches | `pc-firstperson` = `coop-firstperson` = `wave4-integration` (the branch with the CI cache) = the latest docs commit (code as of `e6dbd77`) |
+| Installed on the PC | `D:\Games\PS2\PenguinScreen2`, CI build of `e6dbd77` (run 38230328003): `0a9fa63` plus the frame-advance online lock |
 | Tested in the real headset | **Nothing since the 10 Oct morning session.** That is about 18,800 lines across 58 files (`63cc827..HEAD` in `pcsx2`, `pcsx2-qt`, `bin`), all checked headset-free only. |
-| Steam Frame standalone | Plan in `STEAM-FRAME.md`. **M0 and M1's code are done** on ARMSX2 branch `outbreak-vr-frame` (`22a1676`, CI green); nothing has run on a Frame yet (see below). |
+| Steam Frame standalone | Plan in `STEAM-FRAME.md`. **M0, M1 and M2's code are done** on ARMSX2 branch `outbreak-vr-frame` (`b3ba84d`, CI green); nothing has run on a Frame yet (see below). |
 
 **Builds** come from GitHub Actions only:
 - start one with `gh workflow run build-windows.yml -R beadbeed/PenguinScreen2 --ref <branch>`: about 20 min on a branch with
@@ -27,7 +27,7 @@ Written by the Windows PC session on 2026-10-12, at the end of a long autonomous
 - install with `tools/outbreak-vr/install_build.ps1 -RunId <id>`.
 
 Each install keeps the previous program files in `D:\Games\PS2\PenguinScreen2-backup-<time>`. Each backup is about 113 MB,
-and there are 36 of them (about 4 GB); Alex can delete the old ones.
+and there are 37 of them (about 4 GB); Alex can delete the old ones.
 
 ## What the build does
 
@@ -133,6 +133,13 @@ time:
    - a dedicated XR VkQueue (it removes the shared-queue lock, if the GPU has a second queue);
    - research item B1 (`ndcWidthRatio`; needs a null-headset stereo dump).
 
+**Port back to PenguinScreen2** (found by the ARMSX2 port; listed in ARMSX2's `pcsx2/VR/VR-SOURCE.md`):
+- the frame-advance online lock: **done**, in `e6dbd77`;
+- the pose-to-photon log line in `XRCompositor.cpp`;
+- `CanPause` refusing online only while the VM runs, so a paused VM can be resumed;
+- the Qt pause lock asking `VMManager::IsOnlineLocked()` (so `PCSX2_TEST_ONLINE_LOCKS=1` covers the buttons);
+- PINE's state save and load refusals using `IsOnlineLocked()`.
+
 ## Needs more investigation
 
 - **Real-headset behaviour of the frame loop.** Pacer timing, deferral counts and xrEndFrame times were measured only on the
@@ -187,6 +194,17 @@ image would be softer than the PC's (expect 1x to 1.5x internal resolution and 7
 - a `(VR) Pose-to-photon:` line every 5 s;
 - `tools/outbreak-vr/hook-parity.py`, which checks in CI that each PenguinScreen2 VR hook has its ARMSX2 counterpart.
 
+**M2 is done too** (`b3ba84d`; CI green on `2566847`):
+- the online locks: no pause, frame advance, state load or save, or speed change while the network adapter is on, in
+  VMManager, the Qt buttons, the hotkeys and PINE;
+- the PadLook probes, the recenter chord (L1+R1+L3+R3) and right-stick turning;
+- the VR hotkeys (recenter, brightness);
+- PINE's VR commands 0xE0-0xE5;
+- smooth turn in the first-run ini.
+
+Hook parity is 58 of 85 PenguinScreen2 VR blocks fully ported, 5 ported in part and 22 deliberately left out (each with its
+reason).
+
 The launcher's first-run ini now starts in first person. `FRAME_VIEW=flat` (a Steam launch option) gives M0's flat screen.
 The artifact is `outbreak-vr-frame-<sha>` from the latest green run: a tarball with the AppDir, the launcher, the probe and
 `README-FRAME.md`. Hands, the HUD, menus and pouches come in M3.
@@ -206,6 +224,7 @@ Next on the Frame:
    person, depth, the world holding still, speed). He sends back the logs.
 2. Retune `camera.lookAt.syncFramesBack` and `screen.firstPerson.poseLagMs` from the `(VR) Pose-to-photon:` lines if needed.
 3. M3 (hands, HUD, menus, pouches), then M4 (performance and heat).
+   - The M2 checklist is section 4 of `README-FRAME.md`.
 4. Merge `outbreak-vr-frame` into `outbreak-vr` once Alex agrees.
 
 The first-run ini binds no pad, so Pad 1 has only the VR Gamepad overlay; a keyboard or Steam Input pad needs binding in the

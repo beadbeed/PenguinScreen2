@@ -47,7 +47,12 @@ lists what changed.
 - cells, fast-click and submenu are flaky on this PC, and the previous build showed the same flakes in an A/B run (see
   `STATUS.md`).
 
-The final build (full view merged) is in `STATUS.md`. The PC was shut down at the end of the run.
+Afterwards, in the ARMSX2 work:
+- M0, M1 and M2 of the Steam Frame port were finished on branch `outbreak-vr-frame` (CI green, `b3ba84d`);
+- the port found that frame advance slipped past the online pause lock. It is fixed in `e6dbd77`, the build installed on
+  the PC.
+
+The PC was shut down at the end of the run.
 
 ## PC update 4 (Windows PC, 2026-10-11 night): wave 7
 
