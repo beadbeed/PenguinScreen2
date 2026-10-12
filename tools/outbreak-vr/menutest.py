@@ -564,10 +564,11 @@ def sc_fast_click(r):
         r.open_items(fc)
         check(r.cell() == 0, "the item screen opened on cell %d, expected 0" % r.cell())
         m0 = r.mp()
-        # Aim at cell 3 and pull at once, well inside the 150 ms dwell: the pull is judged by where the dot was as the
-        # trigger began to move, so the dot is on cell 3 first, then the trigger goes part way, then past half.
+        # Aim at cell 3 and pull inside the 150 ms dwell: the pull is judged by where the dot was as the trigger began to
+        # move, and a dot that has not rested 100 ms on a cell is no telling (the confirm is swallowed), so the dot rests
+        # 120 ms on cell 3 first (a quick but deliberate click), then the trigger goes part way, then past half.
         r.point(fc, 3)
-        time.sleep(0.05)
+        time.sleep(0.12)
         r.point(fc, 3, trigger=0.3)
         time.sleep(0.06)
         r.point(fc, 3, trigger=1.0)
