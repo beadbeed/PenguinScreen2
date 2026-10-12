@@ -3971,9 +3971,12 @@ namespace VR::XRCompositor
 				views[0].recommendedImageRectHeight);
 		}
 
-		// The vertical FOV the first-person screen was last logged for (0: the profile's height), so a change while it is
-		// up (the headset's eyes arriving after the arm) is logged again. GS thread.
+		// What the first-person screen was last logged with: the vertical FOV (0: the profile's height), why that FOV, and
+		// whether the headset's field of view was known, so a change while it is up (the headset's eyes arriving after the
+		// arm) is logged again with its coverage. GS thread.
 		float s_fp_logged_fov = -1.0f;
+		const char* s_fp_logged_source = nullptr;
+		bool s_fp_logged_eyes = false;
 
 		// When the first-person screen turns on (and when the FOV sizing it changes while it is up): the camera FOV, how
 		// much of the view the screen covers against the headset's field of view, and its pixel density at the centre
@@ -3985,6 +3988,7 @@ namespace VR::XRCompositor
 			const CameraDriver::FovState fov = CameraDriver::GetFovState();
 			const float fov_deg = fov.sizes_screen ? fov.target_deg : 0.0f;
 			s_fp_logged_fov = fov_deg;
+			s_fp_logged_source = fov.sizes_screen ? fov.source : nullptr;
 			char fov_text[128] = "sized by the profile";
 			if (fov_deg > 0.0f)
 				std::snprintf(fov_text, sizeof(fov_text), "camera FOV %.1f deg (%s)", fov_deg, fov.source);
@@ -4002,6 +4006,7 @@ namespace VR::XRCompositor
 			const float px_deg_v = static_cast<float>(h_px) * d / std::max(height_m, 0.001f) / kDeg;
 
 			const EyeInfo eyes = GetEyeInfo();
+			s_fp_logged_eyes = eyes.valid;
 			if (!eyes.valid)
 			{
 				Console.WriteLn("(VR) First-person screen: +-%.1f x +-%.1f deg at %.2f m (%.2f x %.2f m), %s; headset field "
@@ -6125,10 +6130,12 @@ namespace VR::XRCompositor
 			}
 			else if (s_fp_screen_was_active)
 			{
-				// The FOV sizing the first-person screen changed while it is up (the headset's eyes arrived after the
-				// arm): its line again, with the new coverage.
+				// The FOV sizing the first-person screen changed while it is up, or the headset's field of view became
+				// known (both when its eyes arrive after the arm): its line again, with the coverage.
 				const CameraDriver::FovState fov_state = CameraDriver::GetFovState();
-				if (fov_state.sizes_screen && std::abs(fov_state.target_deg - s_fp_logged_fov) > 0.05f)
+				const bool fov_changed = fov_state.sizes_screen && (std::abs(fov_state.target_deg - s_fp_logged_fov) > 0.05f ||
+																	   fov_state.source != s_fp_logged_source);
+				if (fov_changed || (!s_fp_logged_eyes && GetEyeInfo().valid))
 					LogFirstPersonScreen(sp);
 			}
 			const bool fp_screen = s_fp_screen_was_active;
