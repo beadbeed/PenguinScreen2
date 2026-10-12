@@ -32,11 +32,30 @@ namespace VR::MenuPointer
 		constexpr int kIdle = 0;
 		constexpr int kPressing = 1;
 		constexpr int kReleased = 2;
-		// A user override (any of these) stops a steer: the right stick as far as the menu stick engages, the left stick
-		// (the game's own cursor stick) half way, a grip squeezed.
+		// A user override (any of these) stops a steer: the right stick as far as the menu stick engages (and on down to
+		// its release while engaged, where SpatialControls' menu stick keeps repeating), the left stick (the game's own
+		// cursor stick) half way, a grip squeezed.
 		constexpr float kOverrideRightStick = 0.6f;
+		constexpr float kStickRelease = 0.35f;
 		constexpr float kOverrideLeftStick = 0.5f;
 		constexpr float kOverrideGrip = 0.6f;
+		// After an override, re-arming waits kOverrideSettleMs from its last poll and then until the dot has rested
+		// kRestMs on one hover (kOverrideSettleMaxMs at most): the controller springs back from the thumb's push
+		// meanwhile, and the dot crossing cells then is not the player pointing.
+		constexpr float kOverrideSettleMs = 250.0f;
+		constexpr float kOverrideSettleMaxMs = 1000.0f;
+		// A hover held this long is the dot resting there, not brushing it: after an override or a submenu, only the dot
+		// resting on another cell arms again.
+		constexpr float kRestMs = 100.0f;
+		// The pull: the trigger past kPullStart has begun to move. From then until it reaches the confirm (kPullMaxMs at
+		// most: longer, it is a finger resting on it) nothing is steered on its own, and the confirm it brings goes by the
+		// hover just before it began, so the dip a pull gives the controller cannot redirect it. A, or a pull too quick to
+		// see begin, goes by the hover kPullLookbackMs before. The cursor's cell (or a steer's target) wins while the dot
+		// was within its rect grown by kPullGrow of its size on each side.
+		constexpr float kPullStart = 0.1f;
+		constexpr float kPullMaxMs = 500.0f;
+		constexpr float kPullLookbackMs = 120.0f;
+		constexpr float kPullGrow = 0.25f;
 		// Steering stays suspended this many polls after a suspendWhen guard stops passing.
 		constexpr u32 kSuspendTailPolls = 6;
 		// Event lines logged per opening of the menu; the rest are counted and reported as it closes.
@@ -165,13 +184,76 @@ namespace VR::MenuPointer
 			st.steer_from = -1;
 			st.steer_ms = 0.0f;
 			st.pending = false;
+			st.hover_count = 0;
+			st.hover_next = 0;
+			st.settling = false;
+			st.settle_ms = 0.0f;
+			st.override_cells = 0;
+			st.pull_from_valid = false;
 		}
 
+		// A negative inset grows the rect.
 		bool InRect(const float r[4], float u, float v, float inset)
 		{
 			const float iu = inset * (r[2] - r[0]);
 			const float iv = inset * (r[3] - r[1]);
 			return u >= r[0] + iu && u <= r[2] - iu && v >= r[1] + iv && v <= r[3] - iv;
+		}
+
+		// The hover ring (State::hover): this poll's sample goes in once the hover is known.
+		void PushHover(State& st, const HoverSample& h)
+		{
+			st.hover[st.hover_next] = h;
+			st.hover_next = (st.hover_next + 1) % kHoverHistory;
+			st.hover_count = std::min(st.hover_count + 1, kHoverHistory);
+		}
+
+		// The k-th newest sample (0 the newest); false past the oldest.
+		bool HoverAgo(const State& st, u32 k, HoverSample* out)
+		{
+			if (k >= st.hover_count)
+				return false;
+			*out = st.hover[(st.hover_next + kHoverHistory - 1 - k) % kHoverHistory];
+			return true;
+		}
+
+		// The newest sample at least ms older than the newest; false when the ring does not reach that far back (the menu
+		// has only just opened).
+		bool HoverBefore(const State& st, float ms, HoverSample* out)
+		{
+			float age = 0.0f;
+			HoverSample h;
+			for (u32 k = 0; HoverAgo(st, k, &h); k++)
+			{
+				if (age >= ms)
+				{
+					*out = h;
+					return true;
+				}
+				age += h.dt_ms;
+			}
+			return false;
+		}
+
+		// The cell the dot is on, else the one it was last on within ms; -1 for none.
+		int RecentCell(const State& st, float ms)
+		{
+			if (st.under >= 0)
+				return st.under;
+			float age = 0.0f;
+			HoverSample h;
+			for (u32 k = 0; age <= ms && HoverAgo(st, k, &h); k++)
+			{
+				if (h.under >= 0)
+					return h.under;
+				age += h.dt_ms;
+			}
+			return -1;
+		}
+
+		u64 CellBit(int cell)
+		{
+			return (cell >= 0 && cell < 64) ? (u64{1} << cell) : u64{0};
 		}
 
 		// The cell the cursor struct says the cursor is on: node, index, x and y must all match one. *mismatch is set
@@ -284,6 +366,7 @@ namespace VR::MenuPointer
 			p.x_addr = 0x720B8E;
 			p.y_addr = 0x720B90;
 			p.coop = true;
+			p.dwell_ms = 150.0f;
 			const auto cell = [&p](u32 node, u16 index, u16 x, u16 y, float u0, float v0, float u1, float v1, s8 up, s8 down,
 								  s8 left, s8 right) {
 				ProfileDB::MenuPointerCell c;
@@ -427,6 +510,15 @@ namespace VR::MenuPointer
 	StepOut Step(const ProfileDB::MenuPointerParams& p, const StepIn& in, State& st)
 	{
 		StepOut out;
+		// The controls coming back from a gap (the SteamVR dashboard, a stalled snapshot), where everything read released:
+		// a confirm still held is the one from before the gap, not a fresh pull. It makes no edge and stays held back until
+		// let go, so neither the pointer nor the game takes it for a new press.
+		if (in.actions_live && !st.actions_were_live && in.confirm)
+		{
+			st.swallow = true;
+			st.confirm_prev = true;
+		}
+		st.actions_were_live = in.actions_live;
 		const bool confirm_edge = in.confirm && !st.confirm_prev;
 		st.confirm_prev = in.confirm;
 		const bool back_edge = in.back && !st.back_prev;
@@ -438,6 +530,27 @@ namespace VR::MenuPointer
 			st.swallow = false;
 		// The wait after a confirm (suspendWhen) counts down every poll, the gate up or down.
 		st.after_confirm_ms = std::max(0.0f, st.after_confirm_ms - in.dt_ms);
+		// The right stick as the menu stick: engaged from kOverrideRightStick and held down to kStickRelease, where
+		// SpatialControls' menu stick keeps pressing, so every press it makes counts as the player's.
+		st.stick_engaged = in.right_stick >= (st.stick_engaged ? kStickRelease : kOverrideRightStick);
+		// The pull: the trigger past kPullStart. Where the dot was just before it began (last poll's hover: this poll's dot
+		// may already be dipping) is what the confirm it brings goes by.
+		const float trigger = in.confirm ? 1.0f : (std::isfinite(in.trigger) ? std::clamp(in.trigger, 0.0f, 1.0f) : 0.0f);
+		const bool pull_began = trigger >= kPullStart && !st.pull;
+		if (trigger < kPullStart)
+		{
+			st.pull = false;
+		}
+		else if (pull_began)
+		{
+			st.pull = true;
+			st.pull_ms = 0.0f;
+			st.pull_from_valid = HoverAgo(st, 0, &st.pull_from);
+		}
+		else
+		{
+			st.pull_ms += in.dt_ms;
+		}
 
 		// A pouch's request waiting at the start of this poll (it held the confirm controls back last poll if the gate
 		// was up).
@@ -569,9 +682,18 @@ namespace VR::MenuPointer
 			st.open_ms += in.dt_ms;
 		}
 
-		// Landing: the cursor reached another cell, whatever moved it (a steer, the D-pad, a stick).
+		// Landing: the cursor reached another cell, whatever moved it (a steer, the D-pad, a stick). One the pointer did
+		// not make (it was not steering, or the cell is not the one its press leads to) is a move of the player's own, or
+		// the game's: the left stick under the override, the menu stick, a layout other than the profile's.
+		bool foreign = false;
 		if (current >= 0 && current != st.last_cell)
+		{
 			out.landed = true;
+			const bool planned = st.target >= 0 && st.phase != kIdle && st.dir >= 0 && st.dir < 4 && st.step_from >= 0 &&
+			                     st.step_from < static_cast<int>(p.cells.size()) &&
+			                     current == p.cells[static_cast<size_t>(st.step_from)].next[st.dir];
+			foreign = !planned;
+		}
 		st.last_cell = current;
 
 		// Hover, with the cell's hysteresis; how long it has stayed.
@@ -585,27 +707,59 @@ namespace VR::MenuPointer
 		{
 			st.under_ms += in.dt_ms;
 		}
+		HoverSample sample;
+		sample.under = static_cast<s8>(st.under);
+		sample.hit = in.hit;
+		sample.u = in.u;
+		sample.v = in.v;
+		sample.dt_ms = in.dt_ms;
+		PushHover(st, sample);
 		// The cell under the pointer as the menu opened is ignored until the hover changes, so the cursor never jumps
 		// on its own as a menu opens.
 		if (opened)
 			st.ignore = st.under;
 		else if (st.ignore != -2 && st.under != st.ignore)
 			st.ignore = -2;
-		// Any change of hover arms again, except after a submenu: there only the hover reaching another cell does.
-		if (st.disarmed && st.under != st.disarm_under && (!st.disarm_strict || st.under >= 0))
+		// The settle after an override (State::settling). The cell the dot comes to rest on becomes the one to hold off
+		// from if the dot was on it while the player worked the control: the controller pushed off the cell it started
+		// on by the thumb is not the player pointing anew. A cell the dot reaches only afterwards is.
+		if (st.settling)
+		{
+			st.settle_ms += in.dt_ms;
+			if ((st.settle_ms >= kOverrideSettleMs && st.under_ms >= kRestMs) || st.settle_ms >= kOverrideSettleMaxMs)
+			{
+				st.settling = false;
+				if (st.under >= 0 && (st.override_cells & CellBit(st.under)) != 0)
+					st.disarm_under = st.under;
+			}
+		}
+		// Any change of hover arms again, except after an override or a submenu: there only the dot resting on a cell
+		// other than the one it was on does, once an override has settled.
+		if (st.disarmed && !st.settling && st.under != st.disarm_under &&
+			(!st.disarm_strict || (st.under >= 0 && st.under_ms >= kRestMs)))
 		{
 			st.disarmed = false;
 			st.disarm_strict = false;
 		}
 
-		// The player taking over with another control stops any steer, and the pointer waits for the hover to change.
-		const bool override_now = in.dpad || in.right_stick >= kOverrideRightStick || in.left_stick >= kOverrideLeftStick ||
-		                          back_edge || menu_edge || in.grip >= kOverrideGrip;
+		// The player taking over stops any steer: another control (the menu stick all the while it is engaged), or the
+		// cursor moved by something other than the pointer. The pointer then holds off from the cell the dot was on as
+		// the override began (or had just left), never one it brushes meanwhile, until the dot rests on another.
+		const bool took_over = in.dpad || st.stick_engaged || in.left_stick >= kOverrideLeftStick || back_edge || menu_edge ||
+		                       in.grip >= kOverrideGrip;
+		const bool override_now = took_over || foreign;
 		if (override_now)
 		{
-			abort_steer("you took over");
+			const int hold_cell = st.settling ? st.disarm_under : RecentCell(st, kOverrideSettleMs);
+			if (!st.settling)
+				st.override_cells = 0;
+			abort_steer(took_over ? "you took over" : "the cursor moved off the planned path");
 			st.disarmed = true;
-			st.disarm_under = st.under;
+			st.disarm_strict = true;
+			st.disarm_under = hold_cell;
+			st.override_cells |= CellBit(hold_cell) | CellBit(st.under);
+			st.settling = true;
+			st.settle_ms = 0.0f;
 		}
 
 		// After a confirm reached the game (with no suspendWhen to say when a submenu is up), steering waits until Cross,
@@ -738,13 +892,35 @@ namespace VR::MenuPointer
 		const bool armed = can_steer && !st.disarmed;
 		out.hovered = armed ? st.under : -1;
 
+		// The cell a confirm is for, judged from before the pull, so the dip a trigger pull gives the controller never
+		// redirects it: the hover just before the trigger began to move, when that was seen (a pull begun on an earlier
+		// poll, within kPullMaxMs), else the hover kPullLookbackMs before (A, or a pull too quick to see begin). ref (the
+		// cursor's cell, or a steer's target) wins while the dot was then within its rect grown by kPullGrow, and without a
+		// pull seen also while the dot still is. -1: no cell (the confirm stays with the cursor's own).
+		const auto pull_cell = [&](int ref) {
+			const bool seen = st.pull_from_valid && !pull_began && st.pull_ms <= kPullMaxMs;
+			HoverSample from;
+			if (seen)
+				from = st.pull_from;
+			else if (!HoverBefore(st, kPullLookbackMs, &from))
+				return -1;
+			const bool ref_ok = ref >= 0 && ref < static_cast<int>(p.cells.size());
+			if (ref_ok && from.hit && InRect(p.cells[static_cast<size_t>(ref)].rect, from.u, from.v, -kPullGrow))
+				return ref;
+			if (ref_ok && !seen && in.hit && InRect(p.cells[static_cast<size_t>(ref)].rect, in.u, in.v, -kPullGrow))
+				return ref;
+			return static_cast<int>(from.under);
+		};
+
 		if (confirm_edge)
 		{
 			if (st.target >= 0)
 			{
-				// Pulled while steering: it waits for the arrival; pulled on another cell, it goes there instead.
-				if (armed && st.under >= 0 && st.under != st.target && current >= 0)
-					retarget(st.under);
+				// Pulled while steering: it waits for the arrival; pulled with the dot on another cell before the pull, it
+				// goes there instead.
+				const int pulled_for = pull_cell(st.target);
+				if (armed && pulled_for >= 0 && pulled_for != st.target && current >= 0)
+					retarget(pulled_for);
 				st.pending = true;
 			}
 			else if (st.request >= 0)
@@ -755,35 +931,41 @@ namespace VR::MenuPointer
 				st.swallow = true;
 				out.confirm_swallowed = true;
 			}
-			else if (armed && st.under >= 0 && current >= 0 && st.under != current)
-			{
-				// Pulled on another cell: straight there, no dwell, and the confirm waits for the arrival.
-				start_steer(st.under);
-				st.pending = true;
-			}
 			else
 			{
-				// It reaches the game now: on the cursor's own cell, or (suspended) on whatever the game has up, such as
-				// the highlighted entry of a submenu. With suspendWhen, steering then waits kAfterConfirmMs for a
-				// submenu this confirm opens to show its flag.
-				out.confirm_passed = true;
-				out.confirm_cell = current;
-				if (p.suspend_when.empty())
+				const int pulled_on = pull_cell(current);
+				if (armed && pulled_on >= 0 && current >= 0 && pulled_on != current)
 				{
-					st.latched = true;
-					st.latch_cell = current;
-					out.latched = true;
+					// Pulled with the dot on another cell: straight there, no dwell, and the confirm waits for the arrival.
+					start_steer(pulled_on);
+					st.pending = true;
 				}
 				else
 				{
-					st.after_confirm_ms = kAfterConfirmMs;
+					// It reaches the game now: on the cursor's own cell, or (suspended) on whatever the game has up, such
+					// as the highlighted entry of a submenu. With suspendWhen, steering then waits kAfterConfirmMs for a
+					// submenu this confirm opens to show its flag.
+					out.confirm_passed = true;
+					out.confirm_cell = current;
+					if (p.suspend_when.empty())
+					{
+						st.latched = true;
+						st.latch_cell = current;
+						out.latched = true;
+					}
+					else
+					{
+						st.after_confirm_ms = kAfterConfirmMs;
+					}
 				}
 			}
 		}
 
 		// Pointing at a cell: once it has held dwellMs (and the menu has been open armDelayMs), the cursor goes there. A
-		// steer whose confirm is waiting keeps the cell it was pulled on.
-		const bool passive = armed && st.ignore == -2 && st.open_ms >= p.arm_delay_ms && st.under >= 0 &&
+		// steer whose confirm is waiting keeps the cell it was pulled on, and nothing starts or turns while a pull is
+		// under way (its dip must not steer either).
+		const bool pulling = st.pull && !in.confirm && st.pull_ms <= kPullMaxMs;
+		const bool passive = armed && !pulling && st.ignore == -2 && st.open_ms >= p.arm_delay_ms && st.under >= 0 &&
 		                     st.under_ms >= p.dwell_ms && current >= 0;
 		if (passive)
 		{
@@ -1002,9 +1184,12 @@ namespace VR::MenuPointer
 		in.x = static_cast<u16>(x);
 		in.y = static_cast<u16>(y);
 
-		// The pointer's hit, from the profile's hand (either: the right first, as GetInputSnapshot takes it).
+		// The pointer's hit: GetInputSnapshot's, which is where the compositor draws the dot (the right hand's aim ray; the
+		// left's only standing in for a right controller that is not tracked, or for a PINE test hand), so the left
+		// controller, which carries the Steam Frame's D-pad, never takes the pointer from the right one (hand right, or
+		// either). A profile naming the left hand casts the left ray instead whenever that hit is the right's.
 		VRScreenHit hit = snap.screen_hit;
-		if (in.gate && params->hand >= 0 && hit.valid && !hit.test && hit.hand != params->hand)
+		if (in.gate && params->hand == VRInputSnapshot::LEFT && hit.valid && !hit.test && hit.hand != params->hand)
 		{
 			hit = RayHitScreen(GetScreenTransform(), snap.hands[params->hand].aim_pose);
 			hit.hand = params->hand;
@@ -1013,6 +1198,9 @@ namespace VR::MenuPointer
 		in.u = hit.u;
 		in.v = hit.v;
 		in.confirm = r.trigger >= 0.5f || r.a;
+		// The pull's onset: the analog trigger, A counting as a full pull at once.
+		in.trigger = r.a ? 1.0f : r.trigger;
+		in.actions_live = live && snap.actions_active;
 		// B lets a latch go because it is the game's cancel; with the VM paused the game never sees it.
 		in.back = r.b && vm_running;
 		in.menu = l.menu || r.menu;
@@ -1264,6 +1452,28 @@ namespace VR::MenuPointer
 				"a tilted tablet hit gives the expected u, v");
 		}
 
+		// The pointer's hit as GetInputSnapshot takes it (AimScreenHit), which the shipped profiles' hand: right keeps: the
+		// right hand's ray; the left's only standing in for a right controller that is not tracked, or for a PINE test hand.
+		{
+			const VRPose left_on = AimAlong(V3{0.0f, 1.5f, 0.0f}, fwd);
+			const VRPose right_on = AimAlong(V3{0.1f, 1.5f, 0.0f}, fwd);
+			const VRPose right_away = AimAlong(V3{0.2f, 1.5f, 0.0f}, V3{0.0f, 0.0f, 1.0f});
+			const VRPose untracked{};
+			h = AimScreenHit(world, left_on, right_away, false);
+			check(!h.valid, "the left controller's ray never takes the pointer from a tracked right one pointing away");
+			h = AimScreenHit(world, left_on, right_on, false);
+			check(h.valid && h.hand == VRInputSnapshot::RIGHT && std::fabs(h.u - (0.5f + 0.1f / (2.0f * 0.867f))) < 1.0e-3f,
+				"the right hand's ray points");
+			h = AimScreenHit(world, left_on, untracked, false);
+			check(h.valid && h.hand == VRInputSnapshot::LEFT && std::fabs(h.u - 0.5f) < 1.0e-3f,
+				"with the right controller not tracked, the left's ray stands in");
+			h = AimScreenHit(world, left_on, right_away, true);
+			check(h.valid && h.hand == VRInputSnapshot::LEFT, "a PINE test hand on the left points");
+			h = AimScreenHit(world, left_on, right_on, true);
+			check(h.valid && h.hand == VRInputSnapshot::RIGHT, "the right hand's ray comes first even then");
+			check(!AimScreenHit(invalid, left_on, untracked, true).valid, "no screen, no hit for either hand");
+		}
+
 		// --- Hover and plan -----------------------------------------------------------------------------------------
 		const ProfileDB::MenuPointerParams p = ItemScreenParams();
 		check(HoverCell(p, 0.9385f, 0.2455f, -1) == 1, "the middle of cell 1 hovers cell 1");
@@ -1500,6 +1710,28 @@ namespace VR::MenuPointer
 					in.v = 0.5f * (r[1] + r[3]);
 				}
 			}
+			// Points at (u, v) of the game picture.
+			void Aim(float u, float v)
+			{
+				in.hit = true;
+				in.u = u;
+				in.v = v;
+			}
+			// A trigger pull seen beginning (the trigger part way for a poll), then crossing half: the confirm's edge.
+			void Pull()
+			{
+				in.trigger = 0.3f;
+				Poll();
+				in.trigger = 1.0f;
+				in.confirm = true;
+				Poll();
+			}
+			void LetGo()
+			{
+				in.trigger = 0.0f;
+				in.confirm = false;
+				Poll();
+			}
 			// The menu opens with the pointer off the screen and the arm delay passes.
 			void Open()
 			{
@@ -1591,7 +1823,8 @@ namespace VR::MenuPointer
 			check(s.arrivals == 1 && s.game.cell == 1, "a new hover steers again");
 		}
 
-		// A game that never lands where planned: stopped after maxPresses.
+		// A game that does not move where planned (Right from cell 0 really goes down to cell 2): the landing off the
+		// planned path is a move the pointer did not make, so the steer stops at once and nothing more is pressed.
 		{
 			ProfileDB::MenuPointerParams wrong = p;
 			wrong.cells[0].next[3] = 2; // Right from cell 0 really goes down to cell 2
@@ -1602,8 +1835,24 @@ namespace VR::MenuPointer
 			s.ResetCounts();
 			s.Point(1);
 			s.Run(150);
-			check(s.aborts == 1 && same(s.abort_reason, "too many presses") && s.game.presses == p.max_presses && s.arrivals == 0,
-				"a cursor that never gets there stops after maxPresses presses");
+			check(s.aborts == 1 && same(s.abort_reason, "the cursor moved off the planned path") && s.game.presses == 1 &&
+					  s.game.cell == 2 && s.arrivals == 0,
+				"a cursor that lands off the planned path stops the steer after that press");
+		}
+
+		// A cell more presses away than maxPresses: stopped there.
+		{
+			ProfileDB::MenuPointerParams few = p;
+			few.max_presses = 1;
+			Sim s;
+			s.p = &few;
+			s.Open();
+			s.ResetCounts();
+			s.Point(3);
+			s.Run(60);
+			check(s.aborts == 1 && same(s.abort_reason, "too many presses") && s.game.presses == 1 && s.game.cell == 2 &&
+					  s.arrivals == 0,
+				"a cell more than maxPresses presses away stops the steer after maxPresses");
 		}
 
 		// A game that ignores the presses: stopped after settleVsyncs, and not retried while the hover stays.
@@ -1683,15 +1932,16 @@ namespace VR::MenuPointer
 			check(s.arrivals == 1 && s.game.cell == 1, "a changed hover steers");
 		}
 
-		// Fast click: the trigger pulled on another cell goes there at once, the confirm held back until the arrival.
+		// Fast click: a pull begun with the dot on another cell (before the dwell has brought the cursor there) goes there
+		// at once, the confirm held back until the arrival.
 		{
 			Sim s;
 			s.p = &p;
 			s.Open();
 			s.ResetCounts();
 			s.Point(3);
-			s.in.confirm = true;
-			s.Poll();
+			s.Run(2);
+			s.Pull();
 			check(s.out.target == 3 && s.out.confirm_hold && s.out.dir >= 0, "a fast click sets the target and holds the confirm");
 			bool early = false;
 			int guard = 0;
@@ -1703,8 +1953,7 @@ namespace VR::MenuPointer
 			check(s.arrivals == 1 && s.passed == 1 && !early && !s.out.confirm_hold && s.game.cell == 3 &&
 					  !s.hold_dropped_in_flight,
 				"the held confirm passes at the arrival, on cell 3");
-			s.in.confirm = false;
-			s.Poll();
+			s.LetGo();
 		}
 
 		// A press during the flight passes at the arrival; a tap let go before it is swallowed (one tick).
@@ -1796,7 +2045,11 @@ namespace VR::MenuPointer
 			s.Poll();
 			check(!s.out.suspended, "the cursor reaching another cell lets the latch go");
 			s.Run(40);
-			check(s.arrivals == 1 && s.game.cell == 1, "and the pointer brings it back");
+			check(s.arrivals == 0 && s.game.presses == 0 && s.game.cell == 3,
+				"and the pointer leaves it there: a move it did not make is the player's");
+			s.Point(2);
+			s.Run(60);
+			check(s.arrivals == 1 && s.game.cell == 2, "the dot resting on another cell steers again");
 			s.in.confirm = true;
 			s.Poll();
 			s.in.confirm = false;
@@ -2058,6 +2311,261 @@ namespace VR::MenuPointer
 			check(s.arrivals == 1 && s.game.cell == 1, "until the dot reaches another cell");
 		}
 
+		// --- The player's own moves, the pull and gaps ---------------------------------------------------------------
+		// The player moves the cursor with the right stick while the dot rests on cell 0. The thumb's push jiggles the
+		// controller: the dot leaves the cells and brushes cell 2 during the push and again after the stick is let go,
+		// then comes back to cell 0. Nothing is pressed (the pointer never undoes the player's move), and a pull then
+		// confirms the cell the stick chose.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.Point(0);
+			s.Run(20);
+			s.ResetCounts();
+			s.in.right_stick = 1.0f;
+			s.Point(-1);
+			s.Run(2);
+			s.Point(2);
+			s.Run(2);
+			s.game.cell = 1; // the menu stick's presses land
+			s.Point(0);
+			s.Run(3);
+			s.game.cell = 3;
+			s.Run(3);
+			s.in.right_stick = 0.0f;
+			s.Point(2);
+			s.Run(2);
+			s.Point(-1);
+			s.Run(2);
+			s.Point(0);
+			s.Run(60);
+			check(s.game.presses == 0 && s.game.cell == 3 && s.out.target < 0,
+				"a stick move stands: the dot jiggling off the cells, onto another and back presses nothing");
+			s.Pull();
+			check(s.passed == 1 && s.out.confirm_cell == 3 && s.game.presses == 0, "and a pull confirms the cell the stick chose");
+			s.LetGo();
+		}
+
+		// The menu stick eased back into its repeat band (under the 0.6 that engages it, over the 0.35 that lets it go) is
+		// still the player working it: the dot moving to another cell meanwhile steers nothing, nor once the stick is let
+		// go with the dot resting where the thumb left it.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.Point(0);
+			s.Run(20);
+			s.ResetCounts();
+			s.in.right_stick = 1.0f;
+			s.Run(3);
+			s.in.right_stick = 0.5f;
+			s.Point(1);
+			s.Run(30);
+			check(s.game.presses == 0, "the menu stick in its repeat band is still the player's: nothing is pressed");
+			s.in.right_stick = 0.0f;
+			s.Run(60);
+			check(s.game.presses == 0 && s.game.cell == 0, "nor once it is let go with the dot where the thumb left it");
+		}
+
+		// The stick's push leaves the dot on cell 2 and it rests there: that is the controller, not the player pointing.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.Point(0);
+			s.Run(20);
+			s.ResetCounts();
+			s.in.right_stick = 1.0f;
+			s.Run(2);
+			s.Point(2);
+			s.Run(3);
+			s.game.cell = 1;
+			s.Run(3);
+			s.in.right_stick = 0.0f;
+			s.Run(60);
+			check(s.game.presses == 0 && s.game.cell == 1, "the dot left on a cell the stick's push moved it to presses nothing");
+		}
+
+		// A cell the dot reaches only after the stick is let go is the player pointing: it steers once the override has
+		// settled.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.Point(0);
+			s.Run(20);
+			s.ResetCounts();
+			s.in.right_stick = 1.0f;
+			s.Run(3);
+			s.game.cell = 1;
+			s.Run(3);
+			s.in.right_stick = 0.0f;
+			s.Point(3);
+			s.Run(60);
+			check(s.arrivals == 1 && s.game.cell == 3, "a cell the dot reaches after the stick is let go steers once it settles");
+		}
+
+		// A cursor move the pointer did not make (the left stick under its override, the game itself) is the player's:
+		// with the dot resting on cell 1, where the pointer brought the cursor, the cursor moves to cell 3 on its own.
+		// Nothing is pressed, not even after the dot leaves the cells and comes back to cell 1; the dot resting on another
+		// cell steers again.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.Point(1);
+			s.Run(40);
+			check(s.game.cell == 1, "the pointer brings the cursor to cell 1");
+			s.ResetCounts();
+			s.game.cell = 3;
+			s.Run(60);
+			check(s.game.presses == 0 && s.game.cell == 3, "a cursor move the pointer did not make stands");
+			s.Point(-1);
+			s.Run(10);
+			s.Point(1);
+			s.Run(60);
+			check(s.game.presses == 0 && s.game.cell == 3, "nor does the dot leaving the cells and coming back undo it");
+			s.Point(2);
+			s.Run(60);
+			check(s.arrivals == 1 && s.game.cell == 2, "the dot resting on another cell steers again");
+		}
+
+		// A pull's dip: the dot low in cell 0, where the cursor is; the trigger begins to move and the dot dips well into
+		// cell 2 before it crosses half. The confirm goes to cell 0 at once, and nothing is pressed.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.Aim(0.851f, 0.29f);
+			s.Run(30);
+			s.ResetCounts();
+			s.in.trigger = 0.2f;
+			s.Poll();
+			s.Aim(0.851f, 0.33f);
+			s.in.trigger = 0.35f;
+			s.Poll();
+			s.Aim(0.851f, 0.37f);
+			s.in.trigger = 0.45f;
+			s.Poll();
+			s.in.trigger = 0.8f;
+			s.in.confirm = true;
+			s.Poll();
+			check(s.passed == 1 && s.out.confirm_cell == 0 && s.out.target < 0 && s.game.presses == 0,
+				"a pull's dip onto cell 2 confirms cell 0, where the dot was as the pull began");
+			s.LetGo();
+		}
+
+		// With A (no pull to see begin) the dot 120 ms before decides: A pressed as the dot dips onto cell 2 confirms cell 0.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.Aim(0.851f, 0.29f);
+			s.Run(30);
+			s.ResetCounts();
+			s.Aim(0.851f, 0.37f);
+			s.in.confirm = true;
+			s.Poll();
+			check(s.passed == 1 && s.out.confirm_cell == 0 && s.out.target < 0 && s.game.presses == 0,
+				"A pressed as the dot dips onto cell 2 confirms cell 0");
+			s.LetGo();
+		}
+
+		// A fast click with a dip: the pull begins with the dot low in cell 1 (the cursor still on cell 0) and dips onto
+		// cell 3 before the trigger crosses half. The cursor goes to cell 1, where the dot was, and the confirm passes there.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.ResetCounts();
+			s.Aim(0.9385f, 0.29f);
+			s.Run(2);
+			s.in.trigger = 0.3f;
+			s.Poll();
+			s.Aim(0.9385f, 0.37f);
+			s.in.trigger = 1.0f;
+			s.in.confirm = true;
+			s.Poll();
+			check(s.out.target == 1 && s.out.confirm_hold, "a fast click that dips onto cell 3 steers to cell 1, where it began");
+			int guard = 0;
+			while (s.arrivals == 0 && guard++ < 30)
+				s.Poll();
+			check(s.arrivals == 1 && s.passed == 1 && s.game.cell == 1, "and its confirm passes there");
+			s.LetGo();
+		}
+
+		// No steer starts while a pull is under way (its dip must not steer either): the dot goes to cell 3 with the
+		// trigger part way, and nothing is pressed until it is let go; then the cursor follows.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.Point(0);
+			s.Run(20);
+			s.ResetCounts();
+			s.in.trigger = 0.3f;
+			s.Poll();
+			s.Point(3);
+			s.Run(20);
+			check(s.game.presses == 0 && s.out.target < 0, "no steer starts while a pull is under way");
+			s.in.trigger = 0.0f;
+			s.Run(40);
+			check(s.arrivals == 1 && s.game.cell == 3 && s.passed == 0, "let go, the cursor follows the dot");
+		}
+
+		// A finger resting on the trigger is no pull, even jittering about where a pull begins: after 0.5 s the cursor
+		// follows the dot again.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.Point(0);
+			s.Run(20);
+			s.ResetCounts();
+			s.Point(3);
+			for (int i = 0; i < 90; i++)
+			{
+				s.in.trigger = (i % 2 == 0) ? 0.12f : 0.08f;
+				s.Poll();
+			}
+			check(s.arrivals == 1 && s.game.cell == 3 && s.passed == 0,
+				"a finger resting on the trigger, jittering where a pull begins, stops steering for 0.5 s only");
+			s.in.trigger = 0.0f;
+			s.Poll();
+		}
+
+		// A trigger held through a gap in the controls (the SteamVR dashboard, a stalled snapshot: everything reads
+		// released, and the gate drops) is not a fresh pull when they come back: nothing reaches the game, and it stays held
+		// back until let go.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.Point(3);
+			s.Run(40);
+			check(s.game.cell == 3, "the cursor on cell 3 before the gap");
+			s.ResetCounts();
+			s.in.actions_live = false;
+			s.in.gate = false;
+			s.in.screen_up = true;
+			s.Run(10);
+			s.in.actions_live = true;
+			s.in.gate = true;
+			s.in.trigger = 1.0f;
+			s.in.confirm = true;
+			s.Poll();
+			check(s.passed == 0 && s.out.confirm_hold && s.out.target < 0, "a trigger held through a gap passes nothing as it ends");
+			s.Run(20);
+			check(s.passed == 0 && s.out.confirm_hold && s.phantom == 0, "and stays held back while it is held");
+			s.LetGo();
+			check(!s.out.confirm_hold, "let go, the trigger is the player's again");
+			s.Run(30);
+			s.Pull();
+			check(s.passed == 1 && s.out.confirm_cell == 3, "and the next pull confirms as usual");
+			s.LetGo();
+		}
+
 		// --- Belt pouch requests (RequestCell) ----------------------------------------------------------------------
 		// What the requests did over some polls.
 		struct RequestLog
@@ -2306,8 +2814,8 @@ namespace VR::MenuPointer
 			s.Open();
 			s.ResetCounts();
 			s.Point(4);
-			s.in.confirm = true;
-			s.Poll();
+			s.Run(2);
+			s.Pull();
 			check(s.out.target == 4 && s.st.pending, "a fast click on the equipped box waits for the cursor");
 			RequestLog rl;
 			ask(s, 1, rl);
@@ -2317,9 +2825,8 @@ namespace VR::MenuPointer
 				s.Poll();
 			check(s.arrivals == 1 && s.game.cell == 1 && s.passed == 0 && s.swallowed == 1,
 				"and the confirm meant for the equipped box never reaches the game");
-			s.in.confirm = false;
 			s.Point(-1);
-			s.Poll();
+			s.LetGo();
 		}
 
 		// A stick still pushed from walking as the screen opens keeps the request if let go within the arm delay; a
@@ -2405,9 +2912,9 @@ namespace VR::MenuPointer
 		}
 
 		if (failures == 0)
-			Console.WriteLn(Color_StrongGreen, "(VR) MenuPointer self-test: passed (%d checks: ray/quad, tablet, hover, plan, "
-											   "online rule, liveWhen, steering, overrides, aborts, confirm, latch, suspendWhen, submenus, "
-											   "pouch requests).", checks);
+			Console.WriteLn(Color_StrongGreen, "(VR) MenuPointer self-test: passed (%d checks: ray/quad, tablet, hands, hover, "
+											   "plan, online rule, liveWhen, steering, overrides, aborts, confirm, latch, suspendWhen, "
+											   "submenus, the player's own moves, the pull's dip, gaps, pouch requests).", checks);
 		else
 			Console.WriteLn(Color_StrongRed, "(VR) MenuPointer self-test FAIL: %s (%d of %d checks failed).", first, failures, checks);
 		return failures == 0;

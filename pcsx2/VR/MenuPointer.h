@@ -27,6 +27,12 @@ namespace VR::ProfileDB
 // player did not make), and once it has closed, steering waits for the dot to reach another cell, so closing it never
 // yanks the cursor. After any confirm reaches the game steering also waits kAfterConfirmMs, so a submenu that confirm
 // opens has its flag up before another press could go out.
+//
+// The player's own moves stand: a stick, the D-pad, a grip, B or Menu, or a cursor move the pointer did not make, stops
+// steering until the dot settles on a cell other than the one it was on (the controller's jiggle while a thumb works a
+// stick never counts). A pull is judged by where the dot was as it began, so the dip a trigger pull gives the controller
+// never sends the confirm to another cell, and a confirm still held as the controls come back from a gap (the SteamVR
+// dashboard, a stalled snapshot) is never taken for a fresh one.
 namespace VR::MenuPointer
 {
 	using GuestReader = bool (*)(u32 address, u8 width, u32* value);
@@ -153,6 +159,10 @@ namespace VR::MenuPointer
 		float u = 0.0f;
 		float v = 0.0f;
 		bool confirm = false;     // right trigger at least half pulled, or A: the controls bound to the game's confirm
+		float trigger = 0.0f;     // how far the right trigger is pulled (0 to 1), A counting as a full pull at once
+		// The controls read live (the session focused, the snapshot fresh); false through a gap (the SteamVR dashboard, a
+		// stalled snapshot), when everything reads released.
+		bool actions_live = true;
 		bool back = false;        // B (the game's cancel)
 		bool menu = false;        // Menu
 		bool dpad = false;        // any real D-pad button on either hand
@@ -169,6 +179,17 @@ namespace VR::MenuPointer
 	// flag up well within it (a 30 fps game shows it within two or three frames), so no press can slip in before the
 	// flag is seen.
 	constexpr float kAfterConfirmMs = 400.0f;
+
+	// The hover over the last polls (State::hover), for the cell the dot was on before a pull began or an override.
+	constexpr u32 kHoverHistory = 32;
+	struct HoverSample
+	{
+		s8 under = -1;  // the hovered cell (HoverCell, with its hysteresis), -1 none
+		bool hit = false;
+		float u = 0.0f;
+		float v = 0.0f;
+		float dt_ms = 0.0f; // the time from the poll before it
+	};
 
 	struct StepOut
 	{
@@ -219,12 +240,27 @@ namespace VR::MenuPointer
 		int last_cell = -1;
 		int under = -1; // the cell under the pointer, with HoverCell's hysteresis
 		float under_ms = 0.0f;
+		// The hover over the last kHoverHistory polls, newest at hover_next - 1 (a ring).
+		HoverSample hover[kHoverHistory];
+		u32 hover_count = 0;
+		u32 hover_next = 0;
 		int ignore = -2;        // the hover the menu opened with, ignored until it changes (-2: none)
-		bool disarmed = false;  // after an override or an abort: no steering until the hover changes
-		int disarm_under = -1;  // the hover then
-		// After a submenu (suspendWhen): only the hover reaching a cell other than disarm_under arms again, not the dot
-		// leaving the cells and coming back, so the cursor never follows the dot left where the submenu closed.
+		bool disarmed = false;  // after an override, a submenu or an abort: no steering until the hover changes
+		// The hover then. After an override, the cell the dot was on as it began (or had just left), or the one it comes
+		// to rest on that it was on meanwhile; never one it only brushed, and -1 only with no cell at all.
+		int disarm_under = -1;
+		// After an override or a submenu: only the dot settling on a cell other than disarm_under arms again, not the dot
+		// leaving the cells and coming back, so the cursor never follows the dot left where the player took over or the
+		// submenu closed.
 		bool disarm_strict = false;
+		// After an override, the settle: re-arming waits kOverrideSettleMs from the last poll of it and then until the dot
+		// has rested kRestMs (kOverrideSettleMaxMs at most), while the controller springs back from the thumb's push.
+		bool settling = false;
+		float settle_ms = 0.0f;
+		u64 override_cells = 0; // the cells the dot was on through the override (bit per cell)
+		// The hover just before the trigger began to move (the pull), for the confirm it brings.
+		bool pull_from_valid = false;
+		HoverSample pull_from;
 		// A confirm reached the game (no suspendWhen): no steering until Cross, the cursor reaching another cell or the
 		// menu closing. It lives as long as the menu, not the gate: a gate drop with the menu still up keeps it.
 		bool latched = false;
@@ -248,6 +284,10 @@ namespace VR::MenuPointer
 		bool confirm_prev = false;
 		bool back_prev = false;
 		bool menu_prev = false;
+		bool actions_were_live = true; // StepIn::actions_live last poll
+		bool stick_engaged = false;    // the right stick engaged as the menu stick (held down to its release)
+		bool pull = false;             // the trigger past kPullStart
+		float pull_ms = 0.0f;          // since it went past
 		// A belt pouch's request waiting for point-to-select (made with the screen closed, or within the arm delay).
 		int request = -1;
 		float request_ms = 0.0f;

@@ -196,7 +196,7 @@ menuPointer:
 | `suspendWhen` | guards for a submenu or any state where the D-pad does something else. While any one of them passes nothing is pressed (a press under way is let go at once) and the trigger is yours: a fresh pull goes straight to the game, and one held back before the guard passed stays back until you let go, so it can never confirm a submenu entry on its own. After the guard stops passing steering waits 6 vsyncs more, then until you point at a different cell, so closing a submenu never moves the cursor to wherever you left the dot. After every confirm that reaches the game steering also waits 0.4 s, so the guard of a submenu that confirm opens has time to pass. Left empty, steering instead waits after every confirm that reaches the game, until Cross, the cursor moving to another cell, or the menu closing |
 | `cursor` | the addresses of the game's cursor: a 4-byte `node` pointer to the cell it is on, and 2-byte `index`, `x` and `y` |
 | `cells` | 1 to 16 cells, each with `node`, `index`, `x`, `y` (the cursor's values on that cell; all four must match), `rect` (where the cell shows: left, top, right and bottom as fractions `0` to `1` of the game picture) and `up`, `down`, `left`, `right` (the number, counting from 0, of the cell one D-pad press in that direction leads to; leave out a direction that leads nowhere, or out of the cells) |
-| `hand` | `either` (the default; the right hand first), `left` or `right` |
+| `hand` | `right` or `either` (the default): the right hand points, and the left hand's aim stands in only while the right controller is not tracked, so the left controller (the Steam Frame's D-pad hand) never takes the pointer while the right one just points off the screen. `left`: the left hand points |
 | `coop` | `true` lets it steer online too, which happens only in private co-op. Default `false` |
 | `pressVsyncs`, `gapVsyncs` | each D-pad press is held this many vsyncs, then released at least this many (default `2` and `2`) |
 | `settleVsyncs` | how long to wait for the cursor to move after a press before giving up (default `10`). The second press in one opening of the menu that the cursor does not answer turns point-to-select off until the menu opens again |
@@ -211,8 +211,13 @@ address in a profile. A cell's `x`, `y`, `index` and neighbour numbers are
 
 Steering stops if the cursor stops answering, goes outside the mapped cells,
 or needs more than `maxPresses` presses. It also stops the moment you use the
-D-pad, a stick or a grip (except a grip squeezed in a belt pouch, below), or
-press B or Menu; pointing at another cell starts it again. If the cursor's node
+D-pad, a stick or a grip (except a grip squeezed in a belt pouch, below), press
+B or Menu, or the cursor moves without the pointer (the left stick, the game
+itself); your move stands until you point at a different cell than the one the
+dot was on, and the dot wobbling while your thumb works a stick does not count.
+A pull goes to the cell the dot was on as the trigger began to move, so the dip
+a pull gives the controller never sends the confirm to another cell.
+If the cursor's node
 matches a cell but its index, `x` or `y` do not, the layout is not the one
 mapped, and point-to-select stays off until the menu opens again. Any invalid
 part of the block makes the emulator ignore the whole block, with a log line

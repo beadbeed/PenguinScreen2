@@ -356,11 +356,12 @@ namespace VR
 			return out;
 		}
 
-		void OverlayTestInput(VRInputSnapshot& snap)
+		// The hands it supplied: bit 0 the left, bit 1 the right (VRInputSnapshot::LEFT / RIGHT).
+		int OverlayTestInput(VRInputSnapshot& snap)
 		{
 			XRInput::TestInput t;
 			if (!LiveTestInput(&t))
-				return;
+				return 0;
 
 			snap.actions_active = true;
 			snap.generation = std::max<std::uint64_t>(snap.generation, 1);
@@ -380,11 +381,13 @@ namespace VR
 				origin = snap.head_pose.position_xyz;
 			}
 
+			int supplied = 0;
 			for (int hand = 0; hand < 2; ++hand)
 			{
 				const XRInput::TestInput::Hand& in = t.hands[hand];
 				if (!in.supplied)
 					continue;
+				supplied |= 1 << hand;
 				VRHandState& out = snap.hands[hand];
 				out = VRHandState{};
 				const auto bit = [&in](int i) { return (in.buttons & (1u << i)) != 0; };
@@ -407,6 +410,7 @@ namespace VR
 				out.aim_pose = in.head_relative ? FromHead(in.aim_pose, origin, yaw) : in.aim_pose;
 				out.grip_pose = in.head_relative ? FromHead(in.grip_pose, origin, yaw) : in.grip_pose;
 			}
+			return supplied;
 		}
 	}
 
@@ -425,28 +429,34 @@ namespace VR
 				snap.published_ms = s_snapshot.published_ms;
 			}
 		}
-		OverlayTestInput(snap);
+		const int test_hands = OverlayTestInput(snap);
 
-		// The menu pointer: where the right hand's aim ray meets the flat screen quad, else the left's (so PINE test hands
-		// drive it too), then a PINE test hit over it while one is live. Kept tiny (one locked copy, at most two ray-plane
-		// tests): the VR pacer may call this every display frame.
+		// The menu pointer: where the right hand's aim ray meets the flat screen quad. The left's stands in only for a right
+		// controller that is not tracked, or as a PINE test hand (AimScreenHit), so the left controller (the Steam Frame's
+		// D-pad hand) never takes the pointer while the right one merely points off the screen. Then a PINE test hit over
+		// it while one is live. Kept tiny (one locked copy, at most two ray-plane tests): the VR pacer may call this every
+		// display frame.
 		const VRScreenTransform screen = GetScreenTransform();
-		snap.screen_hit = VRScreenHit{};
-		if (screen.valid)
-		{
-			constexpr int kHandOrder[2] = {VRInputSnapshot::RIGHT, VRInputSnapshot::LEFT};
-			for (const int hand : kHandOrder)
-			{
-				VRScreenHit hit = RayHitScreen(screen, snap.hands[hand].aim_pose);
-				if (!hit.valid)
-					continue;
-				hit.hand = hand;
-				snap.screen_hit = hit;
-				break;
-			}
-		}
+		snap.screen_hit = AimScreenHit(screen, snap.hands[VRInputSnapshot::LEFT].aim_pose,
+			snap.hands[VRInputSnapshot::RIGHT].aim_pose, (test_hands & (1 << VRInputSnapshot::LEFT)) != 0);
 		OverlayTestScreenHit(snap, screen);
 		return snap;
+	}
+
+	VRScreenHit AimScreenHit(const VRScreenTransform& screen, const VRPose& left_aim, const VRPose& right_aim, bool left_test)
+	{
+		VRScreenHit hit = RayHitScreen(screen, right_aim);
+		if (hit.valid)
+		{
+			hit.hand = VRInputSnapshot::RIGHT;
+			return hit;
+		}
+		if (right_aim.valid && !left_test)
+			return VRScreenHit{};
+		hit = RayHitScreen(screen, left_aim);
+		if (hit.valid)
+			hit.hand = VRInputSnapshot::LEFT;
+		return hit;
 	}
 
 	namespace
