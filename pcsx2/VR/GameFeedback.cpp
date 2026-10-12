@@ -3,6 +3,8 @@
 
 #include "VR/GameFeedback.h"
 #include "VR/CameraDriver.h"
+#include "VR/HandModel.h"
+#include "VR/ItemData.h"
 #include "VR/SpatialControls.h"
 #include "VR/VRInput.h"
 #include "VR/VRProfileDB.h"
@@ -142,6 +144,60 @@ namespace VR::GameFeedback
 		constexpr float kDrySeconds = 0.012f;
 		constexpr float kTriggerPressed = 0.5f;
 
+		// The shot kick by the equipped item's kind (ItemData): a handgun, another gun or an id the table lacks as above
+		// (kShotAmp, kShotSeconds); a long gun harder and twice as long, and in the other hand too while it holds the
+		// fore-end (HandModel::OffHandSupports); a throw or a spray only a light cue; a melee weapon none (a swing drops
+		// no rounds, and a count it keeps is not ammo).
+		constexpr float kLongGunShotAmp = 1.4f; // past 1, so it stays stronger than a handgun's at a lower Haptic Strength
+		constexpr float kLongGunShotSeconds = 0.080f;
+		constexpr float kLongGunSupportAmp = 0.6f;
+		constexpr float kThrowAmp = 0.35f;
+		constexpr float kThrowSeconds = 0.025f;
+		constexpr float kSprayAmp = 0.25f;
+		constexpr float kSpraySeconds = 0.060f;
+
+		struct ShotKick
+		{
+			float amp = 0.0f; // 0: no shot at all
+			float seconds = 0.0f;
+			float support_amp = 0.0f; // the other hand, while it holds a long gun's fore-end
+		};
+
+		ShotKick ShotKickFor(ItemData::Kind kind)
+		{
+			ShotKick k;
+			switch (kind)
+			{
+				case ItemData::Kind::LongGun:
+					k.amp = kLongGunShotAmp;
+					k.seconds = kLongGunShotSeconds;
+					k.support_amp = kLongGunSupportAmp;
+					break;
+				case ItemData::Kind::Melee:
+					break;
+				case ItemData::Kind::Thrown:
+					k.amp = kThrowAmp;
+					k.seconds = kThrowSeconds;
+					break;
+				case ItemData::Kind::Spray:
+					k.amp = kSprayAmp;
+					k.seconds = kSpraySeconds;
+					break;
+				default:
+					k.amp = kShotAmp;
+					k.seconds = kShotSeconds;
+					break;
+			}
+			return k;
+		}
+
+		// A gun (or an id the table lacks) clicks when pulled empty; a melee weapon, something to throw or a spray can
+		// does not.
+		bool DryFires(ItemData::Kind kind)
+		{
+			return kind != ItemData::Kind::Melee && kind != ItemData::Kind::Thrown && kind != ItemData::Kind::Spray;
+		}
+
 		// What one vsync read of the weapon. The self-test builds these by hand.
 		struct WeaponSample
 		{
@@ -159,6 +215,7 @@ namespace VR::GameFeedback
 			bool reloading = false; // action == reload
 			bool trigger = false;   // right trigger past kTriggerPressed
 			bool a = false;         // right A
+			bool support = false;   // the left hand holds the long gun's fore-end, as the hands draw it
 			int aim_hand = kRight;
 			float strength = 1.0f;
 			u64 now_ms = 0;
@@ -365,21 +422,28 @@ namespace VR::GameFeedback
 				return;
 			}
 
-			// Another equipped record is a new baseline, no cue.
+			// Another equipped record is a new baseline, no cue. The item's kind sizes the kick (none for melee).
 			const bool same = st.baseline && st.eq == w.eq;
+			const ItemData::Kind kind = ItemData::KindOf(w.item_id);
 			if (same && w.ammo < st.ammo)
 			{
 				const u32 drop = static_cast<u32>(st.ammo) - static_cast<u32>(w.ammo);
-				if (drop <= kWeaponMaxShotStep && w.raised && !w.reloading)
+				const ShotKick kick = ShotKickFor(kind);
+				if (drop <= kWeaponMaxShotStep && w.raised && !w.reloading && kick.amp > 0.0f)
 				{
 					st.view.shot_serial++;
 					st.view.shot_ms = w.now_ms;
-					Pulse(w.aim_hand, kShotAmp, kShotSeconds, w.strength);
+					Pulse(w.aim_hand, kick.amp, kick.seconds, w.strength);
+					// A long gun's kick reaches the left hand too while it holds the fore-end.
+					const bool supported = w.support && kick.support_amp > 0.0f && w.aim_hand != kLeft;
+					if (supported)
+						Pulse(kLeft, kick.support_amp, kick.seconds, w.strength);
 					u32 skipped = 0;
 					if (w.log && TakeLog(s_log_shot, w.now_ms, kLogIntervalMs, &skipped))
-						Console.WriteLn("(VR) Feedback: shot, ammo %u -> %u, %s hand %.2f for %.0f ms%s.",
-							static_cast<u32>(st.ammo), static_cast<u32>(w.ammo), HandName(w.aim_hand),
-							static_cast<double>(kShotAmp), static_cast<double>(kShotSeconds) * 1000.0, MoreSuffix(skipped).text);
+						Console.WriteLn("(VR) Feedback: shot (%s), ammo %u -> %u, %s hand %.2f for %.0f ms%s%s.",
+							ItemData::KindName(kind), static_cast<u32>(st.ammo), static_cast<u32>(w.ammo), HandName(w.aim_hand),
+							static_cast<double>(std::min(kick.amp, 1.0f)), static_cast<double>(kick.seconds) * 1000.0,
+							supported ? ", the left hand on the fore-end too" : "", MoreSuffix(skipped).text);
 				}
 			}
 			else if (same && w.ammo > st.ammo)
@@ -395,8 +459,8 @@ namespace VR::GameFeedback
 						static_cast<u32>(st.ammo), static_cast<u32>(w.ammo), MoreSuffix(skipped).text);
 			}
 
-			// Dry fire: the trigger (or A) pulled on an empty gun held up.
-			if (w.raised && w.ammo == 0 && trigger_edge)
+			// Dry fire: the trigger (or A) pulled on an empty gun held up (a melee weapon, a throw or a spray never clicks).
+			if (w.raised && w.ammo == 0 && trigger_edge && DryFires(kind))
 			{
 				st.view.dry_ms = w.now_ms;
 				Pulse(w.aim_hand, kDryAmp, kDrySeconds, w.strength);
@@ -441,6 +505,35 @@ namespace VR::GameFeedback
 				(p.camera->look_at->aim_hand == kLeft || p.camera->look_at->aim_hand == kRight))
 				return p.camera->look_at->aim_hand;
 			return kRight;
+		}
+
+		// Whether the left hand holds the fore-end of the long gun item_id in the right, as the hands draw them
+		// (HandModel::OffHandSupports from the grip positions and the right hand's aim orientation; one read, so the
+		// take-hold distance).
+		bool LeftOnForeEnd(const VRInputSnapshot& snap, u16 item_id)
+		{
+			if (ItemData::KindOf(item_id) != ItemData::Kind::LongGun)
+				return false;
+			const VRHandState& gun_src = snap.hands[VRInputSnapshot::RIGHT];
+			const VRHandState& off_src = snap.hands[VRInputSnapshot::LEFT];
+			if (!gun_src.grip_pose.valid || !off_src.grip_pose.valid)
+				return false;
+			const VRPose& orient = gun_src.aim_pose.valid ? gun_src.aim_pose : gun_src.grip_pose;
+			HandModel::HandState gun_hand;
+			gun_hand.valid = true;
+			gun_hand.gun = true;
+			gun_hand.held = HandModel::Held::LongGun;
+			gun_hand.item_id = item_id;
+			HandModel::HandState off_hand;
+			off_hand.valid = true;
+			for (int k = 0; k < 3; k++)
+			{
+				gun_hand.pos[k] = gun_src.grip_pose.position_xyz[k];
+				off_hand.pos[k] = off_src.grip_pose.position_xyz[k];
+			}
+			for (int k = 0; k < 4; k++)
+				gun_hand.quat[k] = orient.orientation_xyzw[k];
+			return HandModel::OffHandSupports(gun_hand, off_hand, false);
 		}
 
 		float HapticStrength()
@@ -606,6 +699,7 @@ namespace VR::GameFeedback
 			{
 				w.trigger = snap.hands[VRInputSnapshot::RIGHT].trigger > kTriggerPressed;
 				w.a = snap.hands[VRInputSnapshot::RIGHT].a;
+				w.support = LeftOnForeEnd(snap, w.item_id);
 			}
 			WeaponStep(w, s_weapon);
 		}
@@ -959,6 +1053,104 @@ namespace VR::GameFeedback
 			w.now_ms += 34;
 			WeaponStep(w, ws);
 			check(none() && ws.hold == Hold::Weapon, "weapon: back to a good record is a baseline");
+		}
+
+		// Kinds (ItemData): a long gun kicks harder and longer (and in the left hand too while it holds the fore-end), a
+		// melee weapon not at all and it never clicks empty, a throw and a spray lightly.
+		{
+			WeaponState ws;
+			WeaponSample w;
+			w.log = false;
+			w.readable = true;
+			w.eq = 90;
+			w.rec_in_ram = true;
+			w.present = 1;
+			w.index = 90;
+			w.owner = 1;
+			w.slot_known = true;
+			w.slot = 0;
+			w.item_id = 11; // Shotgun
+			w.ammo = 7;
+			w.raised = true;
+			w.aim_hand = kRight;
+			w.now_ms = 40000;
+			WeaponStep(w, ws);
+			check(none(), "long gun: first read is a baseline");
+			w.ammo = 6;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(take(kRight) && approx(amp, 1.0f) && approx(secs, kLongGunShotSeconds),
+				"long gun: a full kick twice as long in the aim hand");
+			check(!take(kLeft), "long gun: nothing in the left hand while it is off the fore-end");
+			w.support = true;
+			w.ammo = 5;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(take(kRight) && approx(secs, kLongGunShotSeconds), "long gun, left hand on the fore-end: the aim hand kicks");
+			check(take(kLeft) && approx(amp, kLongGunSupportAmp) && approx(secs, kLongGunShotSeconds),
+				"long gun, left hand on the fore-end: and the left hand with it");
+			w.support = false;
+			w.strength = 0.5f;
+			w.ammo = 4;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(take(kRight) && approx(amp, 0.7f), "long gun at Haptic Strength 0.5: 0.7, more than a handgun's 0.5");
+			none();
+			w.strength = 1.0f;
+
+			// Melee (an iron pipe): a drop in its count is no shot, and empty it never clicks.
+			w.eq = 91;
+			w.index = 91;
+			w.item_id = 103;
+			w.ammo = 3;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(none(), "melee: another record is a baseline");
+			const u32 shots_before = ws.view.shot_serial;
+			w.ammo = 2;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(none() && ws.view.shot_serial == shots_before, "melee: a count drop is no shot and no kick");
+			w.ammo = 0;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			none();
+			w.trigger = true;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(none() && ws.view.dry_ms != w.now_ms, "melee: no dry fire");
+			w.trigger = false;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			none();
+
+			// Something to throw and a spray can: a light cue each.
+			w.eq = 92;
+			w.index = 92;
+			w.item_id = 114; // Molotov Cocktail
+			w.ammo = 2;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			none();
+			w.ammo = 1;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(take(kRight) && approx(amp, kThrowAmp) && approx(secs, kThrowSeconds), "thrown: a light cue");
+			w.eq = 93;
+			w.index = 93;
+			w.item_id = 28; // Pesticide Spray
+			w.ammo = 3;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			none();
+			w.ammo = 2;
+			w.now_ms += 17;
+			WeaponStep(w, ws);
+			check(take(kRight) && approx(amp, kSprayAmp) && approx(secs, kSpraySeconds), "spray: a light cue");
+			check(ShotKickFor(ItemData::Kind::Handgun).amp == kShotAmp && ShotKickFor(ItemData::Kind::Unknown).amp == kShotAmp &&
+					ShotKickFor(ItemData::Kind::Melee).amp == 0.0f,
+				"a handgun and an id the table lacks keep the pistol's kick; melee has none");
+			none();
 		}
 
 		// Stronger wins: a weaker pulse queued after a stronger one must not replace it (a beat vs a bite).

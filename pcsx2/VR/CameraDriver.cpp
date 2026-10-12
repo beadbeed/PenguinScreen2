@@ -1761,9 +1761,13 @@ namespace VR::CameraDriver
 					}
 				}
 			}
-			// The first-person hands show the pistol in the right hand while the weapon is raised.
-			// A bare-handed raise (no weapon equipped) shows no pistol; Unknown keeps the stance-only rule.
-			HandModel::SetGunHeld(weapon_raised && GameFeedback::WeaponInHand() != GameFeedback::Hold::BareHands);
+			// The first-person hands show the raised weapon in the right hand, shaped by the equipped item's kind (a
+			// pistol, a long gun, a melee weapon, something to throw or a spray can; the laser sight only on a gun).
+			// A bare-handed raise (no weapon equipped) shows none; Unknown keeps the stance-only pistol.
+			const GameFeedback::Hold weapon_hold = GameFeedback::WeaponInHand();
+			const GameFeedback::WeaponView weapon_view = GameFeedback::GetWeapon();
+			HandModel::SetWeaponHeld(HandModel::HeldFor(weapon_raised && weapon_hold != GameFeedback::Hold::BareHands,
+				weapon_hold == GameFeedback::Hold::Weapon && weapon_view.valid, weapon_view.item_id));
 			s_weapon_raised = weapon_raised;
 
 			// Walk while aiming: with the weapon up Outbreak only turns and tilts the aim with the stick. The

@@ -42,7 +42,36 @@ laser rms/max mm` (the jerk is |p(n) - 2p(n-1) + p(n-2)| of each submitted quad 
 row). Test aids on the null headset: `PCSX2_VR_FAKE_HANDS_SWEEP=1` (with `PCSX2_VR_FAKE_HANDS`; refused while the
 network adapter is on) sweeps the fake hands +-12 cm and +-20 deg of yaw at 0.5 Hz on the display clock;
 `PCSX2_VR_HANDS_RERASTER=always` draws every visible hand again every present (an image-quality A/B); and
-`PCSX2_VR_HANDS_SELFTEST=1` checks the placement maths at VR start (`(VR) Hands self-test: N checks passed`).
+`PCSX2_VR_HANDS_SELFTEST=1` checks the placement maths, the weapon shapes, the left hand's grip on a fore-end and the
+laser by kind at VR start (`(VR) Hands self-test: N checks passed`).
+
+Weapons in hand (both Files, profile `feedback.weapon`): while the weapon is raised in first person the right hand
+holds what the local character has equipped, by the item's kind (`VR/ItemData`, Outbreak-Research's item ids): a
+handgun, the stun gun, nail gun or ampoule shooter as the pistol (recoil, slide, muzzle flash, as before); a long gun
+as a rifle or shotgun (a longer barrel on the pistol's line, a fore-end, a stock back to the wrist; a pump shotgun, the
+scoped hunting rifle, a black assault rifle or submachine gun with its magazine, or a fat-barrelled launcher), with a
+heavier recoil (4 deg up, 2.5 cm back) and a bigger flash; a melee weapon along the pointing direction at its own
+length (knives about 25 cm; pipes, the curved and bent pipes and the wrench 45; the axe, hammer and stun rod 50 with a
+head; the scrub brush 40; the poles, square timber, spear and crutches a metre); something to throw in the closed hand
+(a molotov by its neck, the throwable stick, the concrete piece); a spray can in the closed hand. With a long gun the
+left hand closes round the fore-end once its grip is within 25 cm of it, and opens again past 28 cm. The laser sight
+shows only for guns, and a long gun's starts past its own muzzle. A bare-handed raise shows the hand on the
+controller; an equipped item that is no weapon shows bare hands too; while the weapon reader cannot tell (no
+`feedback.weapon`, or a record that fails its checks) the pistol and laser show from the stance alone, as before.
+Every hand's quad now lies on the plane through the middle of the hand (so the hand keeps its true depth in stereo; a
+weapon reaching past it is drawn onto that plane) and is fitted to the hand and what it holds as seen from the eye; a
+long gun's or a melee weapon's may grow to 1.3 m (the image stays 256 x 256, so it is coarser), and one reaching past
+the eye (a pole over the shoulder) keeps the hand and as much of it as fits. An image is drawn again when what the
+hand holds, or the left hand's grip, changes. Haptics by kind: a long gun's shot kicks for 80 ms at 1.4 before Haptic
+Strength (so it stays stronger than a handgun's 1.0 for 40 ms when the setting is turned down), and the left hand on
+its fore-end gets 0.6; a throw 0.35 for 25 ms, a spray 0.25 for 60 ms; a melee weapon nothing (a drop in its count is
+no shot); and a melee weapon, something to throw or a spray can never clicks when pulled empty. Logs: each weapon
+change `(VR) Hands: the right hand shows a long gun for Shotgun (item 11), with the laser sight.` (or `... the pistol
+from the stance alone ...`), and per shot `(VR) Feedback: shot (long gun), ammo 7 -> 6, right hand 1.00 for 80 ms, the
+left hand on the fore-end too.`. Test aid on the null headset: `PCSX2_VR_FAKE_WEAPON=<item id>` with
+`PCSX2_VR_FAKE_HANDS=gun` puts that item in the fake right hand (logged once as `(VR) Fake hands: the gun is item ...`;
+a long gun also holds the fake left hand just under its fore-end), e.g. 11 the shotgun, 106 the long pole, 114 a
+molotov, 28 the pesticide spray.
 
 Comfort blink (VR setting `ComfortBlink`, on by default): a view-locked black quad 0.3 m ahead that goes black
 over 40 ms, holds 60 ms and clears over 80 ms, on each snap turn and each change between the first-person and
@@ -50,13 +79,14 @@ the world screen. The screen change itself is made once the blink is black (`(VR
 then `(VR) Screen: world-locked.` about 40 ms later); snap turns log `(VR) HUD blink (snap turn).`.
 `PCSX2_VR_BLINK_TEST=1` blinks every 2 s (with the setting on) for `hmdshot.py` captures on the null headset.
 
-Laser sight (VR setting `LaserSight`, on by default): while the weapon is raised in first person, a 4 mm red
-beam from 2 cm past the impostor pistol's muzzle straight along the right hand's aim, fading out over 6 m. It
-has no depth, so it does not stop at walls or enemies. One quad in the base space turned about the beam to face
-the head, drawn under the hands and over the screen; it fades in over 0.15 s with the weapon and goes at once
-when it is lowered, and a frame looking straight down the beam goes without it. The first one in a session logs
-`(VR) HUD: laser sight shown (weapon raised in first person).`. `PCSX2_VR_FAKE_HANDS=gun` shows it on the fake
-right hand at any time (with the setting on).
+Laser sight (VR setting `LaserSight`, on by default): while a gun is raised in first person (never a melee weapon,
+something to throw or a spray can), a 4 mm red beam from 2 cm past the impostor gun's muzzle (the pistol's, or a long
+gun's further out) straight along the right hand's aim, fading out over 6 m. It has no depth, so it does not stop at
+walls or enemies. One quad in the base space turned about the beam to face the head, drawn under the hands and over
+the screen; it fades in over 0.15 s with the weapon and goes at once when it is lowered, and a frame looking straight
+down the beam goes without it. The first one in a session logs `(VR) HUD: laser sight shown (weapon raised in first
+person).`. `PCSX2_VR_FAKE_HANDS=gun` shows it on the fake right hand at any time (with the setting on, and while
+`PCSX2_VR_FAKE_WEAPON`, if set, names a gun).
 
 Menu pointer and tablet (VR settings `MenuPointer`, on by default, and `MenuTablet`, off by default): in a menu
 opened from first person (menu mode), the controller's aim casts a 3 mm beam (in the laser's slot, so not while the
