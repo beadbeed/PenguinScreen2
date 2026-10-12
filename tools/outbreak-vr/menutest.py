@@ -582,12 +582,37 @@ def sc_fast_click(r):
     return "held back, passed on cell 3 after %.2f s; B backed out" % (time.time() - t0)
 
 
+def item_cell(r, fc):
+    """A cell whose confirm opens a command submenu: one of the local character's own cells if it holds an item, else
+    the equipped box (File #1 slot 6 has an empty grid and Kevin's .45 in the equipped box). Steers there first."""
+    b = rec_base(r)
+    for k in range(4):
+        if b and r.p.read8(b + INV_OFFSET + k):
+            target = k
+            break
+    else:
+        target = 4
+    if r.cell() != target:
+        took, _, _ = r.steer_to(fc, target)
+        check(took is not None, "could not steer to %s for the confirm (cursor %s)" % (CELLS[target][0], r.cursor()))
+    return target
+
+
+def rec_base(r):
+    try:
+        return 0x476DD0 + r.p.read8(0x48BF7D) * 0x10E0
+    except Exception:
+        return 0
+
+
+INV_OFFSET = 0xC84
+
+
 def sc_latch(r):
     with r.controller() as fc:
         r.wait_armed()
         r.open_items(fc)
-        own = r.cell()
-        check(own >= 0, "the cursor is on no mapped cell (%s)" % (r.cursor(),))
+        own = item_cell(r, fc)  # a confirm here opens a command submenu
         other = 1 if own != 1 else 2
         r.point(fc, own)
         time.sleep(0.2)
@@ -622,9 +647,8 @@ def sc_submenu(r):
     with r.controller() as fc:
         r.wait_armed()
         r.open_items(fc)
-        own = r.cell()
-        check(own >= 0, "the cursor is on no mapped cell (%s)" % (r.cursor(),))
         check(r.p.read8(SUBMENU) == 0, "the submenu flag reads %d with no submenu open" % r.p.read8(SUBMENU))
+        own = item_cell(r, fc)  # a confirm here opens a command submenu
         other = 1 if own != 1 else 2
         third = next(c for c in (3, 2, 4) if c not in (own, other))
         r.point(fc, own)

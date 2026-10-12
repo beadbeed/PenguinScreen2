@@ -215,11 +215,12 @@ SLPM-65692:
       # still stop you (the game's collision pushes the position back out).
       aim: { stance: 0x08, equals: 2, hand: right, move: 70, moveStick: left, pitch: 0xBE0, pitchSign: 1, pitchClamp: 8000 }
       # Checked live on File #2 (Training Ground): item screen flag, near-cull table, view matrix and the
-      # stick magnitude (+0xFA8: the record is 0x20 longer than File #1's). No File #1-style action byte
-      # was found, so body-follow uses stance + stick only.
+      # stick magnitude (+0xFA8: the record is 0x20 longer than File #1's). The action byte is +0x54B (File #1's
+      # +0x54F; measured 2026-10-11: idle 0, walk 1, run 3, aiming 128), so body-follow checks idle as File #1 does.
       pauseWhen: [{ address: 0x4912BE, equals: 1, width: 1 }]
       bodyFollow:
         - { offset: 0x08, equals: 1, width: 1 }     # stance: normal (2 = weapon raised)
+        - { offset: 0x54B, equals: 0, width: 1 }    # action: idle (1 walk, 3 run, 128 aiming)
         - { offset: 0xFA8, equals: 0, width: 2 }    # stick magnitude: centred
       # Grabbed by a zombie (stance 5, checked on File #1: bites follow until Kevin breaks free), or down / dead /
       # turned (status 0xBB8: 0x08-0x0B down, 0x0C down in gas, above that dead, 0x30-0x34 zombie; dead values also
