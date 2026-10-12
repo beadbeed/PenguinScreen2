@@ -26,7 +26,10 @@ and test the first-person camera. They talk to a running PenguinScreen2 through 
 HUD cards on the null headset: `PCSX2_VR_HUD_TEST=1` shows a test toast every 3 s (it cycles through the
 whole font), `PCSX2_VR_FAKE_HANDS` also shows the wrist card on the fake left hand at any angle (NO DATA
 outside first person), and `PCSX2_VR_HUD_SELFTEST` runs the HUD self-test once (`(VR) HUD self-test:` in
-the emulog). Every toast is logged as `(VR) HUD toast: "..."`. The 5x7 font has A-Z (lower case is drawn as
+the emulog). The toast is view-locked 0.65 m ahead and 12 deg below the line of sight (24 deg wide), nearer than the
+first-person near field brings the world so nothing seen through it pops in front of it, and it goes in under the
+hands (over the screen, the laser and the menu pointer), so a hand passing in front of it hides it instead of the text
+drawing over a nearer hand. Every toast is logged as `(VR) HUD toast: "..."`. The 5x7 font has A-Z (lower case is drawn as
 capitals), 0-9 and `. , % : - / + ! ? ( ) ' &`, so every item name in `pcsx2/VR/ItemData.cpp` draws in full ("Kevin's
 45 Auto", "S&W model 500"; the HUD self-test checks each one). The wrist card's ammo line names the equipped weapon
 (its item id from `feedback.weapon`, through ItemData) in place of AMMO: `45 AUTO 7` for Kevin's 45 Auto (an owner's
@@ -193,10 +196,14 @@ reversal and runtime-velocity paths). `grabtest.py` checks it in the game, heads
 
 First-person stereo depth (VR settings `NearDepthMetres`, default 0 = the profile's `stereo.firstPerson.nearest`,
 below 0 off, 0.45-1.5 m overrides; `RollParallax`, on by default; ini only): true stereo depth now reaches in front of
-the screen plane down to `nearest` (0.75 m in both profiles, as you see it, at any strength) instead of flattening
-everything nearer onto that plane, for perspective-textured draws only (constant-Q, untextured and 2D/FST draws stay
-as before), and the parallax turns with head roll (full up to 25 deg, fading to none at 40 deg) so a tilted head sees
-no vertical disparity. First-person auto stereo (profile key `stereo.firstPerson.auto: true`, in both profiles):
+the screen plane down to `nearest` (1.0 m in both profiles, as you see it, at any strength; it was 0.75 m, and stays
+at 1.0 until it has been judged in the headset) instead of flattening everything nearer onto that plane, for
+perspective-textured draws only (constant-Q, untextured and 2D/FST draws stay as before), and the parallax turns with
+head roll (full up to 25 deg, fading to none at 40 deg) so a tilted head sees no vertical disparity. The game's 2D
+text therefore stays on the screen plane, so a counter or shelf nearer than it shows in front of a message drawn over
+it: if the game's own text looks doubled or sunk into a surface, `[VR] NearDepthMetres = -1` turns the near field off
+(flat, as before wave 4). Our toast sits at 0.65 m, nearer than any `nearest` the profiles have used.
+First-person auto stereo (profile key `stereo.firstPerson.auto: true`, in both profiles):
 separation = the headset's IPD / the first-person screen's real width and convergence = its distance x
 `unitsPerMeter`, so far content lands exactly one IPD apart whatever the aspect ratio. Each arm eases the separation
 in from 0 over 30 vsyncs (0.5 s); a later change (the IPD arriving, a strength edit, an aspect change) eases to the
@@ -206,7 +213,7 @@ flattens toward the screen, above 1 deepens near objects while distant ones neve
 an IPD outside 45-80 mm and a screen outside the rails. `stereo.firstPerson.ndcWidthRatio` (default 1.0) divides the
 auto separation if the draws' NDC is wider than the picture; the once-per-run `(VR) First-person multiview draw: NDC
 spans ... (NDC-to-display width ratio 1.000)` line measures it. Each arm logs `(VR) First-person stereo: sep 0.0132,
-conv 150 (1.50 m), nearest 0.75 m (floor -1.00), roll parallax on; auto from IPD 63.0 mm (runtime) on a 4.77 x 3.58 m
+conv 150 (1.50 m), nearest 1.00 m (floor -0.50), roll parallax on; auto from IPD 63.0 mm (runtime) on a 4.77 x 3.58 m
 screen at 1.50 m, strength 1.00; easing in over 30 vsyncs` (or `; profile values (<reason>), strength 1.00; ...`),
 then `(VR) First-person stereo: eased in to sep ..., conv ... after 30 vsyncs (... ms).`; a retarget ends
 `retargeting over 30 vsyncs (target changed)` and a `NearDepthMetres` edit `nearest changed`.

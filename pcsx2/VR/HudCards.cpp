@@ -1327,6 +1327,55 @@ namespace VR::HudCards
 		const V3 face = Rotate(q, V3{0.0f, 0.0f, 1.0f});
 		const V3 to_eye = Normalize(V3{-pos[0], -pos[1], -pos[2]});
 		check(Dot(face, to_eye) > 0.999f, "toast faces the eye");
+		// It sits nearer than the near field brings the world, so nothing seen through it comes out in front of it in
+		// stereo, and farther than the view-locked vignette drawn over it.
+		check(-pos[2] == kToastDistanceM && kToastDistanceM < kNearFieldMinM && kToastDistanceM > kVignetteDistanceM,
+			"toast nearer than the near field, farther than the vignette");
+		// Moved in from 1.2 m with the same angles: about 24 deg wide, 12 deg below the line of sight.
+		check(std::abs(kToastWidthM / kToastDistanceM - 0.50f / 1.2f) < 1.0e-4f &&
+				  std::abs(-pos[1] / -pos[2] - 0.25f / 1.2f) < 1.0e-4f,
+			"toast keeps its angular size and drop");
+		// Its corners lie in the vignette's clear middle, so the ring drawn over it never darkens its text.
+		const float toast_corner_tan = std::sqrt(std::pow(0.5f * kToastWidthM / kToastDistanceM, 2.0f) +
+			std::pow((kToastDropM + 0.5f * kToastHeightM) / kToastDistanceM, 2.0f));
+		check(toast_corner_tan < kVignetteRadiusTan * kVignetteClearFrac, "toast lies in the vignette's clear middle");
+
+		// Layer order (PlaceCardLayer), with the cards placed in slot order as the compositor does. With hands: the
+		// screen, then beam, dot and toast under the hands, the wrist card, vignette and blink over them.
+		{
+			constexpr int kScreenLayer = 100;
+			constexpr int kHandLayer = 200;
+			int order_layers[16] = {kScreenLayer, kHandLayer, kHandLayer + 1};
+			u32 order_count = 3;
+			u32 order_under = 1;
+			for (int card = 0; card < kCardCount; card++)
+				PlaceCardLayer(card, order_layers, order_count, order_under, card);
+			const int with_hands[] = {kScreenLayer, kLaser, kPointer, kToast, kHandLayer, kHandLayer + 1, kWrist, kVignette, kBlink};
+			bool hands_ok = (order_count == std::size(with_hands));
+			for (u32 li = 0; hands_ok && li < order_count; li++)
+				hands_ok = order_layers[li] == with_hands[li];
+			check(hands_ok, "layers: screen, beam, dot, toast, hands, wrist, vignette, blink");
+
+			// Without hands the toast still goes under the wrist card and the vignette, and the dot under the toast.
+			int bare_layers[16] = {kScreenLayer};
+			u32 bare_count = 1;
+			u32 bare_under = 1;
+			for (int card = 0; card < kCardCount; card++)
+				PlaceCardLayer(card, bare_layers, bare_count, bare_under, card);
+			const int no_hands[] = {kScreenLayer, kLaser, kPointer, kToast, kWrist, kVignette, kBlink};
+			bool bare_ok = (bare_count == std::size(no_hands));
+			for (u32 li = 0; bare_ok && li < bare_count; li++)
+				bare_ok = bare_layers[li] == no_hands[li];
+			check(bare_ok, "layers without hands: screen, beam, dot, toast, wrist, vignette, blink");
+
+			// The toast alone over the hands' mark stays under them.
+			int lone_layers[8] = {kScreenLayer, kHandLayer};
+			u32 lone_count = 2;
+			u32 lone_under = 1;
+			PlaceCardLayer(kToast, lone_layers, lone_count, lone_under, kToast);
+			check(lone_count == 3 && lone_layers[1] == kToast && lone_layers[2] == kHandLayer && lone_under == 1,
+				"the toast goes in under the hands");
+		}
 
 		// Rastering: the right size, opaque text on a translucent panel, clear corners.
 		std::vector<u32> img;

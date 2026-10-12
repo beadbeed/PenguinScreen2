@@ -2156,8 +2156,9 @@ namespace VR::XRCompositor
 				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 		}
 
-		// HUD cards, submitted after everything else so they draw on top, except the laser sight: it goes in at
-		// under_from, under the layers appended from there on (the hands, nearer the eye than the beam). A card
+		// HUD cards, submitted after everything else so they draw on top, except the laser sight (or menu beam), the
+		// menu pointer's dot and the toast: they go in at under_from, under the layers appended from there on (the
+		// hands, nearer the eye than any of them; HudCards::PlaceCardLayer has the order). A card
 		// is rastered at full opacity when its content changes and uploaded only when its content or fade step
 		// does; between uploads the runtime keeps showing the last released image.
 		u32 BuildHudLayers(XrCompositionLayerQuad* hud_quads, const XrCompositionLayerBaseHeader** layers,
@@ -2646,23 +2647,10 @@ namespace VR::XRCompositor
 					quad.pose.position = {pos[0], pos[1], pos[2]};
 					quad.size = {HudCards::kVignetteSizeM, HudCards::kVignetteSizeM};
 				}
+				// The laser, the dot and the toast go in under the hands (the dot over the beam, the toast over both), the
+				// rest on top; layer_count < capacity, checked above.
 				const XrCompositionLayerBaseHeader* layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
-				if ((i == HudCards::kLaser || i == HudCards::kPointer) && under_from < layer_count)
-				{
-					// In under the hands: the layers from under_from move up one (layer_count < capacity, checked above).
-					// under_from then moves past it, so the dot goes in over the beam and both stay under the hands.
-					for (u32 k = layer_count; k > under_from; k--)
-						layers[k] = layers[k - 1];
-					layers[under_from] = layer;
-					layer_count++;
-					under_from++;
-				}
-				else
-				{
-					layers[layer_count++] = layer;
-					if (i == HudCards::kLaser || i == HudCards::kPointer)
-						under_from = layer_count;
-				}
+				HudCards::PlaceCardLayer(i, layers, layer_count, under_from, layer);
 				appended++;
 			}
 			return appended;
@@ -5752,7 +5740,8 @@ namespace VR::XRCompositor
 		if (!force_zero_layers && should_render)
 			BuildHandLayers(hand_quads, layers, layer_count, kLayerCapacity, hand_att);
 
-		// HUD cards last of all, over the hands and everything else; only the laser sight goes in under the hands.
+		// HUD cards last of all, over the hands and everything else; only the laser sight (or menu beam), the menu
+		// pointer's dot and the toast go in under the hands.
 		if (!force_zero_layers && should_render)
 			BuildHudLayers(hud_quads, layers, layer_count, kLayerCapacity, hands_from, hud_att);
 
