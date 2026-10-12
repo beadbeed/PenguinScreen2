@@ -6,9 +6,13 @@ file-by-file inventory, the full M0 brief) is in `research/2026-10-11-steam-fram
 
 Written by the Windows PC session on 2026-10-12 from read-only research.
 
-**Progress (2026-10-12):** M0's code is done and CI-green on ARMSX2 branch `outbreak-vr-frame` (`17d5c67`): the probe, the
-`ENABLE_OPENXR` option, the VR layer (no clang fixes needed), the M0 hooks, the launcher and a smoke job. Nothing has run on
-a Frame yet; Alex's M0 session (ARMSX2 `frame/README-FRAME.md`) is next.
+**Progress (2026-10-12):** M0 and M1's code are done and CI-green on ARMSX2 branch `outbreak-vr-frame` (`22a1676`):
+- the probe and the `ENABLE_OPENXR` option;
+- the VR layer (no clang fixes needed) and the M0 hooks;
+- the launcher and a smoke job;
+- M1's first-person camera, stereo and GS hooks, with a CI hook-parity check.
+
+Nothing has run on a Frame yet. Alex's session (ARMSX2 `frame/README-FRAME.md`) is next.
 
 ## How it would work
 
