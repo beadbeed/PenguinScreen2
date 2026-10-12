@@ -4,6 +4,46 @@ Read this first when you resume. It covers what happened after the PC shut off, 
 decisions, what the Mac found, and what to do next. Alex's Mac holds the full reports in
 `~/Documents/github/outbreak-vr/docs/reviews/` (not on GitHub). This file is the short form.
 
+## PC update 3 (Windows PC, 2026-10-11 evening): wave 6
+
+`pc-firstperson` and `coop-firstperson` are both at c084c95. CI built it, and it is installed on the PC.
+
+**What wave 6 adds:**
+- **Menu safety:**
+  - while an item's command submenu is open (flag = cursor struct + 0x20: File #1 `0x720BA0`, File #2 `0x767210`), the
+    pointer presses nothing and the trigger is the player's;
+  - after a confirm the pointer waits 400 ms for the flag;
+  - after the submenu closes, the cursor waits until the dot moves to another cell.
+  - Also: File #2's equipped box (node `0x768F98`, measured), the beam and dot re-cast at display rate on the pacer, and
+    menus drawn with no stereo separation.
+- **Belt pouches:** a 2x2 chest rig mirroring the item grid, plus the equipped box at the belt buckle.
+  - Reaching into a pouch ticks (a double tick if the cell holds an item).
+  - A squeeze opens the item screen and steers the cursor to that cell (`MenuPointer::RequestCell`), under the same
+    submenu safety. It never confirms.
+- **Shake to break free:** while grabbed (stance 5, alive), shaking a controller waggles the left stick and presses
+  Circle and Cross alternately. Measured by hand: no input 10.2 s, the best mash 3.3 s; `grabtest` broke free in
+  0.1-1.7 s.
+- **`vrtest.py` runs on File #2** (one GAMES table) and has `--check-profile`: 73/73 checks on File #1, 71/71 on File #2.
+- **File #2 profile:**
+  - the item-grid live byte `0x76A604` is verified;
+  - body-follow checks the idle action (`+0x54B`).
+
+**Tested headset-free:**
+- every self-test passes (MenuPointer 144 checks, BeltPouches 54);
+- menutest cells, fast-click, latch, submenu, override, close-in-flight and pouches;
+- grabtest shake and baseline;
+- File #2 vrtest: 10 pass, including arm, smooth turn, holster, point-to-aim, walk-and-shoot, belt, body-follow and
+  savestate yaw.
+
+**Known test issues:**
+- File #2 run-latch fails: running from slot 2 carries Kevin into a door or event, so it needs a save with open floor
+  ahead.
+- vrtest `pitch` fails from File #1 slot 4 and File #2 slot 2 when raised through the holster. Raised with the bumper
+  it holds -3641 on File #2.
+- `grabtest idle-shake` sees one-frame held-word blips (D-pad and Cross). `PCSX2_VR_PADLOG=1` showed the VR controls
+  composed **no** change at those moments, so they don't come from the VR input. They appeared while the PC was
+  hitching (see update 2). Recheck after a reboot.
+
 ## PC update 2 (Windows PC, 2026-10-11 afternoon): waves 4 and 5
 
 Branch `wave4-integration` holds both waves on top of `pc-firstperson`. Merge it into `pc-firstperson` and
