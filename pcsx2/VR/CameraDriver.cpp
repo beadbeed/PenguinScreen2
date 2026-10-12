@@ -34,6 +34,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -922,6 +923,53 @@ namespace VR::CameraDriver
 					return true;
 			}
 			return false;
+		}
+
+		// Which check took first person away, for the DISARMED line: the first guard that fails (its address and what it
+		// reads against what it wants) or the releaseWhen entry that holds. Only read when that line is written.
+		std::string DescribeGuardFailure(const ProfileDB::CameraProfile& cam, u32 crc)
+		{
+			char buf[160];
+			for (size_t i = 0; i < cam.guards.size(); i++)
+			{
+				const ProfileDB::CameraGuard& g = cam.guards[i];
+				u32 address = g.ee_address;
+				if (g.is_chain)
+				{
+					const std::optional<u32> obj = WalkChain(g.pointer_addr, g.deref_offsets);
+					const s64 a = obj.has_value() ? static_cast<s64>(obj.value()) + g.offset : -1;
+					if (a < 0 || a + g.width > static_cast<s64>(Ps2MemSize::MainRam))
+					{
+						std::snprintf(buf, sizeof(buf), "guard %zu (pointer chain from 0x%08X) does not resolve", i + 1,
+							g.pointer_addr);
+						return buf;
+					}
+					address = static_cast<u32>(a);
+				}
+				const u32 v = ReadSized(address, g.width);
+				if ((v == g.equals) == g.not_equals)
+				{
+					std::snprintf(buf, sizeof(buf), "guard %zu (0x%08X, %u byte(s)) reads 0x%X, wants %s0x%X", i + 1, address,
+						static_cast<unsigned>(g.width), v, g.not_equals ? "not " : "", g.equals);
+					return buf;
+				}
+			}
+			if (cam.look_at.has_value() && !cam.look_at->release_when.empty())
+			{
+				const std::optional<u32> base = GetBase(cam, crc);
+				for (size_t i = 0; base.has_value() && i < cam.look_at->release_when.size(); i++)
+				{
+					const ProfileDB::RecordCheck& c = cam.look_at->release_when[i];
+					if (RecordCheckPass(c, base.value()))
+					{
+						const s64 a = static_cast<s64>(base.value()) + c.offset;
+						std::snprintf(buf, sizeof(buf), "released (lookAt.releaseWhen %zu: record +0x%X reads 0x%X)", i + 1,
+							static_cast<unsigned>(c.offset), ReadSized(static_cast<u32>(a), c.width));
+						return buf;
+					}
+				}
+			}
+			return "the guards failed for a moment and pass again";
 		}
 
 		// Where first person may run, resolved every vsync. Unknown is treated as Restricted.
@@ -3008,7 +3056,15 @@ namespace VR::CameraDriver
 					(vm_state != VMState::Running) ? "VM not Running (paused)" :
 					!pose.valid                    ? "no valid head pose published" :
 													 "profile guard failed";
-				Console.WriteLn(Color_StrongOrange, "(VR) CameraDriver: DISARMED (CRC %08X) — %s.", crc, reason);
+				if (s_disarm_reason == DisarmReason::GuardFailed)
+				{
+					Console.WriteLn(Color_StrongOrange, "(VR) CameraDriver: DISARMED (CRC %08X) — %s: %s.", crc, reason,
+						DescribeGuardFailure(cam, crc).c_str());
+				}
+				else
+				{
+					Console.WriteLn(Color_StrongOrange, "(VR) CameraDriver: DISARMED (CRC %08X) — %s.", crc, reason);
+				}
 			}
 			s_armed_logged = armed;
 		}
