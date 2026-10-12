@@ -102,6 +102,7 @@ and it does nothing without a running VR session.
 | `hurt` | `{ offset, max, width }`: where the character's HP (`offset`) and maximum HP (`max`) are, as offsets into the record `camera.base` finds, each `width` bytes (`1`, `2` or `4`, default `2`). Losing HP pulses both hands, harder and longer the bigger the hit |
 | `fire` | `{ address, width, hand }`: a counter the game raises by one per shot, at a fixed `address`. Each rise of 1 to 5 kicks `hand` (`left` or `right`; default the aiming hand of `camera.lookAt`, otherwise right). Bigger jumps are ignored |
 | `danger` | `{ below }`: while HP is above zero and below this fraction of maximum HP (default `0.25`), the left hand feels a heartbeat, faster below a tenth. Needs `hurt` |
+| `weapon` | `{ equipped, table }`: the byte at `equipped` in the record `camera.base` finds is the number of the equipped item's record (`0`: nothing equipped) in the item table at the fixed address `table`. A record counts only while its first byte is `1`, its third byte is its own number and its owner byte is the local player's slot plus one. Its count dropping while the weapon is raised kicks the aiming hand, a rise ticks both hands. The wrist card names the weapon from it, and belt pouches name their items from the same table. The record layout defaults to Resident Evil Outbreak's (`stride`, `id`, `count`, `owner`, and `stance`, `raised`, `action`, `reload` for the raised and reload checks, all hex) |
 
 The `hurt`, `fire` and `danger` cues run only while the head-tracked
 first-person camera is active, so they stay quiet on title screens, in
@@ -114,8 +115,10 @@ of this vibration, and `0` turns it off.
 while the head-tracked first-person camera is active. Turn your wrist toward
 your face, as if checking a watch, and it fades in. It shows the character's
 condition (FINE, CAUTION below 60% of maximum HP, DANGER below 20%, BLEED
-while bleeding), an HP bar, and the virus gauge. Like `feedback`, it only reads
-the game's memory and does nothing without a running VR session.
+while bleeding), an HP bar, and the virus gauge. With `feedback.weapon` in the
+profile and a weapon equipped, a line under the bar shows the weapon's name and
+rounds (`45 AUTO 7`; a knife shows its name alone). Like `feedback`, it only
+reads the game's memory and does nothing without a running VR session.
 
 | Key | Meaning |
 |---|---|
@@ -220,11 +223,14 @@ saying why.
 In first-person play, `pouches` puts small pouches on your body, each tied to
 one of the game's item cells, like the belt in Dungeons of Eternity. Reach a
 hand into a pouch and the controller ticks once, lightly, if that cell is
-empty, or twice and firmer if it holds an item. Squeeze the grip there and the
-game's item screen opens with its cursor on that pouch's cell; if the screen
-is already open, the cursor just moves there. You still pick the item yourself
-with the trigger. Nothing is ever confirmed for you, and the item bytes are only
-read. The pouches work only while first person is running.
+empty, or twice and firmer if it holds an item. With `feedback.weapon` in the
+profile, a short message in front of you also names the item, with its count
+where it has one ("Kevin's 45 Auto 7", "45 Auto Magazine x7", "Green Herb"),
+once each time you reach in and never while a menu is up. Squeeze the grip
+there and the game's item screen opens with its cursor on that pouch's cell;
+if the screen is already open, the cursor just moves there. You still pick the
+item yourself with the trigger. Nothing is ever confirmed for you, and the item
+bytes are only read. The pouches work only while first person is running.
 
 ```yaml
 pouches:
@@ -237,7 +243,7 @@ pouches:
 
 | Key | Meaning |
 |---|---|
-| `list` | 1 to 8 pouches. Each has `cell` (the number, counting from 0, of the `menuPointer` cell its squeeze steers the cursor to), `side`, `height` and `forward` (metres from your eyes, placed the way a Zone control's `placement` is, measured sitting upright and looking ahead), and optionally `item` (a hex offset into the record `camera.base` finds: the byte there is `0` while the cell is empty) and `radius` |
+| `list` | 1 to 8 pouches. Each has `cell` (the number, counting from 0, of the `menuPointer` cell its squeeze steers the cursor to), `side`, `height` and `forward` (metres from your eyes, placed the way a Zone control's `placement` is, measured sitting upright and looking ahead), and optionally `item` (a hex offset into the record `camera.base` finds: the byte there is `0` while the cell is empty, and otherwise the number of the item's record in `feedback.weapon`'s item table, which names it) and `radius` |
 | `anchor` | `seat` (the default) hangs the pouches from your neck and turns them to the forward you last recentered to, so looking down at a pouch or glancing at it does not move it. `head` places them the way the Zone controls are placed, turning with your head |
 | `open` | the `id` of one of the profile's Zone controls. A squeeze with the item screen closed presses that zone as a squeeze inside it would, including its `stopFirst`. Without it, a pouch only moves the cursor of an item screen that is already open |
 | `hand` | `either` (the default), `left` or `right` |

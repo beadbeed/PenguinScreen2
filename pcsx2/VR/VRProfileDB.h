@@ -655,7 +655,9 @@ namespace VR::ProfileDB
 	struct Pouch
 	{
 		int cell = -1;         // the menuPointer.cells entry the cursor is steered to
-		bool has_item = false; // the u8 at camera.base + item_offset is 0 while the cell is empty
+		// The u8 at camera.base + item_offset is 0 while the cell is empty, else the item's record index in the item table
+		// feedback.weapon names (which names the item: GameFeedback::ReadItemRecord).
+		bool has_item = false;
 		u32 item_offset = 0;
 		// Metres from the head as the Zone controls are placed (+ right, + up, + ahead), measured with the head upright
 		// and looking ahead.

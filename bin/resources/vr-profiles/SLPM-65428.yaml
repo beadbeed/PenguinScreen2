@@ -43,7 +43,7 @@ SLPM-65428:
   # raised (+0x08 == 2) a drop of the rounds kicks the aim hand and kicks the pistol back; a rise ticks
   # both hands (reload; the action byte +0x54F reads 0x1C then, expected, not yet checked live); an empty
   # gun clicks on a trigger pull. Nothing equipped shows bare hands (no pistol, no laser). The wrist card
-  # shows the rounds.
+  # shows the weapon's name and rounds ("45 AUTO 7"), and the belt pouches name their items from the same table.
   feedback: { padRumble: true, hurt: { offset: 0x544, max: 0x546, width: 2 }, danger: { below: 0.20 }, weapon: { equipped: 0xC7C, table: 0x3967D0, action: 0x54F, reload: 0x1C } }
   # Wrist card (VR only, first person): turn the left wrist to the face to read the character's condition
   # (FINE / CAUTION below 60% of max HP / DANGER below 20% / BLEED), an HP bar and the virus gauge. Reads
@@ -114,13 +114,18 @@ SLPM-65428:
   # Belt pouches (VR only, first person), Dungeons of Eternity style: five pouches on your body, the four on your chest
   # laid out like the item screen's 2 x 2 grid and the equipped box at your belt buckle. Reach a hand into one and it
   # ticks: once and lightly for an empty cell, twice and firmer while the cell holds an item (the local record's item
-  # byte +0xC84 + k for cell k, 0 = empty; read only, nothing is written). Squeeze the grip in one: with the item screen
-  # closed it opens through the belt zone exactly as a squeeze at your left hip does (you stop, then Start), and the menu
-  # pointer steers the cursor to that pouch's cell with the same D-pad presses as pointing (so it follows the Menu
-  # Pointer setting); with the screen already up a squeeze just moves the cursor there. Then pull the trigger (Circle) to
-  # pick it as usual: nothing is ever confirmed for you, and a squeeze is refused while an item's command submenu is open
-  # (suspendWhen: the cursor struct + 0x20, measured offline 2026-10-11). Only while first person is armed, so never on
-  # obsrv.
+  # byte +0xC84 + k for cell k, 0 = empty; the equipped box shows the special item, Kevin's .45 whether or not it is
+  # equipped, so its pouch reads the special item's byte +0xC88; read only, nothing is written). An open hand reaching
+  # into a pouch that holds an item also shows its name for 1.5 s ("Kevin's 45 Auto 7", "45 Auto Magazine x7", "Green
+  # Herb"): the byte is a record index into the item table feedback.weapon names, and the record must be present, name
+  # itself and be yours (owner = local slot + 1) as for the weapon cues; once per reach (a return within 0.5 s is not
+  # named again) and not while a menu is up, where the item screen names it. Squeeze the grip in one: with the item
+  # screen closed it opens through the belt zone exactly as a squeeze at your left hip does (you stop, then Start), and
+  # the menu pointer steers the cursor to that pouch's cell with the same D-pad presses as pointing (so it follows the
+  # Menu Pointer setting); with the screen already up a squeeze just moves the cursor there. Then pull the trigger
+  # (Circle) to pick it as usual: nothing is ever confirmed for you, and a squeeze is refused while an item's command
+  # submenu is open (suspendWhen: the cursor struct + 0x20, measured offline 2026-10-11). Only while first person is
+  # armed, so never on obsrv.
   # Layout, in metres from your eyes the way the zones are placed (side + right, height + up, forward + ahead), measured
   # sitting upright and looking ahead; each pouch is a ball 6.5 cm round its point. A starting point to tune in the
   # headset: high and narrow, the lower ones standing out from the body, to keep clear of the hip zones (balls 20 cm
@@ -148,7 +153,7 @@ SLPM-65428:
       - { cell: 1, item: 0xC85, side: 0.10, height: -0.20, forward: 0.14 }    # upper right chest -> item cell 1
       - { cell: 2, item: 0xC86, side: -0.07, height: -0.29, forward: 0.24 }   # lower left        -> item cell 2
       - { cell: 3, item: 0xC87, side: 0.07, height: -0.29, forward: 0.24 }    # lower right       -> item cell 3
-      - { cell: 4, side: 0.0, height: -0.40, forward: 0.28 }                  # out from the buckle -> the equipped box
+      - { cell: 4, item: 0xC88, side: 0.0, height: -0.40, forward: 0.28 }     # buckle -> the equipped box (special item)
   stereo:
     separation: 0.012
     convergence: 55.0
