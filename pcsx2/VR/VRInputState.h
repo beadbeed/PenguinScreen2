@@ -99,4 +99,10 @@ void PublishScreenTransform(const VRScreenTransform& transform);
 // Pure: where the ray from the aim pose's position along its -Z meets the screen quad's front face, 0.05-10 m out.
 // Valid only on the quad (0 <= u, v <= 1; u runs left to right, v top to bottom, like the game picture); hand is left at -1.
 VRScreenHit RayHitScreen(const VRScreenTransform& screen, const VRPose& aim);
+
+// Pure: the menu pointer's hit as GetInputSnapshot takes it (before a PINE test hit is laid over it): the right hand's aim
+// ray; the left's only standing in for a right controller whose aim is not tracked (playing with one controller), or
+// when left_test (the left hand is a PINE test hand). So the left controller never takes the pointer while the right one
+// merely points off the screen. hand says which ray made it.
+VRScreenHit AimScreenHit(const VRScreenTransform& screen, const VRPose& left_aim, const VRPose& right_aim, bool left_test);
 }

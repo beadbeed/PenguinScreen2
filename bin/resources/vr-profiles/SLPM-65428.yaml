@@ -96,13 +96,13 @@ SLPM-65428:
     suspendWhen:
       - { address: 0x720BA0, equals: 1, width: 1 }   # an item's command submenu is open
     cursor: { node: 0x720B84, index: 0x720B8C, x: 0x720B8E, y: 0x720B90 }
-    hand: either
+    hand: right        # the left controller (the Steam Frame's D-pad hand) never takes the pointer
     coop: true
     pressVsyncs: 2
     gapVsyncs: 2
     settleVsyncs: 10
     maxPresses: 6
-    dwellMs: 60
+    dwellMs: 150       # real hands drift across a cell's edge: the dot must hold a cell this long
     armDelayMs: 300
     enterInset: 0.12
     cells:

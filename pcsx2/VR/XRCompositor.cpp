@@ -178,8 +178,9 @@ namespace VR::XRCompositor
 
 		// What the pacer needs to place the menu pointer's beam and dot again each display frame: the flat screen quad
 		// they were placed on (the world screen or the menu tablet, as GetScreenTransform() gave it to PlaceMenuPointer),
-		// whether a hand's aim ray placed them (a PINE test hit has no hand to follow) and whether the laser's slot holds
-		// the menu beam this present. BuildHudLayers fills it (GS thread) and the publish copies it into the set.
+		// whether a hand's aim ray placed them (a PINE test hit has no hand to follow) and which hand's, and whether the
+		// laser's slot holds the menu beam this present. BuildHudLayers fills it (GS thread) and the publish copies it into
+		// the set.
 		struct PointerPublish
 		{
 			bool screen_valid = false;
@@ -188,6 +189,7 @@ namespace VR::XRCompositor
 			float half_width = 0.0f;
 			float half_height = 0.0f;
 			bool ray = false;
+			s8 hand = -1; // with ray, the hand whose aim placed them (HandModel::kLeft / kRight)
 			bool beam = false;
 		};
 
@@ -2364,6 +2366,7 @@ namespace VR::XRCompositor
 				pp.half_width = menu_pointer.half_width;
 				pp.half_height = menu_pointer.half_height;
 				pp.ray = !menu_pointer.test && menu_pointer.hand >= 0 && menu_pointer.hand < 2;
+				pp.hand = pp.ray ? static_cast<s8>(menu_pointer.hand) : static_cast<s8>(-1);
 				pp.beam = want[HudCards::kLaser].on && want[HudCards::kLaser].content == 2;
 			}
 
@@ -3940,13 +3943,15 @@ namespace VR::XRCompositor
 
 		// Headset rate, with [VR] HandsDisplayRate: the menu pointer's beam and dot placed again for this display frame in
 		// the pacer's copy of the set, from the aim pose LocateHandsNow located for it and the flat screen quad the set was
-		// published with, by the ray the GS placed them by (PlaceMenuPointer; the right hand first, as GetInputSnapshot
-		// takes the hit). So the beam stays on the hand and the dot under the aim between GS presents, like the hands,
-		// instead of stepping at the GS rate. The GS placement goes out unchanged for a PINE test hit (no hand to follow)
-		// and when no aim pose was located for this frame (none, or the test hands). An aim that misses the screen this
-		// frame leaves the beam and the dot out of it (the next present drops them too), and a beam that cannot be placed
-		// (the eye on its line, the hand at the screen) goes alone. Only poses and sizes change and entries only ever go,
-		// so the layer count never grows; s.published is never written.
+		// published with, by the ray of the hand the GS placed them by and only that one (PlaceMenuPointer takes
+		// GetInputSnapshot's hit: the right hand's ray, the left's only standing in for a right controller that is not
+		// tracked, or as a PINE test hand), so the other hand's ray never takes them over between presents. So the beam
+		// stays on the hand and the dot under the aim between GS presents, like the hands, instead of stepping at the GS
+		// rate. The GS placement goes out unchanged for a PINE test hit (no hand to follow) and when no aim pose was
+		// located for that hand this frame (none, or the test hands). Its aim missing the screen this frame leaves the
+		// beam and the dot out of it (the next present drops them too), and a beam that cannot be placed (the eye on its
+		// line, the hand at the screen) goes alone. Only poses and sizes change and entries only ever go, so the layer
+		// count never grows; s.published is never written.
 		int PlaceMenuPointerNow(PublishedSet& set, const HandsNow& now)
 		{
 			int beam = -1;
@@ -3964,7 +3969,10 @@ namespace VR::XRCompositor
 			if (beam < 0 && dot < 0)
 				return kPointerNowNone;
 			const PointerPublish& pp = set.pointer;
-			if (!pp.screen_valid || !pp.ray)
+			if (!pp.screen_valid || !pp.ray || pp.hand < 0 || pp.hand >= kHandSlots)
+				return kPointerNowKept;
+			const HandsNow::H& hn = now.hand[pp.hand];
+			if (!hn.aim_valid)
 				return kPointerNowKept;
 
 			VRScreenTransform screen;
@@ -3975,30 +3983,15 @@ namespace VR::XRCompositor
 			screen.half_width = pp.half_width;
 			screen.half_height = pp.half_height;
 
-			static constexpr int kAimOrder[kHandSlots] = {HandModel::kRight, HandModel::kLeft};
-			bool any_aim = false;
-			int hand = -1;
-			VRScreenHit hit;
-			for (const int h : kAimOrder)
-			{
-				const HandsNow::H& hn = now.hand[h];
-				if (!hn.aim_valid)
-					continue;
-				any_aim = true;
-				VRPose aim;
-				aim.valid = true;
-				aim.position_xyz = {hn.aim_pos[0], hn.aim_pos[1], hn.aim_pos[2]};
-				aim.orientation_xyzw = {hn.aim_quat[0], hn.aim_quat[1], hn.aim_quat[2], hn.aim_quat[3]};
-				const VRScreenHit rh = RayHitScreen(screen, aim);
-				if (rh.valid && std::isfinite(rh.point[0]) && std::isfinite(rh.point[1]) && std::isfinite(rh.point[2]))
-				{
-					hit = rh;
-					hand = h;
-					break;
-				}
-			}
-			if (!any_aim)
-				return kPointerNowKept;
+			VRPose aim;
+			aim.valid = true;
+			aim.position_xyz = {hn.aim_pos[0], hn.aim_pos[1], hn.aim_pos[2]};
+			aim.orientation_xyzw = {hn.aim_quat[0], hn.aim_quat[1], hn.aim_quat[2], hn.aim_quat[3]};
+			const VRScreenHit hit = RayHitScreen(screen, aim);
+			const int hand =
+				(hit.valid && std::isfinite(hit.point[0]) && std::isfinite(hit.point[1]) && std::isfinite(hit.point[2])) ?
+					static_cast<int>(pp.hand) :
+					-1;
 
 			bool keep_beam = false;
 			bool keep_dot = false;
@@ -4117,6 +4110,7 @@ namespace VR::XRCompositor
 				pp.half_width = 0.867f;
 				pp.half_height = 0.65f;
 				pp.ray = true;
+				pp.hand = static_cast<s8>(HandModel::kRight);
 				pp.beam = true;
 				static constexpr u8 kRoles[4] = {kRoleScreen, kRoleHudLaser, kRoleHudView, kRoleHand};
 				static constexpr u8 kParts[4] = {kPointerPartNone, kPointerPartBeam, kPointerPartDot, kPointerPartNone};
@@ -4168,7 +4162,9 @@ namespace VR::XRCompositor
 					"the screen and the hand are left alone");
 			}
 
-			// The right hand's aim misses: the left hand's places them, as GetInputSnapshot would take it.
+			// Placed by the right hand, as GetInputSnapshot takes the hit: its aim off the screen leaves them out of the
+			// frame even with the left hand's aim on it, and with no right aim this frame the GS placement stays. The left
+			// controller never takes the pointer from the right one.
 			{
 				PublishedSet set;
 				make_set(set);
@@ -4177,11 +4173,31 @@ namespace VR::XRCompositor
 					now.eye[k] = eye[k];
 				aim_at(now.hand[HandModel::kRight], right_from, away);
 				aim_at(now.hand[HandModel::kLeft], left_from, target);
+				check(PlaceMenuPointerNow(set, now) == kPointerNowDropped && set.count == 2,
+					"placed by the right hand, its aim off the screen drops them, whatever the left hand points at");
+				make_set(set);
+				now.hand[HandModel::kRight] = HandsNow::H{};
+				check(PlaceMenuPointerNow(set, now) == kPointerNowKept && set.count == 4 &&
+						  near3(set.e[2].quad.pose.position, gs_pos, 1.0e-6f),
+					"placed by the right hand with no right aim this frame, the GS placement stays");
+			}
+
+			// Placed by the left hand (the right controller not tracked, or a PINE test hand): the left hand's aim places
+			// them, even with the right hand's on the screen this frame.
+			{
+				PublishedSet set;
+				make_set(set);
+				set.pointer.hand = static_cast<s8>(HandModel::kLeft);
+				HandsNow now;
+				for (int k = 0; k < 3; k++)
+					now.eye[k] = eye[k];
+				aim_at(now.hand[HandModel::kLeft], left_from, target);
+				aim_at(now.hand[HandModel::kRight], right_from, target);
 				const float d[3] = {target[0] - left_from[0], target[1] - left_from[1], target[2] - left_from[2]};
 				const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
 				check(PlaceMenuPointerNow(set, now) == kPointerNowPlaced && near3(set.e[2].quad.pose.position, dot_at, 1.0e-3f) &&
 						  std::fabs(set.e[1].quad.size.height - (len - HudCards::kBeamStartM)) < 1.0e-3f,
-					"with the right hand's aim off the screen, the left hand's places them");
+					"placed by the left hand, the left hand's aim places them");
 			}
 
 			// Every aim misses: the beam and the dot are left out of this frame, the rest in order.

@@ -21,9 +21,10 @@ no OpenXR runtime at all for --test-uv. Be standing idle in a room with first pe
   python menutest.py --tablet-ini off              # restores the ini byte for byte
   python menutest.py pouches pouch-open pouch-submenu --slot 6   # the belt pouches (File #2: --slot 1 or 2)
 
-Scenarios: pointer-hit (the hit maths at 9 points, a turned-away aim misses, the left hand alone hits), cells (cells
-1, 3, 2, 0, the equipped box and 0 again, each within 0.8 s, presses <= path + 1, a landing tick per cell),
-fast-click (aim at cell 3 and pull the trigger at once: held back, passed only once the cursor is there), latch
+Scenarios: pointer-hit (the hit maths at 9 points, a turned-away aim misses, a PINE test hand on the left hits while the
+right is turned away: a real left controller never would), cells (cells 1, 3, 2, 0, the equipped box and 0 again, each
+within 0.8 s, presses <= path + 1, a landing tick per cell), fast-click (aim at cell 3 and pull the trigger at once,
+part way then past half: held back, passed only once the cursor is there), latch
 (after a confirm, pointing elsewhere presses nothing until B), submenu (a confirm on the cursor's cell with the dot
 moving straight on: the submenu's flag rises, nothing is pressed while it is up wherever the dot goes, and after B
 closes it the cursor stays until the dot moves to another cell), override (the right stick stops a steer, nothing
@@ -502,19 +503,21 @@ def sc_pointer_hit(r):
         r.aim(fc, RIGHT, 0.5, 0.5, yaw_off=70.0)
         time.sleep(0.15)
         check(not r.mp()["hit_valid"], "the aim turned 70 deg away still hits the screen")
-        fc.clear_hand(RIGHT)
-        r.aiming.pop(RIGHT, None)
+        # The right hand stays tracked, turned away. A real left controller never takes the pointer from it (the profile's
+        # hand: right; GetInputSnapshot's left ray stands in only for a right controller that is not tracked); a PINE test
+        # hand on the left does, which is what lets this runner check the left ray's maths.
         r.aim(fc, LEFT, 0.5, 0.5)
         time.sleep(0.15)
         mm = r.mp()
         check(mm["hit_valid"] and not mm["hit_right"] and abs(mm["u"] - 0.5) < 0.01,
-              "the left hand alone does not hit (hit %s, right %s, u %.3f)" % (mm["hit_valid"], mm["hit_right"], mm["u"]))
+              "a PINE test hand on the left, the right turned away, does not hit (hit %s, right %s, u %.3f)" % (
+                  mm["hit_valid"], mm["hit_right"], mm["u"]))
         fc.clear_hand(LEFT)
         r.aim(fc, RIGHT, 0.6, 0.45)
         time.sleep(0.4)
         r.shot("beam-dot-hands")
         r.close_items(fc)
-    return "9 grid points within %.4f, 70 deg away misses, the left hand alone hits" % worst
+    return "9 grid points within %.4f, 70 deg away misses, a PINE test hand on the left hits" % worst
 
 
 def grid_hits(r, fc, hand=RIGHT):
@@ -561,7 +564,13 @@ def sc_fast_click(r):
         r.open_items(fc)
         check(r.cell() == 0, "the item screen opened on cell %d, expected 0" % r.cell())
         m0 = r.mp()
-        r.point(fc, 3, trigger=1.0)  # aim at cell 3 and pull the trigger at once
+        # Aim at cell 3 and pull at once, well inside the 150 ms dwell: the pull is judged by where the dot was as the
+        # trigger began to move, so the dot is on cell 3 first, then the trigger goes part way, then past half.
+        r.point(fc, 3)
+        time.sleep(0.05)
+        r.point(fc, 3, trigger=0.3)
+        time.sleep(0.06)
+        r.point(fc, 3, trigger=1.0)
         held = False
         passed_cell = None
         t0 = time.time()
