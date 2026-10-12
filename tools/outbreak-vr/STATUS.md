@@ -172,7 +172,20 @@ image would be softer than the PC's (expect 1x to 1.5x internal resolution and 7
 
 The first slice of M0 is a small program, `frame-xrprobe`, that answers the runtime questions in one headset session. It also
 adds the `ENABLE_OPENXR` build option (off by default) and a CI smoke job. It is on ARMSX2 branch `outbreak-vr-frame`, kept
-off `outbreak-vr` until it is green and Alex has seen it. Its CI status and how to run it are in ARMSX2's `OUTBREAK-VR.md` on that branch.
+off `outbreak-vr` until it is green and Alex has seen it. CI is green on `4bc0998`: the build plus a `frame-smoke` job that runs the probe with no runtime on ubuntu-24.04-arm. The
+artifact is `outbreak-vr-frame-<sha>` (a tarball with the AppDir, `frame-probe.sh` and `README-FRAME.md`). How to deploy and
+run it, and what it answers, are in ARMSX2's `OUTBREAK-VR.md` and `frame/README-FRAME.md` on that branch.
+- The probe has never met a real OpenXR runtime; only the no-runtime path ran in CI.
+- It needs glibc 2.38, which the SteamOS host has (2.39). It will not start inside a Sniper container.
+- It suggests both Frame controller profile paths. Valve's input page names `/interaction_profiles/valve/frame_controller_valve`;
+  PenguinScreen2 uses `/interaction_profiles/valve/frame_controller`, which SteamVR on the PC accepted in full in the 10 Oct
+  session (`emulog-20261010-121201.txt`).
+
+Next on the Frame:
+1. Alex runs the probe once.
+2. M0's second slice: copy `pcsx2/VR`, add the shims and hooks under `ENABLE_OPENXR`, the game launcher and first-run ini,
+   `VR-SOURCE.md` and the hook audit (the brief is in `research/2026-10-11-steam-frame-research.md`, section 4).
+3. Merge `outbreak-vr-frame` into `outbreak-vr` once Alex agrees.
 
 ## Important to know
 
