@@ -4,6 +4,51 @@ Read this first when you resume. It covers what happened after the PC shut off, 
 decisions, what the Mac found, and what to do next. Alex's Mac holds the full reports in
 `~/Documents/github/outbreak-vr/docs/reviews/` (not on GitHub). This file is the short form.
 
+## PC update 5 (Windows PC, 2026-10-12 early morning): wave 8, full view, Steam Frame plan, end of the run
+
+**`STATUS.md` is now the one-page summary.** It covers where things are, the first-headset checklist, the ini switches that
+undo each big change, what's next, what needs investigation, the rules and the test kit. Read it first; this section only
+lists what changed.
+
+**Wave 8: the 8 findings of a pre-headset review of the 18k untested lines, fixed:**
+- **Menu pointer:**
+  - the player's own D-pad or stick moves stand: the pointer holds off until the dot rests on another cell;
+  - a trigger pull confirms the cell the dot rested on before the pull, not where its dip went; an unsure pull is swallowed,
+    never sent elsewhere;
+  - no D-pad press goes out with a confirm;
+  - only the right hand points (`hand: right` in both profiles);
+  - `dwellMs` is 150.
+- **Input gaps:** a trigger or A held through a tracking gap is not pressed again when tracking returns.
+  - `VRInputSource` latches it until release;
+  - MenuPointer swallows it once.
+- **Frame loop:**
+  - the deferred-publish "stuck" check uses the pacer heartbeat;
+  - layered mode publishes the two eyes as a pair.
+- **Private co-op detection:** it needs the Internal DNS as the PS2's primary DNS, with the login host's entry on a LAN,
+  Tailscale or loopback address.
+- **Text and depth:**
+  - the HUD toast sits nearer than the near field and under the hands;
+  - first-person `nearest` is 1.0 m (it was 0.75).
+
+**Full view (merged, off by default until Alex has tried the build):**
+- `[VR] FirstPersonFov = Auto` fits the game camera's FOV to the headset (100 to 130 deg, eased in on each arm), and the
+  first-person screen is sized to match;
+- `EdgeFill = true` shows a dim blur of the picture's edges instead of black around it;
+- the profile's fallback stereo separation is scaled to the wider screen.
+
+**Steam Frame standalone:**
+- `STEAM-FRAME.md` has the plan and the research (`research/2026-10-11-steam-frame-research.md`);
+- ARMSX2 branch `outbreak-vr-frame` has the first slice of M0: the `frame-xrprobe` runtime probe, the `ENABLE_OPENXR` build
+  option and a CI smoke job.
+
+**Tested headset-free on 5be8d87:**
+- every self-test passes (MenuPointer 200 checks);
+- menutest latch, override and close-in-flight pass;
+- cells, fast-click and submenu are flaky on this PC, and the previous build showed the same flakes in an A/B run (see
+  `STATUS.md`).
+
+The final build (full view merged) is in `STATUS.md`. The PC was shut down at the end of the run.
+
 ## PC update 4 (Windows PC, 2026-10-11 night): wave 7
 
 **Item names and kinds:** `pcsx2/VR/ItemData.*` maps 234 item ids (shared by both Files) to a short name and a kind.
