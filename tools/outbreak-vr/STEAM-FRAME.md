@@ -4,7 +4,11 @@ Can first-person Outbreak run on the Frame itself, with no PC? Short answer: **p
 nothing found blocks it in principle, but none of it exists yet.** This page is the plan. The research behind it (sources,
 file-by-file inventory, the full M0 brief) is in `research/2026-10-11-steam-frame-research.md`.
 
-Written by the Windows PC session on 2026-10-12 from read-only research; nothing has been built or run on a Frame.
+Written by the Windows PC session on 2026-10-12 from read-only research.
+
+**Progress (2026-10-12):** M0's code is done and CI-green on ARMSX2 branch `outbreak-vr-frame` (`17d5c67`): the probe, the
+`ENABLE_OPENXR` option, the VR layer (no clang fixes needed), the M0 hooks, the launcher and a smoke job. Nothing has run on
+a Frame yet; Alex's M0 session (ARMSX2 `frame/README-FRAME.md`) is next.
 
 ## How it would work
 

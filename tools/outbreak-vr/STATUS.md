@@ -19,7 +19,7 @@ Written by the Windows PC session on 2026-10-12, at the end of a long autonomous
 | Branches | `pc-firstperson` = `coop-firstperson` = `wave4-integration` (the branch with the CI cache) = the commit that adds this page (code as of `0a9fa63`) |
 | Installed on the PC | `D:\Games\PS2\PenguinScreen2`, CI build of `0a9fa63` (run 38202143514) |
 | Tested in the real headset | **Nothing since the 10 Oct morning session.** That is about 18,800 lines across 58 files (`63cc827..HEAD` in `pcsx2`, `pcsx2-qt`, `bin`), all checked headset-free only. |
-| Steam Frame standalone | Plan in `STEAM-FRAME.md`. The probe slice is on ARMSX2 branch `outbreak-vr-frame` (see below). |
+| Steam Frame standalone | Plan in `STEAM-FRAME.md`. **M0's code is done** on ARMSX2 branch `outbreak-vr-frame` (`17d5c67`, CI green); nothing has run on a Frame yet (see below). |
 
 **Builds** come from GitHub Actions only:
 - start one with `gh workflow run build-windows.yml -R beadbeed/PenguinScreen2 --ref <branch>`: about 20 min on a branch with
@@ -170,9 +170,19 @@ Feasible, and nothing found so far blocks it. It would run on ARMSX2 (native ARM
 image would be softer than the PC's (expect 1x to 1.5x internal resolution and 72 Hz first) and the battery would last about
 1 to 1.5 h. The plan has six milestones, about 3 to 5 weeks at CI pace, plus 5 or 6 short headset sessions: `STEAM-FRAME.md`.
 
-The first slice of M0 is a small program, `frame-xrprobe`, that answers the runtime questions in one headset session. It also
-adds the `ENABLE_OPENXR` build option (off by default) and a CI smoke job. It is on ARMSX2 branch `outbreak-vr-frame`, kept
-off `outbreak-vr` until it is green and Alex has seen it. CI is green on `4bc0998`: the build plus a `frame-smoke` job that runs the probe with no runtime on ubuntu-24.04-arm. The
+**M0's code is done** on ARMSX2 branch `outbreak-vr-frame`, at `17d5c67`. CI is green: the build, the unit tests and the
+`frame-smoke` job. `outbreak-vr` and `master` are untouched until Alex has seen it. It has two slices:
+- **The probe:** `frame-xrprobe`, a small program that answers the runtime questions in one headset session, plus the
+  `ENABLE_OPENXR` build option (off by default; only `outbreak-vr.yml` turns it on).
+- **The VR layer:** PenguinScreen2's `pcsx2/VR` (from `c2c5ee2`, 39k lines) copied in. It compiled with clang 17 on the
+  first try, with no fixes needed. Shims and the M0 hooks are added, all under `#ifdef ENABLE_OPENXR`: the queue lock, frames
+  to the headset, settings, input with rumble, and `--vr` / `-vr-info`. Also `frame/launch-outbreak-vr.sh` (logs to
+  `~/armsx2-vr/logs`, writes a first-run ini: Vulkan 1x, MTVU, VR on, head camera and stereo off) and a hook audit.
+  `pcsx2/VR/VR-SOURCE.md` lists every copied file and about 50 hook sites, with their status.
+
+The artifact is `outbreak-vr-frame-17d5c6748c`: a tarball with the AppDir, the launcher, the probe and `README-FRAME.md`.
+M0 should show the game on a flat screen in the headset, played with the Frame controllers as a pad. First person, stereo
+and hands come in M1 to M3. CI is green on `4bc0998`: the build plus a `frame-smoke` job that runs the probe with no runtime on ubuntu-24.04-arm. The
 artifact is `outbreak-vr-frame-<sha>` (a tarball with the AppDir, `frame-probe.sh` and `README-FRAME.md`). How to deploy and
 run it, and what it answers, are in ARMSX2's `OUTBREAK-VR.md` and `frame/README-FRAME.md` on that branch.
 - The probe has never met a real OpenXR runtime; only the no-runtime path ran in CI.
@@ -182,10 +192,14 @@ run it, and what it answers, are in ARMSX2's `OUTBREAK-VR.md` and `frame/README-
   session (`emulog-20261010-121201.txt`).
 
 Next on the Frame:
-1. Alex runs the probe once.
-2. M0's second slice: copy `pcsx2/VR`, add the shims and hooks under `ENABLE_OPENXR`, the game launcher and first-run ini,
-   `VR-SOURCE.md` and the hook audit (the brief is in `research/2026-10-11-steam-frame-research.md`, section 4).
+1. Alex runs the M0 session from `frame/README-FRAME.md`: the probe first, then `launch-outbreak-vr.sh`. He sends back the
+   logs.
+2. M1: the per-vsync VR block (the first-person camera), one owner for StereoState, the GSRendererHW stereo and first-person
+   hooks, and per-eye swapchains.
 3. Merge `outbreak-vr-frame` into `outbreak-vr` once Alex agrees.
+
+The first-run ini binds no pad, so Pad 1 has only the VR Gamepad overlay; a keyboard or Steam Input pad needs binding in the
+ini.
 
 ## Important to know
 
