@@ -352,16 +352,30 @@ void VRInputSource::Instance::ResetState()
 // the dashboard, no Start from a grip still closed in the belt zone. Axes pass through. Only the Gamepad and zones: their
 // buttons are presses the player holds, while the grab devices' buttons are states their reset rebuilds after the gap
 // (the selector's notch or gear at rest, a held lever, a tracked gun) that a latch would hide.
-void VRInputSource::Instance::ReleaseFirst(SC::ControlValues& values, bool opened)
+//
+// The Gamepad's confirm controls (RightTriggerPress and ButtonA) are judged by the controller, not by what the Gamepad
+// composed: the menu pointer's confirm hold (SpatialControls::SetPointerConfirmHold) reads them as 0 while it holds a
+// confirm back, and MenuPointer::Poll sets it before the instances compose. So a trigger still pulled as the gate opens
+// is marked even if the hold hides it that poll, and stays marked until the trigger is really let go: the hold lifting
+// at the cursor's arrival can't turn it into a Circle the player never pulled for after the gap.
+void VRInputSource::Instance::ReleaseFirst(SC::ControlValues& values, const VR::VRInputSnapshot& snap, bool opened)
 {
 	if (!def || (kind != SC::DeviceKind::Gamepad && kind != SC::DeviceKind::Zone))
 		return;
+	const VR::VRHandState& right = snap.hands[VR::VRInputSnapshot::RIGHT];
 	for (const SC::ControlDef& c : def->controls)
 	{
 		if (c.type != SC::ControlType::Button)
 			continue;
 		const u32 i = static_cast<u32>(c.id);
-		const bool pressed = values[i] >= 0.5f;
+		bool pressed = values[i] >= 0.5f;
+		if (kind == SC::DeviceKind::Gamepad)
+		{
+			if (c.id == SC::ControlId::RightTriggerPress)
+				pressed = pressed || right.trigger >= 0.5f;
+			else if (c.id == SC::ControlId::ButtonA)
+				pressed = pressed || right.a;
+		}
 		if (opened)
 			held_through_gap[i] = pressed;
 		else if (!pressed)
@@ -888,7 +902,7 @@ void VRInputSource::PollEvents()
 				break;
 			case SC::DeviceKind::Gamepad:
 				values = SC::ComposeGamepad(snap, in.gamepad, in.gamepad_state, dt);
-				in.ReleaseFirst(values, opened);
+				in.ReleaseFirst(values, snap, opened);
 				QueueBreakoutBuzz(in.gamepad_state.breakout);
 				break;
 			case SC::DeviceKind::Zone:
@@ -909,7 +923,7 @@ void VRInputSource::PollEvents()
 				values = SC::ComposeZone(in.zone_state);
 				// Before the pouch's open press and the stop-first delay below: a squeeze held through an input gap neither
 				// presses nor stops the character until the grip has opened once.
-				in.ReleaseFirst(values, opened);
+				in.ReleaseFirst(values, snap, opened);
 				const bool held_over = in.held_through_gap[static_cast<u32>(SC::ControlId::Pressed)];
 				for (int hand = 0; hand < 2; ++hand)
 				{
