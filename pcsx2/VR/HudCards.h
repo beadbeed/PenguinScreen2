@@ -79,15 +79,16 @@ namespace VR::HudCards
 	// distance, so the angles stay those.
 	static constexpr u32 kToastWidth = 1024;
 	static constexpr u32 kToastHeight = 160;
-	static constexpr float kToastDistanceM = 0.65f;
+	static constexpr float kToastDistanceM = 0.45f;
 	static constexpr float kToastDesignM = 1.2f;
 	static constexpr float kToastWidthM = 0.50f * kToastDistanceM / kToastDesignM;
 	static constexpr float kToastHeightM = kToastWidthM * static_cast<float>(kToastHeight) / static_cast<float>(kToastWidth);
 	static constexpr float kToastDropM = 0.25f * kToastDistanceM / kToastDesignM;
-	// The nearest any shipped profile's near field has put world geometry (stereo.firstPerson nearest: 0.75 m in
-	// wave 4, 1.0 m now). The toast must stay nearer than this. NearDepthMetres can still be set down to 0.45 m by
-	// hand, past the toast; that is the player's choice.
-	static constexpr float kNearFieldMinM = 0.75f;
+	// The nearest any shipped profile's near field puts world geometry (stereo.firstPerson nearest: 0.75 m in wave 4,
+	// 1.0 m in wave 8, 0.5 m since Alex's first headset test found the bar counter too far away). The toast must stay
+	// nearer than this. NearDepthMetres can still be set down to 0.45 m by hand, onto the toast; that is the player's
+	// choice.
+	static constexpr float kNearFieldMinM = 0.5f;
 	static_assert(kToastDistanceM < kNearFieldMinM, "the toast must be nearer than the near field can bring the world");
 
 	// Wrist card image and quad: about the size of a large watch face, held just off the glove.
@@ -144,7 +145,7 @@ namespace VR::HudCards
 	// VignetteStrength setting times CameraDriver::ComfortMotion(), so the ring only closes in while the view
 	// moves without the head.
 	static constexpr u32 kVignetteImageSize = 256;
-	static constexpr float kVignetteDistanceM = 0.5f;
+	static constexpr float kVignetteDistanceM = 0.35f;
 	static constexpr float kVignetteSizeM = 6.0f;
 	static constexpr float kVignetteRadiusTan = 1.6f;
 	static constexpr float kVignetteClearFrac = 0.45f;

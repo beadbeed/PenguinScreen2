@@ -167,12 +167,13 @@ SLPM-65428:
     # each arm. The numbers are the fallback until the headset reports its eyes, or with VR
     # FirstPersonAutoStereo off (0.0132 = 0.063 m / 4.77 m, 150 = 1.5 m x 100 units/m). VR
     # FirstPersonStereoStrength scales it. nearest: true depth continues in front of the screen plane down
-    # to 1.0 m perceived instead of flattening everything nearer onto it; textured, perspective-Q draws
+    # to 0.5 m perceived instead of flattening everything nearer onto it; textured, perspective-Q draws
     # only, so 2D overlays (the game's message text) stay on the screen plane, and a counter nearer than
-    # it then shows in front of text drawn over it. 1.0 m, not wave 4's 0.75, keeps that conflict small
-    # until the near field has been judged in the headset. VR NearDepthMetres overrides it; if the game's
-    # own text looks doubled or sunk into a surface, [VR] NearDepthMetres = -1 turns the near field off.
-    firstPerson: { separation: 0.0132, convergence: 150, nearest: 1.0, auto: true }
+    # it then shows in front of text drawn over it. 0.5 m since Alex's first headset test (2026-10-12):
+    # at 1.0 m the pistol on J's Bar counter felt far away. VR NearDepthMetres overrides it; if the game's
+    # own text looks doubled or sunk into a surface, [VR] NearDepthMetres = 1.0 brings back wave 8's near
+    # field and -1 turns it off.
+    firstPerson: { separation: 0.0132, convergence: 150, nearest: 0.5, auto: true }
     # Menus flat: while the item screen, the map or pause is up (u8 0x48BF7E = 1, the flag camera.lookAt.pauseWhen
     # reads; first person stands down then, so this rule applies) the picture goes at zero separation, so the menu
     # lies exactly on the screen's plane, where the menu pointer's dot is drawn. With the base separation the menu's

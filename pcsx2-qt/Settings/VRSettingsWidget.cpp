@@ -48,9 +48,9 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.comfortVignette, "VR", "ComfortVignette", false);
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.vignetteStrength, "VR", "VignetteStrength", 0.6f);
 	SettingWidgetBinder::BindWidgetToEnumSetting(sif, m_ui.firstPersonFov, "VR", "FirstPersonFov", s_first_person_fov_names,
-		s_first_person_fov_values, s_first_person_fov_values[1], "VRSettingsWidget");
+		s_first_person_fov_values, s_first_person_fov_values[0], "VRSettingsWidget");
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.firstPersonFovMargin, "VR", "FirstPersonFovMarginDeg", 6.0f);
-	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.edgeFill, "VR", "EdgeFill", false);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.edgeFill, "VR", "EdgeFill", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.laserSight, "VR", "LaserSight", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.menuPointer, "VR", "MenuPointer", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.menuTablet, "VR", "MenuTablet", false);
@@ -266,7 +266,7 @@ void VRSettingsWidget::updateFovFields()
 {
 	// The margin only does something with Fit the Headset (per game, the effective value: the global one while the combo
 	// inherits it).
-	const bool fit = dialog()->getEffectiveStringValue("VR", "FirstPersonFov", s_first_person_fov_values[1]) ==
+	const bool fit = dialog()->getEffectiveStringValue("VR", "FirstPersonFov", s_first_person_fov_values[0]) ==
 	                 s_first_person_fov_values[0];
 	m_ui.firstPersonFovMargin->setEnabled(fit);
 	m_ui.firstPersonFovMarginLabel->setEnabled(fit);
