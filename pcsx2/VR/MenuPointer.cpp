@@ -554,14 +554,17 @@ namespace VR::MenuPointer
 		StepOut out;
 		// The controls coming back from a gap (the SteamVR dashboard, a stalled snapshot), where everything read released:
 		// a confirm still held is the one from before the gap, not a fresh pull. It makes no edge and stays held back until
-		// let go, so neither the pointer nor the game takes it for a new press.
+		// let go, so neither the pointer nor the game takes it for a new press (VRInputSource's release-first latch marks
+		// the same hold on the same poll and lets it go on the same release, so the next pull is free for both).
 		if (in.actions_live && !st.actions_were_live && in.confirm)
 		{
 			st.swallow = true;
 			st.confirm_prev = true;
 		}
 		st.actions_were_live = in.actions_live;
-		const bool confirm_edge = in.confirm && !st.confirm_prev;
+		// Not const: a confirm already held as the gate opens is no edge (below). A hold the gap check above caught makes
+		// no edge here, so it is swallowed once, not twice.
+		bool confirm_edge = in.confirm && !st.confirm_prev;
 		st.confirm_prev = in.confirm;
 		const bool back_edge = in.back && !st.back_prev;
 		st.back_prev = in.back;
@@ -720,6 +723,16 @@ namespace VR::MenuPointer
 			out.opened = true;
 			// No landing tick for the cell the menu opens on.
 			st.last_cell = current;
+			// A confirm that reads pulled on the poll the gate opens was held through the gap before it (the SteamVR
+			// dashboard, a stale snapshot: the controls read released meanwhile, so it looks fresh), or pulled in the
+			// same poll the menu came up. Either way the player did not pull it for this menu: it is held, not an edge,
+			// and held back until let go (VRInputSource's release-first latch keeps it from the game too), so it neither
+			// confirms the cell the cursor is on nor steers to the dot's cell to confirm there.
+			if (confirm_edge)
+			{
+				confirm_edge = false;
+				st.swallow = true;
+			}
 		}
 		else
 		{
@@ -2206,6 +2219,72 @@ namespace VR::MenuPointer
 			s.in.gate = false;
 			s.Poll();
 			check(!s.st.latched, "the menu closing behind the gate lets the latch go");
+		}
+
+		// A trigger held through an input gap (the SteamVR dashboard, a stale snapshot: the controls read released
+		// meanwhile) is no fresh pull on the poll the gate opens again: it neither steers to the dot's cell to confirm there
+		// nor confirms the cursor's own cell, and stays held back until let go.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.ResetCounts();
+			s.in.gate = false;
+			s.in.screen_up = true;
+			s.Run(5);
+			s.Point(3);
+			s.in.gate = true;
+			s.in.confirm = true;
+			s.Poll();
+			check(s.out.opened && s.passed == 0 && !s.out.in_flight && s.out.confirm_hold && s.st.swallow,
+				"a trigger held through a gap, the dot on another cell: no steer, and held back as the gate opens");
+			s.Run(40);
+			check(s.passed == 0 && s.arrivals == 0 && s.game.presses == 0 && s.game.cell == 0 && s.out.confirm_hold &&
+					  s.phantom == 0,
+				"and while it stays held nothing is pressed or confirmed");
+			s.in.confirm = false;
+			s.Poll();
+			check(!s.out.confirm_hold && s.passed == 0, "until it is let go");
+			s.in.confirm = true;
+			s.Run(40);
+			s.in.confirm = false;
+			s.Poll();
+			check(s.passed == 1 && s.game.cell == 3 && s.phantom == 0, "then a fresh pull is the player's own");
+
+			s.Point(-1);
+			s.in.back = true; // Cross lets that confirm's latch go
+			s.Poll();
+			s.in.back = false;
+			s.Poll();
+			s.ResetCounts();
+			s.in.gate = false;
+			s.Run(5);
+			s.in.gate = true;
+			s.in.confirm = true;
+			s.Poll();
+			s.Run(10);
+			check(s.passed == 0 && s.out.confirm_hold && s.phantom == 0 && !s.st.latched,
+				"held through a gap on the cursor's own cell: nothing confirmed");
+			s.in.confirm = false;
+			s.Poll();
+			check(!s.out.confirm_hold && s.passed == 0 && s.phantom == 0, "and nothing when it is let go");
+
+			s.in.confirm = true;
+			s.Poll();
+			s.in.confirm = false;
+			s.Poll();
+			check(s.passed == 1 && s.st.latched, "a confirm on the cursor's own cell latches");
+			s.ResetCounts();
+			s.in.gate = false;
+			s.Run(5);
+			s.in.gate = true;
+			s.in.confirm = true;
+			s.Run(10);
+			check(s.st.latched && s.passed == 0 && s.out.confirm_hold && s.phantom == 0,
+				"held through a gap with the latch kept (the menu stayed up): nothing reaches what the game has up");
+			s.in.confirm = false;
+			s.Poll();
+			check(!s.out.confirm_hold && s.passed == 0, "and it is free once let go");
 		}
 
 		// suspendWhen: steering waits while it passes and 6 polls after, then until the dot reaches another cell (the

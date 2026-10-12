@@ -152,7 +152,7 @@ SLPM-65692:
   # Research notes: tools/outbreak-vr and D:/Games/PS2/research on the test PC.
   camera:
     networkFlag: 0x3137D2   # u8 1 while the game is in network play. Online, first person arms only in private co-op
-                          # (VR setting PrivateCoopFirstPerson + login host pointed at a non-obsrv server); see CameraDriver::ResolveNetMode.
+                          # (VR setting PrivateCoopFirstPerson + the Internal DNS as DNS1, sending the login host to a LAN or Tailscale server); see CameraDriver::ResolveNetMode.
     # Local character record. count/idOffset: a used record's +0x03 byte is its own index and the local record's
     # equals the local slot byte (checked offline in the Training Ground), as File #1's game code tests; first person
     # writes only a record that passes, and nothing while it fails.
