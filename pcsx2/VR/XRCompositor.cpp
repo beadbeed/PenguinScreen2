@@ -1490,9 +1490,10 @@ namespace VR::XRCompositor
 					return 0;
 				if (snap.display_time != 0)
 					pose_time = snap.display_time;
-				// The pistol only in first person: hands shown anywhere else (a menu) are empty, so they get no
-				// recoil, flash or slide either.
-				const bool gun = HandModel::GunHeld() && CameraDriver::LookAtActive();
+				// The weapon only in first person: hands shown anywhere else (a menu) are empty, so they get no
+				// recoil, flash or slide either. What it is comes with it (HandModel::HeldFor: the equipped item's kind).
+				const HandModel::WeaponHeld held_weapon = HandModel::GetWeaponHeld();
+				const bool gun = held_weapon.raised && CameraDriver::LookAtActive();
 				for (int i = 0; i < kHandSlots; i++)
 				{
 					const auto& src = snap.hands[i];
@@ -1511,12 +1512,19 @@ namespace VR::XRCompositor
 					d.grip = src.grip;
 					d.trigger = src.trigger;
 					d.gun = gun && (i == HandModel::kRight);
+					if (d.gun)
+					{
+						d.held = held_weapon.held;
+						d.item_id = held_weapon.item_id;
+					}
 				}
 			}
-			// Shot feedback on the pistol (fake hands too, for headset-free captures): recoil, a muzzle flash and
-			// the slide cycling after each shot, and the slide held back on an empty gun. The laser keeps the
-			// true aim.
-			if (hs[HandModel::kRight].valid && hs[HandModel::kRight].gun)
+			// Shot feedback on a pistol or a long gun (fake hands too, for headset-free captures): recoil, a muzzle
+			// flash and the slide cycling after each shot, and the slide held back on an empty pistol. The laser keeps
+			// the true aim. A melee weapon, something to throw or a spray can shows none.
+			const HandModel::Held right_held = hs[HandModel::kRight].held;
+			if (hs[HandModel::kRight].valid && hs[HandModel::kRight].gun &&
+				(right_held == HandModel::Held::Pistol || right_held == HandModel::Held::LongGun))
 			{
 				const GameFeedback::WeaponView wv = GameFeedback::GetWeapon();
 				const u64 shot_now_ms = CameraDriver::SteadyNowMs();
@@ -1526,8 +1534,13 @@ namespace VR::XRCompositor
 				d.kick = (shot && age < 300.0) ? static_cast<float>(std::exp(-age / 60.0)) : 0.0f;
 				d.flash = shot && age < 45.0;
 				d.slide = (shot && age < 120.0) ? static_cast<float>(1.0 - age / 120.0) : 0.0f;
-				d.slide_locked = wv.valid && wv.ammo == 0;
+				d.slide_locked = wv.valid && wv.ammo == 0 && right_held == HandModel::Held::Pistol;
 			}
+			// The left hand closes round a long gun's fore-end once it comes near it (OffHandSupports lets go a little
+			// further out than it takes hold, so it does not flicker on the edge).
+			static bool s_left_supporting = false;
+			s_left_supporting = HandModel::OffHandSupports(hs[HandModel::kRight], hs[HandModel::kLeft], s_left_supporting);
+			hs[HandModel::kLeft].support = s_left_supporting;
 			if (!hs[0].valid && !hs[1].valid)
 				return 0;
 			if (!EnsureHandResources(fake, s_grip_orient))
@@ -2214,19 +2227,22 @@ namespace VR::XRCompositor
 				}
 			}
 
-			// Laser sight: from the pistol's muzzle along the right hand's aim while the weapon is raised in first
-			// person, with the LaserSight setting on; PCSX2_VR_FAKE_HANDS=gun shows it on the fake right hand
-			// whatever the game is doing (the other fake hands hold no pistol, so they get no beam). Placed each
-			// frame from the pose the right hand is drawn with (BuildHandLayers: grip position, aim orientation),
-			// so it needs no new image as it moves: one unchanging image, uploaded again only while it fades in.
-			// It fades in with the raised weapon and goes at once with it, as the pistol leaves the hand.
+			// Laser sight: from the gun's muzzle along the right hand's aim while a gun is raised in first person (a
+			// melee weapon, something to throw or a spray can has none: HandModel::HeldFor), with the LaserSight
+			// setting on; PCSX2_VR_FAKE_HANDS=gun shows it on the fake right hand whatever the game is doing, while its
+			// gun is one (PCSX2_VR_FAKE_WEAPON; the other fake hands hold no gun, so they get no beam). Placed each
+			// frame from the pose the right hand is drawn with (BuildHandLayers: grip position, aim orientation), from
+			// just past the muzzle of the gun drawn there (a long gun's runs on past the pistol's), so it needs no new
+			// image as it moves: one unchanging image, uploaded again only while it fades in. It fades in with the
+			// raised gun and goes at once with it, as the gun leaves the hand.
 			static const bool s_fake_gun = [] {
 				const char* v = std::getenv("PCSX2_VR_FAKE_HANDS");
 				return v && std::strcmp(v, "gun") == 0;
 			}();
-			const bool laser_raised = s_fake_hands ?
-			                              s_fake_gun :
-			                              (HandModel::GunHeld() && CameraDriver::LookAtActive() && s.head_position_valid);
+			const HandModel::WeaponHeld laser_weapon = s_fake_hands ? HandModel::FakeWeapon() : HandModel::GetWeaponHeld();
+			const bool laser_gun = laser_weapon.raised && laser_weapon.laser;
+			const bool laser_raised = s_fake_hands ? (s_fake_gun && laser_gun) :
+			                                         (laser_gun && CameraDriver::LookAtActive() && s.head_position_valid);
 			const bool laser_on = HudCards::LaserSightEnabled() && s.head_pose_valid && laser_raised;
 			bool laser_hand = false;
 			bool laser_placed = false;
@@ -2269,8 +2285,14 @@ namespace VR::XRCompositor
 							laser_time = snap.display_time;
 					}
 				}
-				// Looking straight down the beam no side of the quad faces the eye: that frame goes without it.
-				laser_placed = laser_hand && HudCards::PlaceLaser(hand_pos, hand_quat, eye, laser_pos, laser_quat);
+				// Looking straight down the beam no side of the quad faces the eye: that frame goes without it. For the
+				// pistol this is HudCards::PlaceLaser's beam.
+				float beam_from[3] = {0.0f, 0.0f, 0.0f};
+				float beam_dir[3] = {0.0f, 0.0f, -1.0f};
+				laser_placed = laser_hand &&
+				               HandModel::LaserFrom(laser_weapon.held, laser_weapon.item_id, hand_pos, hand_quat,
+				                   HudCards::kLaserMuzzleGapM, beam_from, beam_dir) &&
+				               HudCards::PlaceBeam(beam_from, beam_dir, HudCards::kLaserLengthM, eye, laser_pos, laser_quat);
 				// Only the gun's beam rides on the hand: anything else shown in the laser's slot stays unattached.
 				if (laser_placed)
 					AttachToHand(att, HudCards::kLaser, HandModel::kRight, hand_pos, hand_quat, eye, laser_time);
