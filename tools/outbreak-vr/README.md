@@ -242,7 +242,9 @@ rises monotonically, takes 350-700 ms and the picture follows it: `python stereo
 Exit code 0 = pass, 1 = fail, 2 = bad input (or no ramp captured). Example: null headset, File #1 J's Bar, first
 person armed, offline,
 `PCSX2_VR_STEREODUMP=D:\Games\PS2\stereo,15`, walk up to the bar counter, then
-`python stereo_metric.py D:\Games\PS2\stereo --expect-floor -1`.
+`python stereo_metric.py D:\Games\PS2\stereo --expect-floor -0.5` (the shipped profiles' `nearest: 1.0` against the
+1.5 m first-person screen gives a floor of 1 - 1.5/1.0 = -0.5 at strength 1; the sidecar's `near_floor` is the value to
+expect for other settings, -1 for the old 0.75 m).
 
 Rules when testing: never change emulation speed; never pause, savestate or dump RAM while online
 (obsrv drops clients after ~30 s without packets and bans speed changes); do not run the virtual pad
