@@ -2313,6 +2313,16 @@ void VMManager::FrameAdvance(u32 num_frames )
 		return;
 	}
 
+	// Frame advance ends in a pause through SetState, which the SetPaused lock never sees; online the game never pauses.
+	if (IsOnlineLocked())
+	{
+		Console.Warning("(VMManager) Frame advance refused: the network adapter is on (the game never pauses online).");
+		Host::AddKeyedOSDMessage("OnlinePauseRefused",
+			TRANSLATE_STR("VMManager", "The game never pauses while the network adapter is on."),
+			Host::OSD_QUICK_DURATION);
+		return;
+	}
+
 	s_frame_advance_count = num_frames;
 	SetState(VMState::Running);
 }
