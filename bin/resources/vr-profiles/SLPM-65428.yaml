@@ -24,7 +24,10 @@ SLPM-65428:
   # screen is used instead: sized to the game camera's FOV (camera.fov below, 100 deg vertical: height =
   # 2 * distance * tan(50 deg)), flat so perspective holds, and placed where the shown frame was rendered
   # from (camera.lookAt viewMatrix; poseLagMs is the fallback guess), so the runtime can reproject it as
-  # the head turns instead of the old frame being glued to the face. menu: with the VR Menu Tablet setting
+  # the head turns instead of the old frame being glued to the face. Because this height matches camera.fov,
+  # VR FirstPersonFov = Auto (the default) may widen the FOV to the headset's view on each arm (100 is the
+  # floor, 130 the cap) and the screen then follows the FOV each frame was rendered with; the height here is
+  # the Profile setting's, and the sign the FOV is vertical degrees. menu: with the VR Menu Tablet setting
   # on (off by default), a menu opened in first person goes on a small tablet instead, 0.70 m ahead of the
   # eyes, 0.30 m below them and 0.36 m tall, tilted back to face them (tilt: <deg> would fix the angle).
   screen: { distance: 2.5, height: 1.3, arc: 0, menu: { distance: 0.70, height: 0.36, drop: 0.30 }, firstPerson: { distance: 1.5, height: 3.575, arc: 0, poseLagMs: 40 } }
@@ -296,7 +299,7 @@ SLPM-65428:
       # walking); the game itself would only turn and tilt the aim with it. Checked on File #1: walls
       # still stop you (the game's collision pushes the position back out).
       aim: { stance: 0x08, equals: 2, hand: right, move: 70, moveStick: left, pitch: 0xBC8, pitchSign: 1, pitchClamp: 8000 }
-    fov: { address: 0x306380, encoding: f32, scale: 100.0 }   # vertical FOV, degrees (about 115 horizontal at 4:3)
+    fov: { address: 0x306380, encoding: f32, scale: 100.0 }   # vertical FOV, degrees (about 115 horizontal at 4:3); the floor of VR FirstPersonFov = Auto
   # Shake to break free (VR controllers only). Measured offline on File #1 (J's Bar, savestate 5, a zombie grabs Kevin):
   # a grab (local record stance +0x08 == 5) lasts about 10 s with no input; mashing Circle or Cross (about 8 Hz) or
   # waggling the left stick left and right (about 6 Hz) halves it; all together break free in about 3.3 s; Square does

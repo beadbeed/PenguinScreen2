@@ -1916,6 +1916,11 @@ bool Pcsx2Config::AchievementsOptions::operator!=(const AchievementsOptions& rig
 	return !this->operator==(right);
 }
 
+const char* Pcsx2Config::VROptions::FirstPersonFovModeNames[] = {
+	"Auto",
+	"Profile",
+	nullptr};
+
 Pcsx2Config::VROptions::VROptions() = default;
 
 void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
@@ -1945,6 +1950,9 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(RollParallax);
 	SettingsWrapEntry(FirstPersonAutoStereo);
 	SettingsWrapEntry(FirstPersonStereoStrength);
+	SettingsWrapEnumEx(FirstPersonFov, "FirstPersonFov", FirstPersonFovModeNames);
+	SettingsWrapEntry(FirstPersonFovMarginDeg);
+	SettingsWrapEntry(EdgeFill);
 	SettingsWrapEntry(Brightness);
 	SettingsWrapEntry(GameRumble);
 	SettingsWrapEntry(HapticStrength);
@@ -1969,6 +1977,9 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 		FirstPersonStereoStrength = std::isfinite(FirstPersonStereoStrength) ?
 		                                std::clamp(FirstPersonStereoStrength, MIN_FP_STEREO_STRENGTH, MAX_FP_STEREO_STRENGTH) :
 		                                1.0f;
+		FirstPersonFovMarginDeg = std::isfinite(FirstPersonFovMarginDeg) ?
+		                              std::clamp(FirstPersonFovMarginDeg, MIN_FP_FOV_MARGIN_DEG, MAX_FP_FOV_MARGIN_DEG) :
+		                              DEFAULT_FP_FOV_MARGIN_DEG;
 		Brightness = std::clamp(Brightness, MIN_BRIGHTNESS, MAX_BRIGHTNESS);
 		HapticStrength = std::clamp(HapticStrength, 0.0f, 1.0f);
 		VignetteStrength = std::isfinite(VignetteStrength) ?
@@ -1980,9 +1991,9 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 bool Pcsx2Config::VROptions::operator==(const VROptions& right) const
 {
 	// SnapTurn, ComfortBlink, LaserSight, MenuPointer, MenuTablet, ComfortVignette, VignetteStrength, OnlineSafe,
-	// FirstPersonAutoStereo, FirstPersonStereoStrength, Brightness, GameRumble and HapticStrength are read from
-	// EmuConfig every vsync; leaving them out keeps a settings tweak from rebuilding (and so re-announcing) every
-	// VR control.
+	// FirstPersonAutoStereo, FirstPersonStereoStrength, FirstPersonFov, FirstPersonFovMarginDeg, Brightness, GameRumble
+	// and HapticStrength are read from EmuConfig every vsync (EdgeFill when VR starts); leaving them out keeps a
+	// settings tweak from rebuilding (and so re-announcing) every VR control.
 	return OpEqu(Enable) && OpEqu(ScreenDistance) && OpEqu(ScreenHeight) &&
 	       OpEqu(ScreenVerticalOffset) &&
 	       OpEqu(ScreenArcDeg) && OpEqu(StereoMode) && OpEqu(StereoUseProfile) &&

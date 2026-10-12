@@ -14,6 +14,7 @@
 #include "VR/VRInput.h"
 #include "VR/VRInputState.h"
 #include "VR/VRProfileDB.h"
+#include "VR/XRCompositor.h"
 
 #include "Config.h"
 #include "MTGS.h"
@@ -29,6 +30,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -369,6 +371,7 @@ namespace VR::CameraDriver
 
 		int CountPredictMismatches(bool log); // with the head prediction code below
 		int CountComfortMismatches(bool log); // with the comfort vignette's state below
+		int CountFovMismatches(bool log);     // with the first-person FOV state below
 
 		void MaybeRunSelfTest()
 		{
@@ -381,6 +384,7 @@ namespace VR::CameraDriver
 			RunHookSelfTest();
 			Console.WriteLn("(VR) CameraDriver predict self-test: %d mismatch(es).", CountPredictMismatches(true));
 			Console.WriteLn("(VR) CameraDriver comfort self-test: %d mismatch(es).", CountComfortMismatches(true));
+			Console.WriteLn("(VR) CameraDriver FOV self-test: %d mismatch(es).", CountFovMismatches(true));
 			const char* gamepad_fail = nullptr;
 			if (SpatialControls::SelfTestGamepad(&gamepad_fail))
 				Console.WriteLn("(VR) Gamepad self-test: passed (sprint latch, ad-lib flicks, unchanged without sprintLatch).");
@@ -1411,6 +1415,7 @@ namespace VR::CameraDriver
 			                       // of the camera as written (ahead of the true one while lookAt.predict leads a turn)
 			float yaw_sign = 1.0f;
 			u64 ms = 0; // when it was written (NowMs)
+			float fov_deg = 0.0f; // the vertical FOV camera.fov wrote with it, when it sizes the first-person screen (else 0)
 		};
 
 		// The base yaw camera.lookAt is using right now, for the compositor: a frame rendered at another
@@ -1982,6 +1987,23 @@ namespace VR::CameraDriver
 		std::atomic<u64> s_lookat_stamp_ms{0};
 		bool s_fov_saved = false;
 		u32 s_fov_saved_raw = 0;
+		// What camera.fov writes in this armed period (CPU thread): latched by the first write after each arm (the target
+		// from FirstPersonFov, eased in from camera.fov's own value), retargeted while armed only when the headset's eyes
+		// first arrive (FirstPersonFovNow).
+		bool s_fov_latched = false;
+		bool s_fov_eyes_used = false;     // the latched target was fitted to the headset
+		bool s_fov_awaiting_eyes = false; // latched with Auto before the headset reported its eyes
+		float s_fov_from = 0.0f;
+		float s_fov_target = 0.0f;
+		u32 s_fov_step = 0;
+		const char* s_fov_source = "";
+		u32 s_fov_written_raw = 0; // the bits last written: RestoreFov gives the game's value back only over ours
+		bool s_fov_published = false; // s_fov_state holds something to clear
+		// GetFovState, and the last choice logged.
+		std::mutex s_fov_mutex;
+		FovState s_fov_state;
+		float s_fov_logged_target = -1.0f;
+		const char* s_fov_logged_source = nullptr;
 
 		struct StampedPose
 		{
@@ -2020,6 +2042,7 @@ namespace VR::CameraDriver
 			float base_yaw = 0.0f;
 			float yaw_sign = 1.0f;
 			u64 write_ms = 0; // when the write the frame was built from was made (NowMs)
+			float fov_deg = 0.0f; // the vertical FOV it was rendered with (LookAtWrite::fov_deg)
 		};
 		std::array<FramePose, 8> s_frame_poses{};
 		std::array<u32, 8> s_frame_age{}; // how many writes back the match was (for the sync log)
@@ -2114,7 +2137,7 @@ namespace VR::CameraDriver
 			// Within about 3 deg and 30 units; anything else is a frame the game built from its own camera.
 			if (!hit || !(best < 0.0025f))
 				return;
-			s_frame_poses[s_frame_next] = FramePose{hit->pose, hit->w.base_yaw, hit->w.yaw_sign, hit->w.ms};
+			s_frame_poses[s_frame_next] = FramePose{hit->pose, hit->w.base_yaw, hit->w.yaw_sign, hit->w.ms, hit->w.fov_deg};
 			s_frame_age[s_frame_next] = hit_age;
 			s_frame_next = (s_frame_next + 1) % s_frame_poses.size();
 			s_frame_count = std::min(s_frame_count + 1, s_frame_poses.size());
@@ -2157,9 +2180,233 @@ namespace VR::CameraDriver
 			if (!s_fov_saved)
 				return;
 			s_fov_saved = false;
+			// Only over the value first person wrote last (Auto writes the fitted FOV, not camera.fov's own number).
 			if (cam.fov.has_value() && cam.fov->encoding == ProfileDB::CameraEncoding::F32 &&
-				static_cast<u32>(memRead32(cam.fov->ee_address)) == std::bit_cast<u32>(cam.fov->scale))
+				static_cast<u32>(memRead32(cam.fov->ee_address)) == s_fov_written_raw)
 				memWrite32(cam.fov->ee_address, s_fov_saved_raw);
+		}
+
+		// The furthest both eyes reach, in degrees from the view axis (EyeInfo's fov: L, R, U, D with L and D negative).
+		struct EyeReach
+		{
+			bool ok = false;
+			float up = 0.0f;
+			float down = 0.0f;
+			float side = 0.0f;
+		};
+
+		EyeReach ReachOf(const float fov_deg[2][4])
+		{
+			EyeReach r;
+			if (!fov_deg)
+				return r;
+			for (int e = 0; e < 2; e++)
+			{
+				for (int k = 0; k < 4; k++)
+				{
+					if (!std::isfinite(fov_deg[e][k]))
+						return r;
+				}
+				r.side = std::max(r.side, std::max(-fov_deg[e][0], fov_deg[e][1]));
+				r.up = std::max(r.up, fov_deg[e][2]);
+				r.down = std::max(r.down, -fov_deg[e][3]);
+			}
+			// Zeros mean nothing was reported; a view never reaches 90 degrees off its axis.
+			r.ok = r.up > 1.0f && r.down > 1.0f && r.side > 1.0f && r.up < 89.0f && r.down < 89.0f && r.side < 89.0f;
+			return r;
+		}
+
+		void PublishFovState(const FovState& st)
+		{
+			std::lock_guard<std::mutex> lock(s_fov_mutex);
+			s_fov_state = st;
+		}
+
+		// First person stood down: the next write latches afresh (and eases in again). The published state stays, so a
+		// first-person frame still on its way to the headset is sized by its own FOV; clear forgets it too (no game, no
+		// profile, no camera.fov).
+		void UnlatchFov(bool clear)
+		{
+			s_fov_latched = false;
+			s_fov_eyes_used = false;
+			s_fov_awaiting_eyes = false;
+			if (clear && s_fov_published)
+			{
+				PublishFovState(FovState{});
+				s_fov_published = false;
+				s_fov_logged_target = -1.0f;
+				s_fov_logged_source = nullptr;
+			}
+		}
+
+		// The value camera.fov writes on this armed vsync (CPU thread, the guards holding). camera.fov counts as the game
+		// camera's vertical FOV in degrees only when it is an f32 the profile's flat screen.firstPerson is sized to; then
+		// VR FirstPersonFov = Auto fits it to the headset on each arm, eased in from camera.fov's own value, and the
+		// first-person screen follows whatever is written. Anything else is written as the profile gives it.
+		float FirstPersonFovNow(const ProfileDB::Profile& profile, const ProfileDB::CameraFov& fov, bool* sizes_screen_out)
+		{
+			const float profile_fov = fov.scale;
+			const XRCompositor::FirstPersonScreenInfo screen = XRCompositor::GetFirstPersonScreenInfo();
+			const bool sizes_screen = fov.encoding == ProfileDB::CameraEncoding::F32 && profile.fp_screen_height.has_value() &&
+			                          !screen.curved &&
+			                          ScreenMatchesFov(profile.fp_screen_distance.value_or(1.5f), profile.fp_screen_height.value(),
+										  profile_fov);
+			const bool want_auto =
+				sizes_screen && EmuConfig.VR.FirstPersonFov == Pcsx2Config::VROptions::FirstPersonFovMode::Auto;
+			const XRCompositor::EyeInfo eyes = XRCompositor::GetEyeInfo();
+			const EyeReach reach = eyes.valid ? ReachOf(eyes.fov_deg) : EyeReach{};
+			const float margin = std::isfinite(EmuConfig.VR.FirstPersonFovMarginDeg) ?
+			                         std::clamp(EmuConfig.VR.FirstPersonFovMarginDeg,
+										 Pcsx2Config::VROptions::MIN_FP_FOV_MARGIN_DEG,
+										 Pcsx2Config::VROptions::MAX_FP_FOV_MARGIN_DEG) :
+			                         kDefaultFovMarginDeg;
+			const float aspect = (screen.valid && std::isfinite(screen.aspect) && screen.aspect > 0.1f) ? screen.aspect :
+			                                                                                             (4.0f / 3.0f);
+
+			bool retarget = false;
+			if (!s_fov_latched)
+			{
+				// An arm: from camera.fov's own value (what first person always wrote) to this arm's target.
+				s_fov_latched = true;
+				s_fov_from = profile_fov;
+				s_fov_step = 0;
+				retarget = true;
+			}
+			else if (s_fov_awaiting_eyes && want_auto && reach.ok)
+			{
+				// The headset's eyes arrived while armed (the one change made while armed; a settings change waits for the
+				// next arm): from where the ease is now to the fitted FOV.
+				s_fov_from = EaseFov(s_fov_from, s_fov_target, s_fov_step);
+				s_fov_step = 0;
+				retarget = true;
+			}
+			if (retarget)
+			{
+				s_fov_eyes_used = want_auto && reach.ok;
+				s_fov_awaiting_eyes = want_auto && !reach.ok;
+				s_fov_target = s_fov_eyes_used ? AutoFirstPersonFovDeg(eyes.fov_deg, aspect, margin, profile_fov) : profile_fov;
+				s_fov_source = s_fov_eyes_used ? "auto" :
+				               !sizes_screen   ? "profile: its first-person screen is not sized to camera.fov" :
+				               !want_auto      ? "profile: VR FirstPersonFov = Profile" :
+				                                 "profile until the headset reports its eyes";
+			}
+			const float now = EaseFov(s_fov_from, s_fov_target, s_fov_step);
+			if (s_fov_step < kFovEaseVsyncs)
+				s_fov_step++;
+
+			FovState st;
+			st.sizes_screen = sizes_screen;
+			st.auto_fit = s_fov_eyes_used;
+			st.fov_deg = now;
+			st.target_deg = s_fov_target;
+			st.profile_deg = profile_fov;
+			st.margin_deg = margin;
+			st.aspect = aspect;
+			if (s_fov_eyes_used)
+			{
+				st.reach_up_deg = reach.up;
+				st.reach_down_deg = reach.down;
+				st.reach_side_deg = reach.side;
+			}
+			st.source = s_fov_source;
+			PublishFovState(st);
+			s_fov_published = true;
+
+			// Each new choice once (an arm with the same target as the last one says nothing new).
+			if (retarget && (s_fov_target != s_fov_logged_target || s_fov_source != s_fov_logged_source))
+			{
+				s_fov_logged_target = s_fov_target;
+				s_fov_logged_source = s_fov_source;
+				char ease[64] = "";
+				if (std::abs(s_fov_target - s_fov_from) > 0.05f)
+					std::snprintf(ease, sizeof(ease), "; easing in from %.1f over %u vsyncs", s_fov_from, kFovEaseVsyncs);
+				if (st.auto_fit)
+				{
+					Console.WriteLn("(VR) First-person FOV: %.1f deg vertical, fitted to the headset (the eyes reach up %.1f, "
+									"down %.1f, sideways %.1f deg; margin %.1f, screen aspect %.2f; camera.fov %.1f is the "
+									"floor, %.0f the cap)%s.",
+						s_fov_target, reach.up, reach.down, reach.side, margin, aspect, profile_fov, kMaxAutoFovDeg, ease);
+				}
+				else
+				{
+					Console.WriteLn("(VR) First-person FOV: %.1f deg vertical (%s)%s.", s_fov_target, s_fov_source, ease);
+				}
+			}
+			if (sizes_screen_out)
+				*sizes_screen_out = sizes_screen;
+			return now;
+		}
+
+		// PCSX2_VR_SELFTEST: the first-person FOV maths (the eyes' union reach, the margin, the floor and the cap, the
+		// screen sized to the FOV, the ease).
+		int CountFovMismatches(bool log)
+		{
+			int fail = 0;
+			const auto check = [&](bool ok, const char* name) {
+				if (!ok)
+				{
+					++fail;
+					if (log)
+						Console.WriteLn("(VR) FOV self-test FAIL: %s", name);
+				}
+			};
+			const auto near_eq = [](float a, float b, float tol) { return std::abs(a - b) <= tol; };
+			constexpr float k43 = 4.0f / 3.0f;
+			constexpr float kToDeg = 180.0f / PI_F;
+			const float qnan = std::numeric_limits<float>::quiet_NaN();
+			// SteamVR's null headset (+-45 deg), a Steam Frame-like pair (wider outside, more down than up, the eyes not
+			// quite alike), a very wide and a very tall headset, nothing reported, and a NaN.
+			const float null_hmd[2][4] = {{-45.0f, 45.0f, 45.0f, -45.0f}, {-45.0f, 45.0f, 45.0f, -45.0f}};
+			const float frame[2][4] = {{-52.0f, 46.0f, 50.0f, -54.0f}, {-46.0f, 52.0f, 51.0f, -53.0f}};
+			const float wide[2][4] = {{-70.0f, 70.0f, 40.0f, -40.0f}, {-70.0f, 70.0f, 40.0f, -40.0f}};
+			const float tall[2][4] = {{-50.0f, 50.0f, 70.0f, -70.0f}, {-50.0f, 50.0f, 70.0f, -70.0f}};
+			const float none[2][4] = {};
+			const float bad[2][4] = {{-45.0f, 45.0f, qnan, -45.0f}, {-45.0f, 45.0f, 45.0f, -45.0f}};
+
+			const EyeReach rf = ReachOf(frame);
+			check(rf.ok && near_eq(rf.up, 51.0f, 1e-4f) && near_eq(rf.down, 54.0f, 1e-4f) && near_eq(rf.side, 52.0f, 1e-4f),
+				"union reach over both eyes");
+			check(!ReachOf(none).ok && !ReachOf(bad).ok, "no reach from zeros or a NaN");
+			// Twice the further of up and down plus the margin, 2 * 54 + 6 = 114 (a 4:3 picture's sides then reach 64 deg).
+			check(near_eq(AutoFirstPersonFovDeg(frame, k43, 6.0f, 100.0f), 114.0f, 1e-3f), "2 * max(up, down) + margin");
+			check(near_eq(AutoFirstPersonFovDeg(frame, k43, 0.0f, 100.0f), 108.0f, 1e-3f), "no margin");
+			// The null headset needs 96 deg: the profile's 100 is the floor.
+			check(near_eq(AutoFirstPersonFovDeg(null_hmd, k43, 6.0f, 100.0f), 100.0f, 1e-3f), "camera.fov is the floor");
+			check(near_eq(AutoFirstPersonFovDeg(null_hmd, k43, 6.0f, 80.0f), 96.0f, 1e-3f), "null headset over a lower floor");
+			// Very wide: the sides decide, 2 * atan(tan 73 / aspect).
+			check(near_eq(AutoFirstPersonFovDeg(wide, 2.0f, 6.0f, 60.0f),
+					  2.0f * std::atan(std::tan(73.0f / kToDeg) / 2.0f) * kToDeg, 1e-2f),
+				"the sideways reach through the aspect");
+			check(near_eq(AutoFirstPersonFovDeg(wide, k43, 6.0f, 100.0f), kMaxAutoFovDeg, 1e-3f), "sideways reach, then the cap");
+			check(near_eq(AutoFirstPersonFovDeg(tall, k43, 6.0f, 100.0f), kMaxAutoFovDeg, 1e-3f), "the cap");
+			check(near_eq(AutoFirstPersonFovDeg(tall, k43, 6.0f, 140.0f), 140.0f, 1e-3f), "a floor above the cap stays");
+			check(near_eq(AutoFirstPersonFovDeg(none, k43, 6.0f, 100.0f), 100.0f, 1e-3f) &&
+					  near_eq(AutoFirstPersonFovDeg(bad, k43, 6.0f, 100.0f), 100.0f, 1e-3f),
+				"no usable eyes: camera.fov");
+			check(near_eq(AutoFirstPersonFovDeg(frame, k43, qnan, 100.0f), 114.0f, 1e-3f), "NaN margin: the default");
+			// The screen follows the FOV: the profiles' 1.5 m, 100 deg screen is 3.575 m tall and 4.767 m wide at 4:3.
+			check(near_eq(ScreenHeightForFov(1.5f, 100.0f), 3.5753f, 1e-3f), "height 2 d tan(fov / 2)");
+			check(near_eq(ScreenHeightForFov(1.5f, 100.0f) * k43, 4.7670f, 1e-3f), "width = height * aspect");
+			check(ScreenHeightForFov(1.5f, 0.0f) == 0.0f && ScreenHeightForFov(0.0f, 100.0f) == 0.0f &&
+					  ScreenHeightForFov(1.5f, 180.0f) == 0.0f && ScreenHeightForFov(1.5f, qnan) == 0.0f,
+				"height rejects bad input");
+			check(ScreenMatchesFov(1.5f, 3.575f, 100.0f) && !ScreenMatchesFov(1.5f, 2.5f, 100.0f) &&
+					  !ScreenMatchesFov(1.5f, 3.575f, qnan),
+				"a screen sized to camera.fov");
+			// The fitted screen covers every edge of the frame-like headset by at least half the margin.
+			{
+				const float fov = AutoFirstPersonFovDeg(frame, k43, 6.0f, 100.0f);
+				const float h = ScreenHeightForFov(1.5f, fov);
+				const float half_v = std::atan(0.5f * h / 1.5f) * kToDeg;
+				const float half_w = std::atan(0.5f * h * k43 / 1.5f) * kToDeg;
+				check(half_v - rf.up >= 3.0f - 1e-3f && half_v - rf.down >= 3.0f - 1e-3f && half_w - rf.side >= 3.0f - 1e-3f,
+					"coverage margin");
+			}
+			check(near_eq(EaseFov(100.0f, 114.0f, 0), 100.0f, 1e-4f) && near_eq(EaseFov(100.0f, 114.0f, kFovEaseVsyncs / 2), 107.0f, 1e-3f) &&
+					  near_eq(EaseFov(100.0f, 114.0f, kFovEaseVsyncs), 114.0f, 1e-4f) &&
+					  near_eq(EaseFov(100.0f, 114.0f, kFovEaseVsyncs + 9), 114.0f, 1e-4f),
+				"the ease on arm");
+			return fail;
 		}
 
 		// PCSX2_VR_FAKE_HEADPOSE=<deg>: a swaying head for headset-free tests, yaw at that amplitude over 4 s and
@@ -2611,6 +2858,7 @@ namespace VR::CameraDriver
 				s_gs_render_valid = false;
 			}
 			s_fov_saved = false;
+			UnlatchFov(true);
 			s_armed_logged = false;
 			s_silence_applied = false;
 			s_hooks_installed = false;
@@ -2634,6 +2882,7 @@ namespace VR::CameraDriver
 			RestoreHolds(nullptr, false);
 			ResetRenderSync();
 			s_fov_saved = false;
+			UnlatchFov(true);
 			s_armed_logged = false;
 			s_silence_applied = false;
 			s_hooks_installed = false;
@@ -2784,6 +3033,8 @@ namespace VR::CameraDriver
 			ResetRenderSync();
 			s_render_sync_logged = false;
 			RestoreFov(cam);
+			// The next arm eases in again (and fits the headset afresh); a profile without camera.fov has nothing to keep.
+			UnlatchFov(!cam.fov.has_value());
 			RestoreSilence(cam, crc);
 			RestoreCodeHooks(cam, crc);
 			if (vm_state == VMState::Running)
@@ -2962,6 +3213,14 @@ namespace VR::CameraDriver
 		// During the disarm grace (guards failing, still armed) nothing is written and the active flag
 		// keeps its value: the game cannot move the camera while its writers are silenced anyway.
 		const bool guards_now = (s_guard_fail_vsyncs == 0);
+		// camera.fov's value for this vsync (VR FirstPersonFov = Auto: fitted to the headset, eased in on arm), worked out
+		// ahead of the lookAt write so the write records it: the compositor sizes each first-person frame's screen by the
+		// FOV that frame was rendered with. Written to the game further down, as before.
+		bool fov_sizes_screen = false;
+		const float fov_now =
+			(cam.fov.has_value() && guards_now) ? FirstPersonFovNow(*profile, cam.fov.value(), &fov_sizes_screen) : 0.0f;
+		if (!cam.fov.has_value())
+			UnlatchFov(true);
 		if (!cam.look_at.has_value())
 			SetLookAtActive(false);
 		else if (guards_now)
@@ -3002,6 +3261,7 @@ namespace VR::CameraDriver
 				const bool wrote = ApplyLookAt(la, base, look, look_cam, pose, &w);
 				if (wrote)
 				{
+					w.fov_deg = fov_sizes_screen ? fov_now : 0.0f;
 					PushStampedPose(cam_pose);
 					PushWritten(w, cam_pose);
 					PublishMatchedPose(la);
@@ -3033,7 +3293,9 @@ namespace VR::CameraDriver
 				s_fov_saved_raw = static_cast<u32>(memRead32(cam.fov->ee_address));
 				s_fov_saved = true;
 			}
-			EncodeAndWrite(cam.fov->ee_address, cam.fov->scale, cam.fov->encoding);
+			EncodeAndWrite(cam.fov->ee_address, fov_now, cam.fov->encoding);
+			if (cam.fov->encoding == ProfileDB::CameraEncoding::F32)
+				s_fov_written_raw = std::bit_cast<u32>(fov_now);
 		}
 
 		if (cam.pad_look.has_value())
@@ -3127,6 +3389,61 @@ namespace VR::CameraDriver
 			}
 		}
 		return true;
+	}
+
+	bool RenderFov(float* fov_deg)
+	{
+		std::lock_guard<std::mutex> lock(s_gs_render_mutex);
+		if (!s_gs_render_valid || !(s_gs_render_pose.fov_deg > 0.0f))
+			return false;
+		if (fov_deg)
+			*fov_deg = s_gs_render_pose.fov_deg;
+		return true;
+	}
+
+	FovState GetFovState()
+	{
+		std::lock_guard<std::mutex> lock(s_fov_mutex);
+		return s_fov_state;
+	}
+
+	float AutoFirstPersonFovDeg(const float fov_deg[2][4], float aspect, float margin_deg, float profile_fov_deg)
+	{
+		constexpr float kToDeg = 180.0f / PI_F;
+		const float floor_deg =
+			(std::isfinite(profile_fov_deg) && profile_fov_deg > 0.0f) ? std::min(profile_fov_deg, 179.0f) : 0.0f;
+		const EyeReach reach = ReachOf(fov_deg);
+		if (!reach.ok)
+			return floor_deg;
+		const float margin = std::isfinite(margin_deg) ? std::clamp(margin_deg, 0.0f, 40.0f) : kDefaultFovMarginDeg;
+		const float a = (std::isfinite(aspect) && aspect > 0.1f) ? aspect : (4.0f / 3.0f);
+		// Symmetric about the view axis: as far up as down, the further of the two plus half the margin.
+		const float half_v = std::max(reach.up, reach.down) + 0.5f * margin;
+		// And tall enough that the picture, `a` times as wide, reaches the furthest side plus half the margin.
+		const float half_side = std::min(reach.side + 0.5f * margin, 89.0f);
+		const float half_v_for_side = std::atan(std::tan(half_side / kToDeg) / a) * kToDeg;
+		const float fit = 2.0f * std::max(half_v, half_v_for_side);
+		return std::max(floor_deg, std::min(fit, kMaxAutoFovDeg));
+	}
+
+	float ScreenHeightForFov(float distance_m, float fov_deg)
+	{
+		if (!std::isfinite(distance_m) || !(distance_m > 0.0f) || !std::isfinite(fov_deg) || fov_deg < 1.0f ||
+			fov_deg > 179.0f)
+			return 0.0f;
+		return 2.0f * distance_m * std::tan(fov_deg * (PI_F / 360.0f));
+	}
+
+	bool ScreenMatchesFov(float distance_m, float height_m, float fov_deg)
+	{
+		const float want = ScreenHeightForFov(distance_m, fov_deg);
+		return want > 0.0f && std::isfinite(height_m) && std::abs(height_m - want) <= 0.02f * want;
+	}
+
+	float EaseFov(float from, float to, u32 step)
+	{
+		const float t = std::clamp(static_cast<float>(step) / static_cast<float>(kFovEaseVsyncs), 0.0f, 1.0f);
+		return from + (to - from) * (t * t * (3.0f - 2.0f * t));
 	}
 
 	u64 SteadyNowMs()
@@ -3235,6 +3552,6 @@ namespace VR::CameraDriver
 	bool SelfTestMath()
 	{
 		return CountMathMismatches(false) == 0 && CountPredictMismatches(false) == 0 &&
-		       CountComfortMismatches(false) == 0;
+		       CountComfortMismatches(false) == 0 && CountFovMismatches(false) == 0;
 	}
 }
