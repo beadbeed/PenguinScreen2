@@ -56,6 +56,10 @@ namespace VR::MenuPointer
 		constexpr float kPullMaxMs = 500.0f;
 		constexpr float kPullLookbackMs = 120.0f;
 		constexpr float kPullGrow = 0.25f;
+		// pull_cell's answer when there is no telling which cell a confirm was for: the dot came onto a cell other than the
+		// cursor's without resting on any, from off the cells or en route, and no pull was seen begin on it. The confirm is
+		// swallowed (one tick) rather than passed on the cursor's cell or sent to a cell the dot only crossed.
+		constexpr int kPullUnsure = -2;
 		// Steering stays suspended this many polls after a suspendWhen guard stops passing.
 		constexpr u32 kSuspendTailPolls = 6;
 		// Event lines logged per opening of the menu; the rest are counted and reported as it closes.
@@ -217,9 +221,9 @@ namespace VR::MenuPointer
 			return true;
 		}
 
-		// The newest sample at least ms older than the newest; false when the ring does not reach that far back (the menu
-		// has only just opened).
-		bool HoverBefore(const State& st, float ms, HoverSample* out)
+		// The newest sample at least ms older than the newest, and how many samples back it is (*k_out); false when the
+		// ring does not reach that far back (the menu has only just opened).
+		bool HoverBefore(const State& st, float ms, HoverSample* out, u32* k_out)
 		{
 			float age = 0.0f;
 			HoverSample h;
@@ -228,11 +232,31 @@ namespace VR::MenuPointer
 				if (age >= ms)
 				{
 					*out = h;
+					*k_out = k;
 					return true;
 				}
 				age += h.dt_ms;
 			}
 			return false;
+		}
+
+		// The samples newer than the one k_from back, oldest first: the first cell the dot had rested on kRestMs by then
+		// (-1 for none), and (*unbroken) whether the hover stayed on cell all the way.
+		int RestedSince(const State& st, u32 k_from, int cell, bool* unbroken)
+		{
+			int rested = -1;
+			*unbroken = cell >= 0;
+			HoverSample h;
+			for (u32 k = std::min(k_from, st.hover_count); k > 0; k--)
+			{
+				if (!HoverAgo(st, k - 1, &h))
+					continue;
+				if (h.under != cell)
+					*unbroken = false;
+				if (rested < 0 && h.under >= 0 && h.held_ms >= kRestMs)
+					rested = h.under;
+			}
+			return rested;
 		}
 
 		// The cell the dot is on, else the one it was last on within ms; -1 for none.
@@ -254,6 +278,24 @@ namespace VR::MenuPointer
 		u64 CellBit(int cell)
 		{
 			return (cell >= 0 && cell < 64) ? (u64{1} << cell) : u64{0};
+		}
+
+		// The samples within ms of the newest, newest first: the cell the dot last rested on kRestMs (-1 for none), and
+		// (*cells) every cell it was on, a bit per cell.
+		int RestedBefore(const State& st, float ms, u64* cells)
+		{
+			int rested = -1;
+			*cells = 0;
+			float age = 0.0f;
+			HoverSample h;
+			for (u32 k = 0; age <= ms && HoverAgo(st, k, &h); k++)
+			{
+				*cells |= CellBit(h.under);
+				if (rested < 0 && h.under >= 0 && h.held_ms >= kRestMs)
+					rested = h.under;
+				age += h.dt_ms;
+			}
+			return rested;
 		}
 
 		// The cell the cursor struct says the cursor is on: node, index, x and y must all match one. *mismatch is set
@@ -545,11 +587,13 @@ namespace VR::MenuPointer
 		{
 			st.pull = true;
 			st.pull_ms = 0.0f;
+			st.pull_polls = 0;
 			st.pull_from_valid = HoverAgo(st, 0, &st.pull_from);
 		}
 		else
 		{
 			st.pull_ms += in.dt_ms;
+			st.pull_polls++;
 		}
 
 		// A pouch's request waiting at the start of this poll (it held the confirm controls back last poll if the gate
@@ -713,6 +757,7 @@ namespace VR::MenuPointer
 		sample.u = in.u;
 		sample.v = in.v;
 		sample.dt_ms = in.dt_ms;
+		sample.held_ms = st.under_ms;
 		PushHover(st, sample);
 		// The cell under the pointer as the menu opened is ignored until the hover changes, so the cursor never jumps
 		// on its own as a menu opens.
@@ -743,16 +788,23 @@ namespace VR::MenuPointer
 		}
 
 		// The player taking over stops any steer: another control (the menu stick all the while it is engaged), or the
-		// cursor moved by something other than the pointer. The pointer then holds off from the cell the dot was on as
-		// the override began (or had just left), never one it brushes meanwhile, until the dot rests on another.
+		// cursor moved by something other than the pointer. The pointer then holds off from the cell the dot was resting
+		// on as the override began, never one it brushes meanwhile, until the dot rests on another. The thumb's push, a
+		// B press or a squeeze moves the controller before the control crosses its threshold, so the dot may already be
+		// on a neighbour as the override engages: the cell it last rested on within kOverrideSettleMs is the one held
+		// (else the one it is on, or was last on), and every cell it was on in that time counts as one the override
+		// pushed it to.
 		const bool took_over = in.dpad || st.stick_engaged || in.left_stick >= kOverrideLeftStick || back_edge || menu_edge ||
 		                       in.grip >= kOverrideGrip;
 		const bool override_now = took_over || foreign;
 		if (override_now)
 		{
-			const int hold_cell = st.settling ? st.disarm_under : RecentCell(st, kOverrideSettleMs);
+			int hold_cell = st.disarm_under;
 			if (!st.settling)
-				st.override_cells = 0;
+			{
+				const int rested_cell = RestedBefore(st, kOverrideSettleMs, &st.override_cells);
+				hold_cell = (rested_cell >= 0) ? rested_cell : RecentCell(st, kOverrideSettleMs);
+			}
 			abort_steer(took_over ? "you took over" : "the cursor moved off the planned path");
 			st.disarmed = true;
 			st.disarm_strict = true;
@@ -896,20 +948,45 @@ namespace VR::MenuPointer
 		// redirects it: the hover just before the trigger began to move, when that was seen (a pull begun on an earlier
 		// poll, within kPullMaxMs), else the hover kPullLookbackMs before (A, or a pull too quick to see begin). ref (the
 		// cursor's cell, or a steer's target) wins while the dot was then within its rect grown by kPullGrow, and without a
-		// pull seen also while the dot still is. -1: no cell (the confirm stays with the cursor's own).
+		// pull seen also while the dot still is. Otherwise it goes by rest, not just time: that hover's cell if the dot
+		// had rested on it kRestMs, or has stayed on it since; else the first cell the dot rested on after it (a pull
+		// begun as the hand still moved, off the cells or across a cell on the way); else, with the pull seen, the cell it
+		// began on (a fast click). -1: no cell (the confirm stays with the cursor's own); kPullUnsure: the dot is on another
+		// cell than ref with nothing to tell which one the player meant.
 		const auto pull_cell = [&](int ref) {
 			const bool seen = st.pull_from_valid && !pull_began && st.pull_ms <= kPullMaxMs;
 			HoverSample from;
+			u32 from_k = 0;
 			if (seen)
+			{
 				from = st.pull_from;
-			else if (!HoverBefore(st, kPullLookbackMs, &from))
+				from_k = st.pull_polls + 1;
+			}
+			else if (!HoverBefore(st, kPullLookbackMs, &from, &from_k))
+			{
 				return -1;
+			}
 			const bool ref_ok = ref >= 0 && ref < static_cast<int>(p.cells.size());
 			if (ref_ok && from.hit && InRect(p.cells[static_cast<size_t>(ref)].rect, from.u, from.v, -kPullGrow))
 				return ref;
 			if (ref_ok && !seen && in.hit && InRect(p.cells[static_cast<size_t>(ref)].rect, in.u, in.v, -kPullGrow))
 				return ref;
-			return static_cast<int>(from.under);
+			const int from_cell = static_cast<int>(from.under);
+			bool unbroken = false;
+			const int rested = RestedSince(st, from_k, from_cell, &unbroken);
+			if (from_cell >= 0 && (from.held_ms >= kRestMs || unbroken))
+				return from_cell;
+			if (rested >= 0)
+				return rested;
+			if (seen && from_cell >= 0)
+				return from_cell;
+			return (st.under >= 0 && st.under != ref) ? kPullUnsure : -1;
+		};
+		// A confirm with no telling which cell it was for: it never reaches the game, held back until let go.
+		const auto swallow_unsure = [&]() {
+			st.swallow = true;
+			out.confirm_swallowed = true;
+			out.confirm_unsure = true;
 		};
 
 		if (confirm_edge)
@@ -919,9 +996,16 @@ namespace VR::MenuPointer
 				// Pulled while steering: it waits for the arrival; pulled with the dot on another cell before the pull, it
 				// goes there instead.
 				const int pulled_for = pull_cell(st.target);
-				if (armed && pulled_for >= 0 && pulled_for != st.target && current >= 0)
-					retarget(pulled_for);
-				st.pending = true;
+				if (armed && pulled_for == kPullUnsure)
+				{
+					swallow_unsure();
+				}
+				else
+				{
+					if (armed && pulled_for >= 0 && pulled_for != st.target && current >= 0)
+						retarget(pulled_for);
+					st.pending = true;
+				}
 			}
 			else if (st.request >= 0)
 			{
@@ -934,7 +1018,11 @@ namespace VR::MenuPointer
 			else
 			{
 				const int pulled_on = pull_cell(current);
-				if (armed && pulled_on >= 0 && current >= 0 && pulled_on != current)
+				if (armed && pulled_on == kPullUnsure)
+				{
+					swallow_unsure();
+				}
+				else if (armed && pulled_on >= 0 && current >= 0 && pulled_on != current)
 				{
 					// Pulled with the dot on another cell: straight there, no dwell, and the confirm waits for the arrival.
 					start_steer(pulled_on);
@@ -963,10 +1051,12 @@ namespace VR::MenuPointer
 
 		// Pointing at a cell: once it has held dwellMs (and the menu has been open armDelayMs), the cursor goes there. A
 		// steer whose confirm is waiting keeps the cell it was pulled on, and nothing starts or turns while a pull is
-		// under way (its dip must not steer either).
+		// under way (its dip must not steer either), nor on the poll its confirm arrives: that confirm was decided above
+		// (passed on the cursor's cell, sent to the cell the pull began on, or swallowed), and a press now would go out
+		// with it, the dip's cell taking the confirm the player made on another.
 		const bool pulling = st.pull && !in.confirm && st.pull_ms <= kPullMaxMs;
-		const bool passive = armed && !pulling && st.ignore == -2 && st.open_ms >= p.arm_delay_ms && st.under >= 0 &&
-		                     st.under_ms >= p.dwell_ms && current >= 0;
+		const bool passive = armed && !pulling && !confirm_edge && st.ignore == -2 && st.open_ms >= p.arm_delay_ms &&
+		                     st.under >= 0 && st.under_ms >= p.dwell_ms && current >= 0;
 		if (passive)
 		{
 			if (st.target < 0 && st.under != current)
@@ -1333,7 +1423,12 @@ namespace VR::MenuPointer
 		{
 			s_open_confirms++;
 			if (LogLine())
-				Console.WriteLn("(VR) MenuPointer: confirm swallowed (the cursor had not arrived).");
+			{
+				if (out.confirm_unsure)
+					Console.WriteLn("(VR) MenuPointer: confirm swallowed (the dot had not rested on the cell it is on).");
+				else
+					Console.WriteLn("(VR) MenuPointer: confirm swallowed (the cursor had not arrived).");
+			}
 		}
 		// Pouch requests are the player's own squeezes, a few a minute at most: always logged.
 		if (out.request_started >= 0)
@@ -2387,6 +2482,32 @@ namespace VR::MenuPointer
 			check(s.game.presses == 0 && s.game.cell == 1, "the dot left on a cell the stick's push moved it to presses nothing");
 		}
 
+		// The thumb's push moves the controller before the stick crosses the override: the dot is already on cell 2 with
+		// the stick at 0.4, then the stick engages (the cursor lands on cell 1) and is let go. Cell 0, where the dot was
+		// resting, is the cell held, and cell 2 one the push moved it to: nothing is pressed, whether the dot springs back
+		// to cell 0 or stays on cell 2.
+		for (int back = 0; back < 2; back++)
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.Point(0);
+			s.Run(20);
+			s.ResetCounts();
+			s.in.right_stick = 0.4f;
+			s.Point(2);
+			s.Run(2);
+			s.in.right_stick = 1.0f;
+			s.game.cell = 1;
+			s.Run(3);
+			s.in.right_stick = 0.0f;
+			s.Point(back ? 0 : 2);
+			s.Run(60);
+			check(s.game.presses == 0 && s.game.cell == 1 && s.arrivals == 0,
+				back ? "a stick push that moved the dot before it engaged stands, the dot back where it rested" :
+				       "a stick push that moved the dot before it engaged stands, the dot left where the push moved it");
+		}
+
 		// A cell the dot reaches only after the stick is let go is the player pointing: it steers once the override has
 		// settled.
 		{
@@ -2492,6 +2613,89 @@ namespace VR::MenuPointer
 			while (s.arrivals == 0 && guard++ < 30)
 				s.Poll();
 			check(s.arrivals == 1 && s.passed == 1 && s.game.cell == 1, "and its confirm passes there");
+			s.LetGo();
+		}
+
+		// A slow pull whose dip rests on cell 2 longer than dwellMs before the trigger crosses half: the confirm goes to
+		// cell 0, where the dot rested as the pull began, and no press goes out with it, on that poll or after; with
+		// suspendWhen or without.
+		for (int with_suspend = 0; with_suspend < 2; with_suspend++)
+		{
+			ProfileDB::MenuPointerParams sp = p;
+			if (with_suspend)
+				sp.suspend_when.push_back(ProfileDB::CameraGuard{});
+			Sim s;
+			s.p = &sp;
+			s.Open();
+			s.Aim(0.851f, 0.29f);
+			s.Run(30);
+			s.ResetCounts();
+			s.in.trigger = 0.2f;
+			s.Poll();
+			s.Aim(0.851f, 0.37f);
+			s.in.trigger = 0.35f;
+			s.Run(12);
+			s.in.trigger = 0.8f;
+			s.in.confirm = true;
+			s.Poll();
+			check(s.passed == 1 && s.out.confirm_cell == 0 && s.out.dir < 0 && !s.out.confirm_hold && s.out.target < 0,
+				"a slow pull whose dip rests on cell 2 confirms cell 0, and no press goes out with it");
+			s.Run(10);
+			s.LetGo();
+			check(s.passed == 1 && s.phantom == 0 && s.game.presses == 0 && s.game.cell == 0,
+				"nor after: the game sees the one confirm and no D-pad");
+		}
+
+		// A pull begun as the hand still moves goes by where the dot comes to rest, not where it was as the pull began:
+		// begun with the dot off the cells, the dot then resting on cell 3, the cursor goes to cell 3 and the confirm
+		// passes there, never on the cursor's cell 0; begun as the dot crossed cell 1 on its way to rest on cell 3, the
+		// same.
+		for (int via = 0; via < 2; via++)
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.ResetCounts();
+			if (via)
+			{
+				s.Point(1);
+				s.Poll();
+			}
+			s.in.trigger = 0.3f;
+			if (via)
+				s.Point(3);
+			s.Poll();
+			s.Point(3);
+			s.in.trigger = 0.4f;
+			s.Run(13);
+			s.in.trigger = 1.0f;
+			s.in.confirm = true;
+			s.Poll();
+			check(s.passed == 0 && s.out.target == 3 && s.out.confirm_hold,
+				via ? "a pull begun as the dot crossed cell 1, resting on cell 3 by the confirm, steers to cell 3" :
+				      "a pull begun with the dot off the cells, resting on cell 3 by the confirm, steers to cell 3");
+			int guard = 0;
+			while (s.arrivals == 0 && guard++ < 30)
+				s.Poll();
+			check(s.arrivals == 1 && s.passed == 1 && s.game.cell == 3 && s.phantom == 0, "and its confirm passes on cell 3");
+			s.LetGo();
+		}
+
+		// A pressed as the dot comes onto cell 3 from off the cells, resting nowhere: there is no telling which cell it
+		// was for, so it is swallowed (held back until let go), not passed on the cursor's cell 0.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.ResetCounts();
+			s.Point(3);
+			s.Run(3);
+			s.in.confirm = true;
+			s.Poll();
+			check(s.passed == 0 && s.swallowed == 1 && s.out.confirm_hold && s.out.target < 0 && s.out.dir < 0,
+				"A pressed as the dot comes onto cell 3 without resting is swallowed, not passed on cell 0");
+			s.Run(5);
+			check(s.passed == 0 && s.phantom == 0 && s.out.confirm_hold, "and stays held back while it is held");
 			s.LetGo();
 		}
 

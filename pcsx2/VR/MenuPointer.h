@@ -30,9 +30,11 @@ namespace VR::ProfileDB
 //
 // The player's own moves stand: a stick, the D-pad, a grip, B or Menu, or a cursor move the pointer did not make, stops
 // steering until the dot settles on a cell other than the one it was on (the controller's jiggle while a thumb works a
-// stick never counts). A pull is judged by where the dot was as it began, so the dip a trigger pull gives the controller
-// never sends the confirm to another cell, and a confirm still held as the controls come back from a gap (the SteamVR
-// dashboard, a stalled snapshot) is never taken for a fresh one.
+// stick never counts, nor a neighbour the push had already moved the dot onto as the override engaged). A pull is judged
+// by where the dot was resting as it began, so the dip a trigger pull gives the controller never sends the confirm to
+// another cell, nor does a cell the dot only crossed on its way; a confirm with no telling which cell it was for is
+// swallowed, and no press goes out on the poll a confirm arrives. A confirm still held as the controls come back from a
+// gap (the SteamVR dashboard, a stalled snapshot) is never taken for a fresh one.
 namespace VR::MenuPointer
 {
 	using GuestReader = bool (*)(u32 address, u8 width, u32* value);
@@ -188,7 +190,8 @@ namespace VR::MenuPointer
 		bool hit = false;
 		float u = 0.0f;
 		float v = 0.0f;
-		float dt_ms = 0.0f; // the time from the poll before it
+		float dt_ms = 0.0f;   // the time from the poll before it
+		float held_ms = 0.0f; // how long the hover had stayed on under by then (State::under_ms): resting, or brushing
 	};
 
 	struct StepOut
@@ -219,6 +222,7 @@ namespace VR::MenuPointer
 		int confirm_cell = -1;
 		bool latched = false;           // and paused steering (no suspendWhen)
 		bool confirm_swallowed = false; // a confirm that will never reach the game
+		bool confirm_unsure = false;    // swallowed because there was no telling which cell it was for
 		bool selfcheck_failed_now = false;
 		bool unresponsive_now = false; // kMaxUnansweredPresses reached this poll: off for the rest of the opening
 		// A belt pouch's request this poll.
@@ -288,6 +292,7 @@ namespace VR::MenuPointer
 		bool stick_engaged = false;    // the right stick engaged as the menu stick (held down to its release)
 		bool pull = false;             // the trigger past kPullStart
 		float pull_ms = 0.0f;          // since it went past
+		u32 pull_polls = 0;            // polls since it went past (the hover ring's samples since pull_from)
 		// A belt pouch's request waiting for point-to-select (made with the screen closed, or within the arm delay).
 		int request = -1;
 		float request_ms = 0.0f;
