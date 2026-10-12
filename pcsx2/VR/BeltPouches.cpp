@@ -3,6 +3,7 @@
 
 #include "VR/BeltPouches.h"
 #include "VR/CameraDriver.h"
+#include "VR/GameFeedback.h"
 #include "VR/HudCards.h"
 #include "VR/MenuPointer.h"
 #include "VR/SplitState.h"
@@ -49,6 +50,8 @@ namespace VR::BeltPouches
 		constexpr float kOpenSettleMs = 1500.0f;
 		// Where a claimed hand is put for the Zone controls: out of every zone's reach.
 		constexpr float kFarAway = 1.0e4f;
+		// How long the toast naming what a hand reached for stays up (fades included).
+		constexpr float kNameToastSeconds = 1.5f;
 
 		// CPU thread only (the input poll).
 		State s_state;
@@ -58,6 +61,9 @@ namespace VR::BeltPouches
 		SpatialControls::ZoneState s_head_yaw; // HeadAnchor's yaw, kept while looking straight down
 		bool s_announced = false;
 		u32 s_announced_crc = 0;
+		// Per pouch, the item byte last logged as naming a record that failed the item checks (0: none), so a stale index
+		// is logged once, not on every reach.
+		std::array<u8, kMaxPouches> s_name_failed{};
 		std::atomic<bool> s_selftest_ran{false};
 
 		std::mutex s_telemetry_mutex;
@@ -263,6 +269,12 @@ namespace VR::BeltPouches
 			hs.pouch = now;
 			out.hover[h] = now;
 			out.claimed[h] = (now >= 0);
+			hs.since_left_ms = std::min(hs.since_left_ms + in.dt_ms, 1.0e9f);
+			if (prev >= 0 && now != prev)
+			{
+				hs.left_pouch = prev;
+				hs.since_left_ms = 0.0f;
+			}
 			if (now >= 0 && now != prev)
 			{
 				out.entered[h] = true;
@@ -273,6 +285,9 @@ namespace VR::BeltPouches
 					{
 						out.reach[h] = Tick::Firm;
 						hs.second_tick_ms = kDoubleTickGapMs;
+						// And names it, once per reach: not on a quick return to the pouch just left (a hand on its edge),
+						// and not over a menu.
+						out.name[h] = !in.menu && !(now == hs.left_pouch && hs.since_left_ms < kNameReentryMs);
 					}
 					else
 					{
@@ -488,9 +503,10 @@ namespace VR::BeltPouches
 					does = "steers the item screen's cursor to the pouch's cell while the screen is up";
 				else
 					does = "does nothing (no open control and no menuPointer)";
-				Console.WriteLn("(VR) Pouches: %d pouch(es) on the %s; reaching into one ticks (twice for an item), a squeeze %s.",
+				const bool names = GameFeedback::ItemTableOf(*profile).valid;
+				Console.WriteLn("(VR) Pouches: %d pouch(es) on the %s; reaching into one ticks (twice for an item%s), a squeeze %s.",
 					count, params->anchor == ProfileDB::PouchAnchor::Head ? "head (as the zones)" : "seat (neck, recentered forward)",
-					does.c_str());
+					names ? ", naming it" : "", does.c_str());
 			}
 		}
 
@@ -503,6 +519,35 @@ namespace VR::BeltPouches
 		MenuPointer::SetPouchGrips(out.owned[0], out.owned[1]);
 		if (!in.active)
 			s_open_hold_ms = 0.0f;
+
+		// Name what an open hand reached for (Step decides when: once per reach into a pouch holding an item). The pouch's
+		// item byte is a record index into the item table feedback.weapon names, and the record must pass the weapon
+		// reader's checks (present, naming itself, the local player's) before its name is shown. Reads only.
+		if (params && (out.name[0] || out.name[1]))
+		{
+			const GameFeedback::ItemTable item_table = GameFeedback::ItemTableOf(*profile);
+			for (int h = 0; h < 2; h++)
+			{
+				const int k = out.hover[h];
+				if (!out.name[h] || k < 0 || k >= count || !item_table.valid)
+					continue;
+				const u8 cell_byte = item_bytes[static_cast<size_t>(k)];
+				const GameFeedback::ItemRecord rec =
+					GameFeedback::ReadItemRecord(item_table, cell_byte, reader ? reader : DefaultRead);
+				if (rec.valid)
+				{
+					HudCards::Toast(GameFeedback::ItemLabel(rec.item_id, rec.count), kNameToastSeconds);
+				}
+				else if (s_name_failed[static_cast<size_t>(k)] != cell_byte)
+				{
+					s_name_failed[static_cast<size_t>(k)] = cell_byte;
+					Console.WriteLn("(VR) Pouches: pouch %d's item byte names record %u, which fails the item checks (present "
+									"%u, own index %u, owner %u, local slot %d); its name is not shown.", k,
+						static_cast<unsigned>(cell_byte), rec.present, rec.own_index, rec.owner,
+						rec.slot_known ? static_cast<int>(rec.slot) : -1);
+				}
+			}
+		}
 
 		u32 enters = 0;
 		u32 item_ticks = 0;
@@ -799,6 +844,13 @@ namespace VR::BeltPouches
 				if (!has)
 					continue;
 				const ProfileDB::PouchParams& pp = shipped->pouches.value();
+				// Every pouch reads its box's item byte (the buckle's: the special item's), and the profile names the
+				// item table those bytes index, so each can be named.
+				bool every_item_read = true;
+				for (const ProfileDB::Pouch& pouch : pp.list)
+					every_item_read = every_item_read && pouch.has_item;
+				check(every_item_read && GameFeedback::ItemTableOf(*shipped).valid,
+					"every shipped pouch reads its item byte, and the profile names the item table it indexes");
 				const SpatialControls::Anchor ahead{};
 				const ZoneBalls ahead_zones = PlaceZones(*shipped, ahead);
 				check(ahead_zones.count >= 3, "the shipped profiles' holster, belt and backpack zones are placed");
@@ -979,6 +1031,48 @@ namespace VR::BeltPouches
 			Step(rig, s_in, st);
 		}
 		{
+			// Names: an open hand reaching a pouch whose cell holds an item names it, once per reach; an empty pouch, a
+			// closed grip, a quick return to the pouch just left (a hand on its edge) and a menu name nothing.
+			State st;
+			StepIn s_in = base;
+			Step(rig, s_in, st);
+			place(s_in, 0, 0, 0.0f);
+			StepOut o = Step(rig, s_in, st);
+			check(o.name[0] && o.reach[0] == Tick::Firm, "an open hand reaching a pouch with an item names it");
+			o = Step(rig, s_in, st);
+			check(!o.name[0], "staying in it names it no more");
+			place(s_in, 0, -1, 0.0f);
+			Step(rig, s_in, st);
+			place(s_in, 0, 0, 0.0f);
+			o = Step(rig, s_in, st);
+			check(o.entered[0] && o.reach[0] == Tick::Firm && !o.name[0], "back in the pouch it left a poll ago: a tick, no name");
+			place(s_in, 0, -1, 0.0f);
+			for (int i = 0; i < 31; i++) // 31 polls of 16.7 ms: past kNameReentryMs
+				Step(rig, s_in, st);
+			place(s_in, 0, 0, 0.0f);
+			o = Step(rig, s_in, st);
+			check(o.name[0], "back in it after 0.5 s: named again");
+			place(s_in, 0, 3, 0.0f);
+			o = Step(rig, s_in, st);
+			check(o.hover[0] == 3 && o.name[0], "straight on into another pouch with an item: named");
+			place(s_in, 0, 1, 0.0f);
+			o = Step(rig, s_in, st);
+			check(o.hover[0] == 1 && o.reach[0] == Tick::Light && !o.name[0], "an empty pouch: the light tick, no name");
+			place(s_in, 1, -1, 1.0f);
+			Step(rig, s_in, st);
+			place(s_in, 1, 0, 1.0f);
+			o = Step(rig, s_in, st);
+			check(o.entered[1] && o.reach[1] == Tick::None && !o.name[1], "a closed grip passing into a pouch names nothing");
+			State menu_st;
+			StepIn m_in = base;
+			m_in.menu = true;
+			m_in.screen_up = true;
+			Step(rig, m_in, menu_st);
+			place(m_in, 0, 3, 0.0f);
+			o = Step(rig, m_in, menu_st);
+			check(o.reach[0] == Tick::Firm && !o.name[0], "with a menu up the tick still comes, the name does not");
+		}
+		{
 			// Closed, but the cell is not one point-to-select maps (or nothing opens the screen).
 			State st;
 			StepIn s_in = base;
@@ -1022,10 +1116,13 @@ namespace VR::BeltPouches
 				"inactive, no hand is in a pouch or owned by one");
 		}
 
+		// The item reader the names come from (it logs its own line, naming its first failed check).
+		check(GameFeedback::ItemSelfTest(), "the item names self-test passes");
+
 		if (failures == 0)
 			Console.WriteLn(Color_StrongGreen, "(VR) BeltPouches self-test: passed (%d checks: seat and head frames, looking "
 											   "down, glancing, hit tests, zones first, the shipped layouts against their zones, ticks, "
-											   "squeezes, opening).", checks);
+											   "names, squeezes, opening).", checks);
 		else
 			Console.WriteLn(Color_StrongRed, "(VR) BeltPouches self-test FAIL: %s (%d of %d checks failed).", first, failures, checks);
 		return failures == 0;

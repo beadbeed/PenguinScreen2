@@ -36,8 +36,9 @@ and the hit maths), rects (each cell's white highlight box, found in a capture, 
 
 Belt pouches (either File; the grip is put at each pouch's centre as pine.pouches() reports it, so any anchor works):
 pouches (with the item screen up, an open hand reaching into each pouch ticks once, twice when the local record's
-item byte says its cell holds an item, and a squeeze brings the cursor to the pouch's cell within 1 s with nothing
-confirmed: no confirm passes, the command submenu flag stays 0, the screen stays up, no menu button press),
+item byte says its cell holds an item (the equipped box's pouch: the special item's byte), and a squeeze brings the
+cursor to the pouch's cell within 1 s with nothing confirmed: no confirm passes, the command submenu flag stays 0,
+the screen stays up, no menu button press),
 pouch-open (with the item screen closed a squeeze opens it through the belt zone and the cursor reaches the pouch's
 cell within 1 s of the screen coming up, nothing confirmed), pouch-submenu (with an item's command submenu open a
 squeeze is refused and nothing is pressed for 1 s; B backs out). On File #2 only these run; the rest SKIP.
@@ -90,16 +91,16 @@ ARM_DELAY_S = 0.45  # the profile's armDelayMs (300) with a margin
 
 # The belt pouches (the profiles' pouches:) on either File: the menu flag (item screen, map or pause), the item screen's
 # cursor struct (u32 1 while up; node pointer at +0x4, u16 index +0xC, x +0xE, y +0x10), the local record (records +
-# local slot * stride) and its item bytes (+items + k for cell k, 0 = empty), the command submenu flag (the cursor
-# struct + 0x20, 1 while an item's EQUIP/RELOAD/USE... submenu is open), and the menuPointer cells as (node, index, x,
-# y) in the profile's order.
+# local slot * stride) and its item bytes (+items + k for cell k, 0 = empty; +special for the equipped box, which shows
+# the special item), the command submenu flag (the cursor struct + 0x20, 1 while an item's EQUIP/RELOAD/USE... submenu
+# is open), and the menuPointer cells as (node, index, x, y) in the profile's order.
 GAMES = {
     "SLPM-65428": dict(menu_open=0x48BF7E, item_up=0x720B80, records=0x476DD0, stride=0x10E0, local_slot=0x48BF7D,
-                       items=0xC84, submenu=0x720BA0,
+                       items=0xC84, special=0xC88, submenu=0x720BA0,
                        cells=((0x720C10, 0, 498, 108), (0x720CA8, 1, 550, 108), (0x720D40, 2, 498, 160),
                               (0x720DD8, 3, 550, 160), (0x722928, 0, 550, 216))),
     "SLPM-65692": dict(menu_open=0x4912BE, item_up=0x7671F0, records=0x47BD30, stride=0x1100, local_slot=0x4912BD,
-                       items=0xC94, submenu=0x767210,
+                       items=0xC94, special=0xC98, submenu=0x767210,
                        cells=((0x767280, 0, 498, 108), (0x767318, 1, 550, 108), (0x7673B0, 2, 498, 160),
                               (0x767448, 3, 550, 160), (0x768F98, 0, 550, 216))),
 }
@@ -416,10 +417,12 @@ class Runner:
         return self.p.read8(self.game["submenu"])
 
     def g_items(self):
-        """The local character's four item bytes, cell 0 first (0 = an empty cell)."""
+        """The local character's item bytes in menuPointer cell order (0 = empty): the four cells, cell 0 first, then
+        the equipped box (cell 4), which shows the special item and whose pouch reads the special item's byte."""
         slot = self.p.read8(self.game["local_slot"])
-        base = self.game["records"] + slot * self.game["stride"] + self.game["items"]
-        return [self.p.read8(base + k) for k in range(4)]
+        record = self.game["records"] + slot * self.game["stride"]
+        return [self.p.read8(record + self.game["items"] + k) for k in range(4)] + [
+            self.p.read8(record + self.game["special"])]
 
     def g_open_items(self, fc):
         """Opens the item screen with the belt zone (first person must be armed) and waits for point-to-select to run."""
@@ -867,11 +870,11 @@ def sc_pouches(r):
             check(b1["hover"][LEFT] == k, "the left hand at pouch %d's centre is in pouch %d" % (k, b1["hover"][LEFT]))
             check(b1["reaches"] == b0["reaches"] + 1, "reaching into pouch %d gave %d tick(s), expected 1" % (
                 k, b1["reaches"] - b0["reaches"]))
-            held = cell < 4 and items[cell] != 0
+            held = cell < len(items) and items[cell] != 0
             item = b1["pouches"][k]["item"]
             if item >= 0:
                 check(item == (1 if held else 0), "pouch %d reads item %d, but the item byte of cell %d is %d" % (
-                    k, item, cell, items[cell] if cell < 4 else -1))
+                    k, item, cell, items[cell] if cell < len(items) else -1))
                 check(b1["item_ticks"] - b0["item_ticks"] == (1 if held else 0),
                       "pouch %d gave %d double tick(s) for a cell that %s" % (
                           k, b1["item_ticks"] - b0["item_ticks"], "holds an item" if held else "is empty"))

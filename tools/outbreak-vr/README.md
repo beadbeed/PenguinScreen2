@@ -20,13 +20,19 @@ and test the first-person camera. They talk to a running PenguinScreen2 through 
 | `sync_sweep.sh` / `sway_metric.py` | On the null headset: world wobble in the Headset Window for render-pose sync variants (`time`, or a `syncFramesBack` value). With `PCSX2_VR_SYNCLOG=1` the emulog also gets, once a second, `(VR) predict:` (how far frames still turn when shown, and the horizons) and `(VR) edge: rms/max deg, H ms` (how far the first-person frame sits from the head as it is shown, the leading-edge band that `lookAt.predict` shrinks; against the fake head when `PCSX2_VR_FAKE_HEADPOSE` is set). |
 | `session_recorder.py` | Started by `launch_vr.ps1` and `Launch-PenguinScreen2-SteamVR.cmd`: records game state (~4/s) and a screenshot every 5 s to `D:\Games\PS2\sessions\<time>` until the emulator closes, plus the emulog. Screenshots only when the network adapter is on. |
 | `hmdshot.py`, `input_log.py`, `record_play.py` | Headset Window screenshot; pad input + screenshots while someone plays; memory snapshots + screenshots while someone plays. |
-| `menutest.py` | Headset-free menu pointer tests for File #1's item screen (offline only): pointer hit maths, steering to each cell, fast click, the pause after a confirm, the command submenu (nothing pressed while its flag is up, no steering after it closes until the dot moves), overrides, closing mid-steer, the map and pause after an item-screen visit (`map-after-items`: point-to-select must stay off and press nothing; pause goes in as Select through `drive.py`), the menu tablet, and the cell rects checked against captures; and the belt pouches on File #1 or File #2 (`pouches`, `pouch-open`, `pouch-submenu`: the reach ticks against the item bytes, each squeeze bringing the cursor to its cell within 1 s, opening the item screen from a pouch, a squeeze refused with a command submenu open, never a confirm). `--slot` loads a savestate first, `--report` saves captures, `--test-uv` points with PINE test hits instead of aiming (works with no OpenXR runtime). |
+| `menutest.py` | Headset-free menu pointer tests for File #1's item screen (offline only): pointer hit maths, steering to each cell, fast click, the pause after a confirm, the command submenu (nothing pressed while its flag is up, no steering after it closes until the dot moves), overrides, closing mid-steer, the map and pause after an item-screen visit (`map-after-items`: point-to-select must stay off and press nothing; pause goes in as Select through `drive.py`), the menu tablet, and the cell rects checked against captures; and the belt pouches on File #1 or File #2 (`pouches`, `pouch-open`, `pouch-submenu`: the reach ticks against the item bytes, the equipped box's against the special item's, each squeeze bringing the cursor to its cell within 1 s, opening the item screen from a pouch, a squeeze refused with a command submenu open, never a confirm). `--slot` loads a savestate first, `--report` saves captures, `--test-uv` points with PINE test hits instead of aiming (works with no OpenXR runtime). |
 | `grabtest.py` | Headset-free shake-to-break-free tests for File #1 (offline only, `PCSX2_VR_TEST_INPUT=1`): `idle-shake` (no grab: shaking moves nothing and presses nothing), `baseline` (a grab with no input, about 10 s) and `shake` (shaking the scripted right controller from the load: the grab must end well before the baseline, and nothing more is pressed once it has). Loads `--grab-slot` (default 5, a zombie grabs Kevin) and `--calm-slot` (default 6). |
 
 HUD cards on the null headset: `PCSX2_VR_HUD_TEST=1` shows a test toast every 3 s (it cycles through the
 whole font), `PCSX2_VR_FAKE_HANDS` also shows the wrist card on the fake left hand at any angle (NO DATA
 outside first person), and `PCSX2_VR_HUD_SELFTEST` runs the HUD self-test once (`(VR) HUD self-test:` in
-the emulog). Every toast is logged as `(VR) HUD toast: "..."`.
+the emulog). Every toast is logged as `(VR) HUD toast: "..."`. The 5x7 font has A-Z (lower case is drawn as
+capitals), 0-9 and `. , % : - / + ! ? ( ) ' &`, so every item name in `pcsx2/VR/ItemData.cpp` draws in full ("Kevin's
+45 Auto", "S&W model 500"; the HUD self-test checks each one). The wrist card's ammo line names the equipped weapon
+(its item id from `feedback.weapon`, through ItemData) in place of AMMO: `45 AUTO 7` for Kevin's 45 Auto (an owner's
+name is dropped), the name alone for a weapon without rounds (`SURVIVAL KNIFE`), cut to 19 characters with any bracket
+closed so it never draws below scale 2 (`GRENADE L. (EXTI) 6`), and still `AMMO 7` for an id the table does not have.
+The card is drawn again when the weapon changes, not only its rounds.
 
 Hands at display rate (VR setting `HandsDisplayRate`, on by default, ini only; needs `HeadsetRateSubmit`): the hand
 impostors, the laser sight and the wrist card are still drawn on the GS thread, but the VR pacer places them every
@@ -95,7 +101,17 @@ Belt pouches (profile `pouches:`, both Files; only while first person is armed, 
 laid out like the item grid (cells 0 and 1 at the upper chest, 2 and 3 below them standing out from the ribs, and the
 equipped box out from the belt buckle), hung from a neck pivot under the head and turned to the forward you last recentered to, so
 looking down at a pouch does not move it. An open hand reaching into one ticks once, lightly, for an empty cell and
-twice, firmer, when the local record's item byte (File #1 +0xC84 + k, File #2 +0xC94 + k) is not 0. A squeeze opens
+twice, firmer, when the local record's item byte (File #1 +0xC84 + k, File #2 +0xC94 + k) is not 0. The equipped box
+shows the special item (Kevin's .45, equipped or not), so its pouch reads the special item's byte (File #1 +0xC88,
+File #2 +0xC98). The same reach also shows a 1.5 s toast naming the item: the byte is a record index into the item
+table `feedback.weapon` names (File #1 0x3967D0, File #2 0x397B40, 60-byte records), the record must be present, name
+its own index and belong to the local slot + 1 (the weapon reader's checks, `GameFeedback::ReadItemRecord`), and
+ItemData gives the name with a gun's rounds (`Kevin's 45 Auto 7`), the count of ammo (`45 Auto Magazine x7`) or of a
+recovery item holding more than one, the name alone otherwise (`Green Herb`), and `Item <id>` for an id it does not
+have. Once per reach: back in the pouch it left less than 0.5 s ago (a hand on the edge) a hand ticks but is not named
+again; an empty pouch, a closed grip passing through and any reach while a menu is up (the item screen names its items
+itself) name nothing. A record failing the checks is logged once per pouch and byte (`(VR) Pouches: pouch K's item
+byte names record R, which fails the item checks (...)`); each name shows as a `(VR) HUD toast:` line. A squeeze opens
 the item screen through the belt zone if it is closed (stop, then Start) and asks the menu pointer for the cell
 (`MenuPointer::RequestCell`: the same closed-loop D-pad steering once the screen has been up 300 ms, refused while an
 item's command submenu is open (the cursor struct + 0x20) or after a confirm, never a confirm); with the screen up a
@@ -107,7 +123,8 @@ pouch's request waits for the screen never reaches the game. Logs: `(VR) Pouches
 (cell C, holds an item|empty) squeezed with the left|right hand; ...` per squeeze, and the menu pointer's `a pouch asked
 for cell C; steering there from cell F.`, `... refused (why).` and `... lapsed ...`. PINE `MsgVRMenuPointer` op 2 reads
 the pouches (`pine.pouches()`: each pouch's centre in the XR base space, the hand in each, the counters).
-`PCSX2_VR_SELFTEST` runs `(VR) BeltPouches self-test:` once.
+`PCSX2_VR_SELFTEST` runs `(VR) BeltPouches self-test:` once, and with it `(VR) Item names self-test:` (ItemData
+lookups, the labels, the record checks on a scripted item table, both profiles' item tables).
 
 Comfort vignette (VR settings `ComfortVignette`, off by default, and `VignetteStrength`, 0.2-1.0, default 0.6):
 while first person moves the view without the head, a view-locked quad 0.5 m ahead (6 m square, about 161 deg

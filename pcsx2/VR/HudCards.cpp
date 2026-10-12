@@ -4,6 +4,7 @@
 #include "VR/HudCards.h"
 #include "VR/CameraDriver.h"
 #include "VR/GameFeedback.h"
+#include "VR/ItemData.h"
 #include "VR/VRProfileDB.h"
 
 #include "Config.h"
@@ -269,6 +270,9 @@ namespace VR::HudCards
 			{'?', {" ### ", "#   #", "    #", "   # ", "  #  ", "     ", "  #  "}},
 			{'(', {"   # ", "  #  ", " #   ", " #   ", " #   ", "  #  ", "   # "}},
 			{')', {" #   ", "  #  ", "   # ", "   # ", "   # ", "  #  ", " #   "}},
+			// For item names ("Kevin's 45 Auto", "S&W model 500").
+			{'\'', {" ##  ", "  #  ", " #   ", "     ", "     ", "     ", "     "}},
+			{'&', {" ##  ", "#  # ", "# #  ", " #   ", "# # #", "#  # ", " ## #"}},
 		};
 		constexpr int kGlyphW = 5;
 		constexpr int kGlyphH = 7;
@@ -563,6 +567,85 @@ namespace VR::HudCards
 			return std::clamp(static_cast<int>(std::lround(d.virus_pct * 10.0f)), 0, 1000);
 		}
 
+		// The longest ammo line that still draws at scale 2 inside the wrist card's padding: 19 characters.
+		constexpr size_t kWristLineChars =
+			static_cast<size_t>((static_cast<int>(kWristWidth) - 2 * kWristPadPx + 2) / (2 * kAdvance));
+
+		// A weapon's name for the wrist card, in capitals and without the owner Outbreak's character weapons carry:
+		// "Kevin's 45 Auto" -> "45 AUTO", "Folding Knife(David's)" -> "FOLDING KNIFE".
+		std::string WristWeaponName(const char* name)
+		{
+			const std::string full = name ? name : "";
+			std::string s = full;
+			// A leading "<Name>'s ".
+			const size_t space = s.find(' ');
+			if (space != std::string::npos && space >= 2 && s.compare(space - 2, 2, "'s") == 0 && space + 1 < s.size())
+				s.erase(0, space + 1);
+			// A trailing "(<Name>'s)".
+			const size_t open = s.rfind('(');
+			if (open != std::string::npos && s.size() >= 3 && s.compare(s.size() - 3, 3, "'s)") == 0)
+			{
+				s.erase(open);
+				while (!s.empty() && s.back() == ' ')
+					s.pop_back();
+			}
+			if (s.empty())
+				s = full;
+			for (char& c : s)
+			{
+				if (c >= 'a' && c <= 'z')
+					c = static_cast<char>(c - 'a' + 'A');
+			}
+			return s;
+		}
+
+		// The wrist card's ammo line: the equipped weapon's name and its rounds ("45 AUTO 7"), the name alone for a
+		// weapon without rounds (a knife, a pipe, a molotov), or "AMMO 7" without an id ItemData knows. A name too long
+		// for kWristLineChars is cut, closing a bracket the cut leaves open.
+		std::string WristAmmoLine(const WristData& d)
+		{
+			char rounds[16];
+			std::snprintf(rounds, sizeof(rounds), "%u", static_cast<unsigned>(d.ammo));
+			const ItemData::Entry* e = d.has_item ? ItemData::Find(d.item_id) : nullptr;
+			std::string name = e ? WristWeaponName(e->name) : std::string();
+			if (!e || name.empty())
+				return std::string("AMMO ") + rounds;
+			const bool with_rounds = ItemData::IsGun(e->kind) || e->kind == ItemData::Kind::Spray;
+			const size_t suffix = with_rounds ? (1 + std::strlen(rounds)) : 0;
+			const size_t room = (kWristLineChars > suffix) ? (kWristLineChars - suffix) : 0;
+			if (name.size() > room)
+			{
+				name.resize(room);
+				const size_t open = name.rfind('(');
+				if (open != std::string::npos && name.find(')', open) == std::string::npos)
+				{
+					// Cut inside a bracket: make room to close it, unless nothing inside it would be left.
+					name.pop_back();
+					while (!name.empty() && name.back() == ' ')
+						name.pop_back();
+					if (name.size() > open + 1)
+						name.push_back(')');
+					else
+						name.resize(std::min(name.size(), open));
+				}
+				while (!name.empty() && name.back() == ' ')
+					name.pop_back();
+			}
+			if (name.empty())
+				return std::string("AMMO ") + rounds;
+			return with_rounds ? (name + " " + rounds) : name;
+		}
+
+		// Which ItemData entry the ammo line names, as its index + 1; 0 for the plain AMMO line (no line, no id or one the
+		// table does not have), which depends on the rounds alone.
+		u32 WristItemSlot(const WristData& d)
+		{
+			if (!d.has_ammo || !d.has_item || ItemData::Count() == 0)
+				return 0;
+			const ItemData::Entry* e = ItemData::Find(d.item_id);
+			return e ? static_cast<u32>(e - &ItemData::At(0)) + 1u : 0u;
+		}
+
 		std::atomic<bool> s_selftest_ran{false};
 
 		void MaybeRunSelfTest()
@@ -685,7 +768,8 @@ namespace VR::HudCards
 			{
 				active = true;
 				ReadWrist(profile->hud->wrist.value(), record, guards_now, &d);
-				// The rounds in the equipped gun (feedback.weapon), when GameFeedback trusts the record.
+				// The rounds in the equipped gun (feedback.weapon), when GameFeedback trusts the record, and its item id
+				// for the weapon's name.
 				if (GameFeedback::WeaponInHand() == GameFeedback::Hold::Weapon)
 				{
 					const GameFeedback::WeaponView wv = GameFeedback::GetWeapon();
@@ -693,6 +777,8 @@ namespace VR::HudCards
 					{
 						d.has_ammo = true;
 						d.ammo = wv.ammo;
+						d.has_item = true;
+						d.item_id = wv.item_id;
 					}
 				}
 			}
@@ -730,6 +816,8 @@ namespace VR::HudCards
 		k |= static_cast<u64>(d.has_ammo ? 1u : 0u) << 5;
 		if (d.has_ammo)
 			k |= static_cast<u64>(d.ammo) << 44;
+		// The weapon the ammo line names (ItemData has fewer than 1024 entries).
+		k |= static_cast<u64>(WristItemSlot(d) & 0x3FFu) << 30;
 		return k;
 	}
 
@@ -754,7 +842,8 @@ namespace VR::HudCards
 			"HUD test: toast card",
 			"ABCDEFGHIJKLM 01234",
 			"NOPQRSTUVWXYZ 56789",
-			". , % : - / + ! ? ( )",
+			". , % : - / + ! ? ( ) ' &",
+			"Kevin's 45 Auto 7, S&W",
 			"Recentered (SteamVR)",
 		};
 		constexpr u32 kLineCount = static_cast<u32>(sizeof(kLines) / sizeof(kLines[0]));
@@ -855,9 +944,8 @@ namespace VR::HudCards
 		const bool ammo = !no_data && d.has_ammo;
 		if (ammo)
 		{
-			char rounds[24];
-			std::snprintf(rounds, sizeof(rounds), "AMMO %u", static_cast<unsigned>(d.ammo));
-			const std::string ammo_line(rounds);
+			// The weapon's name and rounds ("45 AUTO 7"), or "AMMO 7"; at scale 2 or larger (WristAmmoLine cuts to fit).
+			const std::string ammo_line = WristAmmoLine(d);
 			c.Text(w / 2, kAmmoY, ammo_line, FitScale(ammo_line.size(), w - 2 * kWristPadPx, 3), kWristText);
 		}
 		c.Text(w / 2, ammo ? kVirusWithAmmoY : kVirusY, virus_line,
@@ -1160,11 +1248,38 @@ namespace VR::HudCards
 		}
 		check(rows_ok, "every glyph row is 5 pixels wide");
 		bool all = true;
-		for (const char* p = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,%:-/+!?()"; *p; ++p)
+		for (const char* p = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,%:-/+!?()'&"; *p; ++p)
 			all = all && (FindGlyph(*p) != nullptr);
-		check(all, "the font covers A-Z, 0-9, space and . , % : - / + ! ? ( )");
+		check(all, "the font covers A-Z, 0-9, space and . , % : - / + ! ? ( ) ' &");
 		check(FindGlyph('q') == FindGlyph('Q') && FindGlyph('q') != nullptr, "lower case draws as capitals");
 		check(FindGlyph('~') == nullptr, "characters outside the font are left blank");
+		// The apostrophe and the ampersand of item names ("Kevin's 45 Auto", "S&W model 500"): a mark at the top of the
+		// cell, and a figure the cell's full height. No character has two glyphs.
+		const Glyph* apostrophe = FindGlyph('\'');
+		bool apostrophe_high = apostrophe != nullptr && std::strchr(apostrophe->rows[0], '#') != nullptr;
+		for (int row = 3; apostrophe && row < kGlyphH; ++row)
+			apostrophe_high = apostrophe_high && std::strchr(apostrophe->rows[row], '#') == nullptr;
+		check(apostrophe_high, "the apostrophe is a mark at the top of the cell");
+		const Glyph* ampersand = FindGlyph('&');
+		bool ampersand_tall = ampersand != nullptr;
+		for (int row = 0; ampersand && row < kGlyphH; ++row)
+			ampersand_tall = ampersand_tall && std::strchr(ampersand->rows[row], '#') != nullptr;
+		check(ampersand_tall, "the ampersand fills the cell's height");
+		bool glyphs_unique = true;
+		for (size_t gi = 0; gi < std::size(kFont); gi++)
+		{
+			for (size_t gj = gi + 1; gj < std::size(kFont); gj++)
+				glyphs_unique = glyphs_unique && kFont[gi].ch != kFont[gj].ch;
+		}
+		check(glyphs_unique, "no character has two glyphs");
+		// Every name ItemData can hand a pouch's toast or the wrist card draws in full.
+		bool item_names_drawn = ItemData::Count() > 0;
+		for (u32 ii = 0; ii < ItemData::Count(); ii++)
+		{
+			for (const char* ch = ItemData::At(ii).name; ch && *ch; ++ch)
+				item_names_drawn = item_names_drawn && FindGlyph(*ch) != nullptr;
+		}
+		check(item_names_drawn, "every item name (ItemData) draws with the font");
 
 		// Fades: 0.15 s in, 0.15 s out, opaque in between.
 		check(ToastOpacityAt(1000, 3000, 1000) == 0.0f, "toast starts transparent");
@@ -1286,6 +1401,60 @@ namespace VR::HudCards
 		kc.has_ammo = false;
 		kc.ammo = 0;
 		check(WristKey(ka, false) == WristKey(kc, false), "no weapon is the card without the AMMO line");
+
+		// The ammo line names the equipped weapon (ItemData): in capitals, without its owner, with its rounds, cut to
+		// draw at scale 2 or larger; AMMO and the rounds without an id the table knows. The key follows the weapon.
+		WristData wl = kb;
+		check(WristAmmoLine(wl) == "AMMO 7", "a weapon without an item id shows AMMO and its rounds");
+		wl.has_item = true;
+		wl.item_id = 400;
+		check(WristAmmoLine(wl) == "45 AUTO 7", "Kevin's 45 Auto shows as 45 AUTO 7");
+		wl.item_id = 0;
+		wl.ammo = 15;
+		check(WristAmmoLine(wl) == "HANDGUN 15", "the Handgun shows as HANDGUN 15");
+		wl.item_id = 6;
+		wl.ammo = 5;
+		check(WristAmmoLine(wl) == "S&W MODEL 500 5", "the S&W model 500 keeps its ampersand");
+		wl.item_id = 407;
+		check(WristAmmoLine(wl) == "FOLDING KNIFE", "a knife shows its name alone, without its owner");
+		wl.item_id = 26;
+		wl.ammo = 6;
+		const std::string wl_cut = WristAmmoLine(wl);
+		check(wl_cut == "GRENADE L. (EXTI) 6" &&
+				  FitScale(wl_cut.size(), static_cast<int>(kWristWidth) - 2 * kWristPadPx, 3) == 2,
+			"a long name is cut to draw at scale 2, its bracket closed");
+		wl.item_id = 27;
+		wl.ammo = 1;
+		check(WristAmmoLine(wl) == "GRENADE L. (BOW) 1", "a cut leaves no space before the closing bracket");
+		wl.item_id = 9999;
+		check(WristAmmoLine(wl) == "AMMO 1", "an id the table does not have shows AMMO and its rounds");
+		bool wl_fits = true;
+		for (u32 iw = 0; iw < ItemData::Count(); iw++)
+		{
+			WristData wl_any = kb;
+			wl_any.has_item = true;
+			wl_any.item_id = ItemData::At(iw).id;
+			wl_any.ammo = 65535;
+			wl_fits = wl_fits && WristAmmoLine(wl_any).size() <= kWristLineChars;
+		}
+		check(wl_fits && kWristLineChars == 19u, "every item's ammo line fits 19 characters, even with 65535 rounds");
+		WristData wk_handgun = kb;
+		wk_handgun.has_item = true;
+		wk_handgun.item_id = 0;
+		WristData wk_auto = wk_handgun;
+		wk_auto.item_id = 400;
+		check(WristKey(kb, false) != WristKey(wk_handgun, false) && WristKey(wk_handgun, false) != WristKey(wk_auto, false),
+			"naming the weapon, or another weapon with the same rounds, changes the key");
+		WristData wk_odd1 = wk_handgun;
+		wk_odd1.item_id = 9998;
+		WristData wk_odd2 = wk_handgun;
+		wk_odd2.item_id = 9999;
+		check(WristKey(wk_odd1, false) == WristKey(wk_odd2, false) && WristKey(wk_odd1, false) == WristKey(kb, false),
+			"ids the table does not have draw the same AMMO line, so they keep the key");
+		WristData wk_none = wk_auto;
+		wk_none.has_ammo = false;
+		check(WristKey(wk_none, false) == WristKey(ka, false), "no weapon equipped: no line, whatever id is left over");
+
 		WristData sliver = ka;
 		sliver.hp = 1;
 		check(BarFillPx(sliver) == 1, "a sliver of bar stays above 0 HP");
@@ -1318,6 +1487,11 @@ namespace VR::HudCards
 		for (const u32 p : wimg)
 			green_px += (p == kColourFine) ? 1u : 0u;
 		check(green_px > 0, "the wrist card draws Fine in green");
+		std::vector<u32> wimg_plain;
+		std::vector<u32> wimg_named;
+		RasterWrist(wimg_plain, kb, false);
+		RasterWrist(wimg_named, wk_auto, false);
+		check(wimg_plain.size() == wimg_named.size() && wimg_plain != wimg_named, "the weapon's name is drawn on the wrist card");
 
 		// Laser: bright just past the muzzle (the image's bottom rows) and gone at the far end (its top row),
 		// soft across, red.

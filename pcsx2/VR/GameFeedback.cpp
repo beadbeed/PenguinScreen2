@@ -3,6 +3,7 @@
 
 #include "VR/GameFeedback.h"
 #include "VR/CameraDriver.h"
+#include "VR/ItemData.h"
 #include "VR/SpatialControls.h"
 #include "VR/VRInput.h"
 #include "VR/VRProfileDB.h"
@@ -970,5 +971,243 @@ namespace VR::GameFeedback
 
 		Console.WriteLn(fail == 0 ? Color_StrongGreen : Color_StrongRed, "(VR) Feedback self-test: %d failure(s).", fail);
 		return fail == 0;
+	}
+}
+
+// Item records: the item table feedback.weapon names, read and checked the way the weapon reader checks the equipped
+// record, and named from ItemData (the belt pouches' toasts). Reads only.
+namespace VR::GameFeedback
+{
+	namespace
+	{
+		bool ReadItemMemory(u32 address, u8 width, u32* value)
+		{
+			if (!VMManager::HasValidVM() || static_cast<u64>(address) + width > Ps2MemSize::MainRam)
+				return false;
+			switch (width)
+			{
+				case 1: *value = memRead8(address); break;
+				case 2: *value = memRead16(address); break;
+				default: *value = memRead32(address); break;
+			}
+			return true;
+		}
+
+		// The weapon reader's identity rule (ClassifyWeapon's Weapon case), for any record index.
+		bool ItemRecordPasses(u32 index, u32 present, u32 own_index, u32 owner, bool slot_known, u32 slot)
+		{
+			return index != 0 && present == 1 && own_index == index && slot_known && owner == slot + 1;
+		}
+
+		// ItemSelfTest's guest memory: a small window of scripted RAM at kItemTestBase, little-endian like the EE's.
+		constexpr u32 kItemTestBase = 0x00100000;
+		std::array<u8, 0x300> s_item_test_ram{};
+
+		bool ItemTestRead(u32 address, u8 width, u32* value)
+		{
+			if (address < kItemTestBase ||
+				static_cast<u64>(address) + width > static_cast<u64>(kItemTestBase) + s_item_test_ram.size())
+				return false;
+			u32 v = 0;
+			for (u32 i = 0; i < width; i++)
+				v |= static_cast<u32>(s_item_test_ram[static_cast<size_t>(address - kItemTestBase + i)]) << (8u * i);
+			*value = v;
+			return true;
+		}
+
+		void ItemTestPut(u32 address, u8 width, u32 value)
+		{
+			for (u32 i = 0; i < width; i++)
+			{
+				const u64 at = static_cast<u64>(address) + i;
+				if (at >= kItemTestBase && at < static_cast<u64>(kItemTestBase) + s_item_test_ram.size())
+					s_item_test_ram[static_cast<size_t>(at - kItemTestBase)] = static_cast<u8>(value >> (8u * i));
+			}
+		}
+	}
+
+	ItemTable ItemTableOf(const ProfileDB::Profile& profile)
+	{
+		ItemTable t;
+		if (!profile.feedback.has_value() || !profile.feedback->has_weapon || !profile.camera.has_value() ||
+			!profile.camera->base.has_value() || !profile.camera->base->is_indexed)
+			return t;
+		const ProfileDB::FeedbackParams& fb = profile.feedback.value();
+		t.table = fb.weapon_table;
+		t.stride = fb.weapon_stride;
+		t.id_offset = fb.weapon_id_offset;
+		t.count_offset = fb.weapon_count_offset;
+		t.owner_offset = fb.weapon_owner_offset;
+		// Read as one byte, as the weapon reader reads it.
+		t.slot_address = profile.camera->base->index_addr;
+		t.valid = (t.stride != 0);
+		return t;
+	}
+
+	ItemRecord ReadItemRecord(const ItemTable& table, u32 index, ItemMemReader reader)
+	{
+		ItemRecord r;
+		r.index = index;
+		if (!table.valid || index == 0 || table.stride == 0)
+			return r;
+		const u64 rec = static_cast<u64>(table.table) + static_cast<u64>(index) * static_cast<u64>(table.stride);
+		if (rec + table.stride > static_cast<u64>(Ps2MemSize::MainRam))
+			return r;
+		const ItemMemReader peek = reader ? reader : ReadItemMemory;
+		const u32 at = static_cast<u32>(rec);
+		u32 id = 0;
+		u32 count = 0;
+		r.slot_known = peek(table.slot_address, 1, &r.slot);
+		if (!peek(at, 1, &r.present) || !peek(at + 2, 1, &r.own_index) || !peek(at + table.owner_offset, 1, &r.owner) ||
+			!peek(at + table.id_offset, 2, &id) || !peek(at + table.count_offset, 2, &count))
+			return r;
+		r.item_id = static_cast<u16>(id);
+		r.count = static_cast<u16>(count);
+		r.valid = ItemRecordPasses(index, r.present, r.own_index, r.owner, r.slot_known, r.slot);
+		return r;
+	}
+
+	std::string ItemLabel(u16 item_id, u16 count)
+	{
+		const ItemData::Entry* e = ItemData::Find(item_id);
+		const unsigned n = count;
+		char text[48];
+		if (!e)
+			std::snprintf(text, sizeof(text), "Item %u", static_cast<unsigned>(item_id));
+		else if (ItemData::IsGun(e->kind) || e->kind == ItemData::Kind::Spray)
+			std::snprintf(text, sizeof(text), "%s %u", e->name, n);
+		else if (e->kind == ItemData::Kind::Ammo || (e->kind == ItemData::Kind::Recovery && n > 1))
+			std::snprintf(text, sizeof(text), "%s x%u", e->name, n);
+		else
+			std::snprintf(text, sizeof(text), "%s", e->name);
+		return std::string(text);
+	}
+
+	bool ItemSelfTest()
+	{
+		const char* first = nullptr;
+		int failures = 0;
+		int checks = 0;
+		const auto check = [&](bool ok, const char* name) {
+			checks++;
+			if (ok)
+				return;
+			failures++;
+			if (!first)
+				first = name;
+		};
+
+		// ItemData: a few ids from the table, and nothing for an id it does not have.
+		const auto named = [](u16 id, const char* want, ItemData::Kind kind) {
+			const ItemData::Entry* e = ItemData::Find(id);
+			return e && e->id == id && e->kind == kind && std::string(e->name) == want && std::string(ItemData::Name(id)) == want &&
+			       ItemData::KindOf(id) == kind;
+		};
+		check(named(0, "Handgun", ItemData::Kind::Handgun), "item 0 is the Handgun");
+		check(named(210, "45 Auto Magazine", ItemData::Kind::Ammo), "item 210 is the 45 Auto Magazine (ammo)");
+		check(named(400, "Kevin's 45 Auto", ItemData::Kind::Handgun), "item 400 is Kevin's 45 Auto (a handgun)");
+		check(named(300, "Green Herb", ItemData::Kind::Recovery), "item 300 is the Green Herb (recovery)");
+		check(ItemData::Find(9) == nullptr && std::string(ItemData::Name(9)).empty() && ItemData::Find(12345) == nullptr &&
+				  std::string(ItemData::Name(65535)).empty() && ItemData::KindOf(9) == ItemData::Kind::Unknown,
+			"an id the table does not have has no entry and the name \"\"");
+		bool sorted = ItemData::Count() > 0;
+		for (u32 i = 1; i < ItemData::Count(); i++)
+			sorted = sorted && ItemData::At(i - 1).id < ItemData::At(i).id;
+		check(sorted, "the item table is sorted by id, so Find's binary search sees every entry");
+
+		// Labels: rounds after a gun or a spray, x and the count after ammo (and recovery past one), else the name alone.
+		check(ItemLabel(400, 7) == "Kevin's 45 Auto 7", "a gun shows its rounds (Kevin's 45 Auto 7)");
+		check(ItemLabel(0, 0) == "Handgun 0", "an empty gun shows 0 rounds");
+		check(ItemLabel(210, 7) == "45 Auto Magazine x7", "ammo shows its count (45 Auto Magazine x7)");
+		check(ItemLabel(300, 1) == "Green Herb" && ItemLabel(300, 0) == "Green Herb", "one herb shows its name alone");
+		check(ItemLabel(303, 2) == "Mixed Herb (G+G) x2", "a recovery item holding more than one shows the count");
+		check(ItemLabel(100, 1) == "Survival Knife", "a knife shows its name alone");
+		check(ItemLabel(29, 30) == "Flame Spray 30", "a spray weapon shows its count");
+		check(ItemLabel(10102, 1) == "Key with a Blue Tag", "a key item shows its name alone");
+		check(ItemLabel(12345, 3) == "Item 12345", "an id the table does not have shows \"Item <id>\"");
+
+		// Records: the table at +0x10 of the scripted RAM (60-byte records laid out as Outbreak's), the local slot byte
+		// at +0x00. Slot 0, so owner 1 is ours.
+		s_item_test_ram.fill(0);
+		ItemTable tbl;
+		tbl.valid = true;
+		tbl.table = kItemTestBase + 0x10;
+		tbl.stride = 60;
+		tbl.id_offset = 0x06;
+		tbl.count_offset = 0x24;
+		tbl.owner_offset = 0x28;
+		tbl.slot_address = kItemTestBase;
+		const auto put_record = [&tbl](u32 index, u32 present, u32 own_index, u32 id, u32 count, u32 owner) {
+			const u32 base = tbl.table + index * tbl.stride;
+			ItemTestPut(base, 1, present);
+			ItemTestPut(base + 2, 1, own_index);
+			ItemTestPut(base + tbl.id_offset, 2, id);
+			ItemTestPut(base + tbl.count_offset, 2, count);
+			ItemTestPut(base + tbl.owner_offset, 1, owner);
+		};
+		ItemTestPut(tbl.slot_address, 1, 0);
+		put_record(3, 1, 3, 400, 7, 1);    // ours
+		put_record(5, 1, 5, 210, 7, 2);    // slot 1's
+		put_record(6, 0, 6, 300, 1, 1);    // not present
+		put_record(7, 1, 8, 300, 1, 1);    // names another index
+		put_record(9, 1, 9, 12345, 1, 1);  // an id ItemData does not have
+		const ItemRecord ours = ReadItemRecord(tbl, 3, ItemTestRead);
+		check(ours.valid && ours.index == 3 && ours.item_id == 400 && ours.count == 7 &&
+				  ItemLabel(ours.item_id, ours.count) == "Kevin's 45 Auto 7",
+			"a record that is present, names itself and is ours is read: Kevin's 45 Auto 7");
+		check(!ReadItemRecord(tbl, 5, ItemTestRead).valid, "another player's record (owner = slot 1 + 1) is not named");
+		ItemTestPut(tbl.slot_address, 1, 1);
+		check(ReadItemRecord(tbl, 5, ItemTestRead).valid && !ReadItemRecord(tbl, 3, ItemTestRead).valid,
+			"as slot 1, slot 1's record is ours and slot 0's is not");
+		ItemTestPut(tbl.slot_address, 1, 0);
+		check(!ReadItemRecord(tbl, 6, ItemTestRead).valid, "a record that is not present is not named");
+		check(!ReadItemRecord(tbl, 7, ItemTestRead).valid, "a record naming another index is not named");
+		check(!ReadItemRecord(tbl, 0, ItemTestRead).valid, "index 0 (an empty cell) names nothing");
+		const ItemRecord unknown = ReadItemRecord(tbl, 9, ItemTestRead);
+		check(unknown.valid && ItemLabel(unknown.item_id, unknown.count) == "Item 12345",
+			"a good record with an id the table does not have shows \"Item <id>\"");
+		check(!ReadItemRecord(tbl, 40, ItemTestRead).valid, "a record the reader cannot read names nothing");
+		ItemTable no_slot = tbl;
+		no_slot.slot_address = kItemTestBase - 1;
+		check(!ReadItemRecord(no_slot, 3, ItemTestRead).valid, "without the local slot byte nothing is named");
+		ItemTable past_ram = tbl;
+		past_ram.table = Ps2MemSize::MainRam - 30;
+		check(!ReadItemRecord(past_ram, 1, ItemTestRead).valid, "a record past the end of main RAM is not read");
+		ItemTable no_table = tbl;
+		no_table.valid = false;
+		check(!ReadItemRecord(no_table, 3, ItemTestRead).valid, "no item table (no feedback.weapon), no names");
+
+		// The table from a profile: feedback.weapon and an indexed camera.base.
+		ProfileDB::Profile prof;
+		check(!ItemTableOf(prof).valid, "a profile without feedback.weapon has no item table");
+		prof.feedback.emplace();
+		prof.feedback->has_weapon = true;
+		prof.feedback->weapon_table = 0x3967D0;
+		prof.camera.emplace();
+		prof.camera->base.emplace();
+		check(!ItemTableOf(prof).valid, "nor one whose camera.base is not indexed (no local slot byte)");
+		prof.camera->base->is_indexed = true;
+		prof.camera->base->index_addr = 0x48BF7D;
+		const ItemTable from_profile = ItemTableOf(prof);
+		check(from_profile.valid && from_profile.table == 0x3967D0 && from_profile.stride == 60 && from_profile.id_offset == 0x06 &&
+				  from_profile.count_offset == 0x24 && from_profile.owner_offset == 0x28 && from_profile.slot_address == 0x48BF7D,
+			"feedback.weapon's table and record fields and camera.base's slot byte make the item table");
+
+		// The shipped Outbreak profiles: File #1's table 0x3967D0 and slot byte 0x48BF7D, File #2's 0x397B40 and 0x4912BD.
+		const ProfileDB::Profile* file1 = ProfileDB::Lookup("SLPM-65428", 0);
+		const ProfileDB::Profile* file2 = ProfileDB::Lookup("SLPM-65692", 0);
+		const ItemTable table1 = file1 ? ItemTableOf(*file1) : ItemTable{};
+		const ItemTable table2 = file2 ? ItemTableOf(*file2) : ItemTable{};
+		check(table1.valid && table1.table == 0x3967D0 && table1.slot_address == 0x48BF7D && table1.stride == 60,
+			"File #1's profile names its item table (0x3967D0) and slot byte (0x48BF7D)");
+		check(table2.valid && table2.table == 0x397B40 && table2.slot_address == 0x4912BD && table2.stride == 60,
+			"File #2's profile names its item table (0x397B40) and slot byte (0x4912BD)");
+
+		if (failures == 0)
+			Console.WriteLn(Color_StrongGreen, "(VR) Item names self-test: passed (%d checks: ItemData lookups, labels, record "
+											   "checks, the shipped item tables).", checks);
+		else
+			Console.WriteLn(Color_StrongRed, "(VR) Item names self-test FAIL: %s (%d of %d checks failed).", first, failures, checks);
+		return failures == 0;
 	}
 }

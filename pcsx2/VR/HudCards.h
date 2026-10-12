@@ -15,8 +15,9 @@
 // uploads the pixels and submits the layers, and only while a VR session runs.
 //
 // Six cards: the toast, a short line of text view-locked below the line of sight (recenters, brightness,
-// controllers paused); the wrist card, on the back of the left wrist in first person, with the
-// character's condition, an HP bar and the virus gauge read from the profile's hud.wrist block; the
+// controllers paused, the item a hand reaches for in a belt pouch); the wrist card, on the back of the left
+// wrist in first person, with the character's condition, an HP bar and the virus gauge read from the profile's
+// hud.wrist block, and the equipped weapon's name and rounds (feedback.weapon); the
 // comfort blink, a black quad over the whole view for snap turns and screen changes; the laser sight,
 // a thin red beam from the pistol's muzzle along the aim while the weapon is raised in first person (in a
 // menu the same slot carries the menu pointer's beam instead); the comfort vignette, a view-locked black
@@ -186,9 +187,14 @@ namespace VR::HudCards
 		float virus_pct = 0.0f; // 0-100
 		bool has_bleed = false;
 		bool bleeding = false;
-		// Rounds in the equipped gun (GameFeedback, feedback.weapon), drawn as "AMMO n" under the HP bar.
+		// Rounds in the equipped gun (GameFeedback, feedback.weapon), drawn under the HP bar: "AMMO n", or the weapon's
+		// name and rounds (below).
 		bool has_ammo = false;
 		u16 ammo = 0;
+		// With has_ammo: the equipped weapon's item id. When ItemData knows it, its short name takes the place of AMMO
+		// on that line ("45 AUTO 7"; a weapon without rounds, such as a knife, shows its name alone).
+		bool has_item = false;
+		u16 item_id = 0;
 	};
 
 	enum class Condition : u8
@@ -272,8 +278,8 @@ namespace VR::HudCards
 	void PlacePointer(const float hit[3], const float screen_quat[4], const float eye[3], float out_pos[3],
 		float out_quat[4], float* out_size);
 
-	// Condition thresholds, labels, keys, the font, the fades, the blink, the laser, the vignette, the menu pointer's
-	// dot and beam, and the placement maths. Runs once (the compositor's first HUD frame or the first Poll) when
-	// PCSX2_VR_HUD_SELFTEST is set.
+	// Condition thresholds, labels, keys, the font (every item name included), the wrist card's weapon line, the fades,
+	// the blink, the laser, the vignette, the menu pointer's dot and beam, and the placement maths. Runs once (the
+	// compositor's first HUD frame or the first Poll) when PCSX2_VR_HUD_SELFTEST is set.
 	bool SelfTest();
 }

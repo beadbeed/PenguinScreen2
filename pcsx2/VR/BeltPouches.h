@@ -26,6 +26,12 @@ namespace VR::ProfileDB
 // the menu pointer to steer the game's cursor to the pouch's cell (MenuPointer::RequestCell: the same closed-loop D-pad
 // presses, refused while a command submenu is open, never a confirm). With the item screen already up a squeeze just
 // re-targets the cursor. The player confirms with the trigger as usual.
+//
+// An open hand reaching into a pouch whose cell holds an item also shows a short toast naming it: the item byte is a
+// record index into the item table the profile's feedback.weapon names, read and checked as GameFeedback's weapon
+// reader checks the equipped record (GameFeedback::ReadItemRecord), and named from ItemData with its count
+// ("Kevin's 45 Auto 7", "45 Auto Magazine x7", "Green Herb"). Once per reach: not on a quick return to the pouch just
+// left (kNameReentryMs), not for an empty pouch, and not while a menu is up (the item screen names its items itself).
 namespace VR::BeltPouches
 {
 	using GuestReader = bool (*)(u32 address, u8 width, u32* value);
@@ -37,6 +43,8 @@ namespace VR::BeltPouches
 	static constexpr float kNeckBack = 0.075f;
 	// A hand in a pouch stays in it until this much past its radius.
 	static constexpr float kExitMargin = 0.02f;
+	// A hand back in the pouch it left less than this long ago (jitter on the edge) ticks again but names nothing.
+	static constexpr float kNameReentryMs = 500.0f;
 	// The profile's Zone controls PlaceZones looks at (Outbreak has three).
 	static constexpr int kMaxZoneBalls = 16;
 
@@ -186,6 +194,7 @@ namespace VR::BeltPouches
 		std::array<bool, 2> owned{};   // grip belongs to the pouches: in one, or still closed after a squeeze in one
 		std::array<bool, 2> claimed{}; // in a pouch: the Zone controls do not see the hand
 		std::array<Tick, 2> tick{};    // the pulse to play this poll (a reach, a double tick's second beat, a squeeze)
+		std::array<bool, 2> name{};    // a reach into a pouch holding an item: show the item's name (once per reach)
 		std::array<Action, 2> action{};
 		std::array<int, 2> action_pouch{{-1, -1}};
 		std::array<const char*, 2> refused_why{};
@@ -199,6 +208,8 @@ namespace VR::BeltPouches
 		bool squeezed = false; // with hysteresis
 		bool owned = false;    // squeezed in a pouch and not opened since
 		float second_tick_ms = -1.0f; // the double tick's second beat is due in this long; below 0 none
+		int left_pouch = -1;          // the pouch this hand last left
+		float since_left_ms = 1.0e9f; // how long ago it left it
 	};
 
 	struct State
@@ -214,8 +225,8 @@ namespace VR::BeltPouches
 
 	StepOut Step(const ProfileDB::PouchParams& p, const StepIn& in, State& st);
 
-	// The frames, hit tests, ticks and squeeze decisions on scripted hands, and the shipped Outbreak layout against the
-	// hip zones. Runs once from Poll when PCSX2_VR_SELFTEST is set; logs "(VR) BeltPouches self-test: passed (...)" or
-	// "... FAIL: <first check>".
+	// The frames, hit tests, ticks, names and squeeze decisions on scripted hands, and the shipped Outbreak layout against
+	// the hip zones; also runs GameFeedback::ItemSelfTest. Runs once from Poll when PCSX2_VR_SELFTEST is set; logs "(VR)
+	// BeltPouches self-test: passed (...)" or "... FAIL: <first check>".
 	bool SelfTest();
 }

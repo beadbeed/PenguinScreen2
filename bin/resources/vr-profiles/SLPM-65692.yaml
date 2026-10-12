@@ -66,12 +66,16 @@ SLPM-65692:
   # Belt pouches (VR only, first person), as File #1's: four pouches on your chest laid out like the item screen's 2 x 2
   # grid, and a fifth out from the belt buckle for the equipped box (menuPointer cell 4, node 0x768F98). Reach a hand into one and it ticks: once and lightly for an empty cell, twice and firmer while the cell holds
   # an item (the local record's item byte +0xC94 + k for cell k, 0 = empty; checked offline: Kevin's cell 0 holds his
-  # .45 magazine; read only). Squeeze the grip in one: with the item screen closed it opens through the belt zone as a
-  # squeeze at your left hip does (you stop, then Start), and the menu pointer steers the cursor to that pouch's cell
-  # (the same D-pad presses as pointing, so it follows the Menu Pointer setting); with the screen up a squeeze just moves
-  # the cursor there. The trigger (Circle) still picks it: nothing is ever confirmed for you, and a squeeze is refused
-  # while an item's command submenu is open (suspendWhen: the cursor struct 0x7671F0 + 0x20). Only while first person is
-  # armed, so never on obsrv.
+  # .45 magazine; the equipped box shows the special item, the .45 Auto even while it is not equipped (Training Ground
+  # slot 1: special +0xC98 = 13, equipped +0xC8C = 0), so its pouch reads +0xC98; read only). An open hand reaching
+  # into a pouch that holds an item also shows its name for 1.5 s ("45 Auto Magazine x7", "Kevin's 45 Auto 7"), from
+  # the item table feedback.weapon names, once the record passes the weapon cues' checks (present, naming itself,
+  # yours); once per reach and not while a menu is up. Squeeze the grip in one: with the item screen closed it opens
+  # through the belt zone as a squeeze at your left hip does (you stop, then Start), and the menu pointer steers the
+  # cursor to that pouch's cell (the same D-pad presses as pointing, so it follows the Menu Pointer setting); with the
+  # screen up a squeeze just moves the cursor there. The trigger (Circle) still picks it: nothing is ever confirmed for
+  # you, and a squeeze is refused while an item's command submenu is open (suspendWhen: the cursor struct 0x7671F0 +
+  # 0x20). Only while first person is armed, so never on obsrv.
   # Layout, in metres from your eyes the way the zones are placed (side + right, height + up, forward + ahead), measured
   # sitting upright and looking ahead; each pouch is a ball 6.5 cm round its point. As File #1's, a starting point to
   # tune in the headset, high and narrow to keep clear of the hip zones:
@@ -96,7 +100,7 @@ SLPM-65692:
       - { cell: 1, item: 0xC95, side: 0.10, height: -0.20, forward: 0.14 }    # upper right chest -> item cell 1
       - { cell: 2, item: 0xC96, side: -0.07, height: -0.29, forward: 0.24 }   # lower left        -> item cell 2
       - { cell: 3, item: 0xC97, side: 0.07, height: -0.29, forward: 0.24 }    # lower right       -> item cell 3
-      - { cell: 4, side: 0.0, height: -0.40, forward: 0.28 }                  # out from the buckle -> the equipped box
+      - { cell: 4, item: 0xC98, side: 0.0, height: -0.40, forward: 0.28 }     # buckle -> the equipped box (special item)
   screen: { distance: 2.5, height: 1.3, arc: 0, menu: { distance: 0.70, height: 0.36, drop: 0.30 }, firstPerson: { distance: 1.5, height: 3.575, arc: 0, poseLagMs: 40 } }
   # Headset only: a gamma lift so the dark rooms read on a headset's LCD without washing out the blacks.
   # Applied only while first person drives the camera (firstPersonOnly defaults to true), so menus and the
@@ -111,7 +115,8 @@ SLPM-65692:
   # index (0 = bare hands) in the 60-byte item table at 0x397B40, laid out as File #1's (checked in
   # savestates). With the stance raised a drop of the rounds is a shot (aim-hand kick, pistol recoil), a
   # rise is a reload, and an empty gun clicks on a trigger pull. The reload action byte is not measured
-  # yet, so no action/reload here. Nothing equipped shows bare hands; the wrist card shows the rounds.
+  # yet, so no action/reload here. Nothing equipped shows bare hands; the wrist card shows the weapon's name and
+  # rounds ("45 AUTO 7"), and the belt pouches name their items from the same table.
   feedback: { padRumble: true, hurt: { offset: 0x540, max: 0x542, width: 2 }, danger: { below: 0.20 }, weapon: { equipped: 0xC8C, table: 0x397B40 } }
   # Wrist card (VR only, first person): turn the left wrist to the face to read the character's condition
   # (FINE / CAUTION below 60% of max HP / DANGER below 20% / BLEED), an HP bar and the virus gauge. Reads
