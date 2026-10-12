@@ -344,6 +344,33 @@ void VRInputSource::Instance::ResetState()
 	zone_press_s = -1.0f;
 }
 
+// Release-first after an input gap. While the gate is closed (no session, the session not focused: the SteamVR
+// dashboard is up; a stale input snapshot; split screen; a failed guard) everything goes out released. On the poll the
+// gate opens again (opened), every digital output that already reads pressed (a button, a trigger or grip *Press, a
+// zone's Pressed) is marked, and a marked output goes out as 0 until it reads released once; then it is free again. So
+// nothing held through the gap is pressed again when input returns: no Circle from a trigger still pulled on leaving
+// the dashboard, no Start from a grip still closed in the belt zone. Axes pass through. Only the Gamepad and zones: their
+// buttons are presses the player holds, while the grab devices' buttons are states their reset rebuilds after the gap
+// (the selector's notch or gear at rest, a held lever, a tracked gun) that a latch would hide.
+void VRInputSource::Instance::ReleaseFirst(SC::ControlValues& values, bool opened)
+{
+	if (!def || (kind != SC::DeviceKind::Gamepad && kind != SC::DeviceKind::Zone))
+		return;
+	for (const SC::ControlDef& c : def->controls)
+	{
+		if (c.type != SC::ControlType::Button)
+			continue;
+		const u32 i = static_cast<u32>(c.id);
+		const bool pressed = values[i] >= 0.5f;
+		if (opened)
+			held_through_gap[i] = pressed;
+		else if (!pressed)
+			held_through_gap[i] = false;
+		if (held_through_gap[i])
+			values[i] = 0.0f;
+	}
+}
+
 std::array<int, 2> VRInputSource::Instance::HoldingHands() const
 {
 	std::array<int, 2> hands{-1, -1};
@@ -560,6 +587,7 @@ void VRInputSource::BuildInstance(Instance& in) const
 	in.ResetState();
 	in.last = {};
 	in.ever_emitted = false;
+	in.held_through_gap = {};
 }
 
 VRInputSource::VRInputSource() = default;
@@ -622,7 +650,8 @@ void VRInputSource::SyncSpecs()
 	for (Instance& in : m_instances)
 	{
 		// Let go of whatever the old devices still hold (a latched run's Cross, a holster's R1) before they
-		// go; a button still physically held is pressed again by the new device's first compose.
+		// go; a button still physically held must be let go once before the new device presses it (its first
+		// armed poll opens its gate: ReleaseFirst).
 		if (in.ever_emitted)
 			Emit(in, SC::ControlValues{});
 		if (in.announced)
@@ -783,6 +812,8 @@ void VRInputSource::PollEvents()
 			f = std::max(f - dt, 0.0f);
 
 		const bool gate = live && snap.actions_active && !split && EvaluateGuards(in.spec.when, reader);
+		// The first armed poll after a gap (or ever): what is already held then must be let go first (ReleaseFirst).
+		const bool opened = gate && !in.armed;
 		if (gate != in.armed || !in.armed_logged)
 		{
 			in.armed = gate;
@@ -857,31 +888,38 @@ void VRInputSource::PollEvents()
 				break;
 			case SC::DeviceKind::Gamepad:
 				values = SC::ComposeGamepad(snap, in.gamepad, in.gamepad_state, dt);
+				in.ReleaseFirst(values, opened);
 				QueueBreakoutBuzz(in.gamepad_state.breakout);
 				break;
 			case SC::DeviceKind::Zone:
 			{
 				SC::Anchor head;
+				SC::ZoneEvents ev;
 				if (SC::HeadAnchor(snap, in.zone_state, &head))
 				{
 					// A hand inside a belt pouch is the pouch's: the zone does not see it there, so a pouch can sit at the
 					// edge of a bigger zone (the hip holster) and a squeeze in it presses only the pouch. A press the zone
 					// already holds carries on, as it does wherever the hand goes.
-					const SC::ZoneEvents ev = SC::StepZone(head, in.zone, VR::BeltPouches::HandsOutsidePouches(hands), in.zone_state);
-					for (int hand = 0; hand < 2; ++hand)
-					{
-						// A light tick on reaching the zone says it is armed; a firmer one when it presses.
-						if (ev.pressed[hand])
-							VR::XRInput::QueuePulse(hand, SC::kHapticGrab.amplitude, SC::kHapticGrab.seconds);
-						else if (ev.entered[hand])
-							VR::XRInput::QueuePulse(hand, SC::kHapticZoneEnter.amplitude, SC::kHapticZoneEnter.seconds);
-					}
+					ev = SC::StepZone(head, in.zone, VR::BeltPouches::HandsOutsidePouches(hands), in.zone_state);
 				}
 				else
 				{
 					in.zone_state.Reset();
 				}
 				values = SC::ComposeZone(in.zone_state);
+				// Before the pouch's open press and the stop-first delay below: a squeeze held through an input gap neither
+				// presses nor stops the character until the grip has opened once.
+				in.ReleaseFirst(values, opened);
+				const bool held_over = in.held_through_gap[static_cast<u32>(SC::ControlId::Pressed)];
+				for (int hand = 0; hand < 2; ++hand)
+				{
+					// A light tick on reaching the zone says it is armed; a firmer one when it presses (not for a squeeze
+					// held through a gap, which presses nothing).
+					if (ev.pressed[hand] && !held_over)
+						VR::XRInput::QueuePulse(hand, SC::kHapticGrab.amplitude, SC::kHapticGrab.seconds);
+					else if (ev.entered[hand])
+						VR::XRInput::QueuePulse(hand, SC::kHapticZoneEnter.amplitude, SC::kHapticZoneEnter.seconds);
+				}
 				// A belt pouch squeezed with the item screen closed opens it through the zone the profile's pouches.open
 				// names, as a squeeze in this zone would: a stopFirst zone stops the character first, then presses.
 				if (VR::BeltPouches::OpenPressFor(in.spec.id))

@@ -15,6 +15,9 @@ private:
 - DNS1 Manual 192.0.2.1, so only the Internal DNS hosts below resolve;
 - kddi-mmbb.jp and www01.kddi-mmbb.jp go to the server; DNAS stays on its public replay (153.121.44.150);
 - [VR] PrivateCoopFirstPerson = true, so first person runs online there.
+The emulator counts it as private co-op only while DNS1 is the Internal DNS (Internal, or Manual 192.0.2.1) and
+www01.kddi-mmbb.jp points at a LAN (10/8, 172.16/12, 192.168/16), Tailscale (100.64/10) or loopback (127/8) address;
+anything else (obsrv set up by hand in the network settings, a public address) keeps first person off online.
 
 obsrv:
 - adapter on;
@@ -29,8 +32,12 @@ import shutil
 import sys
 
 OBSRV_DNS = "208.72.237.31"
+INTERNAL_DNS = "192.0.2.1"
 DNAS = ("gate1.jp.dnas.playstation.org", "153.121.44.150")
 LOGIN_HOSTS = ("kddi-mmbb.jp", "www01.kddi-mmbb.jp")
+# What the emulator takes for a private server's address (CameraDriver LoginHostIsPrivate): LAN, Tailscale, loopback.
+PRIVATE_NETS = tuple(ipaddress.ip_network(n) for n in
+                     ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "127.0.0.0/8"))
 CANDIDATES = [
     r"D:\Games\PS2\PenguinScreen2\inis\PenguinScreen2.ini",
     r"D:\Games\PS2\PenguinScreen2\inis\PCSX2.ini",
@@ -111,6 +118,29 @@ def read_keys(blocks, section):
     return out
 
 
+def is_private(addr):
+    try:
+        ip = ipaddress.ip_address(addr or "")
+    except ValueError:
+        return False
+    return ip.version == 4 and any(ip in net for net in PRIVATE_NETS)
+
+
+def private_login(eth, hosts):
+    """The login host's address when the emulator counts the settings as private co-op, else None. The same rule as
+    CameraDriver LoginHostIsPrivate: DEV9 hands the PS2 its DNS (Sockets, or InterceptDHCP), DNS1 is the Internal DNS
+    (Internal, or Manual 192.0.2.1), and the last enabled www01.kddi-mmbb.jp entry (as DEV9's DNS server reads the
+    table) is a private address."""
+    dhcp_ours = eth.get("EthApi") == "Sockets" or eth.get("InterceptDHCP") == "true"
+    mode = eth.get("ModeDNS1", "Auto")
+    dns1_internal = mode == "Internal" or (mode == "Manual" and eth.get("DNS1") == INTERNAL_DNS)
+    login = None
+    for h in hosts:
+        if h.get("Url") == "www01.kddi-mmbb.jp" and h.get("Enabled") == "true":
+            login = h.get("Address")
+    return login if dhcp_ours and dns1_internal and is_private(login) else None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mode", choices=["private", "obsrv", "off", "status"])
@@ -128,8 +158,16 @@ def main():
         eth = read_keys(blocks, "DEV9/Eth")
         vr = read_keys(blocks, "VR")
         hosts = [read_keys(blocks, f"DEV9/Eth/Hosts/Host{i}") for i in range(int(read_keys(blocks, "DEV9/Eth/Hosts").get("Count", "0") or 0))]
-        login = next((h.get("Address") for h in hosts if h.get("Url") == "www01.kddi-mmbb.jp" and h.get("Enabled") == "true"), None)
-        where = "off" if eth.get("EthEnable") != "true" else (f"private server {login}" if login and not login.startswith("208.72.237.") else "obsrv")
+        login = private_login(eth, hosts)
+        if eth.get("EthEnable") != "true":
+            where = "off"
+        elif login:
+            where = f"private server {login}"
+        elif eth.get("ModeDNS1") == "Manual" and eth.get("DNS1") == OBSRV_DNS:
+            where = "obsrv"
+        else:
+            where = ("not private co-op (first person stays off online): DNS1 is not the Internal DNS, or "
+                     "www01.kddi-mmbb.jp is not a LAN, Tailscale or loopback address")
         print(f"{ini}\n  network: {where}\n  adapter: {eth.get('EthEnable')} {eth.get('EthApi')} {eth.get('EthDevice')}, "
               f"DNS1 {eth.get('ModeDNS1')} {eth.get('DNS1')}\n  private co-op first person: {vr.get('PrivateCoopFirstPerson', 'false')}")
         return
@@ -142,8 +180,12 @@ def main():
             sys.exit("private needs the server's IPv4 address, e.g. python netmode.py private 100.101.102.103")
         if str(addr).startswith("208.72.237."):
             sys.exit("that is obsrv's address, not a private server")
+        if not is_private(str(addr)):
+            print(f"warning: {addr} is not a LAN, Tailscale or loopback address, so the emulator will not count this as "
+                  "private co-op and first person stays off online (co-op itself still works, on the 3D screen)",
+                  file=sys.stderr)
         set_keys(blocks, "DEV9/Eth", {"EthEnable": "true", "EthApi": "Sockets", "EthDevice": "Auto",
-                                      "ModeDNS1": "Manual", "DNS1": "192.0.2.1"})
+                                      "ModeDNS1": "Manual", "DNS1": INTERNAL_DNS})
         write_hosts(blocks, [(h, str(addr)) for h in LOGIN_HOSTS] + [DNAS], "private")
         set_keys(blocks, "VR", {"PrivateCoopFirstPerson": "true"})
         msg = f"private server {addr}: login hosts -> {addr}, DNAS -> {DNAS[1]}, private co-op first person on"

@@ -281,6 +281,7 @@ namespace VR::XRCompositor
 			// pose. Only the GS thread touches these.
 			PublishedSet deferred = {};
 			bool deferred_valid = false;
+			// SteadyNowMs when the deferral was made, restarted each time the pacer's heartbeat has moved past it; 0 = none.
 			u64 deferred_since_ms = 0;
 			std::atomic<u32> stat_publish_deferred{0};
 
@@ -319,6 +320,10 @@ namespace VR::XRCompositor
 				std::vector<XrSwapchainImageVulkan2KHR> images;
 				bool ever_released = false;
 				bool wait_pending = false;
+				// The acquired image (pending_index) is waited and ours to copy into, but its copy is held back: in layered
+				// stereo both eyes are copied in the same present or neither is (WaitEye), so a ready eye whose partner
+				// was not ready keeps its image for the next present. Waiting on it again would be a call-order error.
+				bool waited = false;
 				uint32_t pending_index = 0;
 				// Headset rate: this present's image is copied but not yet released. EndOfFrame releases it together
 				// with publishing its layers, under submit_mutex, so the pacer never shows it at the previous pose.
@@ -618,6 +623,7 @@ namespace VR::XRCompositor
 				chain.images.clear();
 				chain.ever_released = false;
 				chain.wait_pending = false;
+				chain.waited = false;
 				chain.release_pending = false;
 			}
 			s.swapchain_width = 0;
@@ -701,7 +707,9 @@ namespace VR::XRCompositor
 			return true;
 		}
 
-		bool RecordAndSubmitCopy(GSTextureVK* src, u32 src_layer, VkImage dst)
+		// Copies layer src_layers[k] of src into swapchain image dsts[k], for each of the count (1 or 2) images, in one
+		// command buffer and one submit, so the copies go in together or not at all (both eyes in layered stereo).
+		bool RecordAndSubmitCopies(GSTextureVK* src, const u32* src_layers, const VkImage* dsts, u32 count)
 		{
 			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
 
@@ -737,22 +745,26 @@ namespace VR::XRCompositor
 
 			src->TransitionToLayout(cmd, GSTextureVK::Layout::TransferSrc);
 
-			ImageBarrier(cmd, dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-				VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-				VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+			for (u32 k = 0; k < count; k++)
+			{
+				const VkImage dst = dsts[k];
+				ImageBarrier(cmd, dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+					VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 
-			VkImageCopy region = {};
-			region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, src_layer, 1};
-			region.srcOffset = {0, 0, 0};
-			region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-			region.dstOffset = {0, 0, 0};
-			region.extent = {s.swapchain_width, s.swapchain_height, 1};
-			vkCmdCopyImage(cmd, src->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst,
-				VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+				VkImageCopy region = {};
+				region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, src_layers[k], 1};
+				region.srcOffset = {0, 0, 0};
+				region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+				region.dstOffset = {0, 0, 0};
+				region.extent = {s.swapchain_width, s.swapchain_height, 1};
+				vkCmdCopyImage(cmd, src->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst,
+					VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-			ImageBarrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-				VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+				ImageBarrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+					VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+					VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+			}
 
 			vr = vkEndCommandBuffer(cmd);
 			if (vr != VK_SUCCESS)
@@ -774,40 +786,46 @@ namespace VR::XRCompositor
 			return true;
 		}
 
-		// Legacy: copies and releases. Headset rate: copies and leaves the image acquired (release_pending); EndOfFrame
-		// releases it under submit_mutex together with publishing the layers that show it (ReleaseAndPublish), so
-		// the pacer can never show the new image at the previous present's pose. Copied then means "copied, release
-		// still to come"; a failed release turns it into Skipped there.
-		CopyResult CopyToSwapchain(GSTextureVK* src, u32 src_layer, decltype(s.chains[0])& chain)
+		// What waiting for an eye chain's image gave: Ready (acquired and waited: its copy may go in), or what the present
+		// reports for that eye instead, as CopyResult does: Skipped (nothing acquired, or the image still waits for its
+		// release) or TimeoutZeroLayer (acquired but not handed back by the runtime yet; the next present waits again).
+		enum class EyeWait
+		{
+			Ready,
+			Skipped,
+			TimeoutZeroLayer
+		};
+
+		// Acquires the chain's next image (or keeps the one acquired earlier) and waits for it within this present's
+		// budget. An image waited at an earlier present, whose copy was held back for the other eye, is Ready at once.
+		EyeWait WaitEye(decltype(s.chains[0])& chain)
 		{
 			// An image still waiting for its release (the last publish found the pacer inside xrEndFrame and was
 			// deferred): nothing is copied into the chain until the next publish releases it.
 			if (chain.release_pending)
-				return CopyResult::Skipped;
+				return EyeWait::Skipped;
+			if (chain.waited)
+				return EyeWait::Ready;
 
-			uint32_t index = 0;
-			if (chain.wait_pending)
+			if (!chain.wait_pending)
 			{
-				index = chain.pending_index;
-			}
-			else
-			{
-				XrResult res = LockedAcquire(chain.swapchain, &index);
-				if (XR_FAILED(res))
+				uint32_t index = 0;
+				const XrResult acquire_res = LockedAcquire(chain.swapchain, &index);
+				if (XR_FAILED(acquire_res))
 				{
 					if (!s.warned_acquire)
 					{
 						s.warned_acquire = true;
-						Console.Error("(VR) xrAcquireSwapchainImage failed (%d).", static_cast<int>(res));
+						Console.Error("(VR) xrAcquireSwapchainImage failed (%d).", static_cast<int>(acquire_res));
 					}
-					return CopyResult::Skipped;
+					return EyeWait::Skipped;
 				}
 				chain.pending_index = index;
 				chain.wait_pending = true;
 			}
 
-			XrResult res = BudgetedWaitSwapchainImage(chain.swapchain, kSwapchainWaitNs);
-			if (res == XR_TIMEOUT_EXPIRED)
+			const XrResult wait_res = BudgetedWaitSwapchainImage(chain.swapchain, kSwapchainWaitNs);
+			if (wait_res == XR_TIMEOUT_EXPIRED)
 			{
 				// The image stays acquired (wait_pending); the next present waits on it again.
 				static u64 s_wait_timeouts = 0;
@@ -819,40 +837,98 @@ namespace VR::XRCompositor
 									"(headset asleep?); skipping copies, emulation keeps running.",
 						static_cast<unsigned long long>(s_wait_timeouts));
 				}
-				return CopyResult::TimeoutZeroLayer;
+				return EyeWait::TimeoutZeroLayer;
 			}
-			if (XR_FAILED(res))
+			if (XR_FAILED(wait_res))
 			{
 				if (!s.warned_wait_fail)
 				{
 					s.warned_wait_fail = true;
-					Console.Error("(VR) xrWaitSwapchainImage failed (%d).", static_cast<int>(res));
+					Console.Error("(VR) xrWaitSwapchainImage failed (%d).", static_cast<int>(wait_res));
 				}
-				return CopyResult::TimeoutZeroLayer;
+				return EyeWait::TimeoutZeroLayer;
 			}
 			chain.wait_pending = false;
+			chain.waited = true;
+			return EyeWait::Ready;
+		}
 
-			const bool submitted = RecordAndSubmitCopy(src, src_layer, chain.images[index].image);
+		// What an eye whose copy did not go in this present reports: a ready eye held back for its partner, Skipped.
+		CopyResult NotCopied(EyeWait w)
+		{
+			return (w == EyeWait::TimeoutZeroLayer) ? CopyResult::TimeoutZeroLayer : CopyResult::Skipped;
+		}
 
-			if (s.headset_rate)
+		// Copies src's layer src_layers[k] into eye chain chain_ids[k], for count (1 or 2) chains that WaitEye made Ready,
+		// in one submit, then hands each image back. Legacy: releases it. Headset rate: leaves it acquired
+		// (release_pending); EndOfFrame releases it under submit_mutex together with publishing the layers that show it
+		// (ReleaseAndPublish), so the pacer can never show the new image at the previous present's pose. Copied then means
+		// "copied, release still to come"; a failed release turns it into Skipped there. A waited image goes back even
+		// when the copy was not submitted. Each chain's result goes in out[k].
+		void CopyEyes(GSTextureVK* src, const u32* src_layers, const u32* chain_ids, u32 count, CopyResult* out)
+		{
+			VkImage dsts[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+			count = std::min<u32>(count, 2);
+			for (u32 k = 0; k < count; k++)
 			{
-				// Released (even when the copy was not submitted: a waited image must go back) in ReleaseAndPublish.
-				chain.release_pending = true;
-				return submitted ? CopyResult::Copied : CopyResult::Skipped;
+				const auto& chain = s.chains[chain_ids[k]];
+				dsts[k] = chain.images[chain.pending_index].image;
 			}
+			const bool submitted = RecordAndSubmitCopies(src, src_layers, dsts, count);
 
-			res = LockedRelease(chain.swapchain);
-			if (XR_FAILED(res))
+			for (u32 k = 0; k < count; k++)
 			{
-				if (!s.warned_release)
+				auto& chain = s.chains[chain_ids[k]];
+				chain.waited = false;
+				out[k] = submitted ? CopyResult::Copied : CopyResult::Skipped;
+				if (s.headset_rate)
 				{
-					s.warned_release = true;
-					Console.Error("(VR) xrReleaseSwapchainImage failed (%d).", static_cast<int>(res));
+					// Released in ReleaseAndPublish.
+					chain.release_pending = true;
+					continue;
 				}
-				return CopyResult::Skipped;
+				const XrResult res = LockedRelease(chain.swapchain);
+				if (XR_FAILED(res))
+				{
+					if (!s.warned_release)
+					{
+						s.warned_release = true;
+						Console.Error("(VR) xrReleaseSwapchainImage failed (%d).", static_cast<int>(res));
+					}
+					out[k] = CopyResult::Skipped;
+				}
 			}
+		}
 
-			return submitted ? CopyResult::Copied : CopyResult::Skipped;
+		// One chain on its own (mono, or one eye of alternate-eye stereo): waits for its image and copies src's
+		// src_layer into it.
+		CopyResult CopyToSwapchain(GSTextureVK* src, u32 src_layer, u32 chain_id)
+		{
+			const EyeWait w = WaitEye(s.chains[chain_id]);
+			if (w != EyeWait::Ready)
+				return NotCopied(w);
+			CopyResult r = CopyResult::Skipped;
+			CopyEyes(src, &src_layer, &chain_id, 1, &r);
+			return r;
+		}
+
+		// Layered stereo: the two eyes are one unit. Both images are waited first, and both copied only when both are
+		// ready, in one submit; otherwise neither is copied this present and a ready one keeps its waited image for the
+		// next (WaitEye). A lone eye is never copied or released, so the headset can't show one eye's new game frame
+		// beside the other's old one, each at the previous pose (the keep_screen in ReleaseAndPublish keeps the old pair
+		// together).
+		void CopyEyePair(GSTextureVK* src, CopyResult* out)
+		{
+			const EyeWait w0 = WaitEye(s.chains[0]);
+			const EyeWait w1 = WaitEye(s.chains[1]);
+			if (w0 == EyeWait::Ready && w1 == EyeWait::Ready)
+			{
+				static constexpr u32 kEyes[2] = {0, 1};
+				CopyEyes(src, kEyes, kEyes, 2, out);
+				return;
+			}
+			out[0] = NotCopied(w0);
+			out[1] = NotCopied(w1);
 		}
 
 		void DestroyLeverChains()
@@ -3378,12 +3454,13 @@ namespace VR::XRCompositor
 			s.published = BuildPublishedSet(layers, layer_count, src, keep_screen, fp_screen, fp_head, fp_image, s.published);
 		}
 
-		// Headset rate: releases the screen and hand images this present copied (left acquired by CopyToSwapchain and
+		// Headset rate: releases the screen and hand images this present copied (left acquired by CopyEyes and
 		// BuildHandLayers) and publishes the layers that show them, all under submit_mutex. The runtime shows a
 		// swapchain's last released image, so a release before the publish would let the pacer end a frame with the
 		// new image at the previous present's pose (and, in layered stereo, one eye new and the other old). Lock order
 		// as documented at s.submit_mutex: submit_mutex, then the queue lock (LockedRelease). Bounded like
-		// DestroySwapchainSynced: a pacer inside xrEndFrame for over 500 ms means the runtime stopped answering.
+		// DestroySwapchainSynced: a pacer that has not moved (its heartbeat) for over 500 ms while inside xrEndFrame
+		// means the runtime stopped answering.
 		// cl_copy: each eye's CopyResult this present (-1: none tried); a failed release turns Copied into Skipped.
 		// chain_was_released: each eye chain's ever_released before this present's copies, which set it on Copied
 		// ahead of the release so this present's layers are built; restored when the release fails.
@@ -3421,13 +3498,24 @@ namespace VR::XRCompositor
 				}
 				s.stat_publish_deferred.fetch_add(1, std::memory_order_relaxed);
 				const u64 stuck_ms = static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(kRuntimeStuckTimeout).count());
-				if (now_ms > s.deferred_since_ms + stuck_ms)
+				// Stuck means the pacer itself has not moved for that long, not that the deferral is that old: its heartbeat
+				// (stored at the top of every pacer loop and when xrWaitFrame returns, both before it takes submit_mutex)
+				// stands still only while it is inside a runtime call, here xrEndFrame with submit_mutex held. A deferral
+				// left over from a GS gap (an offline pause with no presents, a GS hitch, a session restart) whose next
+				// present happens to meet xrEndFrame again would otherwise tear VR down under a healthy pacer.
+				const u64 beat = s.pacer_heartbeat_ms.load(std::memory_order_acquire);
+				if (beat != 0 && now_ms > beat + stuck_ms && now_ms > s.deferred_since_ms + stuck_ms)
 				{
 					// The images stay acquired: the loss teardown destroys the swapchains (or leaves them alive with the
 					// pacer detached).
 					Console.Error("(VR) The VR pacer has been inside xrEndFrame for over 500 ms (runtime not answering): "
 								  "frame not published, abandoning VR; emulation continues.");
 					XRSession::MarkLost();
+				}
+				else if (beat > s.deferred_since_ms)
+				{
+					// The pacer has looped since the deferral (or since the clock last restarted): the clock starts again.
+					s.deferred_since_ms = now_ms;
 				}
 				return;
 			}
@@ -4875,6 +4963,7 @@ namespace VR::XRCompositor
 			chain.images.clear();
 			chain.ever_released = false;
 			chain.wait_pending = false;
+			chain.waited = false;
 			chain.release_pending = false;
 		}
 		s.swapchain_width = 0;
@@ -4983,7 +5072,14 @@ namespace VR::XRCompositor
 		if (s.headset_rate)
 		{
 			if (!XRSession::IsSessionRunning())
+			{
+				// A publish deferred before the session stopped would wait out the whole stop and go out stale after it:
+				// drop it, as DestroySwapchainSynced does. Its images, still acquired (release_pending), are released by
+				// the next publish that gets submit_mutex, which keeps the previous Screen entries.
+				s.deferred_valid = false;
+				s.deferred_since_ms = 0;
 				return;
+			}
 			// The pacer's latest head pose becomes this present's (head_pose and friends are the GS thread's own copy).
 			{
 				std::lock_guard<std::mutex> lock(s.head_mutex);
@@ -5160,9 +5256,12 @@ namespace VR::XRCompositor
 			{
 				if (layered)
 				{
+					// Both eyes copied this present or neither (CopyEyePair).
+					CopyResult pair_result[2] = {CopyResult::Skipped, CopyResult::Skipped};
+					CopyEyePair(src, pair_result);
 					for (u32 l = 0; l < 2; l++)
 					{
-						const CopyResult r = CopyToSwapchain(src, l, s.chains[l]);
+						const CopyResult r = pair_result[l];
 						cl_copy[l] = static_cast<int>(r);
 						if (r == CopyResult::Copied)
 							s.chains[l].ever_released = true;
@@ -5174,7 +5273,7 @@ namespace VR::XRCompositor
 				{
 					const u32 cl_ci = (eye != MonoEye) ? eye : 0;
 					auto& chain = s.chains[cl_ci];
-					const CopyResult r = CopyToSwapchain(src, 0, chain);
+					const CopyResult r = CopyToSwapchain(src, 0, cl_ci);
 					cl_copy[cl_ci] = static_cast<int>(r);
 					if (r == CopyResult::Copied)
 						chain.ever_released = true;
@@ -5617,13 +5716,13 @@ namespace VR::XRCompositor
 				(s.chains[0].ever_released ? "B0" : "B1");
 			GSTextureVK* cur = static_cast<GSTextureVK*>(current);
 			Console.WriteLn("(VR) CHAINLOG v=%llu render=%d cur=%s%ux%u/%uL layered=%d stereo=%d "
-							"c0={r=%d er=%d wp=%d} c1={r=%d er=%d wp=%d} branch=%s layers=%u",
+							"c0={r=%d er=%d wp=%d wd=%d} c1={r=%d er=%d wp=%d wd=%d} branch=%s layers=%u",
 				static_cast<unsigned long long>(s_chainlog_visit++), should_render ? 1 : 0,
 				current ? "" : "NULL:", cur ? static_cast<u32>(cur->GetWidth()) : 0,
 				cur ? static_cast<u32>(cur->GetHeight()) : 0, cur ? cur->GetArrayLayers() : 0,
 				layered ? 1 : 0, stereo ? 1 : 0,
-				cl_copy[0], s.chains[0].ever_released ? 1 : 0, s.chains[0].wait_pending ? 1 : 0,
-				cl_copy[1], s.chains[1].ever_released ? 1 : 0, s.chains[1].wait_pending ? 1 : 0,
+				cl_copy[0], s.chains[0].ever_released ? 1 : 0, s.chains[0].wait_pending ? 1 : 0, s.chains[0].waited ? 1 : 0,
+				cl_copy[1], s.chains[1].ever_released ? 1 : 0, s.chains[1].wait_pending ? 1 : 0, s.chains[1].waited ? 1 : 0,
 				branch, layer_count);
 		}
 
@@ -5775,6 +5874,7 @@ namespace VR::XRCompositor
 			chain.images.clear();
 			chain.ever_released = false;
 			chain.wait_pending = false;
+			chain.waited = false;
 			chain.release_pending = false;
 		}
 		s.swapchain_width = 0;

@@ -940,20 +940,36 @@ namespace VR::CameraDriver
 			return EmuConfig.VR.OnlineSafe || (EmuConfig.DEV9.EthEnable && s_net_mode != NetMode::PrivateCoop);
 		}
 
-		// DEV9's Internal DNS sends the game's login host (www01.kddi-mmbb.jp) to an address that is not obsrv
-		// (208.72.237.0/24). This is how tools/outbreak-vr/netmode.py private points a client at our server.
+		// DEV9's Internal DNS sends the game's login host (www01.kddi-mmbb.jp) to a private address, and that DNS is the
+		// one the PS2 asks. This is how tools/outbreak-vr/netmode.py private points a client at our server.
+		// - The hosts table only counts when the Internal DNS (192.0.2.1) is the PS2's primary resolver: DEV9 hands out the
+		//   PS2's addresses (always with Sockets; with PCAP or TAP only when it intercepts DHCP) and DNS1 is Internal, or
+		//   Manual 192.0.2.1 as netmode.py writes. With DNS1 anywhere else (obsrv's resolver, Auto) the game never asks
+		//   the Internal DNS, whatever its hosts table holds.
+		// - The entry is read as DNS_Server reads it (enabled, the exact name, the last one wins) and its address must be
+		//   private: a LAN (10/8, 172.16/12, 192.168/16), Tailscale (100.64/10) or this PC (127/8). Any other address,
+		//   obsrv's included, is not private co-op.
 		bool LoginHostIsPrivate()
 		{
-			for (const Pcsx2Config::DEV9Options::HostEntry& h : EmuConfig.DEV9.EthHosts)
+			const Pcsx2Config::DEV9Options& dev9 = EmuConfig.DEV9;
+			const bool dhcp_ours = dev9.EthApi == Pcsx2Config::DEV9Options::NetApi::Sockets || dev9.InterceptDHCP;
+			const u8* dns1 = dev9.DNS1;
+			const bool dns1_internal = dev9.ModeDNS1 == Pcsx2Config::DEV9Options::DnsMode::Internal ||
+			                           (dev9.ModeDNS1 == Pcsx2Config::DEV9Options::DnsMode::Manual && dns1[0] == 192 &&
+			                               dns1[1] == 0 && dns1[2] == 2 && dns1[3] == 1);
+			if (!dhcp_ours || !dns1_internal)
+				return false;
+
+			const u8* a = nullptr;
+			for (const Pcsx2Config::DEV9Options::HostEntry& h : dev9.EthHosts)
 			{
-				if (!h.Enabled || !StringUtil::compareNoCase(h.Url, "www01.kddi-mmbb.jp"))
-					continue;
-				const u8* a = h.Address;
-				const bool unset = (a[0] | a[1] | a[2] | a[3]) == 0;
-				const bool obsrv = a[0] == 208 && a[1] == 72 && a[2] == 237;
-				return !unset && !obsrv;
+				if (h.Enabled && h.Url == "www01.kddi-mmbb.jp")
+					a = h.Address;
 			}
-			return false;
+			if (!a)
+				return false;
+			return a[0] == 10 || (a[0] == 172 && (a[1] & 0xF0) == 16) || (a[0] == 192 && a[1] == 168) ||
+			       (a[0] == 100 && (a[1] & 0xC0) == 64) || a[0] == 127;
 		}
 
 		NetMode ResolveNetMode(const ProfileDB::CameraProfile& cam)

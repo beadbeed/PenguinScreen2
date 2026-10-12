@@ -101,8 +101,12 @@ private:
 		std::array<float, 2> break_away_flash_s{};
 		float zone_press_s = -1.0f; // time since a stop-first zone was squeezed; -1 = no press pending
 		std::array<bool, VR::SpatialControls::kControlCount> stick_bound{};
+		// Release-first after an input gap (ReleaseFirst): the digital outputs that were already pressed when the gate
+		// opened, held at 0 until each reads released once. Not cleared by ResetState (a recenter mid-hold keeps it).
+		std::array<bool, VR::SpatialControls::kControlCount> held_through_gap{};
 
 		void ResetState();
+		void ReleaseFirst(VR::SpatialControls::ControlValues& values, bool opened);
 		std::array<int, 2> HoldingHands() const;
 		std::array<bool, 2> BrokeAway() const;
 		std::array<float, 2> LeverValues() const;

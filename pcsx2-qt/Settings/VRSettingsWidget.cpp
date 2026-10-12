@@ -139,11 +139,11 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 		   "Takes effect immediately."));
 
 	dialog()->registerWidgetHelp(m_ui.privateCoopFirstPerson, tr("Private Co-op First Person"), tr("Unchecked"),
-		tr("Lets first person run online, but only on a private server: the network adapter's Internal DNS must send "
-		   "www01.kddi-mmbb.jp to an address that is not obsrv. On obsrv or any other server, first person stays off "
-		   "online and you get the 3D screen. Your partner sees your character turn and aim where you look, slightly "
-		   "late. Walking while aiming and aim pitch work there too, unless Online-Safe First Person is checked. "
-		   "Takes effect immediately."));
+		tr("Lets first person run online, but only on a private server: the network adapter's DNS1 must be its Internal "
+		   "DNS (Internal, or Manual 192.0.2.1), whose hosts list sends www01.kddi-mmbb.jp to a LAN, Tailscale or local "
+		   "address. On obsrv or any other server, first person stays off online and you get the 3D screen. Your "
+		   "partner sees your character turn and aim where you look, slightly late. Walking while aiming and aim pitch "
+		   "work there too, unless Online-Safe First Person is checked. Takes effect immediately."));
 
 	dialog()->registerWidgetHelp(m_ui.gameRumble, tr("Forward Game Rumble to the VR Controllers"), tr("Checked"),
 		tr("Sends the game's own controller vibration to the VR controllers: the large motor to both hands, the small "
