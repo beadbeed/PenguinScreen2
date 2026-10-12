@@ -341,14 +341,14 @@ first-person screen. It wins over `scenes`.
 
 ```yaml
 stereo:
-  firstPerson: { separation: 0.0132, convergence: 150, nearest: 0.75, auto: true }
+  firstPerson: { separation: 0.0132, convergence: 150, nearest: 1.0, auto: true }
 ```
 
 | Key | Meaning |
 |---|---|
 | `separation` | the first-person separation. With `auto`, the fallback |
 | `convergence` | the first-person convergence, in game units. With `auto`, the fallback |
-| `nearest` | metres, `0.45` to `1.5`: how near true depth reaches in front of the screen plane before it flattens. Measured as the distance you see, so it holds at any strength. VR `NearDepthMetres` overrides it (below 0 turns it off) |
+| `nearest` | metres, `0.45` to `1.5`: how near true depth reaches in front of the screen plane before it flattens. Measured as the distance you see, so it holds at any strength. Only perspective-textured draws get it, so the game's 2D text stays on the screen plane and geometry nearer than that plane shows in front of text drawn over it; the Outbreak profiles use `1.0` (not `0.75`) until the near field has been judged in the headset. VR `NearDepthMetres` overrides it (below 0 turns it off: `[VR] NearDepthMetres = -1` if the game's own text looks doubled) |
 | `auto` | `true` works the pair out from the headset: separation = IPD / the first-person screen's width, convergence = its distance x `camera.lookAt.unitsPerMeter`. Far content then lands exactly one IPD apart and the screen plane sits at the screen's distance. Needs both `separation` and `convergence`, which are used until the headset reports its eyes, when the IPD is outside 45-80 mm, when the screen is under 1 m or over 12 m wide or nearer than 0.5 m or farther than 5 m, or with VR `FirstPersonAutoStereo = false` (ini only). VR `FirstPersonStereoStrength` (0.5-1.5) scales either |
 | `ndcWidthRatio` | optional, `0.5` to `2.0`, default `1.0`: how much wider the first-person draws' NDC is than the displayed picture. The `auto` separation is divided by it. The log's 'First-person multiview draw' line reports the measured ratio; leave it at 1.0 unless that line says otherwise |
 

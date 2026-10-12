@@ -25,9 +25,11 @@
 // and the menu pointer's dot, lying on the screen where the controller points while a menu is up.
 namespace VR::HudCards
 {
-	// Card slots, in the order the compositor submits them: the laser (or the menu beam) and the menu pointer's
-	// dot go in under the hands (which are nearer the eye), the dot over the beam; the rest over everything: the
-	// vignette over the hands and the wrist card, the toast over the vignette so it stays readable, the blink last.
+	// Card slots. The compositor submits them in slot order, but PlaceCardLayer (below) puts three of them in under
+	// the hands, which are nearer the eye: the laser (or the menu beam), over it the menu pointer's dot, and over both
+	// the toast. The rest go over everything: the wrist card, then the vignette over the hands and the wrist card, the
+	// blink last. So the farther layer is always drawn first: screen, beam, dot, toast (0.65 m), hands and wrist card
+	// (0.3-0.5 m), vignette ring (0.5 m, out at the edges of the view, clear where the toast is), blink.
 	static constexpr int kLaser = 0;
 	static constexpr int kWrist = 1;
 	static constexpr int kVignette = 2;
@@ -36,14 +38,57 @@ namespace VR::HudCards
 	static constexpr int kPointer = 5;
 	static constexpr int kCardCount = 6;
 
-	// Toast image and quad: about 1.2 m ahead and 0.25 m below eye level, 0.5 m wide (about 24 deg, so
-	// the image's 1024 pixels give the text 1.1 deg tall letters up to ~23 characters, smaller beyond).
+	// Puts card's layer into layers[0, layer_count) as the compositor submits them, with room for one more (the caller
+	// checks the capacity). under_from is where the layers that go over the HUD's under-hands cards begin (the hands,
+	// from BuildHandLayers); with nothing there it equals layer_count. The laser (or menu beam) and the menu pointer's
+	// dot go in at under_from and move it past themselves, so the dot lands over the beam. The toast goes in at
+	// under_from too but leaves it where it is, so a dot or beam placed after it still goes in under the toast: the
+	// toast (0.65 m) is nearer than the screen the dot lies on and most of the beam, and farther than the hands, which
+	// then hide it where they pass in front of it, as a panel behind them would be hidden, instead of the toast drawing
+	// over a nearer hand (the item-name toast shows while a hand reaches into a pouch). Every other card goes on top.
+	template <typename Layer>
+	void PlaceCardLayer(int card, Layer* layers, u32& layer_count, u32& under_from, Layer layer)
+	{
+		const bool under_hands = (card == kLaser || card == kPointer || card == kToast);
+		const bool moves_mark = (card == kLaser || card == kPointer);
+		if (under_hands && under_from < layer_count)
+		{
+			for (u32 k = layer_count; k > under_from; k--)
+				layers[k] = layers[k - 1];
+			layers[under_from] = layer;
+			layer_count++;
+			if (moves_mark)
+				under_from++;
+		}
+		else
+		{
+			// On top, either because the card goes over everything or because nothing is over the mark yet. A beam or
+			// dot appended moves the mark past itself; an appended toast leaves it under itself (still the old
+			// layer_count), so a later beam or dot goes in under the toast.
+			layers[layer_count++] = layer;
+			if (moves_mark)
+				under_from = layer_count;
+		}
+	}
+
+	// Toast image and quad: about 24 deg wide and 12 deg below the line of sight (so the image's 1024 pixels give
+	// the text 1.1 deg tall letters up to ~23 characters, smaller beyond). It sits kToastDistanceM ahead, nearer
+	// than any shipped profile's first-person near field brings the world (stereo.firstPerson nearest, kNearFieldMinM
+	// below; GSRendererHW), so no counter or wall seen through it comes out in front of it in stereo. kToastDesignM is the
+	// distance its size was first drawn for (0.5 m wide, 0.25 m down at 1.2 m): width and drop scale with the
+	// distance, so the angles stay those.
 	static constexpr u32 kToastWidth = 1024;
 	static constexpr u32 kToastHeight = 160;
-	static constexpr float kToastWidthM = 0.50f;
+	static constexpr float kToastDistanceM = 0.65f;
+	static constexpr float kToastDesignM = 1.2f;
+	static constexpr float kToastWidthM = 0.50f * kToastDistanceM / kToastDesignM;
 	static constexpr float kToastHeightM = kToastWidthM * static_cast<float>(kToastHeight) / static_cast<float>(kToastWidth);
-	static constexpr float kToastDistanceM = 1.2f;
-	static constexpr float kToastDropM = 0.25f;
+	static constexpr float kToastDropM = 0.25f * kToastDistanceM / kToastDesignM;
+	// The nearest any shipped profile's near field has put world geometry (stereo.firstPerson nearest: 0.75 m in
+	// wave 4, 1.0 m now). The toast must stay nearer than this. NearDepthMetres can still be set down to 0.45 m by
+	// hand, past the toast; that is the player's choice.
+	static constexpr float kNearFieldMinM = 0.75f;
+	static_assert(kToastDistanceM < kNearFieldMinM, "the toast must be nearer than the near field can bring the world");
 
 	// Wrist card image and quad: about the size of a large watch face, held just off the glove.
 	static constexpr u32 kWristWidth = 256;
@@ -279,7 +324,8 @@ namespace VR::HudCards
 		float out_quat[4], float* out_size);
 
 	// Condition thresholds, labels, keys, the font (every item name included), the wrist card's weapon line, the fades,
-	// the blink, the laser, the vignette, the menu pointer's dot and beam, and the placement maths. Runs once (the
+	// the blink, the laser, the vignette, the menu pointer's dot and beam, the placement maths (the toast nearer than
+	// the near field at its old angles) and the layer order (PlaceCardLayer). Runs once (the
 	// compositor's first HUD frame or the first Poll) when PCSX2_VR_HUD_SELFTEST is set.
 	bool SelfTest();
 }
