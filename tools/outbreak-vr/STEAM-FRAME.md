@@ -6,12 +6,15 @@ file-by-file inventory, the full M0 brief) is in `research/2026-10-11-steam-fram
 
 Written by the Windows PC session on 2026-10-12 from read-only research.
 
-**Progress (2026-10-12):** M0, M1 and M2's code are done and CI-green on ARMSX2 branch `outbreak-vr-frame` (`b3ba84d`):
+**Progress (2026-10-12):** M0 to M3's code are done and CI-green on ARMSX2 branch `outbreak-vr-frame` (`bd7198a`):
 - the probe and the `ENABLE_OPENXR` option;
 - the VR layer (no clang fixes needed) and the M0 hooks;
 - the launcher and a smoke job;
 - M1's first-person camera, stereo and GS hooks, with a CI hook-parity check;
-- M2's controls, hotkeys, PINE VR commands and online locks.
+- M2's controls, hotkeys, PINE VR commands and online locks;
+- M3's hands, HUD, menus, pouches, layer budget, the Qt VR settings page, and `pine.py` over the Linux socket.
+
+M4 (performance and heat) and M5 (packaging, keeping the copies in step) need the device.
 
 Nothing has run on a Frame yet. Alex's session (ARMSX2 `frame/README-FRAME.md`) is next.
 

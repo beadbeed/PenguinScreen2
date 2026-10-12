@@ -48,7 +48,7 @@ lists what changed.
   `STATUS.md`).
 
 Afterwards, in the ARMSX2 work:
-- M0, M1 and M2 of the Steam Frame port were finished on branch `outbreak-vr-frame` (CI green, `b3ba84d`);
+- M0 to M3 of the Steam Frame port were finished on branch `outbreak-vr-frame` (CI green, `bd7198a`);
 - the port found that frame advance slipped past the online pause lock. It is fixed in `e6dbd77`, the build installed on
   the PC.
 

@@ -19,7 +19,7 @@ Written by the Windows PC session on 2026-10-12, at the end of a long autonomous
 | Branches | `pc-firstperson` = `coop-firstperson` = `wave4-integration` (the branch with the CI cache) = the latest docs commit (code as of `e6dbd77`) |
 | Installed on the PC | `D:\Games\PS2\PenguinScreen2`, CI build of `e6dbd77` (run 38230328003): `0a9fa63` plus the frame-advance online lock |
 | Tested in the real headset | **Nothing since the 10 Oct morning session.** That is about 18,800 lines across 58 files (`63cc827..HEAD` in `pcsx2`, `pcsx2-qt`, `bin`), all checked headset-free only. |
-| Steam Frame standalone | Plan in `STEAM-FRAME.md`. **M0, M1 and M2's code are done** on ARMSX2 branch `outbreak-vr-frame` (`b3ba84d`, CI green); nothing has run on a Frame yet (see below). |
+| Steam Frame standalone | Plan in `STEAM-FRAME.md`. **M0 to M3's code are done** on ARMSX2 branch `outbreak-vr-frame` (`bd7198a`, CI green); nothing has run on a Frame yet (see below). |
 
 **Builds** come from GitHub Actions only:
 - start one with `gh workflow run build-windows.yml -R beadbeed/PenguinScreen2 --ref <branch>`: about 20 min on a branch with
@@ -138,7 +138,10 @@ time:
 - the pose-to-photon log line in `XRCompositor.cpp`;
 - `CanPause` refusing online only while the VM runs, so a paused VM can be resumed;
 - the Qt pause lock asking `VMManager::IsOnlineLocked()` (so `PCSX2_TEST_ONLINE_LOCKS=1` covers the buttons);
-- PINE's state save and load refusals using `IsOnlineLocked()`.
+- PINE's state save and load refusals using `IsOnlineLocked()`;
+- the VR settings page's Edge Fill "recommended" value: it should be Unchecked now that `EdgeFill` defaults to false;
+- the M3 layer budget (`maxLayerCount`) and the flat-quad fallback lines in `XRSession.cpp` and `XRCompositor.cpp`;
+- `pine.py`'s Linux socket transport (it changes nothing on Windows).
 
 ## Needs more investigation
 
@@ -202,8 +205,17 @@ image would be softer than the PC's (expect 1x to 1.5x internal resolution and 7
 - PINE's VR commands 0xE0-0xE5;
 - smooth turn in the first-run ini.
 
-Hook parity is 58 of 85 PenguinScreen2 VR blocks fully ported, 5 ported in part and 22 deliberately left out (each with its
-reason).
+**M3 is done too** (`bd7198a`; CI green on `60f5acd`):
+- hands, HUD, wrist card, menu pointer, pouches and item names all run (no hook site was missing);
+- a layer budget that stays within the runtime's `maxLayerCount`, dropping the least important layers first, and logs it;
+- the flat-quad fallback when the runtime has no cylinder layer, logged;
+- the Qt VR settings page, plus every `[VR]` key listed in `README-FRAME.md` section 6 (the Qt window can't be reached in the
+  headset);
+- `tools/pine.py` reaching the Linux PINE socket, so the research and test tools work against the Frame over SSH.
+
+Hook parity is 60 of 85 PenguinScreen2 VR blocks fully ported, 5 ported in part and 20 deliberately left out (each with its
+reason). The checklists for Alex's Frame session are sections 3 to 5 of `README-FRAME.md` (M1 to M3). M4, performance and
+heat, needs measurements from the device.
 
 The launcher's first-run ini now starts in first person. `FRAME_VIEW=flat` (a Steam launch option) gives M0's flat screen.
 The artifact is `outbreak-vr-frame-<sha>` from the latest green run: a tarball with the AppDir, the launcher, the probe and
