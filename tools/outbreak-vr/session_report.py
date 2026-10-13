@@ -338,7 +338,7 @@ def parse_emulog(path: str) -> Log:
                     if mm:
                         info["surface_hz"] = float(mm.group(1))
                 elif m.startswith("OSD [VRStereoScene]: "):
-                    mm = re.match(r"OSD \[VRStereoScene\]: Stereo scene: (.+?) \(sep", m)
+                    mm = re.match(r"OSD \[VRStereoScene\]: Stereo scene: ([^(]+?)\s*(?:\(|$)", m)
                     if mm:
                         add("scene", name=mm.group(1).strip())
                     elif m.startswith("OSD [VRStereoScene]: Stereo: first person"):
@@ -1197,7 +1197,7 @@ def analyze_arm(log: Log, rec: Rec | None, t_end: float, t_vr_start: float | Non
     return out
 
 
-def analyze_menus(log: Log, t_end: float) -> dict:
+def analyze_menus(log: Log, t_end: float, rec=None) -> dict:
     scenes = log.of("scene")
     periods = []
     in_menu = None
@@ -1248,6 +1248,16 @@ def analyze_menus(log: Log, t_end: float) -> dict:
             p["kind"] = "map / pause"
         else:
             p["kind"] = "menu (kind not logged)"
+        # the recorder's menu byte (item screen, map and pause set it; take-it prompts and hand-overs do not, see
+        # research/2026-10-12-ui-flags-research.md) separates a prompt from a menu when the log cannot
+        if rec is not None and rec.offset is not None and rec.rows:
+            a = bisect.bisect_left(rec.ts, p["t0"] - rec.offset - 0.4)
+            b = bisect.bisect_right(rec.ts, p["t1"] - rec.offset + 0.4)
+            seg = rec.rows[a:b]
+            if seg:
+                p["csv_menu"] = max(r["menu"] for r in seg)
+                if p["csv_menu"] == 0 and p["kind"] != "item screen":
+                    p["kind"] = "take-it prompt / game screen"
     out = dict(periods=periods)
     out["count"] = len(periods)
     out["by_kind"] = {}
@@ -1594,7 +1604,7 @@ def build(emulog: str, session_dir: str | None, steam_dir: str | None, app: str,
     r.arm = safe(r, "first person", analyze_arm, dict(periods=[], count=0, armed_total=0.0, first=None, reasons={}, named_guard=0,
                                                        csv_causes={}, short=[]), log, r.rec, r.t_vr_end, r.t_vr_start)
     r.menus = safe(r, "menus", analyze_menus, dict(periods=[], count=0, by_kind={}, item_opens=0, pointer_off=0, confirms=0,
-                                                    mismatch=[]), log, r.t_vr_end)
+                                                    mismatch=[]), log, r.t_vr_end, r.rec)
     r.screens = safe(r, "screens", analyze_screens, empty_screens(), log,
                      r.t_vr_start if r.t_vr_start is not None else 0.0, r.t_vr_end, r.menus, r.arm, r.rec)
     r.play = safe(r, "gameplay", analyze_play, empty_play(), log, r.rec)
@@ -1791,7 +1801,8 @@ def make_findings(R_: R) -> list:
                 s += f" {len(S['quick'])} quick reversal(s) within 1 s; {S['quick_backed']} of them match the game's own menu byte flipping (button presses)"
                 if S["quick_unbacked"]:
                     sev = "warn"
-                    s += f", {len(S['quick_unbacked'])} do not (first {T(S['quick_unbacked'][0][0])}: a screen glitch?)"
+                    s += (f", {len(S['quick_unbacked'])} do not (first {T(S['quick_unbacked'][0][0])}: a screen glitch, or a prompt "
+                          f"that leaves the menu byte alone)")
                 s += "."
             else:
                 s += (f" {len(S['quick'])} quick reversal(s) within 1 s (button presses or a glitch; pass --session to check them "
@@ -1819,7 +1830,8 @@ def make_findings(R_: R) -> list:
     if rec is not None:
         z = R_.play.get("rec_zero_hp", [])
         if z:
-            add("info", f"The recorder saw HP hit 0 {len(z)} time(s): " + ", ".join(T(t + rec.offset) for t in z[:5]) + ".")
+            add("info", f"The recorder saw the character's HP reach 0 ({len(z)}x): " + ", ".join(T(t + rec.offset) for t in z[:5])
+                        + " (down or dead, the recorder does not say which).")
     # ---- SteamVR
     sv = R_.svr
     if sv.get("totals"):
@@ -1990,6 +2002,8 @@ def tbl_menus(R_: R, clock: Clock):
         if p["kind"] == "item screen":
             d = f"{p.get('confirms', 0)} confirm(s), {p.get('steers', 0)} steer(s), {p.get('submenus', 0)} submenu(s)" + \
                 ("" if p.get("pointer", True) else ", point-to-select off")
+        elif p["kind"] == "take-it prompt / game screen":
+            d = "the recorder's menu byte stayed 0 (a pickup or hand-over prompt, not the item screen, map or pause)"
         rows.append([str(i), f"{p['t0']:.1f}", clock.hms(p["t0"]) if clock.ok else "", fmt_dur(p["dur"]), p["kind"], d])
     return hdr, rows
 
@@ -2019,16 +2033,19 @@ def tbl_play(R_: R, clock: Clock):
         rows.append(["weapon in hand", str(len(P["weapons"])), "; ".join(f"{n} ({k})" for _t, n, k in P["weapons"][:6])])
     if P["reload_other"]:
         rows.append(["reload (other log lines)", str(len(P["reload_other"])), clip(P["reload_other"][0].msg, 90)])
+    prompts = [x for x in R_.menus["periods"] if x["kind"] == "take-it prompt / game screen"]
     pk = len(P["pickup_lines"]) + len(P.get("rec_pickup_runs", []))
-    if pk or P.get("rec_pickup_runs") is not None:
+    if pk or P.get("rec_pickup_runs") is not None or prompts:
         bits = []
+        if prompts:
+            bits.append(f"{len(prompts)} flat-screen take-it prompt(s)")
         if P["pickup_lines"]:
             bits.append(f"{len(P['pickup_lines'])} log line(s), e.g. '{clip(P['pickup_lines'][0].msg, 60)}'")
         if P.get("rec_pickup_runs") is not None:
             bits.append(f"{len(P['rec_pickup_runs'])} reach animation(s) in the recorder (action 9)")
         if not P["pickup_lines"]:
             bits.append("this build logs no pickup line")
-        rows.append(["pickups / take-it reaches", str(pk), "; ".join(bits)])
+        rows.append(["pickups / take-it reaches", str(len(prompts) or pk), "; ".join(bits)])
     if P["rumble_on"]:
         rows.append(["game rumble", str(P["rumble_on"]), "forwarded to the controllers"])
     if P["pouch"]:
@@ -2996,6 +3013,8 @@ SAMPLE_LINES = """\
 [   90.3177] (VR) HUD blink (first-person screen).
 [   95.2386] (VR) Screen: world-locked.
 [   95.2080] OSD [VRStereoScene]: Stereo scene: menu (sep 0.000, conv 55)
+[  165.5131] OSD [VRStereoScene]: Stereo scene: base
+[  184.9974] OSD [VRStereoScene]: Stereo: first person (sep 0.0147 auto, conv 150)
 [   96.2287] (VR) MenuPointer: item screen open, cursor at cell 0 (node 720C10 index 0 x 498 y 108); point-to-select on.
 [   99.9449] (VR) MenuPointer: item screen closed (0 steer(s), 2 confirm(s); 0 line(s) not logged).
 [  134.7129] (VR) MenuPointer: a menu was up without the profile's liveWhen passing (the map or pause, not the item screen); point-to-select stayed off.
@@ -3045,7 +3064,7 @@ def selftest() -> int:
     check("hurt", log.of("hurt") and log.of("hurt")[0].d["b"] == 2080)
     check("reload", log.of("reload") and log.of("reload")[0].d["b"] == 2)
     check("blink and screen", log.of("blink") and log.of("screen") and log.of("screen")[0].d["mode"] == "world")
-    check("scene menu", log.of("scene") and log.of("scene")[0].d["name"] == "menu")
+    check("stereo scenes menu, base, first person", [e.d["name"] for e in log.of("scene")] == ["menu", "base", "first person"])
     check("item screen", log.of("item_open") and log.of("item_close") and log.of("item_close")[0].d["confirms"] == 2)
     check("map/pause", len(log.of("menu_other")) == 1)
     check("grab", log.of("grab_start") and log.of("grab_end") and log.of("grab_end")[0].d["secs"] == 1.6)
