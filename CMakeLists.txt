@@ -63,6 +63,11 @@ if(ENABLE_TESTS)
 	add_subdirectory(tests/ctest)
 endif()
 
+# The VR self-tests runner (vr_selftests, built only on request; the Windows CI build runs it)
+if(ENABLE_VR)
+	add_subdirectory(tests/vr)
+endif()
+
 # gsrunner
 if(ENABLE_GSRUNNER)
 	add_subdirectory(pcsx2-gsrunner)

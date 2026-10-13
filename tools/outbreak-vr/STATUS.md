@@ -268,6 +268,9 @@ ini.
   pointer), `PCSX2_VR_HUD_SELFTEST=1`, `PCSX2_VR_FEEDBACK_SELFTEST=1` and `PCSX2_VR_HANDS_SELFTEST=1` (that one needs a VR
   session). Results go to the emulog. On 2026-10-12 every one passed on 5be8d87: MenuPointer 200 checks, BeltPouches 65,
   item names 31, HUD and feedback 0 failures.
+- the same self-tests (the hands' too) in CI, no emulator: every Windows build runs `tests/vr`'s `vr_selftests` ("Run VR
+  Self-Tests"), which fails the job on any failure and logs each one's summary line. Locally: `cmake --build build
+  --target vr_selftests`, then `build/tests/vr/vr_selftests bin/resources`.
 - `vrtest.py`: first-person scenarios on both Files. `--check-profile` needs no emulator.
 - `menutest.py`: menu pointer and pouches; `--test-uv` works with no runtime.
 - `grabtest.py`: shake to break free.
