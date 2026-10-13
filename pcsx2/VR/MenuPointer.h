@@ -139,9 +139,10 @@ namespace VR::MenuPointer
 	// between polls. when_up false clears *seen and returns false. Pure.
 	bool LiveGate(bool when_up, bool live_now, bool* seen);
 
-	// A steer stopped because the cursor did not answer a press this many times in one opening of the menu turns
-	// point-to-select off until the menu opens again: a cursor that does not answer is not this menu's (a stale cursor
-	// struct under another screen, or a wrong table), and every press it ignores may be moving something else.
+	// A steer stopped because the cursor did not answer a press (nor the one re-press of it, see StepOut::repressed) this
+	// many times in one opening of the menu turns point-to-select off until the menu opens again: a cursor that does not
+	// answer is not this menu's (a stale cursor struct under another screen, or a wrong table), and every press it
+	// ignores may be moving something else.
 	constexpr u32 kMaxUnansweredPresses = 2;
 
 	// One poll of point-to-select, everything it depends on passed in, so the self-test can drive it with a scripted game.
@@ -211,6 +212,9 @@ namespace VR::MenuPointer
 		bool closed = false;
 		bool landed = false;  // the cursor reached another cell, whatever moved it
 		bool pressed = false; // a D-pad press began
+		// That press was the one re-press of a press the game missed (the cursor had not moved settleVsyncs polls after
+		// it): the same direction, after the release gap. pressed is set too.
+		bool repressed = false;
 		bool arrived = false;
 		int arrived_from = -1;
 		float arrived_ms = 0.0f;
@@ -279,6 +283,9 @@ namespace VR::MenuPointer
 		int dir = -1;
 		u32 phase_polls = 0; // polls pressed (pressing) or released (released) so far
 		int step_from = -1;  // the cell the current press started from
+		// The press under way, or its release, is the re-press of one the game missed (the cursor stayed on step_from):
+		// a miss of it too stops the steer, and the cursor answering clears it.
+		bool repressed = false;
 		u32 presses = 0;
 		int steer_from = -1;
 		float steer_ms = 0.0f;

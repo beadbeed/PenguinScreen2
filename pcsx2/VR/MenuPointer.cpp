@@ -184,6 +184,7 @@ namespace VR::MenuPointer
 			st.dir = -1;
 			st.phase_polls = 0;
 			st.step_from = -1;
+			st.repressed = false;
 			st.presses = 0;
 			st.steer_from = -1;
 			st.steer_ms = 0.0f;
@@ -647,6 +648,7 @@ namespace VR::MenuPointer
 			st.phase = kIdle;
 			st.dir = -1;
 			st.phase_polls = 0;
+			st.repressed = false;
 			st.presses = 0;
 			st.disarmed = true;
 			st.disarm_under = st.under;
@@ -891,6 +893,7 @@ namespace VR::MenuPointer
 			st.phase = kIdle;
 			st.dir = -1;
 			st.phase_polls = 0;
+			st.repressed = false;
 			st.presses = 0;
 			st.steer_from = current;
 			st.steer_ms = 0.0f;
@@ -1113,12 +1116,13 @@ namespace VR::MenuPointer
 			st.phase = kIdle;
 			st.dir = -1;
 			st.phase_polls = 0;
+			st.repressed = false;
 			st.presses = 0;
 		};
 
 		// Steering, closed loop: press the planned direction pressVsyncs polls, release at least gapVsyncs (a 30 fps
 		// game could merge two presses across a shorter gap), wait for the cursor to move (at most settleVsyncs), then
-		// plan again from wherever it is.
+		// plan again from wherever it is. A press the cursor never answers is pressed once more first.
 		if (st.target >= 0)
 		{
 			st.steer_ms += in.dt_ms;
@@ -1141,6 +1145,8 @@ namespace VR::MenuPointer
 					arrive();
 				else if (current != st.step_from)
 				{
+					// Answered, a re-press too: the next press that goes unanswered is a first miss again.
+					st.repressed = false;
 					if (st.phase_polls >= p.gap_vsyncs)
 						st.phase = kIdle;
 					else
@@ -1148,13 +1154,37 @@ namespace VR::MenuPointer
 				}
 				else if (st.phase_polls >= p.settle_vsyncs)
 				{
-					abort_steer("the cursor did not move");
-					// kMaxUnansweredPresses of these in one opening: no more presses until the menu opens again.
-					st.unanswered++;
-					if (st.unanswered >= kMaxUnansweredPresses && !st.unresponsive)
+					// The game sometimes misses a press it was given (it reads the pad at its own pace). Before giving up,
+					// press the same direction once more, after the release gap, while the plan from this cell still leads
+					// that way (the target may have changed meanwhile) and maxPresses allows it. Everything that ends a
+					// steer has run by now (the player taking over, the gate dropping, a submenu, the cursor reaching its
+					// target), so none of those ever gets a re-press. A miss of the re-press too stops the steer.
+					const bool repress = !st.repressed && st.dir >= 0 && st.presses < p.max_presses &&
+					                     PlanStep(p, current, st.target) == st.dir;
+					if (repress && st.phase_polls < p.gap_vsyncs)
 					{
-						st.unresponsive = true;
-						out.unresponsive_now = true;
+						st.phase_polls++;
+					}
+					else if (repress)
+					{
+						st.repressed = true;
+						st.phase = kPressing;
+						st.phase_polls = 1;
+						st.presses++;
+						out.dir = st.dir;
+						out.pressed = true;
+						out.repressed = true;
+					}
+					else
+					{
+						abort_steer("the cursor did not move");
+						// kMaxUnansweredPresses of these in one opening: no more presses until the menu opens again.
+						st.unanswered++;
+						if (st.unanswered >= kMaxUnansweredPresses && !st.unresponsive)
+						{
+							st.unresponsive = true;
+							out.unresponsive_now = true;
+						}
 					}
 				}
 				else
@@ -1386,6 +1416,8 @@ namespace VR::MenuPointer
 							"point-to-select off until the screen opens again.",
 				kMaxUnansweredPresses, node, index, x, y);
 		}
+		if (out.repressed && LogLine())
+			Console.WriteLn("(VR) MenuPointer: re-pressed once (the game missed a press).");
 		if (out.arrived)
 		{
 			s_open_steers++;
@@ -1650,6 +1682,10 @@ namespace VR::MenuPointer
 			bool unknown = false; // the cursor on a node no cell has (a partner's panel)
 			int x_off = 0;        // x read off by this much (a different layout)
 			bool ignore = false;  // presses do nothing
+			// Presses the game misses: bit n set drops the n-th press it would take (counting from 0 across the test),
+			// leaving the cursor where it is.
+			u32 drop = 0;
+			u32 takes = 0;
 			int held_dir = -1;
 			int held_polls = 0;
 			int released_polls = 99;
@@ -1744,8 +1780,13 @@ namespace VR::MenuPointer
 					}
 					else
 					{
-						pending_dir = dir;
-						pending_in = 2;
+						const bool missed = takes < 32 && ((drop >> takes) & 1u) != 0;
+						takes++;
+						if (!missed)
+						{
+							pending_dir = dir;
+							pending_in = 2;
+						}
 					}
 				}
 			}
@@ -1769,6 +1810,9 @@ namespace VR::MenuPointer
 			bool auto_suspend = false;  // in.suspend follows the game's submenu flag
 			bool trigger_prev = false;  // the confirm controls as the game got them last poll
 			int phantom = 0;            // confirms the game saw that the pointer never passed
+			int represses = 0;          // presses the pointer made again after one the game missed
+			int repress_off_dir = 0;    // of those, ones that were not the direction of the press before
+			int press_dir = -1;         // the direction of the last press that began
 
 			void Poll()
 			{
@@ -1777,6 +1821,15 @@ namespace VR::MenuPointer
 				if (auto_suspend)
 					in.suspend = game.flag;
 				out = Step(*p, in, st);
+				if (out.pressed)
+				{
+					if (out.repressed)
+					{
+						represses++;
+						repress_off_dir += (out.dir == press_dir) ? 0 : 1;
+					}
+					press_dir = out.dir;
+				}
 				game.See(out.dir);
 				// The confirm controls as the game gets them (the trigger, unless held back): a rising edge the pointer
 				// did not pass would be a confirm the player never made at that moment.
@@ -1860,6 +1913,8 @@ namespace VR::MenuPointer
 				swallowed = 0;
 				landed = 0;
 				polls = 0;
+				represses = 0;
+				repress_off_dir = 0;
 				game.presses = 0;
 			}
 		};
@@ -1965,7 +2020,8 @@ namespace VR::MenuPointer
 				"a cell more than maxPresses presses away stops the steer after maxPresses");
 		}
 
-		// A game that ignores the presses: stopped after settleVsyncs, and not retried while the hover stays.
+		// A game that ignores the presses: a press it never answers is pressed once more (after settleVsyncs and the release
+		// gap), the steer stops when that goes unanswered too, and is not retried while the hover stays.
 		{
 			Sim s;
 			s.p = &p;
@@ -1974,19 +2030,20 @@ namespace VR::MenuPointer
 			s.ResetCounts();
 			s.Point(1);
 			s.Run(120);
-			check(s.aborts == 1 && same(s.abort_reason, "the cursor did not move") && s.game.presses == 1,
-				"a cursor that does not move stops the steer after one press");
-			// A second unanswered press in the same opening turns point-to-select off until the menu opens again (a stale
+			check(s.aborts == 1 && same(s.abort_reason, "the cursor did not move") && s.game.presses == 2 && s.represses == 1 &&
+					  s.repress_off_dir == 0,
+				"a cursor that does not move stops the steer after one press and one re-press");
+			// A second unanswered steer in the same opening turns point-to-select off until the menu opens again (a stale
 			// cursor struct under the map or pause would otherwise send a press on every change of hover).
 			s.Point(3);
 			s.Run(120);
-			check(s.aborts == 2 && s.game.presses == 2 && !s.out.unresponsive_now && s.st.unresponsive,
-				"a second unanswered press turns steering off for the opening");
+			check(s.aborts == 2 && s.game.presses == 4 && !s.out.unresponsive_now && s.st.unresponsive,
+				"a second unanswered steer turns steering off for the opening");
 			s.Point(2);
 			s.Run(60);
 			s.Point(1);
 			s.Run(60);
-			check(s.game.presses == 2 && s.out.hovered < 0 && s.out.dir < 0, "after it, no change of hover presses anything");
+			check(s.game.presses == 4 && s.out.hovered < 0 && s.out.dir < 0, "after it, no change of hover presses anything");
 			s.in.gate = false;
 			s.Poll();
 			s.game.ignore = false;
@@ -1995,6 +2052,204 @@ namespace VR::MenuPointer
 			s.Point(3);
 			s.Run(60);
 			check(!s.st.unresponsive && s.arrivals == 1 && s.game.cell == 3, "the menu opening again steers again");
+		}
+
+		// A press the game missed (held the usual time, never taken): pressed once more after the release gap, the same
+		// direction, and the steer goes on when that one is answered. An answered re-press is an answered press, so it counts
+		// for nothing against the cursor (kMaxUnansweredPresses).
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.game.drop = 0x1; // the first press the game would take is dropped
+			s.ResetCounts();
+			s.Point(1);
+			s.Run(80);
+			check(s.arrivals == 1 && s.game.cell == 1 && s.aborts == 0 && s.game.presses == 2 && s.represses == 1 &&
+					  s.repress_off_dir == 0,
+				"a missed press is pressed once more, the same direction, and the steer arrives");
+			check(s.game.min_gap >= static_cast<int>(p.gap_vsyncs) && s.game.max_held <= 2 && s.out.dir < 0 && !s.out.in_flight,
+				"the re-press keeps the release gap and the press length, and nothing is pressed after");
+			check(s.st.unanswered == 0 && !s.st.unresponsive && !s.st.repressed,
+				"an answered re-press is not an unanswered press");
+
+			// A miss on the second step of a way (cell 0 down to 2, then right to 3).
+			Sim t;
+			t.p = &p;
+			t.Open();
+			t.game.drop = 0x2; // the second press it would take
+			t.ResetCounts();
+			t.Point(3);
+			t.Run(100);
+			check(t.arrivals == 1 && t.game.cell == 3 && t.aborts == 0 && t.game.presses == 3 && t.represses == 1 &&
+					  t.repress_off_dir == 0,
+				"a miss on the second step is pressed again too, in the direction of that step");
+
+			// A miss on each of the two steps, each answered by its re-press: not two in a row, so nothing stops.
+			Sim u;
+			u.p = &p;
+			u.Open();
+			u.game.drop = 0x5; // the first and the third press it would take
+			u.ResetCounts();
+			u.Point(3);
+			u.Run(140);
+			check(u.arrivals == 1 && u.game.cell == 3 && u.aborts == 0 && u.game.presses == 4 && u.represses == 2 &&
+					  u.repress_off_dir == 0 && u.st.unanswered == 0,
+				"a miss answered by its re-press, twice on the way, is not two misses in a row");
+
+			// With a short settleVsyncs and a long gapVsyncs the re-press still waits out the gap.
+			ProfileDB::MenuPointerParams slow = p;
+			slow.settle_vsyncs = 2;
+			slow.gap_vsyncs = 6;
+			Sim v;
+			v.p = &slow;
+			v.Open();
+			v.game.drop = 0x1;
+			v.ResetCounts();
+			v.Point(1);
+			v.Run(80);
+			check(v.arrivals == 1 && v.game.cell == 1 && v.game.presses == 2 && v.represses == 1 && v.game.min_gap >= 6,
+				"the re-press waits for the release gap when that is longer than settleVsyncs");
+		}
+
+		// Two misses in a row stop the steer as before (the cursor did not move), after one re-press and no more; one
+		// unanswered steer is no reason to stop steering for the opening.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.game.drop = 0x3; // the first two presses it would take
+			s.ResetCounts();
+			s.Point(1);
+			s.Run(120);
+			check(s.aborts == 1 && same(s.abort_reason, "the cursor did not move") && s.game.presses == 2 && s.represses == 1 &&
+					  s.arrivals == 0 && !s.out.in_flight && s.out.dir < 0,
+				"two misses in a row stop the steer with the existing reason, after one re-press");
+			check(s.st.unanswered == 1 && !s.st.unresponsive && !s.st.repressed, "and count as one unanswered steer");
+			s.Run(60);
+			check(s.game.presses == 2 && s.represses == 1, "nothing is pressed again while the hover stays");
+			s.ResetCounts();
+			s.Point(3);
+			s.Run(80);
+			check(s.arrivals == 1 && s.game.cell == 3 && s.game.presses == 2 && s.represses == 0,
+				"the next hover steers as usual once the game takes presses again");
+		}
+
+		// A re-press only goes where the plan still leads from the cell the missed press was on: the hover moved to a cell
+		// the other way meanwhile, so the steer stops as it did before.
+		{
+			ProfileDB::MenuPointerParams longwait = p;
+			longwait.settle_vsyncs = 30;
+			Sim s;
+			s.p = &longwait;
+			s.Open();
+			s.game.drop = 0x1;
+			s.ResetCounts();
+			s.Point(1);
+			int guard = 0;
+			while (!(s.st.phase == kReleased && s.st.phase_polls >= 1) && guard++ < 60)
+				s.Poll();
+			s.Point(2); // down from cell 0, where the missed press (right) did not lead
+			s.Run(60);
+			check(s.aborts == 1 && same(s.abort_reason, "the cursor did not move") && s.game.presses == 1 && s.represses == 0 &&
+					  s.out.dir < 0,
+				"a missed press is not repeated in another direction than the plan's");
+		}
+
+		// No re-press once the player has taken over, though it was due on that very poll (the poll after the release has
+		// lasted settleVsyncs).
+		{
+			const auto due = [](Sim& sim) {
+				int guard = 0;
+				while (!(sim.st.phase == kReleased && sim.st.phase_polls >= sim.p->settle_vsyncs) && guard++ < 80)
+					sim.Poll();
+			};
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.game.drop = 0x1;
+			s.ResetCounts();
+			s.Point(1);
+			due(s);
+			check(s.game.presses == 1 && s.represses == 0 && s.out.in_flight && s.out.confirm_hold,
+				"a missed press waits out settleVsyncs, the re-press due on the next poll");
+			s.in.right_stick = 1.0f;
+			s.Poll();
+			check(s.aborts == 1 && same(s.abort_reason, "you took over") && s.out.dir < 0 && s.represses == 0 &&
+					  s.game.presses == 1,
+				"the player taking over on the poll it was due: no re-press");
+			s.in.right_stick = 0.0f;
+			s.Run(60);
+			check(s.game.presses == 1 && s.represses == 0 && s.aborts == 1, "and none after");
+
+			// The menu closing on that poll.
+			Sim c;
+			c.p = &p;
+			c.Open();
+			c.game.drop = 0x1;
+			c.ResetCounts();
+			c.Point(1);
+			due(c);
+			c.in.gate = false;
+			c.Poll();
+			check(c.aborts == 1 && same(c.abort_reason, "the menu closed") && c.out.dir < 0 && c.represses == 0 &&
+					  c.game.presses == 1,
+				"the menu closing on the poll it was due: no re-press");
+			c.Run(30);
+			c.in.gate = true;
+			c.Run(60);
+			check(c.game.presses == 1 && c.represses == 0 && c.game.cell == 0, "and none after, nor when the menu opens again");
+
+			// A submenu opening on that poll (suspendWhen), and while it is up or after it has closed.
+			ProfileDB::MenuPointerParams sp = p;
+			sp.suspend_when.push_back(ProfileDB::CameraGuard{});
+			Sim m;
+			m.p = &sp;
+			m.Open();
+			m.game.drop = 0x1;
+			m.ResetCounts();
+			m.Point(1);
+			due(m);
+			check(m.game.presses == 1 && m.represses == 0 && m.out.in_flight,
+				"suspendWhen: a missed press waits, the re-press due on the next poll");
+			m.in.suspend = true;
+			m.Poll();
+			check(m.aborts == 1 && same(m.abort_reason, "a submenu is open") && m.out.dir < 0 && m.represses == 0 &&
+					  m.game.presses == 1,
+				"a submenu opening on the poll it was due: no re-press");
+			m.Run(40);
+			m.in.suspend = false;
+			m.Run(60);
+			check(m.game.presses == 1 && m.represses == 0 && m.game.cell == 0, "and none while it is up or after it has closed");
+		}
+
+		// A confirm waiting for the cursor, which reaches its target on the poll the re-press was due (a slow game): it
+		// arrives, the confirm passes, and nothing is pressed again.
+		{
+			Sim s;
+			s.p = &p;
+			s.Open();
+			s.game.drop = 0x1;
+			s.ResetCounts();
+			s.Point(1);
+			int guard = 0;
+			while (!s.out.in_flight && guard++ < 60)
+				s.Poll();
+			s.in.confirm = true;
+			s.Poll();
+			check(s.out.confirm_hold && s.passed == 0 && s.out.target == 1, "a pull during the flight is held back");
+			guard = 0;
+			while (!(s.st.phase == kReleased && s.st.phase_polls >= p.settle_vsyncs) && guard++ < 80)
+				s.Poll();
+			check(s.game.presses == 1 && s.represses == 0 && s.out.confirm_hold && s.passed == 0,
+				"the confirm is still held back with the press unanswered");
+			s.game.cell = 1; // the cursor gets there at last
+			s.Poll();
+			check(s.arrivals == 1 && s.passed == 1 && s.out.dir < 0 && s.represses == 0 && s.game.presses == 1 && s.aborts == 0,
+				"the cursor on its target on the poll it was due: the confirm passes and no re-press goes out");
+			s.in.confirm = false;
+			s.Run(30);
+			check(s.game.presses == 1 && s.represses == 0 && s.phantom == 0, "and nothing is pressed after");
 		}
 
 		// The cursor leaving the cells (a partner's panel) stops the steer.
@@ -3250,7 +3505,8 @@ namespace VR::MenuPointer
 		if (failures == 0)
 			Console.WriteLn(Color_StrongGreen, "(VR) MenuPointer self-test: passed (%d checks: ray/quad, tablet, hands, hover, "
 											   "plan, online rule, liveWhen, steering, overrides, aborts, confirm, latch, suspendWhen, "
-											   "submenus, the player's own moves, the pull's dip, gaps, pouch requests).", checks);
+											   "submenus, the player's own moves, the pull's dip, gaps, re-presses, pouch "
+											   "requests).", checks);
 		else
 			Console.WriteLn(Color_StrongRed, "(VR) MenuPointer self-test FAIL: %s (%d of %d checks failed).", first, failures, checks);
 		return failures == 0;
