@@ -1962,6 +1962,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(OpaqueBackground);
 	SettingsWrapEntry(HandsDisplayRate);
 	SettingsWrapEntry(DedicatedXrQueue);
+	SettingsWrapEntry(PacerCopies);
 	SettingsWrapEntry(XrSeatRuntimeDirs);
 	SettingsWrapEntry(XrSeatRuntimeJsons);
 
@@ -1996,9 +1997,8 @@ bool Pcsx2Config::VROptions::operator==(const VROptions& right) const
 	// SnapTurn, ComfortBlink, LaserSight, ZoneMarkers, MenuPointer, MenuTablet, PickupCue, ComfortVignette,
 	// VignetteStrength, OnlineSafe, FirstPersonAutoStereo, FirstPersonStereoStrength, FirstPersonFov,
 	// FirstPersonFovMarginDeg, Brightness, GameRumble and HapticStrength are read from EmuConfig every vsync (EdgeFill,
-	// HeadsetRateSubmit, OpaqueBackground and HandsDisplayRate when VR starts, DedicatedXrQueue when the GS device is
-	// created); leaving them out keeps a
-	// settings tweak from rebuilding (and so re-announcing) every VR control.
+	// HeadsetRateSubmit, OpaqueBackground, HandsDisplayRate and PacerCopies when VR starts, DedicatedXrQueue when the GS
+	// device is created); leaving them out keeps a settings tweak from rebuilding (and so re-announcing) every VR control.
 	return OpEqu(Enable) && OpEqu(ScreenDistance) && OpEqu(ScreenHeight) &&
 	       OpEqu(ScreenVerticalOffset) &&
 	       OpEqu(ScreenArcDeg) && OpEqu(StereoMode) && OpEqu(StereoUseProfile) &&

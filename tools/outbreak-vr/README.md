@@ -73,6 +73,63 @@ with the GS (<why>).` The `(VR) Frames:` line splits its queue-lock waits as `to
 work is submitted first and `(VR) XR queue: the GS had work not yet submitted ... (N so far)` is logged (the first time
 and every 600th); it should not show in normal play.
 
+Pacer copies (VR setting `PacerCopies`, off by default, ini only, read when VR starts; needs `DedicatedXrQueue` in
+effect and `HeadsetRateSubmit`): the VR pacer does every swapchain call itself, so the GS thread (and with it the
+emulation) never calls into the runtime or takes the queue lock in its end-of-frame work. A runtime that blocks in
+`xrEndFrame` then holds up only the pacer. The GS copies each frame (both eyes) into one of three images of the
+compositor's own with a copy recorded into its OWN current command buffer (no extra submit, no lock; it goes to the GPU
+with the GS's next submit, whose timeline value is known as it is recorded), builds the edge fill beside it the same way,
+and draws the hands, HUD cards, lever cards and zone markers into a three-slot staging ring each (host memory), then
+publishes the layers at once. The pacer, after `xrBeginFrame`, claims what it will read, acquires and waits each
+swapchain image within 2 ms, copies the ring and the staging into its own swapchains in one submit on the session's
+queue (waiting for the GS's latest submitted timeline value, signalling the next xr value), releases them and ends the
+frame. A layer goes out only with the image it was built for, as before (the screen's pair with its frame, a hand or
+zone marker with its drawing, the toast and the laser's slot with their content); otherwise with what went out with the
+image its swapchain holds, or parked. The ring is safe by the claims plus the xr timeline wait every GS submit after a
+pacer read carries; the staging slots by the pacer's fences. Because the frame reaches the GPU with the GS's next
+submit, the headset sees it about one GS frame (16.7 ms) later than with the GS-side copy; `PCSX2_VR_PACER_COPIES_FLUSH=1`
+has the GS submit right after the copy instead (an A/B for that latency). The stereo dump keeps working (it reads the
+frame in the same command buffer, after the copy). The alternate-eye debug mode (`PCSX2_VR_INTERLEAVE`) goes as mono.
+VR start logs `(VR) Pacer copies: on ([VR] PacerCopies): ...`, `off`, or why it stays off (`needs the dedicated XR
+queue`, `needs HeadsetRateSubmit`); the pacer's swapchains log `(VR) Pacer copies: swapchain N made on the pacer (...)`
+as they are made. With it on the Frames line ends `pacer copies: frames F/s age mean/max ms (GS submit not in G, image
+not back I, busy B), uploads U/s`: frames copied into the eye swapchains and how long after their publish, pacer frames
+whose newest frame's GS submit had not gone in yet, images the runtime had not handed back within the budget, frames
+with all three copy command buffers still on the GPU, and CPU-drawn layers copied. With it on, `queue-lock wait ... GS
+thread` should read 0 and `copies skipped` count only a full ring (rare).
+
+The `(VR) Frames:` line (every 5 s, from the thread that ends the frames: the VR pacer, or the GS in legacy mode):
+frames submitted per second against the display rate, new and re-sent GS frames, stale and `shouldRender=false`
+frames, then `mean/max ms:` for `xrWaitFrame` and `xrBeginFrame` (each from its call to its return: SteamVR may pace in
+either, or in `xrEndFrame`; legacy adds `wait->begin`, how long a waited frame sat until the GS present began it) and
+`xrEndFrame` split into `queue lock` (waiting for the session's queue) and `runtime` (the call itself). `display lead vs
+first min/mean/max` is each frame's `predictedDisplayTime` minus the steady clock at its `xrWaitFrame`'s return,
+against the first frame's (logged once as `(VR) Frames: display lead baseline N ms`): a runtime that starts predicting
+one frame further out shows as a jump of one display period (11.1 ms at 90 Hz). Then the queue-lock waits, copies and
+deferrals as before, the last frame's `layers`, `layer changes` (submits whose layer array, each layer's type,
+swapchain and image size in order, differs from the one before; SteamVR re-creates a layer position's texture when
+what sits there changes size, about 150 times in 11 minutes in the first headset session) and `no projection`
+(submits with layers but no projection layer under them; with `OpaqueBackground` on this should read 0 after the first
+frame: a frame whose views cannot be located, as around a focus change, sends the background with the last views
+located instead, counted as `views reused`).
+
+Layer positions: every layer has a fixed position in the frame's layer array, in the order they are drawn: the
+background, the screen's layers, the lever cards, the zone markers, the laser (or menu beam), the menu pointer's dot,
+the toast, the hands, then the wrist card, the vignette and the blink. A lever card, zone marker, HUD card or hand that
+is not shown this frame but whose swapchain has been released once stays in its position parked: its own image, 1 cm
+across, 100 m behind the head in the VIEW space, so no eye sees it (valid OpenXR, nothing zero-sized or transparent for
+a runtime to special-case). SteamVR shows our quads as overlays by array index and re-creates a position's texture
+when what sits there changes size, and the volatile cards (laser, dot, toast, zone markers) must stay under the hands
+for their depth, so leaving one out moved every layer after it; parked, a toggle changes nothing in the array. A layer
+whose swapchain was never released stays out (it joins once, the first time it shows), and parked layers only take
+capacity the shown ones leave (15 plus the background). In first person that is 14 layers every frame, `layers 14
+(parked N)` on the Frames line, and `layer changes` should stay at 0 in steady play (a screen size change, the edge
+fill turning on or off and a layer's first show still count one). The HUD cards' images are now 256 x 256 like the
+hands' and the zone markers' (the laser and beam, blink and dot stretched by whole factors, the wrist card padded and
+its quad grown to match; the toast keeps 1024 x 160), so a position that does change occupant mostly keeps its size.
+VR start logs `(VR) Layers: each layer keeps its position ...`; `PCSX2_VR_NO_PARKED_LAYERS=1` leaves a layer that is
+not shown out again (logged), for an A/B of what the parked overlays cost SteamVR (`xrEndFrame` runtime mean and max).
+
 Weapons in hand (both Files, profile `feedback.weapon`): while the weapon is raised in first person the right hand
 holds what the local character has equipped, by the item's kind (`VR/ItemData`, Outbreak-Research's item ids): a
 handgun, the stun gun, nail gun or ampoule shooter as the pistol (recoil, slide, muzzle flash, as before); a long gun

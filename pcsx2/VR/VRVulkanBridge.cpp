@@ -438,6 +438,16 @@ namespace VR
 			s_gs_waited_xr = t.xr_value;
 	}
 
+	u64 NextGsSubmitValue()
+	{
+		return s_gs_next + 1;
+	}
+
+	u64 GsSubmittedValue()
+	{
+		return s_gs_submitted.load(std::memory_order_acquire);
+	}
+
 	bool AddXrReadTimeline(VkSubmitInfo* si, XrReadTimeline* t)
 	{
 		if (!XrQueueDedicated())

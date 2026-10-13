@@ -142,6 +142,7 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 | `ZoneMarkers` | true | false: no holstered weapon or zone markers |
 | `PickupCue` | true | false: no pickup tick or name |
 | `DedicatedXrQueue` | false | true: the OpenXR session gets its own Vulkan queue. The emulog says `(VR) XR queue: dedicated` or `shared with the GS (why)`. |
+| `PacerCopies` | false | true (with `DedicatedXrQueue` in effect): the VR pacer copies the frame, hands and cards into the headset's swapchains itself, so the GS thread never calls into the runtime or waits for its queue lock; the frame shows about one GS frame later (`PCSX2_VR_PACER_COPIES_FLUSH=1` takes that back with one more GS submit); the emulog says `(VR) Pacer copies: on` or why it stays off |
 
 ## In progress (agents, 2026-10-12 night)
 
@@ -152,9 +153,11 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 - **True per-eye rendering:** depth reprojection, and replaying the game's VU1 draw program per eye.
   `research/2026-10-12-true-vr-rendering-research.md`.
 
+**Merged since session 2:** `pacer2` (frame stats, a steady layer array with parked layers, a projection layer always
+sent, opt-in `PacerCopies`; targets the SteamVR stalls, `research/2026-10-12-steamvr-endframe-research.md`); the menu
+re-press; the VR self-tests in CI.
+
 **Builds on branches:**
-- **`pacer2`:** frame stats, a steady layer array, an always-present projection layer, and opt-in pacer-owned copies
-  (`PacerCopies`). This targets the SteamVR stalls: `research/2026-10-12-steamvr-endframe-research.md`.
 - **`reloadwire`:** the reload gesture drives the native L1 reload.
 - **`meshraster`:** the textured mesh renderer, so the game's weapon models and the hand model can be drawn.
 
