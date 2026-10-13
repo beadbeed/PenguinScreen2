@@ -104,7 +104,7 @@ GAMES = {
     "SLPM-65692": dict(
         title="File #2",
         records=0x47BD30, stride=0x1100, local_slot=0x4912BD,
-        menu_open=0x4912BE,
+        menu_open=0x4912BE, screen_up=0x767110,
         eye=0x313548, target=0x313554,
         cut_handler=0x595248, focus_slot=0x3B31F4, near_cull=0x718DB4,
         max_hp=0x542,
@@ -973,7 +973,8 @@ def profile_problems(serial, prof):
         pause_flag, ", ".join(_fmt(a) for a in pause) or "none"))
     if "menuPointer" in prof:
         when = [c.get("address") for c in (prof["menuPointer"] or {}).get("when") or []]
-        has("menuPointer.when", g["menu_open"] in when, "no entry on 0x%X" % g["menu_open"])
+        has("menuPointer.when", g["menu_open"] in when or pause_flag in when,
+            "no entry on 0x%X or 0x%X" % (g["menu_open"], pause_flag))
 
     # Body follow: stance normal and the stick magnitude centred (File #1 also tests its action byte).
     follow = dict((c.get("offset"), c.get("equals")) for c in look.get("bodyFollow") or [])

@@ -43,7 +43,8 @@ SLPM-65692:
   menuPointer:
     when:
       - { address: 0x543004, equals: 3 }             # GAME overlay resident
-      - { address: 0x4912BE, equals: 1, width: 1 }   # item screen, map or pause open
+      - { address: 0x4912BE, notEquals: 0, width: 1 }   # item screen, map or pause open (as File #1: not 'equals 1',
+                                                        # the openers store slot + 1 in co-op)
       - { address: 0x7671F0, equals: 1 }             # the item screen has been up (stays 1 after it closes)
     liveWhen:
       - { address: 0x76A604, equals: 1, width: 1 }   # the cursor in your own item grid (verified on File #2)
@@ -143,11 +144,10 @@ SLPM-65692:
     # own text looks doubled or sunk into a surface, [VR] NearDepthMetres = 1.0 brings back wave 8's near
     # field and -1 turns it off.
     firstPerson: { separation: 0.0132, convergence: 150, nearest: 0.5, auto: true }
-    # Menus flat (as File #1): while the item screen, the map or pause is up (u8 0x4912BE = 1, the flag
-    # camera.lookAt.pauseWhen reads) the picture goes at zero separation, so the menu lies on the screen's plane with
-    # the menu pointer's dot.
+    # Menus flat (as File #1): while any game screen is drawn (u32 0x767110 = 1, the flag camera.lookAt.pauseWhen reads)
+    # the picture goes at zero separation, so the menu lies on the screen's plane with the menu pointer's dot.
     scenes:
-      - { when: { address: 0x4912BE, equals: 1, width: 1 }, separation: 0, label: menu }
+      - { when: { address: 0x767110, equals: 1 }, separation: 0, label: menu }
   # First-person camera (only with --vr and the VR 'Head-Tracked Camera' setting, on by default).
   # Outbreak builds its view from an eye and a target vector. During normal room play (GAME overlay
   # resident, scenario in game, room camera in normal mode) the room camera's three cut handlers and the
@@ -228,7 +228,11 @@ SLPM-65692:
       # Checked live on File #2 (Training Ground): item screen flag, near-cull table, view matrix and the
       # stick magnitude (+0xFA8: the record is 0x20 longer than File #1's). The action byte is +0x54B (File #1's
       # +0x54F; measured 2026-10-11: idle 0, walk 1, run 3, aiming 128), so body-follow checks idle as File #1 does.
-      pauseWhen: [{ address: 0x4912BE, equals: 1, width: 1 }]
+      # Any game screen drawn (File #1's 0x720AA0 at File #2's struct layout): u32 0x767110 is 1 while the item screen
+      # (and its command submenu), the map or pause is drawn and 0 otherwise; checked offline 2026-10-12 in 1302 samples
+      # at ~36 ms plus 142 for pause, 0 in every idle, walk, run, aim and shot sample; it rises 62-109 ms after 0x4912BE.
+      # The take-it prompt was not seen on File #2 yet (tools/outbreak-vr/research/2026-10-12-reload-timing-research.md).
+      pauseWhen: [{ address: 0x767110, equals: 1 }]
       bodyFollow:
         - { offset: 0x08, equals: 1, width: 1 }     # stance: normal (2 = weapon raised)
         - { offset: 0x54B, equals: 0, width: 1 }    # action: idle (1 walk, 3 run, 128 aiming)

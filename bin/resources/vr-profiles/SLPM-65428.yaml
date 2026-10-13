@@ -92,9 +92,13 @@ SLPM-65428:
   menuPointer:
     when:
       - { address: 0x540004, equals: 3 }             # GAME overlay resident
-      - { address: 0x48BF7E, notEquals: 0, width: 1 }   # item screen, map or pause open (the openers store slot + 1, so
-                                                        # not 1 for a co-op player in slots 1-3; the take-it prompts
-                                                        # leave it 0, so the pointer stays off there)
+      - { address: 0x720AA0, equals: 1 }             # a game screen drawn: the item screen, the map, pause or a
+                                                     # take-it prompt. In a take-it prompt the cursor struct tracks the
+                                                     # highlight exactly (the 4 cells, same nodes, index and x/y; the box
+                                                     # cannot be reached), 0x723F94 reads 1 and 0x720BA0 0, so you point
+                                                     # at the cell the item goes into; the trigger on a full cell SWAPS
+                                                     # (the old item drops to the floor), so it confirms only where the dot
+                                                     # rested, as everywhere. The map and pause fail liveWhen.
       - { address: 0x720B80, equals: 1 }             # the item screen has been up (stays 1 after it closes)
     liveWhen:
       - { address: 0x723F94, equals: 1, width: 1 }   # the cursor in your own item grid (where the screen opens)
