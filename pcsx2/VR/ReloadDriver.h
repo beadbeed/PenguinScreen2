@@ -188,6 +188,11 @@ namespace VR::ReloadDriver
 	// the driver, plays their haptics and toasts, writes their log lines.
 	Frame Poll(const VRInputSnapshot& snap, const SpatialControls::Hands& hands, GuestReader reader, float dt);
 
+	// A reload is running (lowering, holding L1, or letting go), as the last Poll left it; false once that is more than
+	// 250 ms old (the polls stopped). The game holds the weapon lowered meanwhile, so CameraDriver keeps the first-person
+	// hand showing the gun the magazine is going into instead of putting it back in the holster. Any thread.
+	bool Reloading();
+
 	// A copy of hands with the hand `hand` (-1: none) moved out of every zone's and pouch's reach. Its grip is kept, so a
 	// zone still tracks it closing and opening and a grip held through the hiding never reads as a fresh squeeze.
 	SpatialControls::Hands HideHand(const SpatialControls::Hands& hands, int hand);

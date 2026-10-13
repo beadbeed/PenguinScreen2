@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <string_view>
@@ -778,6 +779,9 @@ namespace VR::ReloadDriver
 		float s_hint_next_s = -1.0f;
 		std::string s_hint_first;
 		std::string s_hint_second;
+		// Reloading(): when the last poll that had a reload running ran (CameraDriver::SteadyNowMs; 0 none).
+		std::atomic<u64> s_reloading_ms{0};
+		constexpr u64 kReloadingStaleMs = 250;
 
 		bool DefaultRead(u32 address, u8 width, u32* value)
 		{
@@ -1140,6 +1144,8 @@ namespace VR::ReloadDriver
 			Report(o, no_spare, (item_id < s_most_rounds.size()) ? s_most_rounds[item_id] : 0u);
 		}
 
+		s_reloading_ms.store((o.phase != Phase::Idle) ? std::max<u64>(CameraDriver::SteadyNowMs(), 1) : 0, std::memory_order_release);
+
 		frame.owned_hand = go.owns_left_hand ? carry : -1;
 		frame.pad_port = s_pad_port;
 		frame.reload_button = s_reload_button;
@@ -1149,5 +1155,12 @@ namespace VR::ReloadDriver
 		// reload, not an L1 with the weapon raised (which would switch the lock-on target).
 		frame.mask_reload = o.mask_reload || go.owns_left_hand;
 		return frame;
+	}
+
+	bool Reloading()
+	{
+		const u64 ms = s_reloading_ms.load(std::memory_order_acquire);
+		const u64 now = CameraDriver::SteadyNowMs();
+		return ms != 0 && (now < ms || now - ms < kReloadingStaleMs);
 	}
 }

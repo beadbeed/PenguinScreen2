@@ -266,8 +266,10 @@ rounds have not risen for 0.8 s (with File #1's action byte: also as soon as the
 reload action at all), or after 4 s unless a round came in the last 0.45 s (a 15-round Handgun from empty takes 4.9 s),
 6 s at most; the left stick past 0.25, a game screen, or first person or the gun going away let go at once. Then L1 goes
 up, and 0.05 s later R1 comes back: a bumper or holster grip still held raises the weapon again by itself; a left
-trigger still held stays at 0 until it is let go once (release-first). Each round loaded is felt through the weapon
-reader's existing reload tick (both hands, per rise). A reload that loaded nothing toasts `No spare ammo` (no ammo in
+trigger still held stays at 0 until it is let go once (release-first). While it runs the first-person hand keeps
+showing the gun (`ReloadDriver::Reloading`, read by CameraDriver for `HandModel::SetWeaponHeld`) although the game holds
+it lowered, so it does not jump to the holster for a second. Each round loaded is felt through the weapon reader's
+existing reload tick (both hands, per rise). A reload that loaded nothing toasts `No spare ammo` (no ammo in
 the cells, an empty gun, or a gun below the most rounds it has shown this session) or `Magazine full`, once per attempt.
 Only the player's own R1 is held back and their own L1 pressed, nothing is written, so it runs wherever first person
 arms (offline and private co-op; never on obsrv). The first time a gun is raised in a session the toasts `Reload: lower
