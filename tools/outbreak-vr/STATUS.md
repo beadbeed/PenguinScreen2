@@ -5,7 +5,7 @@ only** until it feels right. The direction, and the plan to make it feel like re
 
 Details live elsewhere:
 - `ROADMAP.md`: Alex's goal, why it still feels like a flat game in a headset, and the road to real VR;
-- `HANDOFF.md`: the history and Alex's decisions;
+- `HANDOFF.md`: older history (10-10 to 10-12); no longer updated;
 - `README.md`: every tool and debug switch;
 - `bin/resources/vr-profiles/README.md`: the profile format;
 - `research/`: game memory facts and design research;
