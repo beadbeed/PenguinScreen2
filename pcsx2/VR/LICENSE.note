@@ -41,4 +41,18 @@ has them, including around any edits made to wire this module in.
 That is every source file in this directory. The development tooling written for
 this module is likewise original work of the same author and carries its own note.
 
-_Last updated 2026-09-20._
+## Third-party data in this directory
+
+These files carry data from other people's works, under those works' own licenses.
+Each states its license and its source in its own header, as `ItemData.cpp` does for
+the MIT-licensed Outbreak-Research item table.
+
+- `HandMeshData.inc` (with `HandMesh.cpp` / `.h` that read it): the low-poly hand
+  model of Godot XR Tools (GodotVR/godot-xr-tools, `addons/godot-xr-tools/hands/`),
+  **CC0 1.0 Universal**. "DigitalN8m4r3 aka Miodrag Sejic has waived all copyright
+  and related or neighboring rights to Hand Models for the Godot XR Tools" (7th
+  November 2022); its base mesh is from MakeHuman's CC0 assets. The file is the
+  mesh posed and baked by `tools/outbreak-vr/convert_hand_gltf.py`; the model's
+  glTF files are not in this repository.
+
+_Last updated 2026-10-12._

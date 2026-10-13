@@ -1067,6 +1067,7 @@ set(pcsx2VRSources
 	VR/ControlQuads.cpp
 	VR/GameFeedback.cpp
 	VR/GrabBreakout.cpp
+	VR/HandMesh.cpp
 	VR/HandModel.cpp
 	VR/HudCards.cpp
 	VR/ItemData.cpp
@@ -1097,6 +1098,7 @@ set(pcsx2VRHeaders
 	VR/ControlQuads.h
 	VR/GameFeedback.h
 	VR/GrabBreakout.h
+	VR/HandMesh.h
 	VR/HandModel.h
 	VR/HudCards.h
 	VR/ItemData.h
