@@ -59,10 +59,10 @@
 //
 // MESH, MATERIAL, DRAW
 //
-// Mesh: vertex arrays (positions xyz, normals xyz, optional UVs uv; each with an optional byte stride, 0 meaning tightly
-// packed) and a triangle list by u16 or u32 indices (neither: the vertices are a plain triangle list). The mesh is
-// borrowed, never copied: it must stay alive for the Draw. A triangle with an index past the vertex count, or a vertex
-// that is not finite, is skipped.
+// Mesh: vertex arrays (positions xyz, normals xyz, optional UVs uv; each with an optional byte stride, a multiple of 4,
+// 0 meaning tightly packed) and a triangle list by u16 or u32 indices (neither: the vertices are a plain triangle list).
+// The mesh is borrowed, never copied: it must stay alive for the Draw. A triangle with an index past the vertex count, or
+// a vertex that is not finite, is skipped.
 //
 // Material:
 //   texture       an optional RGBA8 Texture (texel A = 255 is opaque): nearest or bilinear, and repeat or clamp for u and
@@ -75,10 +75,10 @@
 //                 interpolated across the triangle (Gouraud), so it needs the mesh's normals; without them the mesh is
 //                 drawn unlit. The total light is clamped to 0 to 1: a surface never gets brighter than its colour.
 //                 light_in_view_space gives the direction relative to the camera (x right, y up, z towards the viewer),
-//                 which keeps the shading steady as the head moves, as HandModel's impostors do. linear_light makes the
-//                 factors count in linear light while the colours stay as sRGB bytes (a square root stands for the
-//                 gamma), so a half-lit surface is as bright as HandModel's linear shading makes it; off, they simply
-//                 multiply the bytes (the PS2 game's own look).
+//                 which keeps the shading steady as the head moves, as HandModel's impostors do. linear_light counts the
+//                 light in linear light while the colours stay sRGB bytes (a factor is applied as its square root, the
+//                 usual gamma approximation), as HandModel shades; off, the factors multiply the bytes as they are (the
+//                 PS2 game's own look).
 //   alpha_cutoff  above 0, a texel (a filtered texel with bilinear) whose alpha is below it is not drawn: no colour and
 //                 no depth, so what is behind shows. What is drawn is opaque.
 //   cull_back     drop the faces turned away. Off, they are drawn too, lit from their own side (the normals turned).
@@ -109,11 +109,11 @@
 //
 // SPEED
 //
-// The cost is mostly in the samples shaded: the area drawn, times 1, 4 or 16 for the sample grid. On a 2.5 GHz cloud core a
-// sphere of 1008 triangles filling 5.6 thousand pixels of a 256 x 256 image takes (Clear + Draw + Resolve) 0.10 ms at
-// 1 x 1, 0.3 ms at 2 x 2 and 0.9 ms at 4 x 4 as a flat colour, lit, with a rim (a hand's worth), and 0.11, 0.37 and 1.2 ms
-// with a nearest-filtered texture (a weapon's worth); filling 25 thousand pixels with a bilinear texture it takes 0.7,
-// 2.7 and 11 ms. Textures with power-of-two sides sample fastest. SelfTest logs the same for the machine it runs on.
+// The cost is mostly in the samples shaded: the area drawn, times 1, 4 or 16 for the sample grid. On a 2.5 GHz cloud
+// core a sphere of 1008 triangles filling 5.6 thousand pixels of a 256 x 256 image takes (Clear + Draw + Resolve) 0.10 ms
+// at 1 x 1, 0.3 ms at 2 x 2 and 0.9 ms at 4 x 4 as a flat colour, lit, with a rim (a hand's worth), and 0.11, 0.37 and
+// 1.2 ms with a nearest-filtered texture (a weapon's worth); filling 25 thousand pixels with a bilinear texture it takes
+// 0.7, 2.7 and 11 ms. Textures with power-of-two sides sample fastest. SelfTest logs the same for the machine it runs on.
 namespace VR::MeshRaster
 {
 	// Column-major 4 x 4 matrix, identity by default.

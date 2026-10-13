@@ -732,7 +732,8 @@ namespace VR::MeshRaster
 			const u32 w10 = fx - w11;
 			const u32 w01 = fy - w11;
 			const u32 w00 = 256u - fx - fy + w11;
-			const u64 sum = (Expand(t00) * w00 + Expand(t10) * w10 + Expand(t01) * w01 + Expand(t11) * w11 + 0x0080008000800080ull) >> 8;
+			const u64 sum = (Expand(t00) * w00 + Expand(t10) * w10 + Expand(t01) * w01 + Expand(t11) * w11 +
+				0x0080008000800080ull) >> 8;
 			return static_cast<u32>(sum & 0xFFu) | static_cast<u32>(sum & 0xFF0000u) | static_cast<u32>((sum >> 24) & 0xFF00u) |
 			       static_cast<u32>((sum >> 24) & 0xFF000000u);
 		}
@@ -1053,7 +1054,8 @@ namespace VR::MeshRaster
 				const bool indexed = mesh.indices16 || mesh.indices32;
 				const u32 tri_count = (indexed ? mesh.index_count : mesh.vertex_count) / 3;
 				stats.triangles = tri_count;
-				if (tri_count == 0 || !AllFinite(model.m, 16) || !AllFinite(camera.view.m, 16) || !AllFinite(camera.proj.m, 16))
+				if (tri_count == 0 || !AllFinite(model.m, 16) || !AllFinite(camera.view.m, 16) ||
+					!AllFinite(camera.proj.m, 16))
 					return false;
 
 				// The model's 3 x 3 and its cofactor matrix (the inverse transpose times the determinant), which turns a
@@ -1063,7 +1065,8 @@ namespace VR::MeshRaster
 				const float a00 = mm[0], a01 = mm[4], a02 = mm[8];
 				const float a10 = mm[1], a11 = mm[5], a12 = mm[9];
 				const float a20 = mm[2], a21 = mm[6], a22 = mm[10];
-				const float det = a00 * (a11 * a22 - a12 * a21) - a01 * (a10 * a22 - a12 * a20) + a02 * (a10 * a21 - a11 * a20);
+				const float det = a00 * (a11 * a22 - a12 * a21) - a01 * (a10 * a22 - a12 * a20) +
+					a02 * (a10 * a21 - a11 * a20);
 				if (!IsFinite(det) || std::fabs(det) < 1.0e-18f)
 					return false;
 				const float mirror = (det < 0.0f) ? -1.0f : 1.0f;
@@ -1399,7 +1402,8 @@ namespace VR::MeshRaster
 		// (px, py) is (px, height - py) at a depth in front of the camera.
 		Camera PixelCamera(u32 width, u32 height)
 		{
-			return Camera::Orthographic(Mat4(), 0.0f, static_cast<float>(width), 0.0f, static_cast<float>(height), 0.1f, 100.0f);
+			return Camera::Orthographic(Mat4(), 0.0f, static_cast<float>(width), 0.0f, static_cast<float>(height), 0.1f,
+				100.0f);
 		}
 
 		u32 AddPx(Geometry& g, u32 height, float px, float py, float depth, float u = 0.0f, float v = 0.0f,
@@ -1524,7 +1528,8 @@ namespace VR::MeshRaster
 				t.Clear();
 				Draw(t, cam, off.View(), Mat4(), mat, &st);
 				const u32 want_off = SamplesInRect(t, 10.3f, 20.6f, 40.7f, 60.2f);
-				check(want_off > 0 && st.covered == want_off && st.written == want_off && CoverageIsRect(t, 10.3f, 20.6f, 40.7f, 60.2f),
+				check(want_off > 0 && st.covered == want_off && st.written == want_off &&
+					CoverageIsRect(t, 10.3f, 20.6f, 40.7f, 60.2f),
 					"a quad off the sample lines covers exactly its samples, once each (any grid)");
 
 				Geometry on;
@@ -1533,7 +1538,8 @@ namespace VR::MeshRaster
 				Draw(t, cam, on.View(), Mat4(), mat, &st);
 				const u32 want_on = SamplesInRect(t, 10.5f, 20.5f, 40.5f, 60.5f);
 				check(want_on > 0 && st.covered == want_on && CoverageIsRect(t, 10.5f, 20.5f, 40.5f, 60.5f),
-					"a quad with its edges through sample centres takes its left and top edges and not its right and bottom (top-left rule)");
+					"a quad with its edges through sample centres takes its left and top edges and not its right and bottom "
+					"(top-left rule)");
 				if (grid == 1)
 					check(st.covered == 30u * 40u, "the quad from (10.5, 20.5) to (40.5, 60.5) is 30 x 40 pixels");
 
@@ -1553,7 +1559,9 @@ namespace VR::MeshRaster
 						const bool edge = (i == 0 || j == 0 || i == 8 || j == 8);
 						const float jx = edge ? 0.0f : jitter();
 						const float jy = edge ? 0.0f : jitter();
-						id[j][i] = AddPx(lattice, h, 12.5f + 5.0f * static_cast<float>(i) + jx, 15.5f + 5.0f * static_cast<float>(j) + jy, 5.0f);
+						const float cx = 12.5f + 5.0f * static_cast<float>(i) + jx;
+						const float cy = 15.5f + 5.0f * static_cast<float>(j) + jy;
+						id[j][i] = AddPx(lattice, h, cx, cy, 5.0f);
 					}
 				}
 				for (int j = 0; j < 8; j++)
@@ -1577,7 +1585,8 @@ namespace VR::MeshRaster
 				const u32 want_lattice = SamplesInRect(t, 12.5f, 15.5f, 52.5f, 55.5f);
 				check(st.triangles == 128u && st.covered == want_lattice && st.written == want_lattice &&
 				      CoverageIsRect(t, 12.5f, 15.5f, 52.5f, 55.5f),
-					"a lattice of 128 triangles sharing corners on sample centres covers its outline exactly once (no cracks, no double hits)");
+					"a lattice of 128 triangles sharing corners on sample centres covers its outline exactly once (no "
+					"cracks, no double hits)");
 			}
 		}
 
@@ -1632,7 +1641,8 @@ namespace VR::MeshRaster
 			DrawStats st;
 			t.Clear();
 			Draw(t, cam, mesh, model, mat, &st);
-			check(st.culled == 0 && st.written > 1000u, "the tilted quad faces the camera, so back-face culling keeps it");
+			check(st.culled == 0 && st.written > 1000u,
+				"the tilted quad faces the camera, so back-face culling keeps it");
 
 			// The ray through each pixel against the quad's plane, back in the quad's own coordinates.
 			const float zero[3] = {0.0f, 0.0f, 0.0f};
@@ -1680,7 +1690,9 @@ namespace VR::MeshRaster
 				}
 			}
 			check(tested > 500, "the perspective texture test samples enough pixels");
-			check(wrong == 0, "a checkerboard quad in strong perspective shows the texel the ray through each pixel reaches (perspective-correct UVs, v down from the top)");
+			check(wrong == 0,
+				"a checkerboard quad in strong perspective shows the texel the ray through each pixel reaches "
+				"(perspective-correct UVs, v down from the top)");
 		}
 
 		void TestFiltering(Checker& check)
@@ -1713,7 +1725,8 @@ namespace VR::MeshRaster
 			tex.filter = Texture::Filter::Nearest;
 			t.Clear();
 			Draw(t, cam, g.View(), Mat4(), mat);
-			check(ChannelR(t.Pixel(23, 10)) == 0u && ChannelR(t.Pixel(24, 10)) == 255u, "nearest: the colour changes at the texel edge");
+			check(ChannelR(t.Pixel(23, 10)) == 0u && ChannelR(t.Pixel(24, 10)) == 255u,
+				"nearest: the colour changes at the texel edge");
 
 			// Repeat and clamp, u running 0 to 2 across the quad.
 			const u32 pair[2] = {PackRgba(255, 0, 0), PackRgba(0, 0, 255)};
@@ -1724,12 +1737,14 @@ namespace VR::MeshRaster
 			tex.wrap_u = Texture::Wrap::Repeat;
 			t.Clear();
 			Draw(t, cam, two.View(), Mat4(), mat);
-			check(t.Pixel(9, 10) == pair[0] && t.Pixel(19, 10) == pair[1] && t.Pixel(29, 10) == pair[0] && t.Pixel(39, 10) == pair[1],
+			check(t.Pixel(9, 10) == pair[0] && t.Pixel(19, 10) == pair[1] && t.Pixel(29, 10) == pair[0] &&
+				t.Pixel(39, 10) == pair[1],
 				"repeat: the texture runs again past u = 1");
 			tex.wrap_u = Texture::Wrap::Clamp;
 			t.Clear();
 			Draw(t, cam, two.View(), Mat4(), mat);
-			check(t.Pixel(9, 10) == pair[0] && t.Pixel(19, 10) == pair[1] && t.Pixel(29, 10) == pair[1] && t.Pixel(39, 10) == pair[1],
+			check(t.Pixel(9, 10) == pair[0] && t.Pixel(19, 10) == pair[1] && t.Pixel(29, 10) == pair[1] &&
+				t.Pixel(39, 10) == pair[1],
 				"clamp: the last texel runs on past u = 1");
 
 			// Bilinear with repeat blends the last texel into the first across the seam.
@@ -1738,7 +1753,8 @@ namespace VR::MeshRaster
 			tex.wrap_u = Texture::Wrap::Repeat;
 			t.Clear();
 			Draw(t, cam, g.View(), Mat4(), mat);
-			check(Near(ChannelR(t.Pixel(4, 10)), 121u, 3u), "bilinear, repeat: at u = 0 the last texel blends into the first");
+			check(Near(ChannelR(t.Pixel(4, 10)), 121u, 3u),
+				"bilinear, repeat: at u = 0 the last texel blends into the first");
 
 			// Textures whose sides are not powers of two (the general path): three texels across.
 			const u32 trio[3] = {PackRgba(255, 0, 0), PackRgba(0, 255, 0), PackRgba(0, 0, 255)};
@@ -1751,7 +1767,8 @@ namespace VR::MeshRaster
 			AddPxQuad(thirds, h, 2.0f, 4.0f, 41.0f, 20.0f, 5.0f, 2.0f);
 			t.Clear();
 			Draw(t, cam, thirds.View(), Mat4(), mat);
-			check(t.Pixel(5, 10) == trio[0] && t.Pixel(22, 10) == trio[0] && t.Pixel(30, 10) == trio[1] && t.Pixel(38, 10) == trio[2],
+			check(t.Pixel(5, 10) == trio[0] && t.Pixel(22, 10) == trio[0] && t.Pixel(30, 10) == trio[1] &&
+				t.Pixel(38, 10) == trio[2],
 				"a texture three texels wide repeats (sides that are not powers of two)");
 			tex.wrap_u = Texture::Wrap::Clamp;
 			t.Clear();
@@ -1764,7 +1781,8 @@ namespace VR::MeshRaster
 			AddPxQuad(once, h, 2.0f, 4.0f, 41.0f, 20.0f, 5.0f);
 			t.Clear();
 			Draw(t, cam, once.View(), Mat4(), mat);
-			check(ChannelR(t.Pixel(21, 10)) >= 250u && ChannelR(t.Pixel(8, 10)) <= 6u && Near(ChannelR(t.Pixel(14, 10)), 118u, 6u),
+			check(ChannelR(t.Pixel(21, 10)) >= 250u && ChannelR(t.Pixel(8, 10)) <= 6u &&
+				Near(ChannelR(t.Pixel(14, 10)), 118u, 6u),
 				"bilinear on a texture three texels wide: the middle texel's centre is solid and the ends fall away");
 		}
 
@@ -1782,9 +1800,11 @@ namespace VR::MeshRaster
 			near_mat.base_colour[1] = 0.0f;
 			near_mat.base_colour[2] = 0.0f; // red
 			Geometry far_tri;
-			far_tri.Tri(AddPx(far_tri, h, 2.0f, 2.0f, 8.0f), AddPx(far_tri, h, 2.0f, 26.0f, 8.0f), AddPx(far_tri, h, 26.0f, 2.0f, 8.0f));
+			far_tri.Tri(AddPx(far_tri, h, 2.0f, 2.0f, 8.0f), AddPx(far_tri, h, 2.0f, 26.0f, 8.0f),
+				AddPx(far_tri, h, 26.0f, 2.0f, 8.0f));
 			Geometry near_tri;
-			near_tri.Tri(AddPx(near_tri, h, 6.0f, 6.0f, 3.0f), AddPx(near_tri, h, 6.0f, 30.0f, 3.0f), AddPx(near_tri, h, 30.0f, 6.0f, 3.0f));
+			near_tri.Tri(AddPx(near_tri, h, 6.0f, 6.0f, 3.0f), AddPx(near_tri, h, 6.0f, 30.0f, 3.0f),
+				AddPx(near_tri, h, 30.0f, 6.0f, 3.0f));
 			const u32 green = PackRgba(0, 255, 0);
 			const u32 red = PackRgba(255, 0, 0);
 			for (int order = 0; order < 2; order++)
@@ -1836,7 +1856,8 @@ namespace VR::MeshRaster
 			}
 			// Ortho depth is linear: z = (distance - near) / (far - near).
 			const float want = (3.0f + 4.0f * (4.5f / 32.0f) - 0.1f) / 99.9f;
-			check(std::fabs(t.Depth()[10 * w + 4] - want) < 1.0e-4f, "depth: the buffer holds the interpolated plane's depth");
+			check(std::fabs(t.Depth()[10 * w + 4] - want) < 1.0e-4f,
+				"depth: the buffer holds the interpolated plane's depth");
 		}
 
 		// A floor triangle with its apex behind the camera is cut by the near plane and covers the floor it should.
@@ -1852,7 +1873,8 @@ namespace VR::MeshRaster
 			DrawStats st;
 			t.Clear();
 			Draw(t, cam, g.View(), Mat4(), mat, &st);
-			check(st.clipped == 1 && st.rejected == 0 && st.written > 100u, "a triangle across the camera's plane is clipped, not dropped");
+			check(st.clipped == 1 && st.rejected == 0 && st.written > 100u,
+				"a triangle across the camera's plane is clipped, not dropped");
 
 			// The triangle in the floor plane's own (x, z) coordinates: A (-5, -10), B (5, -10), C (0, 5).
 			const float ax = -5.0f, az = -10.0f, bx = 5.0f, bz = -10.0f, cx = 0.0f, cz = 5.0f;
@@ -1918,10 +1940,12 @@ namespace VR::MeshRaster
 
 			t.Clear();
 			Draw(t, cam, ccw.View(), Mat4(), mat, &st);
-			check(st.culled == 0 && st.written > 20u && t.Pixel(16, 16) != 0u, "culling: a counter-clockwise triangle is the front and stays");
+			check(st.culled == 0 && st.written > 20u && t.Pixel(16, 16) != 0u,
+				"culling: a counter-clockwise triangle is the front and stays");
 			t.Clear();
 			Draw(t, cam, cw.View(), Mat4(), mat, &st);
-			check(st.culled == 1 && st.written == 0 && t.Pixel(16, 16) == 0u, "culling: a clockwise triangle is the back and goes");
+			check(st.culled == 1 && st.written == 0 && t.Pixel(16, 16) == 0u,
+				"culling: a clockwise triangle is the back and goes");
 			mat.cull_back = false;
 			t.Clear();
 			Draw(t, cam, cw.View(), Mat4(), mat, &st);
@@ -1948,7 +1972,8 @@ namespace VR::MeshRaster
 			check(st.culled == 1 && st.written == 0, "culling: and its back faces stay back faces");
 
 			const float flat_scale[3] = {1.0f, 0.0f, 1.0f};
-			check(!Draw(t, cam, ccw.View(), ModelMatrix(no_pos, no_rot, flat_scale), mat), "a model matrix that flattens the mesh draws nothing");
+			check(!Draw(t, cam, ccw.View(), ModelMatrix(no_pos, no_rot, flat_scale), mat),
+				"a model matrix that flattens the mesh draws nothing");
 		}
 
 		void TestAlpha(Checker& check)
@@ -1986,7 +2011,8 @@ namespace VR::MeshRaster
 			Geometry back_quad;
 			AddPxQuad(back_quad, h, 0.0f, 0.0f, 32.0f, 32.0f, 9.0f);
 			Draw(t, cam, back_quad.View(), Mat4(), behind);
-			check(t.Pixel(24, 8) == blue && t.Pixel(8, 8) == red, "alpha test: a cut-out lets the farther surface show and leaves its depth alone");
+			check(t.Pixel(24, 8) == blue && t.Pixel(8, 8) == red,
+				"alpha test: a cut-out lets the farther surface show and leaves its depth alone");
 
 			mat.alpha_cutoff = 0.0f;
 			t.Clear();
@@ -2024,14 +2050,16 @@ namespace VR::MeshRaster
 			mat.base_colour[2] = 0.0f;
 			t.Clear();
 			Draw(t, cam, g.View(), Mat4(), mat);
-			check(Near(ChannelG(t.Pixel(16, 16)), 95u, 2u) && ChannelB(t.Pixel(16, 16)) == 0u && Near(ChannelR(t.Pixel(16, 16)), 191u, 1u),
+			check(Near(ChannelG(t.Pixel(16, 16)), 95u, 2u) && ChannelB(t.Pixel(16, 16)) == 0u &&
+				Near(ChannelR(t.Pixel(16, 16)), 191u, 1u),
 				"lighting: the base colour tints each channel");
 			mat.base_colour[1] = 1.0f;
 			mat.base_colour[2] = 1.0f;
 			mat.lighting.linear_light = true;
 			t.Clear();
 			Draw(t, cam, g.View(), Mat4(), mat);
-			check(Near(ChannelR(t.Pixel(16, 16)), 221u, 2u), "lighting: in linear light the 0.75 factor is its square root on the bytes");
+			check(Near(ChannelR(t.Pixel(16, 16)), 221u, 2u),
+				"lighting: in linear light the 0.75 factor is its square root on the bytes");
 			mat.lighting.linear_light = false;
 
 			// A back face drawn with culling off is lit from its own side.
@@ -2040,7 +2068,8 @@ namespace VR::MeshRaster
 			mat.cull_back = false;
 			t.Clear();
 			Draw(t, cam, back.View(), Mat4(), mat);
-			check(Near(ChannelR(t.Pixel(16, 16)), 63u, 1u), "lighting: a back face (culling off) has its normals turned, so it gets only the ambient light");
+			check(Near(ChannelR(t.Pixel(16, 16)), 63u, 1u),
+				"lighting: a back face (culling off) has its normals turned, so it gets only the ambient light");
 			mat.cull_back = true;
 
 			// A light given in the camera's own frame follows the camera: looking down +z, the viewer's +z is world -z.
@@ -2049,16 +2078,19 @@ namespace VR::MeshRaster
 			const float up[3] = {0.0f, 1.0f, 0.0f};
 			const Camera turned = Camera::Perspective(LookAt(origin, ahead, up), 60.0f * kPi / 180.0f, 1.0f, 0.1f, 50.0f);
 			Geometry behind; // the same triangle on the +z side, facing the camera at the origin
-			behind.Tri(behind.Add(1.0f, -1.0f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f), behind.Add(-1.0f, -1.0f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f),
+			behind.Tri(behind.Add(1.0f, -1.0f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f),
+				behind.Add(-1.0f, -1.0f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f),
 				behind.Add(0.0f, 1.0f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f));
 			mat.lighting.light_in_view_space = true;
 			t.Clear();
 			Draw(t, turned, behind.View(), Mat4(), mat);
-			check(Near(ChannelR(t.Pixel(16, 16)), 191u, 1u), "lighting: a light in view space (towards the viewer) lights what faces the viewer");
+			check(Near(ChannelR(t.Pixel(16, 16)), 191u, 1u),
+				"lighting: a light in view space (towards the viewer) lights what faces the viewer");
 			mat.lighting.light_in_view_space = false;
 			t.Clear();
 			Draw(t, turned, behind.View(), Mat4(), mat);
-			check(Near(ChannelR(t.Pixel(16, 16)), 63u, 1u), "lighting: the same light direction in world space points the other way");
+			check(Near(ChannelR(t.Pixel(16, 16)), 63u, 1u),
+				"lighting: the same light direction in world space points the other way");
 			mat.lighting.light_in_view_space = false;
 
 			// Rim and headlight, in an orthographic view whose view vector is the same everywhere.
@@ -2078,7 +2110,8 @@ namespace VR::MeshRaster
 			AddPxQuad(face_on, h, 4.0f, 4.0f, 28.0f, 28.0f, 5.0f, 1.0f, 0.0f, 0.0f, 1.0f);
 			t.Clear();
 			Draw(t, ortho, edge_on.View(), Mat4(), rim_mat);
-			check(t.Pixel(16, 16) == PackRgba(255, 0, 0), "lighting: a surface edge-on to the viewer takes the full rim colour");
+			check(t.Pixel(16, 16) == PackRgba(255, 0, 0),
+				"lighting: a surface edge-on to the viewer takes the full rim colour");
 			t.Clear();
 			Draw(t, ortho, face_on.View(), Mat4(), rim_mat);
 			check(t.Pixel(16, 16) == PackRgba(0, 0, 0), "lighting: a surface facing the viewer takes none");
@@ -2113,7 +2146,9 @@ namespace VR::MeshRaster
 				Draw(t, ortho, away.View(), Mat4(), axis_mat);
 				axes_ok = axes_ok && Near(ChannelR(t.Pixel(16, 16)), 63u, 1u);
 			}
-			check(axes_ok, "lighting: a light along x, y or z lights the surface facing it and leaves the one facing away to the ambient");
+			check(axes_ok,
+				"lighting: a light along x, y or z lights the surface facing it and leaves the one facing away to the "
+				"ambient");
 
 			// No normals: drawn unlit; lighting disabled: the same.
 			Material plain;
@@ -2140,12 +2175,15 @@ namespace VR::MeshRaster
 			Draw(t2, cam, g.View(), Mat4(), mat);
 			t2.Resolve();
 			const u32 half = t2.Pixel(9, 8);
-			check(t2.Pixel(6, 8) == 0xFFFFFFFFu && t2.Pixel(11, 8) == 0u, "2 x 2: the inside is solid and the outside clear");
-			check(Near(ChannelA(half), 128u, 1u) && Near(ChannelR(half), ChannelA(half), 1u) && Near(ChannelG(half), ChannelA(half), 1u),
+			check(t2.Pixel(6, 8) == 0xFFFFFFFFu && t2.Pixel(11, 8) == 0u,
+				"2 x 2: the inside is solid and the outside clear");
+			check(Near(ChannelA(half), 128u, 1u) && Near(ChannelR(half), ChannelA(half), 1u) &&
+				Near(ChannelG(half), ChannelA(half), 1u),
 				"2 x 2: a pixel with half its samples covered is half alpha, premultiplied");
 			u32 straight[16 * 16];
 			t2.CopyUnpremultiplied(straight);
-			check(ChannelR(straight[8 * 16 + 9]) >= 254u && Near(ChannelA(straight[8 * 16 + 9]), 128u, 1u) && straight[8 * 16 + 6] == 0xFFFFFFFFu &&
+			check(ChannelR(straight[8 * 16 + 9]) >= 254u && Near(ChannelA(straight[8 * 16 + 9]), 128u, 1u) &&
+				straight[8 * 16 + 6] == 0xFFFFFFFFu &&
 			      straight[8 * 16 + 11] == 0u,
 				"the unpremultiplied copy keeps the colour at an edge pixel");
 
@@ -2155,7 +2193,8 @@ namespace VR::MeshRaster
 			t4.Clear();
 			Draw(t4, cam, q.View(), Mat4(), mat);
 			t4.Resolve();
-			check(Near(ChannelA(t4.Pixel(9, 8)), 64u, 1u), "4 x 4: a pixel with a quarter of its samples covered is a quarter alpha");
+			check(Near(ChannelA(t4.Pixel(9, 8)), 64u, 1u),
+				"4 x 4: a pixel with a quarter of its samples covered is a quarter alpha");
 
 			// With one sample per pixel the same edge is all or nothing, and Resolve changes nothing.
 			Target t1(w, h, 1);
@@ -2175,7 +2214,8 @@ namespace VR::MeshRaster
 			const Material mat = PlainMaterial();
 			Geometry scene;
 			AddPxQuad(scene, h, 10.3f, 12.6f, 30.7f, 40.2f, 5.0f);
-			scene.Tri(AddPx(scene, h, 20.0f, 30.0f, 3.0f), AddPx(scene, h, 50.0f, 60.0f, 3.0f), AddPx(scene, h, 55.0f, 30.0f, 3.0f));
+			scene.Tri(AddPx(scene, h, 20.0f, 30.0f, 3.0f), AddPx(scene, h, 50.0f, 60.0f, 3.0f),
+				AddPx(scene, h, 55.0f, 30.0f, 3.0f));
 			Geometry big;
 			AddPxQuad(big, h, 2.0f, 2.0f, 60.0f, 50.0f, 4.0f);
 
@@ -2260,7 +2300,8 @@ namespace VR::MeshRaster
 			check(!Draw(t, cam, empty, Mat4(), mat), "a mesh with no vertices draws nothing");
 
 			Geometry gone;
-			gone.Tri(AddPx(gone, h, 100.0f, 4.0f, 5.0f), AddPx(gone, h, 100.0f, 20.0f, 5.0f), AddPx(gone, h, 120.0f, 4.0f, 5.0f));
+			gone.Tri(AddPx(gone, h, 100.0f, 4.0f, 5.0f), AddPx(gone, h, 100.0f, 20.0f, 5.0f),
+				AddPx(gone, h, 120.0f, 4.0f, 5.0f));
 			t.Clear();
 			Draw(t, cam, gone.View(), Mat4(), mat, &st);
 			check(st.rejected == 1 && st.covered == 0, "a triangle wholly outside the view is thrown out");
@@ -2289,7 +2330,8 @@ namespace VR::MeshRaster
 			const float up[3] = {0.04f, 0.98f, 0.17f};
 			const float size = 0.31f;
 			Camera cam;
-			check(Camera::Impostor(eye, centre, right, up, size, 0.03f, 20.0f, &cam), "the impostor camera is built for a quad in front of the eye");
+			check(Camera::Impostor(eye, centre, right, up, size, 0.03f, 20.0f, &cam),
+				"the impostor camera is built for a quad in front of the eye");
 
 			// HandModel::RenderImpostor's frame and projection.
 			float r[3] = {right[0], right[1], right[2]};
@@ -2302,7 +2344,8 @@ namespace VR::MeshRaster
 			const float ec[3] = {eye[0] - centre[0], eye[1] - centre[1], eye[2] - centre[2]};
 			const float de = Dot3(ec, n);
 			const float ppm = 256.0f / size;
-			const float pts[5][3] = {{-0.05f, 1.02f, -0.18f}, {0.0f, 1.0f, -0.3f}, {-0.12f, 1.1f, -0.25f}, {0.08f, 0.93f, -0.1f}, {-0.2f, 1.2f, -0.4f}};
+			const float pts[5][3] = {{-0.05f, 1.02f, -0.18f}, {0.0f, 1.0f, -0.3f}, {-0.12f, 1.1f, -0.25f},
+				{0.08f, 0.93f, -0.1f}, {-0.2f, 1.2f, -0.4f}};
 			bool same = true;
 			bool landed = true;
 			for (const auto& p : pts)
@@ -2313,7 +2356,8 @@ namespace VR::MeshRaster
 				const float want_x = 128.0f + (Dot3(ec, r) + s * Dot3(d, r)) * ppm;
 				const float want_y = 128.0f - (Dot3(ec, u) + s * Dot3(d, u)) * ppm;
 				float px[2];
-				same = same && ProjectPoint(cam, 256, 256, p, px) && std::fabs(px[0] - want_x) < 0.02f && std::fabs(px[1] - want_y) < 0.02f;
+				same = same && ProjectPoint(cam, 256, 256, p, px) && std::fabs(px[0] - want_x) < 0.02f &&
+					std::fabs(px[1] - want_y) < 0.02f;
 			}
 			check(same, "the impostor camera projects a point to the pixel HandModel::RenderImpostor does");
 
@@ -2322,7 +2366,8 @@ namespace VR::MeshRaster
 			Material mat = PlainMaterial();
 			const float p0[3] = {-0.1f, 1.08f, -0.27f};
 			Geometry g;
-			g.Tri(g.Add(p0[0] - 0.01f, p0[1] - 0.01f, p0[2]), g.Add(p0[0] + 0.01f, p0[1] - 0.01f, p0[2]), g.Add(p0[0], p0[1] + 0.01f, p0[2]));
+			g.Tri(g.Add(p0[0] - 0.01f, p0[1] - 0.01f, p0[2]), g.Add(p0[0] + 0.01f, p0[1] - 0.01f, p0[2]),
+				g.Add(p0[0], p0[1] + 0.01f, p0[2]));
 			t.Clear();
 			Draw(t, cam, g.View(), Mat4(), mat);
 			float px[2];
@@ -2341,7 +2386,8 @@ namespace VR::MeshRaster
 			const float behind_eye[3] = {eye[0] + 2.0f * n[0], eye[1] + 2.0f * n[1], eye[2] + 2.0f * n[2]};
 			check(!ProjectPoint(cam, 256, 256, behind_eye, px), "a point behind the eye does not project");
 			const float flat_eye[3] = {eye[0], eye[1], eye[2]};
-			check(!Camera::Impostor(eye, flat_eye, right, up, size, 0.03f, 20.0f, &cam) && !Camera::Impostor(eye, centre, right, up, 0.0f, 0.03f, 20.0f, &cam),
+			check(!Camera::Impostor(eye, flat_eye, right, up, size, 0.03f, 20.0f, &cam) &&
+				!Camera::Impostor(eye, centre, right, up, 0.0f, 0.03f, 20.0f, &cam),
 				"no impostor camera for an eye on the quad's plane or a quad of no size");
 
 			// LookAt, Perspective and the pixel mapping agree on which way is up and right.
@@ -2354,10 +2400,12 @@ namespace VR::MeshRaster
 			float p_ahead[2];
 			float p_ar[2];
 			float depth_ahead = 0.0f;
-			check(ProjectPoint(look, 100, 80, ahead, p_ahead, &depth_ahead) && std::fabs(p_ahead[0] - 50.0f) < 0.01f && std::fabs(p_ahead[1] - 40.0f) < 0.01f &&
+			check(ProjectPoint(look, 100, 80, ahead, p_ahead, &depth_ahead) && std::fabs(p_ahead[0] - 50.0f) < 0.01f &&
+				std::fabs(p_ahead[1] - 40.0f) < 0.01f &&
 			      depth_ahead > 0.0f && depth_ahead < 1.0f,
 				"a point straight ahead of the camera lands in the middle of the image");
-			check(ProjectPoint(look, 100, 80, above_right, p_ar) && p_ar[0] > 50.0f && p_ar[1] < 40.0f, "a point up and to the right lands up and to the right (y down in pixels)");
+			check(ProjectPoint(look, 100, 80, above_right, p_ar) && p_ar[0] > 50.0f && p_ar[1] < 40.0f,
+				"a point up and to the right lands up and to the right (y down in pixels)");
 
 			// ModelMatrix: a quarter turn about +Y takes +X to -Z, then the scale and the translation.
 			float quarter[4];
@@ -2368,7 +2416,8 @@ namespace VR::MeshRaster
 			const float unit_x[3] = {1.0f, 0.0f, 0.0f};
 			float moved[3];
 			TransformPoint(m, unit_x, moved);
-			check(std::fabs(moved[0] - 1.0f) < 1.0e-5f && std::fabs(moved[1] - 2.0f) < 1.0e-5f && std::fabs(moved[2] - 1.0f) < 1.0e-5f,
+			check(std::fabs(moved[0] - 1.0f) < 1.0e-5f && std::fabs(moved[1] - 2.0f) < 1.0e-5f &&
+				std::fabs(moved[2] - 1.0f) < 1.0e-5f,
 				"ModelMatrix turns, scales and moves in that order");
 		}
 
@@ -2482,14 +2531,18 @@ namespace VR::MeshRaster
 						sink += t.Pixel(128, 128);
 						// The first two runs warm the caches and the scratch.
 						if (i >= 2)
-							ms[k] += std::chrono::duration<double, std::milli>(end - begin).count() / static_cast<double>(runs[k]);
+						{
+							const double elapsed_ms = std::chrono::duration<double, std::milli>(end - begin).count();
+							ms[k] += elapsed_ms / static_cast<double>(runs[k]);
+						}
 					}
 					if (k == 0)
 						drew = drew && st.triangles == 1008u && st.written > 1000u;
 				}
-				Console.WriteLn("(VR) MeshRaster timing: %u triangles into 256x256, %s, %u px drawn: %.3f ms at 1x1, %.3f ms at 2x2, %.3f ms at 4x4 "
-								"(Clear + Draw + Resolve, one core)",
-					static_cast<unsigned>(st.triangles), scene.name, static_cast<unsigned>(st.written / 16u), ms[0], ms[1], ms[2]);
+				Console.WriteLn("(VR) MeshRaster timing: %u triangles into 256x256, %s, %u px drawn: %.3f ms at 1x1, "
+								"%.3f ms at 2x2, %.3f ms at 4x4 (Clear + Draw + Resolve, one core)",
+					static_cast<unsigned>(st.triangles), scene.name, static_cast<unsigned>(st.written / 16u), ms[0], ms[1],
+					ms[2]);
 			}
 			check(sink != 0u && drew, "the timing scenes draw a thousand triangles");
 		}
