@@ -5,6 +5,7 @@
 #include "VR/CameraDriver.h"
 #include "VR/HandModel.h"
 #include "VR/ItemData.h"
+#include "VR/ItemReach.h"
 #include "VR/SpatialControls.h"
 #include "VR/VRInput.h"
 #include "VR/VRProfileDB.h"
@@ -582,6 +583,24 @@ namespace VR::GameFeedback
 				Console.WriteLn("(VR) Feedback: game rumble forwarding stopped.");
 		}
 
+		// The pickup cue (profile reach:): what ItemReach needs from the camera driver this vsync. It reads its own memory
+		// and does not depend on the feedback block, so Poll calls it before that block's early return. LocalRecord is true
+		// only while first person is armed with camera.base resolved; menu mode is any game screen up (the item screen, map,
+		// pause, a take-it prompt, held through the camera guards' flicker) and weapon_raised is lookAt.aim's stance, both
+		// where Circle answers something other than a pickup.
+		void PollPickupCue(const ProfileDB::Profile* profile, float strength)
+		{
+			ItemReach::Live live;
+			if (profile && profile->reach.has_value() && VMManager::GetState() == VMState::Running &&
+				CameraDriver::LocalRecord(&live.record, &live.guards_now))
+			{
+				live.armed = true;
+				live.screen_up = SpatialControls::MenuMode();
+				live.weapon_raised = CameraDriver::GetTelemetry().weapon_raised;
+			}
+			ItemReach::Poll(profile, live, CameraDriver::SteadyNowMs(), strength);
+		}
+
 		void MaybeRunSelfTest()
 		{
 			static const bool enabled = (std::getenv("PCSX2_VR_FEEDBACK_SELFTEST") != nullptr);
@@ -618,6 +637,7 @@ namespace VR::GameFeedback
 		const float strength = HapticStrength();
 		s_strength.store(strength, std::memory_order_relaxed);
 		UpdateRumbleTarget(profile, fb);
+		PollPickupCue(profile, strength);
 
 		// The cues use the camera's guards and its record: no cues on the title screen or in cutscenes. They
 		// keep going while grabbed, down or dead (LocalRecordAny ignores releaseWhen), so a bite still pulses.
@@ -760,6 +780,7 @@ namespace VR::GameFeedback
 
 	void OnStateLoaded()
 	{
+		ItemReach::OnStateLoaded();
 		s_cues = CueState{};
 		ResetWeaponBaseline(s_weapon);
 		s_weapon.trigger_down = true;

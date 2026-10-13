@@ -48,6 +48,30 @@ SLPM-65428:
   # gun clicks on a trigger pull. Nothing equipped shows bare hands (no pistol, no laser). The wrist card
   # shows the weapon's name and rounds ("45 AUTO 7"), and the belt pouches name their items from the same table.
   feedback: { padRumble: true, hurt: { offset: 0x544, max: 0x546, width: 2 }, danger: { below: 0.20 }, weapon: { equipped: 0xC7C, table: 0x3967D0, action: 0x54F, reload: 0x1C } }
+  # Pickup cue (VR only, first person; VR setting PickupCue, on by default): when something on the floor comes within reach
+  # of the character's own Circle press, the right hand gets a light tick and a short toast names the item and the button
+  # ("Kevin's 45 Auto  (A)"), once per approach (not again while it stays in reach; re-armed after half a second out of it).
+  # The game has no "can pick up" flag: it searches only when Circle is pressed, so this is a read-only copy of that search
+  # (nothing is written), validated live 25 of 25 against the game's own press (2026-10-12, J's Bar pistol, knife and the
+  # bathroom Green Herb; tools/outbreak-vr/research/2026-10-12-ui-flags-research.md, section B). The game keeps its trigger
+  # nodes in a linked list: u32 0x23BD90 holds the first node's address (gp - 0x5EE0) and each node's +0x28 the next (0 ends).
+  # A node counts as a floor item when its type byte +0x30 is 0x80, its search mode +0x31 is 0, its enabled byte +0x3C is
+  # non-zero and its busy byte +0x3D is 0, the search circle overlaps its quad (four s32 x, z corners from +0x00; the circle's
+  # centre inside it, or within the radius of an edge) and the character's height y lies between the node's s32 y min +0x20
+  # and y max +0x24, or the node's y min is up to 200 over it (an item on a counter). The circle is 50 round and centred 46 +
+  # the record's own reach f32 (+0x1B4, 0.0 for Kevin) ahead of the character along its heading (s16 +0x92, 0x10000 = 360
+  # degrees, 0 faces +z, direction (sin, cos)); position is f32 x, y, z at +0x38. Among the nodes that count the lowest
+  # priority byte +0x32 wins. Its u32 +0x40 is a record index in the 60-byte item table at 0x3967D0, whose u16 +0x06 is the item
+  # id ItemData names; an id ItemData does not know cues nothing. The walk stops at maxNodes (0x100) and at the first node it
+  # meets twice, and every address is range-checked. Nothing is cued while a game screen is up (Circle answers its prompt)
+  # or the weapon is raised (Circle fires). File #2's list head is not known yet, so SLPM-65692 has no reach block.
+  reach:
+    list: 0x23BD90
+    node: { next: 0x28, quad: 0x00, yMin: 0x20, yMax: 0x24, type: 0x30, mode: 0x31, priority: 0x32, enabled: 0x3C, busy: 0x3D, item: 0x40 }
+    accept: { type: 0x80, mode: 0x00 }
+    items: { table: 0x3967D0, stride: 0x3C, id: 0x06 }
+    probe: { position: 0x38, heading: 0x92, reach: 0x1B4, ahead: 46, radius: 50, above: 200 }
+    maxNodes: 0x100
   # Wrist card (VR only, first person): turn the left wrist to the face to read the character's condition
   # (FINE / CAUTION below 60% of max HP / DANGER below 20% / BLEED), an HP bar and the virus gauge. Reads
   # only. Local record offsets: HP u16 +0x544 of max +0x546; virus counter u32 +0xBAC over the u32 maximum

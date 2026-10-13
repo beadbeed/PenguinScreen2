@@ -1942,6 +1942,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(LaserSight);
 	SettingsWrapEntry(MenuPointer);
 	SettingsWrapEntry(MenuTablet);
+	SettingsWrapEntry(PickupCue);
 	SettingsWrapEntry(ComfortVignette);
 	SettingsWrapEntry(VignetteStrength);
 	SettingsWrapEntry(OnlineSafe);
@@ -1990,7 +1991,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 
 bool Pcsx2Config::VROptions::operator==(const VROptions& right) const
 {
-	// SnapTurn, ComfortBlink, LaserSight, MenuPointer, MenuTablet, ComfortVignette, VignetteStrength, OnlineSafe,
+	// SnapTurn, ComfortBlink, LaserSight, MenuPointer, MenuTablet, PickupCue, ComfortVignette, VignetteStrength, OnlineSafe,
 	// FirstPersonAutoStereo, FirstPersonStereoStrength, FirstPersonFov, FirstPersonFovMarginDeg, Brightness, GameRumble
 	// and HapticStrength are read from EmuConfig every vsync (EdgeFill when VR starts); leaving them out keeps a
 	// settings tweak from rebuilding (and so re-announcing) every VR control.
