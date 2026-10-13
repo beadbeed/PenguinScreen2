@@ -71,7 +71,7 @@
 //   base_colour   multiplies the texture (or is the colour without one), each channel 0 to 1.
 //   lighting      one directional key light plus ambient, Lambert, an optional headlight (the part facing the viewer is
 //                 lit) and an optional rim (the part turning away from the viewer glows). Worked out per vertex and
-//                 interpolated (Gouraud, perspective-correct), so it needs the mesh's normals; without them the mesh is
+//                 interpolated across the triangle (Gouraud), so it needs the mesh's normals; without them the mesh is
 //                 drawn unlit. The total light is clamped to 0 to 1: a surface never gets brighter than its colour.
 //                 light_in_view_space gives the direction relative to the camera (x right, y up, z towards the viewer),
 //                 which keeps the shading steady as the head moves, as HandModel's impostors do. linear_light makes the
@@ -101,10 +101,17 @@
 // space (cut points always worked out from the inside vertex out, so two triangles sharing an edge cut it at the same
 // point), their corners are snapped to 1/256 of a sample, and each sample is covered when it is inside all three edges,
 // worked out in exact integer arithmetic. A sample exactly on an edge belongs to the triangle that has it as its top or
-// left edge (the Direct3D top-left rule), so a mesh's shared edges leave neither cracks nor double hits. Depth, UVs and
-// the light are interpolated in screen space from the plane through the triangle's corners (UVs and light divided by w,
-// so perspective-correct). Only a triangle that reaches beyond the guard band (eight times the picture's size) can be cut
-// off its neighbour's edge by a hair.
+// left edge (the Direct3D top-left rule), so a mesh's shared edges leave neither cracks nor double hits. Depth, light
+// and UVs are interpolated in screen space from the plane through the triangle's corners (the UVs divided by w, so they
+// are perspective-correct). Only a triangle that reaches beyond the guard band (eight times the picture's size) can be
+// cut off its neighbour's edge by a hair.
+//
+// SPEED
+//
+// The cost is in the samples shaded, not the triangles: about 5 ns a sample for a lit flat colour, 10 ns with a nearest
+// texture and 20 with a bilinear one (on a 2.5 GHz cloud core; the self-test logs what this machine does), times 1, 4
+// or 16 for the sample grid. A hand of a thousand triangles filling a third of a 256 x 256 image is a fifth of a
+// millisecond at 1 x 1 and under a millisecond at 2 x 2. Textures with power-of-two sides sample fastest.
 //
 // A Draw allocates nothing: the transformed vertices go to a scratch the Target keeps (vertex_capacity of them; a mesh
 // with more vertices is transformed triangle by triangle instead, slower but the same pixels).

@@ -95,9 +95,15 @@ namespace VR::MeshRaster
 		}
 
 		// A 0-to-1 value as 0 to 256 (a NaN as 0): 256 so that a full factor multiplies a byte exactly (b * 256 >> 8).
-		u32 Q256(float f)
+		__fi u32 Q256(float f)
 		{
-			return (f > 0.0f) ? ((f < 1.0f) ? static_cast<u32>(f * 256.0f + 0.5f) : 256u) : 0u;
+			return static_cast<u32>(std::max(0.0f, std::min(f * 256.0f + 0.5f, 256.0f)));
+		}
+
+		// f held to 0 to 1 (a NaN as 0).
+		float Unit(float f)
+		{
+			return (f > 0.0f) ? ((f < 1.0f) ? f : 1.0f) : 0.0f;
 		}
 	}
 
@@ -492,19 +498,18 @@ namespace VR::MeshRaster
 		// The light on a surface whose normal makes ndl with the light and ndv with the viewer: the factor on the colour.
 		float LightFactor(const DrawState& ds, float ndl, float ndv)
 		{
-			float l = ds.ambient + ds.key * std::max(ndl, 0.0f) + ds.headlight * std::clamp(ndv, 0.0f, 1.0f);
-			l = std::clamp(l, 0.0f, 1.0f);
+			const float l = Unit(ds.ambient + ds.key * std::max(ndl, 0.0f) + ds.headlight * Unit(ndv));
 			// With the colours as sRGB bytes, a factor in linear light multiplies them as its approximate gamma curve.
 			return ds.linear ? std::sqrt(l) : l;
 		}
 
 		float RimFactor(const DrawState& ds, float ndv)
 		{
-			const float edge = 1.0f - std::clamp(ndv, 0.0f, 1.0f);
+			const float edge = 1.0f - Unit(ndv);
 			float r = edge;
 			for (int i = 1; i < ds.rim_power; i++)
 				r *= edge;
-			r = std::clamp(ds.rim * r, 0.0f, 1.0f);
+			r = Unit(ds.rim * r);
 			return ds.linear ? std::sqrt(r) : r;
 		}
 
@@ -645,12 +650,12 @@ namespace VR::MeshRaster
 			return made;
 		}
 
-		// A corner in sample space: its position in 1/256 of a sample, and what is interpolated across the triangle (depth
-		// as it is, the rest divided by w so that it comes out perspective-correct).
+		// A corner in sample space: its position in 1/256 of a sample, and what is interpolated across the triangle: the
+		// depth and the light as they are, the texture coordinates divided by w so that they come out perspective-correct.
 		struct ScreenVert
 		{
 			s32 x, y;
-			float z, iw, uw, vw, litw, rimw;
+			float z, iw, uw, vw, lit, rim;
 		};
 
 		// How the colour of a sample is made, set once per Draw.
@@ -661,8 +666,14 @@ namespace VR::MeshRaster
 			s32 tex_h = 0;
 			float tex_wf = 0.0f;
 			float tex_hf = 0.0f;
+			float u_scale = 0.0f; // 256 texels' worth of u and v, for the power-of-two path
+			float v_scale = 0.0f;
+			s32 mask_u = 0;
+			s32 mask_v = 0;
+			bool pot = false; // both sides a power of two, so wrapping is a mask
 			bool repeat_u = true;
 			bool repeat_v = true;
+			bool base_white = true;
 			u32 base[3] = {256u, 256u, 256u}; // base colour, 0 to 256
 			bool rim_on = false;
 			u32 rim_colour[3] = {256u, 256u, 256u};
@@ -689,72 +700,137 @@ namespace VR::MeshRaster
 		};
 
 		// A texture coordinate that is safe to turn into an index: a NaN or a huge value becomes something in range.
-		float SafeCoord(float t)
+		__fi float SafeCoord(float t)
 		{
 			return (t > -1.0e6f) ? ((t < 1.0e6f) ? t : 1.0e6f) : -1.0e6f;
 		}
 
-		float WrapRepeat(float t)
+		// For a texture whose sides are not powers of two: u as 0 to 1, repeating or clamped.
+		__fi float WrapRepeat(float t)
 		{
 			t = SafeCoord(t);
 			return t - static_cast<float>(FloorToInt(t));
 		}
 
-		float WrapClamp(float t)
+		__fi float WrapClamp(float t)
 		{
 			return (t > 0.0f) ? ((t < 1.0f) ? t : 1.0f) : 0.0f;
 		}
 
-		u32 SampleNearest(const SampleState& s, float u, float v)
+		// The four bytes of a texel in 16-bit lanes of a 64-bit word (R, B, G, A from the bottom), so that a weighted sum
+		// of texels cannot spill from one channel into the next.
+		__fi u64 Expand(u32 t)
 		{
-			const float fu = s.repeat_u ? WrapRepeat(u) : WrapClamp(u);
-			const float fv = s.repeat_v ? WrapRepeat(v) : WrapClamp(v);
-			s32 x = static_cast<s32>(fu * s.tex_wf);
-			s32 y = static_cast<s32>(fv * s.tex_hf);
-			x = std::clamp(x, 0, s.tex_w - 1);
-			y = std::clamp(y, 0, s.tex_h - 1);
+			return (static_cast<u64>(t & 0xFF00FF00u) << 24) | (t & 0x00FF00FFu);
+		}
+
+		// The bilinear blend of four texels, fx and fy (0 to 255) the fractions towards the right and lower ones: weights in
+		// 256ths that add up to exactly 256.
+		__fi u32 Blend4(u32 t00, u32 t10, u32 t01, u32 t11, u32 fx, u32 fy)
+		{
+			const u32 w11 = (fx * fy) >> 8;
+			const u32 w10 = fx - w11;
+			const u32 w01 = fy - w11;
+			const u32 w00 = 256u - fx - fy + w11;
+			const u64 sum = (Expand(t00) * w00 + Expand(t10) * w10 + Expand(t01) * w01 + Expand(t11) * w11 + 0x0080008000800080ull) >> 8;
+			return static_cast<u32>(sum & 0xFFu) | static_cast<u32>(sum & 0xFF0000u) | static_cast<u32>((sum >> 24) & 0xFF00u) |
+			       static_cast<u32>((sum >> 24) & 0xFF000000u);
+		}
+
+		// A texture coordinate in 1/256 texels (an s64, so that a wild coordinate cannot overflow it).
+		__fi s64 TexelFixed(float t, float scale)
+		{
+			return static_cast<s64>(SafeCoord(t) * scale);
+		}
+
+		__fi u32 SampleNearest(const SampleState& s, float u, float v)
+		{
+			s32 x;
+			s32 y;
+			if (s.pot)
+			{
+				const s64 fu = TexelFixed(u, s.u_scale) >> kSubBits;
+				const s64 fv = TexelFixed(v, s.v_scale) >> kSubBits;
+				x = s.repeat_u ? static_cast<s32>(fu & s.mask_u) : static_cast<s32>(std::clamp<s64>(fu, 0, s.tex_w - 1));
+				y = s.repeat_v ? static_cast<s32>(fv & s.mask_v) : static_cast<s32>(std::clamp<s64>(fv, 0, s.tex_h - 1));
+			}
+			else
+			{
+				const float fu = s.repeat_u ? WrapRepeat(u) : WrapClamp(u);
+				const float fv = s.repeat_v ? WrapRepeat(v) : WrapClamp(v);
+				x = std::clamp(static_cast<s32>(fu * s.tex_wf), 0, s.tex_w - 1);
+				y = std::clamp(static_cast<s32>(fv * s.tex_hf), 0, s.tex_h - 1);
+			}
 			return s.texels[static_cast<size_t>(y) * s.tex_w + x];
 		}
 
-		// a + (b - a) * f / 256 on all four bytes at once (f 0 to 256), two bytes to each half of the word.
-		u32 Lerp4(u32 a, u32 b, u32 f)
+		__fi u32 SampleBilinear(const SampleState& s, float u, float v)
 		{
-			const u32 rb = ((a & 0x00FF00FFu) * (256u - f) + (b & 0x00FF00FFu) * f + 0x00800080u) >> 8;
-			const u32 ag = (((a >> 8) & 0x00FF00FFu) * (256u - f) + ((b >> 8) & 0x00FF00FFu) * f + 0x00800080u) >> 8;
-			return (rb & 0x00FF00FFu) | ((ag & 0x00FF00FFu) << 8);
-		}
-
-		u32 SampleBilinear(const SampleState& s, float u, float v)
-		{
-			// Texel centres are half a texel in from the edges.
-			const float fu = (s.repeat_u ? WrapRepeat(u) : WrapClamp(u)) * s.tex_wf - 0.5f;
-			const float fv = (s.repeat_v ? WrapRepeat(v) : WrapClamp(v)) * s.tex_hf - 0.5f;
-			s32 x0 = FloorToInt(fu);
-			s32 y0 = FloorToInt(fv);
-			const float tx = fu - static_cast<float>(x0);
-			const float ty = fv - static_cast<float>(y0);
-			s32 x1 = x0 + 1;
-			s32 y1 = y0 + 1;
-			if (s.repeat_u)
+			s32 x0;
+			s32 x1;
+			s32 y0;
+			s32 y1;
+			u32 fx;
+			u32 fy;
+			if (s.pot)
 			{
-				x0 = (x0 < 0) ? x0 + s.tex_w : x0;
-				x1 = (x1 >= s.tex_w) ? x1 - s.tex_w : x1;
+				// Texel centres are half a texel in from the edges.
+				const s64 fu = TexelFixed(u, s.u_scale) - kSub / 2;
+				const s64 fv = TexelFixed(v, s.v_scale) - kSub / 2;
+				const s64 xi = fu >> kSubBits;
+				const s64 yi = fv >> kSubBits;
+				fx = static_cast<u32>(fu & (kSub - 1));
+				fy = static_cast<u32>(fv & (kSub - 1));
+				if (s.repeat_u)
+				{
+					x0 = static_cast<s32>(xi & s.mask_u);
+					x1 = static_cast<s32>((xi + 1) & s.mask_u);
+				}
+				else
+				{
+					x0 = static_cast<s32>(std::clamp<s64>(xi, 0, s.tex_w - 1));
+					x1 = static_cast<s32>(std::clamp<s64>(xi + 1, 0, s.tex_w - 1));
+				}
+				if (s.repeat_v)
+				{
+					y0 = static_cast<s32>(yi & s.mask_v);
+					y1 = static_cast<s32>((yi + 1) & s.mask_v);
+				}
+				else
+				{
+					y0 = static_cast<s32>(std::clamp<s64>(yi, 0, s.tex_h - 1));
+					y1 = static_cast<s32>(std::clamp<s64>(yi + 1, 0, s.tex_h - 1));
+				}
 			}
-			if (s.repeat_v)
+			else
 			{
-				y0 = (y0 < 0) ? y0 + s.tex_h : y0;
-				y1 = (y1 >= s.tex_h) ? y1 - s.tex_h : y1;
+				const float tu = (s.repeat_u ? WrapRepeat(u) : WrapClamp(u)) * s.tex_wf - 0.5f;
+				const float tv = (s.repeat_v ? WrapRepeat(v) : WrapClamp(v)) * s.tex_hf - 0.5f;
+				x0 = FloorToInt(tu);
+				y0 = FloorToInt(tv);
+				fx = std::min(static_cast<u32>((tu - static_cast<float>(x0)) * 256.0f), 255u);
+				fy = std::min(static_cast<u32>((tv - static_cast<float>(y0)) * 256.0f), 255u);
+				x1 = x0 + 1;
+				y1 = y0 + 1;
+				if (s.repeat_u)
+				{
+					x0 = (x0 < 0) ? x0 + s.tex_w : x0;
+					x1 = (x1 >= s.tex_w) ? x1 - s.tex_w : x1;
+				}
+				if (s.repeat_v)
+				{
+					y0 = (y0 < 0) ? y0 + s.tex_h : y0;
+					y1 = (y1 >= s.tex_h) ? y1 - s.tex_h : y1;
+				}
+				// Clamped, the ends clamp to the edge texel; either way never outside the texture.
+				x0 = std::clamp(x0, 0, s.tex_w - 1);
+				x1 = std::clamp(x1, 0, s.tex_w - 1);
+				y0 = std::clamp(y0, 0, s.tex_h - 1);
+				y1 = std::clamp(y1, 0, s.tex_h - 1);
 			}
-			// Clamped, the ends clamp to the edge texel; either way never outside the texture.
-			x0 = std::clamp(x0, 0, s.tex_w - 1);
-			x1 = std::clamp(x1, 0, s.tex_w - 1);
-			y0 = std::clamp(y0, 0, s.tex_h - 1);
-			y1 = std::clamp(y1, 0, s.tex_h - 1);
 			const u32* row0 = s.texels + static_cast<size_t>(y0) * s.tex_w;
 			const u32* row1 = s.texels + static_cast<size_t>(y1) * s.tex_w;
-			const u32 fx = std::min(static_cast<u32>(tx * 256.0f), 255u);
-			const u32 fy = std::min(static_cast<u32>(ty * 256.0f), 255u);
-			return Lerp4(Lerp4(row0[x0], row0[x1], fx), Lerp4(row1[x0], row1[x1], fx), fy);
+			return Blend4(row0[x0], row0[x1], row1[x0], row1[x1], fx, fy);
 		}
 
 		// The plane through a triangle's three values of one quantity, as its value at the first sample the triangle's
@@ -832,32 +908,37 @@ namespace VR::MeshRaster
 				p.q0 = qa + p.dx * ox + p.dy * oy;
 				return p;
 			};
+			// A copy of the sampling state, so that the stores below cannot be taken to change it.
+			const SampleState ss = fc.ss;
 			const Plane pz = make_plane(a.z, b.z, c.z);
-			const Plane piw = make_plane(a.iw, b.iw, c.iw);
-			const Plane plit = make_plane(a.litw, b.litw, c.litw);
-			const Plane prim = make_plane(a.rimw, b.rimw, c.rimw);
+			const Plane plit = make_plane(a.lit, b.lit, c.lit);
+			Plane prim = {};
+			if (ss.rim_on)
+				prim = make_plane(a.rim, b.rim, c.rim);
+			Plane piw = {};
 			Plane pu = {};
 			Plane pv = {};
 			if constexpr (kFilter != 0)
 			{
+				piw = make_plane(a.iw, b.iw, c.iw);
 				pu = make_plane(a.uw, b.uw, c.uw);
 				pv = make_plane(a.vw, b.vw, c.vw);
 			}
 
-			const SampleState& ss = fc.ss;
 			u64 covered = 0;
 			u64 written = 0;
 			for (s32 y = y0; y <= y1; y++)
 			{
 				const float fy = static_cast<float>(y - y0);
 				const float z_row = pz.q0 + pz.dy * fy;
-				const float iw_row = piw.q0 + piw.dy * fy;
 				const float lit_row = plit.q0 + plit.dy * fy;
 				const float rim_row = prim.q0 + prim.dy * fy;
+				float iw_row = 0.0f;
 				float u_row = 0.0f;
 				float v_row = 0.0f;
 				if constexpr (kFilter != 0)
 				{
+					iw_row = piw.q0 + piw.dy * fy;
 					u_row = pu.q0 + pu.dy * fy;
 					v_row = pv.q0 + pv.dy * fy;
 				}
@@ -866,8 +947,9 @@ namespace VR::MeshRaster
 				s64 e0 = row0;
 				s64 e1 = row1;
 				s64 e2 = row2;
+				float fx = 0.0f;
 				bool seen = false;
-				for (s32 x = x0; x <= x1; x++, e0 += sx0, e1 += sx1, e2 += sx2)
+				for (s32 x = x0; x <= x1; x++, fx += 1.0f, e0 += sx0, e1 += sx1, e2 += sx2)
 				{
 					if ((e0 | e1 | e2) < 0)
 					{
@@ -878,28 +960,56 @@ namespace VR::MeshRaster
 					}
 					seen = true;
 					covered++;
-					const float fx = static_cast<float>(x - x0);
 					const float zf = z_row + pz.dx * fx;
 					if (!(zf < drow[x]))
 						continue;
 
-					const float rw = 1.0f / (iw_row + piw.dx * fx);
 					u32 texel = 0xFFFFFFFFu;
-					if constexpr (kFilter == 1)
-						texel = SampleNearest(ss, (u_row + pu.dx * fx) * rw, (v_row + pv.dx * fx) * rw);
-					else if constexpr (kFilter == 2)
-						texel = SampleBilinear(ss, (u_row + pu.dx * fx) * rw, (v_row + pv.dx * fx) * rw);
-					if (ss.cutoff > 0 && static_cast<s32>(texel >> 24) < ss.cutoff)
-						continue;
+					if constexpr (kFilter != 0)
+					{
+						const float rw = 1.0f / (iw_row + piw.dx * fx);
+						const float tu = (u_row + pu.dx * fx) * rw;
+						const float tv = (v_row + pv.dx * fx) * rw;
+						if constexpr (kFilter == 1)
+							texel = SampleNearest(ss, tu, tv);
+						else
+							texel = SampleBilinear(ss, tu, tv);
+						if (static_cast<s32>(texel >> 24) < ss.cutoff)
+							continue;
+					}
 
 					// Texel * base * light, in 8.8 fixed point: a full factor leaves the byte as it was.
-					const u32 lq = Q256((lit_row + plit.dx * fx) * rw);
-					u32 r = ((texel & 0xFFu) * ((lq * ss.base[0]) >> 8)) >> 8;
-					u32 g = (((texel >> 8) & 0xFFu) * ((lq * ss.base[1]) >> 8)) >> 8;
-					u32 bl = (((texel >> 16) & 0xFFu) * ((lq * ss.base[2]) >> 8)) >> 8;
+					const u32 lq = Q256(lit_row + plit.dx * fx);
+					u32 r;
+					u32 g;
+					u32 bl;
+					if constexpr (kFilter == 0)
+					{
+						if (ss.base_white)
+						{
+							r = (255u * lq) >> 8;
+							g = r;
+							bl = r;
+						}
+						else
+						{
+							r = (255u * ((lq * ss.base[0]) >> 8)) >> 8;
+							g = (255u * ((lq * ss.base[1]) >> 8)) >> 8;
+							bl = (255u * ((lq * ss.base[2]) >> 8)) >> 8;
+						}
+					}
+					else
+					{
+						const u32 mr = ss.base_white ? lq : (lq * ss.base[0]) >> 8;
+						const u32 mg = ss.base_white ? lq : (lq * ss.base[1]) >> 8;
+						const u32 mb = ss.base_white ? lq : (lq * ss.base[2]) >> 8;
+						r = ((texel & 0xFFu) * mr) >> 8;
+						g = (((texel >> 8) & 0xFFu) * mg) >> 8;
+						bl = (((texel >> 16) & 0xFFu) * mb) >> 8;
+					}
 					if (ss.rim_on)
 					{
-						const u32 rq = Q256((rim_row + prim.dx * fx) * rw);
+						const u32 rq = Q256(rim_row + prim.dx * fx);
 						r = std::min(255u, r + ((rq * ss.rim_colour[0]) >> 8));
 						g = std::min(255u, g + ((rq * ss.rim_colour[1]) >> 8));
 						bl = std::min(255u, bl + ((rq * ss.rim_colour[2]) >> 8));
@@ -1033,6 +1143,7 @@ namespace VR::MeshRaster
 					ss.base[i] = Q256(material.base_colour[i]);
 					ss.rim_colour[i] = Q256(lt.rim_colour[i]);
 				}
+				ss.base_white = (ss.base[0] == 256u && ss.base[1] == 256u && ss.base[2] == 256u);
 				ss.rim_on = ds.lit && ds.rim > 0.0f;
 				const float cutoff = std::clamp(IsFinite(material.alpha_cutoff) ? material.alpha_cutoff : 0.0f, 0.0f, 1.0f);
 				ss.cutoff = static_cast<s32>(std::ceil(cutoff * 255.0f));
@@ -1045,6 +1156,11 @@ namespace VR::MeshRaster
 					ss.tex_h = static_cast<s32>(tex->height);
 					ss.tex_wf = static_cast<float>(tex->width);
 					ss.tex_hf = static_cast<float>(tex->height);
+					ss.u_scale = ss.tex_wf * static_cast<float>(kSub);
+					ss.v_scale = ss.tex_hf * static_cast<float>(kSub);
+					ss.mask_u = ss.tex_w - 1;
+					ss.mask_v = ss.tex_h - 1;
+					ss.pot = (tex->width & (tex->width - 1)) == 0 && (tex->height & (tex->height - 1)) == 0;
 					ss.repeat_u = (tex->wrap_u == Texture::Wrap::Repeat);
 					ss.repeat_v = (tex->wrap_v == Texture::Wrap::Repeat);
 					filter = (tex->filter == Texture::Filter::Bilinear) ? 2 : 1;
@@ -1183,8 +1299,8 @@ namespace VR::MeshRaster
 						s.iw = iw;
 						s.uw = p.u * iw;
 						s.vw = p.v * iw;
-						s.litw = p.lit * iw;
-						s.rimw = p.rim * iw;
+						s.lit = p.lit;
+						s.rim = p.rim;
 					}
 					if (!usable)
 					{
@@ -1615,6 +1731,41 @@ namespace VR::MeshRaster
 			Draw(t, cam, two.View(), Mat4(), mat);
 			check(t.Pixel(9, 10) == pair[0] && t.Pixel(19, 10) == pair[1] && t.Pixel(29, 10) == pair[1] && t.Pixel(39, 10) == pair[1],
 				"clamp: the last texel runs on past u = 1");
+
+			// Bilinear with repeat blends the last texel into the first across the seam.
+			tex.texels = ramp;
+			tex.filter = Texture::Filter::Bilinear;
+			tex.wrap_u = Texture::Wrap::Repeat;
+			t.Clear();
+			Draw(t, cam, g.View(), Mat4(), mat);
+			check(Near(ChannelR(t.Pixel(4, 10)), 121u, 3u), "bilinear, repeat: at u = 0 the last texel blends into the first");
+
+			// Textures whose sides are not powers of two (the general path): three texels across.
+			const u32 trio[3] = {PackRgba(255, 0, 0), PackRgba(0, 255, 0), PackRgba(0, 0, 255)};
+			tex.texels = trio;
+			tex.width = 3;
+			tex.height = 1;
+			tex.filter = Texture::Filter::Nearest;
+			tex.wrap_u = Texture::Wrap::Repeat;
+			Geometry thirds;
+			AddPxQuad(thirds, h, 2.0f, 4.0f, 41.0f, 20.0f, 5.0f, 2.0f);
+			t.Clear();
+			Draw(t, cam, thirds.View(), Mat4(), mat);
+			check(t.Pixel(5, 10) == trio[0] && t.Pixel(22, 10) == trio[0] && t.Pixel(30, 10) == trio[1] && t.Pixel(38, 10) == trio[2],
+				"a texture three texels wide repeats (sides that are not powers of two)");
+			tex.wrap_u = Texture::Wrap::Clamp;
+			t.Clear();
+			Draw(t, cam, thirds.View(), Mat4(), mat);
+			check(t.Pixel(5, 10) == trio[0] && t.Pixel(22, 10) == trio[2] && t.Pixel(38, 10) == trio[2], "and clamps");
+			const u32 peak[3] = {PackRgba(0, 0, 0), PackRgba(255, 255, 255), PackRgba(0, 0, 0)};
+			tex.texels = peak;
+			tex.filter = Texture::Filter::Bilinear;
+			Geometry once;
+			AddPxQuad(once, h, 2.0f, 4.0f, 41.0f, 20.0f, 5.0f);
+			t.Clear();
+			Draw(t, cam, once.View(), Mat4(), mat);
+			check(ChannelR(t.Pixel(21, 10)) >= 250u && ChannelR(t.Pixel(8, 10)) <= 6u && Near(ChannelR(t.Pixel(14, 10)), 118u, 6u),
+				"bilinear on a texture three texels wide: the middle texel's centre is solid and the ends fall away");
 		}
 
 		// Depth: two overlapping triangles in either order, and two that cross each other.
