@@ -327,7 +327,7 @@ namespace VR::ReloadDriver
 
 			bool Action() const { return loading || action_s > 0.0f; }
 
-			void Frame(bool r1, bool l1, float dt)
+			void Tick(bool r1, bool l1, float dt)
 			{
 				if (r1 || other_r1)
 				{
@@ -431,13 +431,13 @@ namespace VR::ReloadDriver
 				}
 				if (finish_poll >= 0 && r1_back_poll < 0 && !out.suppress_raise)
 					r1_back_poll = polls;
-				g.Frame(r1, out.hold_reload, dt);
+				g.Tick(r1, out.hold_reload, dt);
 				polls++;
 			}
 
-			void Hold(float seconds)
+			void Hold(float secs)
 			{
-				for (int i = 0, n = std::max(1, static_cast<int>(std::lround(seconds * 60.0f))); i < n; ++i)
+				for (int i = 0, n = std::max(1, static_cast<int>(std::lround(secs * 60.0f))); i < n; ++i)
 					Poll();
 			}
 
@@ -655,7 +655,7 @@ namespace VR::ReloadDriver
 			Run stall;
 			stall.Poll(true);
 			stall.Hold(0.1f);
-			stall.Poll(10.0f);
+			stall.Poll(false, 10.0f);
 			c(stall.st.phase == Phase::Holding && stall.finishes == 0, "stall: a 10 s gap is not a timeout");
 			Run junk;
 			const float nan = std::numeric_limits<float>::quiet_NaN();
