@@ -27,8 +27,10 @@ namespace VR::GameModels
 		// barrel toward -X, top of the slide toward +Z, thickness along Y; its origin is near the trigger. Melee items
 		// lie along X, centred on the origin.
 		float pos[3];
-		float normal[3]; // as stored (unit length on the discs checked)
-		float uv[2];     // 0..1 across the part's texture, v counting down from the top row
+		float normal[3]; // as stored (unit length on both discs)
+		// Across the part's texture, v counting down from the top row. Mostly 0..1, but on File #2 the Shotgun E, Hunting
+		// Rifle and Handgun HP run u up to 2: sample with wrap (the GS's repeat), never clamp.
+		float uv[2];
 	};
 
 	// A decoded texture page: rows top to bottom, each texel ControlQuads::PackRgba's order (r | g << 8 | b << 16 |
@@ -82,8 +84,10 @@ namespace VR::GameModels
 
 	// Starts reading the running game's weapon models, once per disc: for SLPM-65428 / SLPM-65692 only, on a worker
 	// thread of its own, from the disc image the VM booted through a reader of its own (never the emulated CDVD's).
-	// The VR session calls it when it starts; any thread, returns at once, and again for the same disc does nothing.
-	// Logs one summary line when done ("(VR) Game models: ...").
+	// The VR session calls it when it starts (a session that starts before a game boots waits for the VM to name its
+	// disc); any thread, returns at once, and again for the same disc does nothing. Logs one summary line when done
+	// ("(VR) Game models: ..."). Only the start reads the disc: a game booted later while the same session runs keeps
+	// what was loaded for the first.
 	void StartLoad();
 
 	// The weapon's model, or nullptr until the load finished, for another game, or when the disc has no mesh for the

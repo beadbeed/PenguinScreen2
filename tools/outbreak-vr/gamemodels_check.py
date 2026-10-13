@@ -146,6 +146,7 @@ def afs_entries(disc, base_lba, total_size):
 	count = u32(head, 4)
 	need(0 < count <= MAX_AFS_ENTRIES, 'AFS entry count')
 	table_bytes = 8 + count * 8 + 8
+	need(table_bytes <= total_size, 'an AFS table past the archive')
 	table = disc.read_range(base_lba * SECTOR, table_bytes)
 	entries = []
 	first = None
@@ -504,7 +505,6 @@ def main():
 
 	items = load_item_table()
 	weapon_ids = sorted(i for i, (kind, _) in items.items() if kind in WEAPON_KINDS)
-	t0 = time.perf_counter()
 	disc = Disc(args.image)
 	serial = '?'
 	try:
@@ -545,7 +545,7 @@ def main():
 				continue
 			files_seen.append(name)
 			try:
-				need(0 < size <= MAX_NBD_BYTES, 'NBD size')
+				need(0x40 <= size <= MAX_NBD_BYTES, 'NBD size')
 				buf = disc.read_range(lba * SECTOR, size)
 				ents = {}
 				for k in range(4):

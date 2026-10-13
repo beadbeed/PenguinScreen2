@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -1346,15 +1347,35 @@ namespace VR::GameModels
 			s_loader.state.store(state, std::memory_order_release);
 		}
 
+		// VR can start before a game boots (the GS opened for the menus first): wait for the VM to name its disc. Until a
+		// VM exists only its atomic state is read, so nothing here touches VMManager's strings while the emulator starts
+		// up or exits. False when cancelled.
+		bool WaitForDisc(std::string* serial)
+		{
+			for (;;)
+			{
+				if (s_loader.cancel.load(std::memory_order_relaxed))
+					return false;
+				if (VMManager::GetState() != VMState::Shutdown)
+				{
+					*serial = VMManager::GetDiscSerial();
+					if (!serial->empty())
+						return true;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(250));
+			}
+		}
+
 		void Load()
 		{
-			const std::string serial = VMManager::GetDiscSerial();
+			std::string serial;
+			if (!WaitForDisc(&serial))
+				return;
 			const bool file1 = (serial == kFile1Serial);
 			if (!file1 && serial != kFile2Serial)
 			{
 				// Another game: nothing to load, and nothing from an earlier Outbreak disc may answer for it.
-				Finish(State::NotOutbreak, fmt::format("not Outbreak File #1 or #2 (serial {})", serial.empty() ? "none" : serial),
-					nullptr, {}, true);
+				Finish(State::NotOutbreak, fmt::format("not Outbreak File #1 or #2 (serial {})", serial), nullptr, {}, true);
 				return;
 			}
 			if (CDVDsys_GetSourceType() != CDVD_SourceType::Iso)
