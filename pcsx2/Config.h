@@ -1395,6 +1395,12 @@ struct Pcsx2Config
 		// timeline semaphores), so a runtime that blocks inside xrEndFrame no longer holds up the GS's own submits;
 		// false = the session shares the GS queue under the queue lock. Read when the GS device is created.
 		bool DedicatedXrQueue = false;
+		// The VR pacer copies each frame into the headset's swapchains itself: the GS thread only copies the frame into an
+		// image of the compositor's in its own command buffer and draws the hands and HUD cards into staging memory, and
+		// never calls into the runtime or takes the queue lock, so a runtime that blocks inside xrEndFrame cannot hold up
+		// the emulation at all; false = the GS thread acquires, copies and releases the swapchain images as before. Needs
+		// DedicatedXrQueue (in effect, not only asked for) and HeadsetRateSubmit. Read when VR starts.
+		bool PacerCopies = false;
 
 		VROptions();
 		void LoadSave(SettingsWrapper& wrap);

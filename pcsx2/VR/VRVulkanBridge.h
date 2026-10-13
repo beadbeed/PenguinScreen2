@@ -116,9 +116,17 @@ namespace VR
 	// Once that vkQueueSubmit returned VK_SUCCESS: the compositor's next read waits for its gs value.
 	void GsSubmitTimelineDone(const GsSubmitTimeline& t);
 
-	// XRCompositor, GS thread, under the queue lock, for a submit on the session's queue that reads GS textures (si has
-	// no waits or signals of its own): with a dedicated XR queue, makes it wait for the GS's latest submit and signal
-	// the next xr value. False (si untouched) while the queue is shared.
+	// [VR] PacerCopies (XRCompositor): the gs value the GS's next submit will signal, so work recorded into the GS's
+	// current command buffer now is known done on the GPU once the gs timeline reaches it (GS thread only); and the gs
+	// value of the GS's latest submit that went in (any thread), which a read of that work must not get ahead of.
+	u64 NextGsSubmitValue();
+	u64 GsSubmittedValue();
+
+	// XRCompositor, under the queue lock, for a submit on the session's queue that reads GS textures, or with
+	// [VR] PacerCopies images the GS wrote in its own command buffers (si has no waits or signals of its own): with a
+	// dedicated XR queue, makes it wait for the GS's latest submit and signal the next xr value. The GS thread makes these
+	// submits, or with PacerCopies the VR pacer, never both in one session; the queue lock orders the values either way.
+	// False (si untouched) while the queue is shared.
 	struct XrReadTimeline
 	{
 		VkSemaphore wait;

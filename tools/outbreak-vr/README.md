@@ -72,6 +72,31 @@ with the GS (<why>).` The `(VR) Frames:` line splits its queue-lock waits as `to
 work is submitted first and `(VR) XR queue: the GS had work not yet submitted ... (N so far)` is logged (the first time
 and every 600th); it should not show in normal play.
 
+Pacer copies (VR setting `PacerCopies`, off by default, ini only, read when VR starts; needs `DedicatedXrQueue` in
+effect and `HeadsetRateSubmit`): the VR pacer does every swapchain call itself, so the GS thread (and with it the
+emulation) never calls into the runtime or takes the queue lock in its end-of-frame work. A runtime that blocks in
+`xrEndFrame` then holds up only the pacer. The GS copies each frame (both eyes) into one of three images of the
+compositor's own with a copy recorded into its OWN current command buffer (no extra submit, no lock; it goes to the GPU
+with the GS's next submit, whose timeline value is known as it is recorded), builds the edge fill beside it the same way,
+and draws the hands, HUD cards, lever cards and zone markers into a three-slot staging ring each (host memory), then
+publishes the layers at once. The pacer, after `xrBeginFrame`, claims what it will read, acquires and waits each
+swapchain image within 2 ms, copies the ring and the staging into its own swapchains in one submit on the session's
+queue (waiting for the GS's latest submitted timeline value, signalling the next xr value), releases them and ends the
+frame. A layer goes out only with the image it was built for, as before (the screen's pair with its frame, a hand or
+zone marker with its drawing, the toast and the laser's slot with their content); otherwise with what went out with the
+image its swapchain holds, or parked. The ring is safe by the claims plus the xr timeline wait every GS submit after a
+pacer read carries; the staging slots by the pacer's fences. Because the frame reaches the GPU with the GS's next
+submit, the headset sees it about one GS frame (16.7 ms) later than with the GS-side copy; `PCSX2_VR_PACER_COPIES_FLUSH=1`
+has the GS submit right after the copy instead (an A/B for that latency). The stereo dump keeps working (it reads the
+frame in the same command buffer, after the copy). The alternate-eye debug mode (`PCSX2_VR_INTERLEAVE`) goes as mono.
+VR start logs `(VR) Pacer copies: on ([VR] PacerCopies): ...`, `off`, or why it stays off (`needs the dedicated XR
+queue`, `needs HeadsetRateSubmit`); the pacer's swapchains log `(VR) Pacer copies: swapchain N made on the pacer (...)`
+as they are made. With it on the Frames line ends `pacer copies: frames F/s age mean/max ms (GS submit not in G, image
+not back I, busy B), uploads U/s`: frames copied into the eye swapchains and how long after their publish, pacer frames
+whose newest frame's GS submit had not gone in yet, images the runtime had not handed back within the budget, frames
+with all three copy command buffers still on the GPU, and CPU-drawn layers copied. With it on, `queue-lock wait ... GS
+thread` should read 0 and `copies skipped` count only a full ring (rare).
+
 The `(VR) Frames:` line (every 5 s, from the thread that ends the frames: the VR pacer, or the GS in legacy mode):
 frames submitted per second against the display rate, new and re-sent GS frames, stale and `shouldRender=false`
 frames, then `mean/max ms:` for `xrWaitFrame` and `xrBeginFrame` (each from its call to its return: SteamVR may pace in

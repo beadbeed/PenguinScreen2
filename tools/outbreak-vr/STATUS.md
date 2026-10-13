@@ -115,6 +115,7 @@ time:
 | `FirstPersonFov` | Profile | Auto: FOV fitted to the headset |
 | `EdgeFill` | false | true: blurred edges instead of black |
 | `DedicatedXrQueue` | false | true: the OpenXR session gets a Vulkan queue of its own, so a runtime stuck in `xrEndFrame` no longer holds up the GS's submits (the emulog says `(VR) XR queue: dedicated` or `shared with the GS (why)`) |
+| `PacerCopies` | false | true (with `DedicatedXrQueue` in effect): the VR pacer copies the frame, hands and cards into the headset's swapchains itself, so the GS thread never calls into the runtime or waits for its queue lock; the frame shows about one GS frame later (`PCSX2_VR_PACER_COPIES_FLUSH=1` takes that back with one more GS submit); the emulog says `(VR) Pacer copies: on` or why it stays off |
 
 ## What's next (in order)
 
@@ -132,7 +133,9 @@ time:
    - reconnecting after a SteamVR restart;
    - physical reload (a gesture);
    - a dedicated XR VkQueue: in as an opt-in (`DedicatedXrQueue`, branch `xrqueue`), to be tried in the headset and made
-     the default if it holds;
+     the default if it holds; on top of it the pacer doing every swapchain copy (`PacerCopies`, branch `pacer2`, with
+     fixed layer positions and the split xrWaitFrame / xrBeginFrame / xrEndFrame timings on the Frames line): press the
+     Steam button once in the headset, wait three minutes, and compare the Frames lines with it on and off;
    - research item B1 (`ndcWidthRatio`; needs a null-headset stereo dump).
 
 **Port back to PenguinScreen2** (found by the ARMSX2 port; listed in ARMSX2's `pcsx2/VR/VR-SOURCE.md`):

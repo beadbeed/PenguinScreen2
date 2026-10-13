@@ -214,6 +214,24 @@ namespace VR::XRCompositor
 			return (card == HudCards::kLaser) ? kRoleHudLaser : (card == HudCards::kWrist) ? kRoleHudWrist : kRoleHudView;
 		}
 
+		// The role of what sits in a slot (HudRole for the HUD cards').
+		u8 RoleOfSlot(u8 slot)
+		{
+			if (slot < kSlotLever)
+				return kRoleScreen;
+			if (slot < kSlotZone)
+				return kRoleLever;
+			if (slot < kSlotLaser)
+				return kRoleZone;
+			if (slot == kSlotLaser)
+				return kRoleHudLaser;
+			if (slot >= kSlotHand && slot < kSlotWrist)
+				return kRoleHand;
+			if (slot == kSlotWrist)
+				return kRoleHudWrist;
+			return kRoleHudView;
+		}
+
 		// Every hand, zone marker and HUD card image but the toast's is this size, so a layer position whose occupant does
 		// change (a slot showing up before it for the first time, a short capacity) mostly keeps its image size, and
 		// SteamVR the texture it keeps for it.
@@ -256,6 +274,44 @@ namespace VR::XRCompositor
 			bool beam = false;
 		};
 
+		// [VR] PacerCopies (the scheme is described above PcCopyPass): the pacer's own swapchains, one per thing the GS
+		// draws: the two eyes, the edge fill, then one for each slot from the lever cards on (kSlotLever ... kSlotBlink),
+		// which are all quads drawn on the CPU.
+		constexpr int kPcEyeChain = 0; // + eye
+		constexpr int kPcFillChain = 2;
+		constexpr int kPcSlotChain = 3; // + (slot - kSlotLever)
+		constexpr int kPcChainCount = kPcSlotChain + (kSlotCount - kSlotLever);
+		constexpr int kPcRingSlots = 3;
+		constexpr int kPcStageSlots = 3;
+
+		int PcChainOfSlot(u8 slot)
+		{
+			return kPcSlotChain + (static_cast<int>(slot) - static_cast<int>(kSlotLever));
+		}
+
+		// What a published set shows of the frame: the ring slot holding it, the gs value of the GS submit that copies it
+		// there, its serial (what an eye chain holding it says), and the edge fill copied beside it.
+		struct PcFrame
+		{
+			int slot = -1;
+			u64 serial = 0;
+			u64 gs_value = 0;
+			VkImage image = VK_NULL_HANDLE; // two layers, the eyes (mono: layer 0)
+			u32 width = 0;
+			u32 height = 0;
+			bool layered = false;
+			VkImage fill = VK_NULL_HANDLE; // the edge fill's canvas, or none
+			u64 fill_spell = 0;            // the first-person spell it belongs to; 0 = no fill shown
+		};
+
+		// The latest content the GS put in a CPU-drawn layer's staging ring: its serial, slot and content key.
+		struct PcPost
+		{
+			u64 serial = 0;
+			int slot = -1;
+			u64 key = 0;
+		};
+
 		// The layers the GS built at its last present, copied by value: the pacer submits them every display period
 		// until the next present replaces them (the runtime keeps showing each swapchain's last released image).
 		struct PublishedSet
@@ -270,6 +326,13 @@ namespace VR::XRCompositor
 				XrCompositionLayerQuad quad;
 				XrCompositionLayerCylinderKHR cyl;
 				HandAttach att; // not attached unless the layer rides on a controller
+				// PacerCopies (PcResolveSet): the pacer's chain this shows (a screen's eye; the rest by slot), and what its
+				// image must hold to go with this pose: the post's serial (hands, zone markers, the screen's frame), else
+				// with pc_serial 0 a content key (the toast's text, the laser's slot holding the laser or the menu beam),
+				// else (both 0) any image that chain released.
+				u8 pc_chain;
+				u64 pc_serial;
+				u64 pc_key;
 			};
 			Entry e[kLayerCapacity];
 			u32 count;
@@ -283,6 +346,10 @@ namespace VR::XRCompositor
 			float turn_rate;    // CameraDriver::ScreenTurnRate at publish, first-person screen only
 			u64 serial;         // counts publishes, for the re-sent count
 			u64 fp_image;       // which game frame the screen entries show (the sync log), 0 = unknown
+			// PacerCopies: the frame the Screen entries show, and each slot chain's latest staging post as of this
+			// publish (empty otherwise).
+			PcFrame pc_frame;
+			PcPost pc_post[kPcChainCount];
 		};
 
 		struct
@@ -459,6 +526,7 @@ namespace VR::XRCompositor
 				float eye[3] = {0.0f, 0.0f, 0.0f};
 				XrTime pose_time = 0;
 				u64 raster_ms = 0;
+				u64 pc_serial = 0; // PacerCopies: the staging post that holds this drawing
 			};
 			HandImage hand_image[kHandSlots];         // what each hand swapchain's last RELEASED image shows
 			HandImage hand_image_pending[kHandSlots]; // drawn this present, committed at its release (ReleaseAndPublish)
@@ -571,6 +639,196 @@ namespace VR::XRCompositor
 			Skipped,
 			TimeoutZeroLayer
 		};
+
+		// [VR] PacerCopies: the state the GS thread and the VR pacer share, and each one's own (the scheme is described
+		// above PcCopyPass). A ring slot: the frame copied out of the GS's texture, and the edge fill built beside it.
+		struct PcRingSlot
+		{
+			VkImage image = VK_NULL_HANDLE; // two layers, the eyes
+			VmaAllocation alloc = VK_NULL_HANDLE;
+			u32 width = 0;
+			u32 height = 0;
+			VkFormat format = VK_FORMAT_UNDEFINED;
+			VkImage fill = VK_NULL_HANDLE; // made the first time a fill is built into this slot
+			VmaAllocation fill_alloc = VK_NULL_HANDLE;
+		};
+
+		// A CPU-drawn layer's staging ring: kPcStageSlots images in one host-visible, coherent buffer.
+		struct PcStage
+		{
+			VkBuffer buffer = VK_NULL_HANDLE;
+			VkDeviceMemory memory = VK_NULL_HANDLE;
+			u8* map = nullptr;
+			u32 width = 0;
+			u32 height = 0;
+			VkDeviceSize slot_bytes = 0;
+			// Under s.publish_mutex: the latest post, the slot the pacer has claimed to copy this frame, and the copy pass
+			// that last read each slot (written again only once that pass is done on the GPU, pc.done_gen).
+			PcPost post;
+			int claimed = -1;
+			u64 read_gen[kPcStageSlots] = {};
+		};
+
+		// One of the pacer's swapchains.
+		struct PcChain
+		{
+			XrSwapchain swapchain = XR_NULL_HANDLE;
+			std::vector<XrSwapchainImageVulkan2KHR> images;
+			u32 width = 0;
+			u32 height = 0;
+			bool acquired = false; // an image (index) acquired and not released yet
+			bool waited = false;   // and handed over by xrWaitSwapchainImage
+			uint32_t index = 0;
+			u64 released_serial = 0; // what its last released image holds; 0 = none released yet
+			u64 released_key = 0;
+			u64 released_spell = 0;
+			bool failed = false; // its swapchain could not be made: not tried again this session
+		};
+
+		constexpr int kPcCmdBuffers = 3;
+		// The most the pacer waits in one frame, all its swapchain images together, for the runtime to hand them back.
+		constexpr int64_t kPcWaitBudgetNs = 2000000;
+
+		struct
+		{
+			bool on = false;    // Initialize: [VR] PacerCopies in effect
+			bool flush = false; // PCSX2_VR_PACER_COPIES_FLUSH: the GS submits its command buffer right after the copy
+			// The GS thread's (ring_claimed and the stages' posts and claims under s.publish_mutex):
+			PcRingSlot ring[kPcRingSlots];
+			int ring_claimed = -1; // the slot the pacer reads this frame
+			PcFrame frame;         // the last frame copied into the ring: what the next publish shows
+			u64 frame_serial = 0;
+			u64 post_serial = 0;
+			u64 fill_spell = 0;    // counts the first-person spells with an edge fill
+			bool fill_live = false;
+			PcStage stage[kPcChainCount]; // the slot chains' (from kPcSlotChain on)
+			std::atomic<u64> done_gen{0};  // the pacer's latest copy pass known to be done on the GPU
+			bool warned_stage = false;
+			bool warned_ring = false;
+			// The pacer thread's:
+			PcChain chains[kPcChainCount];
+			VkCommandPool pool = VK_NULL_HANDLE;
+			VkCommandBuffer cmd[kPcCmdBuffers] = {};
+			VkFence fence[kPcCmdBuffers] = {};
+			u64 fence_gen[kPcCmdBuffers] = {}; // the copy pass each fence is for; 0 = not in flight
+			u32 next_cmd = 0;
+			u64 gen = 0;
+			// The screen entries that went out with what the eye chains hold, with their set's state (PcResolveSet).
+			PublishedSet shown_screen = {};
+			bool shown_screen_valid = false;
+			// Each slot's last entry that went out with what its chain holds (PcResolveSet's fallback).
+			PublishedSet::Entry last_entry[kSlotCount] = {};
+			bool last_valid[kSlotCount] = {};
+			bool warned_pass = false;
+			bool warned_chain = false;
+			bool warned_release = false;
+		} pc;
+
+		// A host-visible, coherent buffer the CPU writes and the GPU copies from, mapped (PacerCopies' staging).
+		bool CreateHostBuffer(VkDeviceSize size, VkBuffer* buffer, VkDeviceMemory* memory, u8** map)
+		{
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			*buffer = VK_NULL_HANDLE;
+			*memory = VK_NULL_HANDLE;
+			*map = nullptr;
+			VkBufferCreateInfo bci = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+			bci.size = size;
+			bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+			bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+			if (!h.IsValid() || vkCreateBuffer(h.device, &bci, nullptr, buffer) != VK_SUCCESS)
+			{
+				*buffer = VK_NULL_HANDLE;
+				return false;
+			}
+			VkMemoryRequirements mr = {};
+			vkGetBufferMemoryRequirements(h.device, *buffer, &mr);
+			VkPhysicalDeviceMemoryProperties mp = {};
+			vkGetPhysicalDeviceMemoryProperties(h.physical_device, &mp);
+			constexpr VkMemoryPropertyFlags kWant = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+			u32 type = UINT32_MAX;
+			for (u32 i = 0; i < mp.memoryTypeCount; i++)
+			{
+				if ((mr.memoryTypeBits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & kWant) == kWant)
+				{
+					type = i;
+					break;
+				}
+			}
+			VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+			mai.allocationSize = mr.size;
+			mai.memoryTypeIndex = type;
+			void* mapped = nullptr;
+			if (type == UINT32_MAX || vkAllocateMemory(h.device, &mai, nullptr, memory) != VK_SUCCESS)
+			{
+				*memory = VK_NULL_HANDLE;
+				vkDestroyBuffer(h.device, *buffer, nullptr);
+				*buffer = VK_NULL_HANDLE;
+				return false;
+			}
+			if (vkBindBufferMemory(h.device, *buffer, *memory, 0) != VK_SUCCESS ||
+				vkMapMemory(h.device, *memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS)
+			{
+				vkFreeMemory(h.device, *memory, nullptr);
+				vkDestroyBuffer(h.device, *buffer, nullptr);
+				*memory = VK_NULL_HANDLE;
+				*buffer = VK_NULL_HANDLE;
+				return false;
+			}
+			*map = static_cast<u8*>(mapped);
+			return true;
+		}
+
+		// GS thread (PacerCopies): a free slot of the chain's staging ring to draw a width x height RGBA image into, or
+		// null to skip this upload (the layer keeps what it showed, as with a swapchain image not back in time). Free means
+		// neither the latest post nor the one the published set names (the pacer may claim either), nor the pacer's claim,
+		// and done being read on the GPU. Never waits.
+		u32* PcStageBegin(int chain, u32 width, u32 height, int* slot_out)
+		{
+			PcStage& st = pc.stage[chain];
+			if (st.buffer == VK_NULL_HANDLE)
+			{
+				const VkDeviceSize bytes = static_cast<VkDeviceSize>(width) * height * 4u;
+				if (!CreateHostBuffer(bytes * kPcStageSlots, &st.buffer, &st.memory, &st.map))
+				{
+					if (!pc.warned_stage)
+					{
+						pc.warned_stage = true;
+						Console.Warning("(VR) Pacer copies: a staging buffer (%llu bytes) could not be made; that layer stays "
+										"as it is.",
+							static_cast<unsigned long long>(bytes * kPcStageSlots));
+					}
+					return nullptr;
+				}
+				st.width = width;
+				st.height = height;
+				st.slot_bytes = bytes;
+			}
+			if (st.width != width || st.height != height)
+				return nullptr;
+			const u64 done = pc.done_gen.load(std::memory_order_acquire);
+			std::lock_guard<std::mutex> lock(s.publish_mutex);
+			const int published = s.published.pc_post[chain].slot;
+			for (int j = 0; j < kPcStageSlots; j++)
+			{
+				if (j == st.post.slot || j == published || j == st.claimed || st.read_gen[j] > done)
+					continue;
+				*slot_out = j;
+				return reinterpret_cast<u32*>(st.map + st.slot_bytes * static_cast<VkDeviceSize>(j));
+			}
+			return nullptr;
+		}
+
+		// GS thread (PacerCopies): the slot PcStageBegin gave is drawn and is the chain's content from now on (key: what it
+		// shows, for PublishedSet::Entry::pc_key). Returns its serial.
+		u64 PcStagePost(int chain, int slot, u64 key)
+		{
+			std::lock_guard<std::mutex> lock(s.publish_mutex);
+			PcPost& post = pc.stage[chain].post;
+			post.serial = ++pc.post_serial;
+			post.slot = slot;
+			post.key = key;
+			return post.serial;
+		}
 
 		bool CheckXR(XrResult res, const char* what)
 		{
@@ -1310,7 +1568,8 @@ namespace VR::XRCompositor
 			}
 			if (!any)
 			{
-				if (s.levers[0].swapchain != XR_NULL_HANDLE || s.levers[1].swapchain != XR_NULL_HANDLE)
+				// With PacerCopies the pacer owns the swapchains (and keeps them): nothing here to destroy.
+				if (!pc.on && (s.levers[0].swapchain != XR_NULL_HANDLE || s.levers[1].swapchain != XR_NULL_HANDLE))
 				{
 					DestroyLeverChains();
 					Console.WriteLn("(VR) Control quads: no active control — lever swapchains destroyed.");
@@ -1322,7 +1581,7 @@ namespace VR::XRCompositor
 				}
 				return 0;
 			}
-			if (!EnsureLeverResources())
+			if (!pc.on && !EnsureLeverResources())
 				return 0;
 
 			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
@@ -1332,12 +1591,31 @@ namespace VR::XRCompositor
 			int pending_count = 0;
 			for (int i = 0; i < ControlQuads::kSlots; i++)
 			{
-				if (!slots[i].active || !EnsureLeverChain(i))
+				if (!slots[i].active || (!pc.on && !EnsureLeverChain(i)))
 					continue;
 				auto& lc = s.levers[i];
 				const u32 key = ControlQuads::RasterKey(slots[i].t, slots[i].grabbed, slots[i].broke_away);
 				if (lc.ever_released && key == lc.last_key)
 					continue;
+				if (pc.on)
+				{
+					// PacerCopies: drawn into the card's staging ring and posted; the pacer copies it into its swapchain
+					// (PcCopyPass). ever_released then means posted.
+					int stage_slot = -1;
+					const int chain = PcChainOfSlot(static_cast<u8>(kSlotLever + i));
+					u32* const dst = PcStageBegin(chain, ControlQuads::kWidth, ControlQuads::kHeight, &stage_slot);
+					if (!dst)
+						continue;
+					static std::vector<u32> s_lever_pixels;
+					ControlQuads::RasterLever(s_lever_pixels, slots[i].t, slots[i].grabbed, slots[i].broke_away, i);
+					if (s_lever_pixels.size() != static_cast<size_t>(ControlQuads::kWidth) * ControlQuads::kHeight)
+						continue;
+					std::memcpy(dst, s_lever_pixels.data(), s_lever_pixels.size() * sizeof(u32));
+					PcStagePost(chain, stage_slot, key);
+					lc.ever_released = true;
+					lc.last_key = key;
+					continue;
+				}
 
 				uint32_t index = 0;
 				if (lc.wait_pending)
@@ -1703,7 +1981,7 @@ namespace VR::XRCompositor
 		// quad that faces the head, uploaded, and submitted after the screen and lever layers. The quad
 		// is flat at the hand's depth, so the runtime's reprojection keeps it in place as the head moves.
 		u32 BuildHandLayers(XrCompositionLayerQuad* hand_quads, const XrCompositionLayerBaseHeader** layers,
-			u32& layer_count, u32 layer_capacity, HandAttach* att)
+			u32& layer_count, u32 layer_capacity, HandAttach* att, u64* serial_out)
 		{
 			// PCSX2_VR_FAKE_HANDS (any value): both hands held at fixed offsets from the head and shown
 			// even outside first person, to check them on a headset without controllers (SteamVR's null
@@ -1801,7 +2079,8 @@ namespace VR::XRCompositor
 			hs[HandModel::kLeft].support = s_left_supporting;
 			if (!hs[0].valid && !hs[1].valid)
 				return 0;
-			if (!EnsureHandResources(fake, s_grip_orient))
+			// With PacerCopies the hands draw into staging rings and the pacer owns the swapchains (PcStageBegin).
+			if (!pc.on && !EnsureHandResources(fake, s_grip_orient))
 				return 0;
 
 			HandModel::ImpostorQuad iq[kHandSlots];
@@ -1843,6 +2122,34 @@ namespace VR::XRCompositor
 					continue;
 				}
 				auto& hc = s.hand_chains[i];
+				if (pc.on)
+				{
+					// PacerCopies: drawn into the hand's staging ring and posted, which makes it the hand's image from now
+					// on (the pacer copies it into its swapchain before the next frame it ends, PcCopyPass); ever_released
+					// then means posted. No free slot: as a swapchain image not back in time (a kept image still shows).
+					int stage_slot = -1;
+					const int chain = PcChainOfSlot(static_cast<u8>(kSlotHand + i));
+					u32* const dst = PcStageBegin(chain, HandModel::kImageSize, HandModel::kImageSize, &stage_slot);
+					if (!dst)
+						continue;
+					HandModel::RenderImpostor(i, hs[i], eye, iq[i].centre, iq[i].right, iq[i].up, iq[i].size_m, s_hand_pixels);
+					if (s_hand_pixels.size() * sizeof(u32) != static_cast<size_t>(kHandImageBytes))
+						continue;
+					std::memcpy(dst, s_hand_pixels.data(), static_cast<size_t>(kHandImageBytes));
+					auto& posted = s.hand_image[i];
+					posted.valid = true;
+					posted.iq = iq[i];
+					posted.hs = hs[i];
+					for (int k = 0; k < 3; k++)
+						posted.eye[k] = eye[k];
+					posted.pose_time = pose_time;
+					posted.raster_ms = now_ms;
+					posted.pc_serial = PcStagePost(chain, stage_slot, 0);
+					hc.ever_released = true;
+					uploaded[i] = true;
+					s.stat_hand_new.fetch_add(1, std::memory_order_relaxed);
+					continue;
+				}
 				// Headset rate: an image whose release never happened (runtime marked lost) is left to teardown.
 				if (hc.release_pending)
 					continue;
@@ -1987,6 +2294,9 @@ namespace VR::XRCompositor
 					AttachToHand(att, i, i, hs[i].pos, hs[i].quat, eye, pose_time);
 				else
 					AttachToHand(att, i, i, img.hs.pos, img.hs.quat, img.eye, img.pose_time);
+				// PacerCopies: the post this layer's pose goes with (posted this present, or the kept image's).
+				if (serial_out)
+					serial_out[i] = img.pc_serial;
 			}
 			return appended;
 		}
@@ -2399,7 +2709,7 @@ namespace VR::XRCompositor
 		// is rastered at full opacity when its content changes and uploaded only when its content or fade step
 		// does; between uploads the runtime keeps showing the last released image.
 		u32 BuildHudLayers(XrCompositionLayerQuad* hud_quads, const XrCompositionLayerBaseHeader** layers,
-			u32& layer_count, u32 layer_capacity, u32 under_from, HandAttach* att)
+			u32& layer_count, u32 layer_capacity, u32 under_from, HandAttach* att, u64* key_out)
 		{
 			s_pointer_pub = PointerPublish{};
 			HudCards::MaybeTestToast();
@@ -2687,7 +2997,8 @@ namespace VR::XRCompositor
 			bool any = false;
 			for (const Want& wv : want)
 				any = any || (wv.on && wv.level > 0);
-			if (!any || !EnsureHudResources())
+			// With PacerCopies the cards draw into staging rings and the pacer owns the swapchains (PcStageBegin).
+			if (!any || (!pc.on && !EnsureHudResources()))
 				return 0;
 
 			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
@@ -2731,6 +3042,23 @@ namespace VR::XRCompositor
 				const size_t pixel_count = static_cast<size_t>(chain_sz.width) * chain_sz.height;
 				if (raster.image.size() != pixel_count)
 					continue;
+				if (pc.on)
+				{
+					// PacerCopies: at its fade step into the card's staging ring and posted; the pacer copies it into its
+					// swapchain (PcCopyPass). ever_released and shown_* then mean posted.
+					int stage_slot = -1;
+					const int chain = PcChainOfSlot(HudSlot(i));
+					u32* const dst = PcStageBegin(chain, chain_sz.width, chain_sz.height, &stage_slot);
+					if (!dst)
+						continue;
+					HudCards::ScaleAlpha(raster.image.data(), pixel_count,
+						static_cast<float>(wv.level) / static_cast<float>(kHudLevels), dst);
+					PcStagePost(chain, stage_slot, wv.content);
+					hc.ever_released = true;
+					hc.shown_content = wv.content;
+					hc.shown_level = wv.level;
+					continue;
+				}
 
 				uint32_t index = 0;
 				if (hc.wait_pending)
@@ -2814,6 +3142,10 @@ namespace VR::XRCompositor
 				// the laser or the menu beam it is placed as; being a fade step behind is fine.
 				if ((i == HudCards::kToast || i == HudCards::kLaser) && hc.shown_content != wv.content)
 					continue;
+				// PacerCopies: what the pacer's swapchain must hold to go with this layer (any image of the card, but
+				// this toast's text, or the laser or the menu beam in the laser's slot).
+				if (key_out)
+					key_out[i] = (i == HudCards::kToast || i == HudCards::kLaser) ? wv.content : 0;
 				const HudCardSize sz = HudChainSize(i);
 				XrCompositionLayerQuad& quad = hud_quads[i];
 				quad.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
@@ -3111,8 +3443,11 @@ namespace VR::XRCompositor
 		// the hands, which reach into them. An image is drawn again only when what it shows changes or the view of it
 		// drifts (ZoneMarkers::NeedsRedraw); until then its last image is moved with its frame. Nothing at all while the
 		// HUD cards are off for the session.
+		// PacerCopies: the staging post each zone marker's image is (GS thread).
+		u64 s_zone_serial[kZoneSlots] = {};
+
 		u32 BuildZoneLayers(XrCompositionLayerQuad* zone_quads, const XrCompositionLayerBaseHeader** layers,
-			u32& layer_count, u32 layer_capacity, u32 insert_at)
+			u32& layer_count, u32 layer_capacity, u32 insert_at, u64* serial_out)
 		{
 			// HeadAnchor's yaw for each zone, kept while the head looks straight up or down, as each Zone control keeps its
 			// own (GS thread only).
@@ -3251,7 +3586,8 @@ namespace VR::XRCompositor
 			bool any = false;
 			for (const bool g : go)
 				any = any || g;
-			if (!any || !EnsureZoneResources())
+			// With PacerCopies the markers draw into staging rings and the pacer owns the swapchains (PcStageBegin).
+			if (!any || (!pc.on && !EnsureZoneResources()))
 				return 0;
 
 			// Which images are drawn again this present, and on which quad.
@@ -3297,6 +3633,30 @@ namespace VR::XRCompositor
 				if (!redraw[slot])
 					continue;
 				auto& zc = s.zone_chains[slot];
+				if (pc.on)
+				{
+					// PacerCopies: drawn into the marker's staging ring and posted, which makes it the marker's image from now
+					// on (the pacer copies it into its swapchain, PcCopyPass); ever_released then means posted.
+					int stage_slot = -1;
+					const int chain = PcChainOfSlot(static_cast<u8>(kSlotZone + slot));
+					u32* const dst = PcStageBegin(chain, ZoneMarkers::kImageSize, ZoneMarkers::kImageSize, &stage_slot);
+					if (!dst)
+						continue;
+					const ZoneMarkers::Quad& pq = quad[slot];
+					if (slot == ZoneMarkers::kHolster)
+						HandModel::RenderImpostor(HandModel::kRight, weapon, eye, pq.centre, pq.right, pq.up, pq.size_m, s_zone_pixels);
+					else
+						ZoneMarkers::RasterMarks(marks[slot], mark_count[slot], eye, pq, s_zone_pixels);
+					if (s_zone_pixels.size() * sizeof(u32) != static_cast<size_t>(kZoneImageBytes))
+						continue;
+					std::memcpy(dst, s_zone_pixels.data(), static_cast<size_t>(kZoneImageBytes));
+					s_zone_serial[slot] = PcStagePost(chain, stage_slot, 0);
+					zc.ever_released = true;
+					uploaded[slot] = true;
+					s.zone_drawn[slot] = ZoneMarkers::Describe(frame_pos[slot], frame_quat[slot], eye, quad[slot], key[slot],
+						marks[slot], mark_count[slot]);
+					continue;
+				}
 				uint32_t index = 0;
 				if (zc.wait_pending)
 				{
@@ -3425,6 +3785,9 @@ namespace VR::XRCompositor
 				lq.pose.orientation = {orient[0], orient[1], orient[2], orient[3]};
 				lq.pose.position = {centre[0], centre[1], centre[2]};
 				lq.size = {size, size};
+				// PacerCopies: the post this layer's pose goes with.
+				if (serial_out)
+					serial_out[slot] = s_zone_serial[slot];
 				for (u32 k = layer_count; k > at; k--)
 					layers[k] = layers[k - 1];
 				layers[at] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&lq);
@@ -4046,12 +4409,54 @@ namespace VR::XRCompositor
 		}
 
 		// A device image the fill blits through, in GENERAL layout once laid out (UNORM: the frame's bytes as they are,
-		// so the blur averages gamma-encoded values like the screen shows them).
+		// so the blur averages gamma-encoded values like the screen shows them). With PacerCopies the GS device allocates
+		// it (alloc), since it is then used in the GS's own command buffers and must go with their deferred destruction.
 		struct FillImage
 		{
 			VkImage image = VK_NULL_HANDLE;
 			VkDeviceMemory memory = VK_NULL_HANDLE;
+			VmaAllocation alloc = VK_NULL_HANDLE;
 		};
+
+		// PacerCopies: a device-local image the GS device allocates, so the GS's deferred destruction can free it once the
+		// GS command buffers that use it (the one being recorded included) are done (DeferGsImage).
+		bool CreateGsImage(u32 width, u32 height, u32 levels, u32 layers, VkFormat format, VkImage* image, VmaAllocation* alloc)
+		{
+			*image = VK_NULL_HANDLE;
+			*alloc = VK_NULL_HANDLE;
+			GSDeviceVK* const dev = GSDeviceVK::GetInstance();
+			if (!dev)
+				return false;
+			VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+			ci.imageType = VK_IMAGE_TYPE_2D;
+			ci.format = format;
+			ci.extent = {width, height, 1};
+			ci.mipLevels = levels;
+			ci.arrayLayers = layers;
+			ci.samples = VK_SAMPLE_COUNT_1_BIT;
+			ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+			ci.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+			ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+			ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			VmaAllocationCreateInfo aci = {};
+			aci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+			if (vmaCreateImage(dev->GetAllocator(), &ci, &aci, image, alloc, nullptr) != VK_SUCCESS)
+			{
+				*image = VK_NULL_HANDLE;
+				*alloc = VK_NULL_HANDLE;
+				return false;
+			}
+			return true;
+		}
+
+		void DeferGsImage(VkImage* image, VmaAllocation* alloc)
+		{
+			GSDeviceVK* const dev = GSDeviceVK::GetInstance();
+			if (*image != VK_NULL_HANDLE && dev)
+				dev->DeferImageDestruction(*image, *alloc);
+			*image = VK_NULL_HANDLE;
+			*alloc = VK_NULL_HANDLE;
+		}
 
 		struct
 		{
@@ -4083,7 +4488,11 @@ namespace VR::XRCompositor
 			FillImage* const all[4] = {&s_fill.chain, &s_fill.misc, &s_fill.dimmed, &s_fill.up};
 			for (FillImage* img : all)
 			{
-				if (h.IsValid())
+				if (img->alloc != VK_NULL_HANDLE)
+				{
+					DeferGsImage(&img->image, &img->alloc);
+				}
+				else if (h.IsValid())
 				{
 					if (img->image != VK_NULL_HANDLE)
 						vkDestroyImage(h.device, img->image, nullptr);
@@ -4137,6 +4546,13 @@ namespace VR::XRCompositor
 
 		bool CreateFillImage(const Internal::VulkanHandles& h, u32 width, u32 height, u32 levels, FillImage* img)
 		{
+			if (pc.on)
+			{
+				if (CreateGsImage(width, height, levels, 1, VK_FORMAT_R8G8B8A8_UNORM, &img->image, &img->alloc))
+					return true;
+				FailFill("vmaCreateImage", 0);
+				return false;
+			}
 			VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
 			ci.imageType = VK_IMAGE_TYPE_2D;
 			ci.format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -4198,9 +4614,10 @@ namespace VR::XRCompositor
 		}
 
 		// The fill's command buffer, fence and swapchain (once), and its images for a src_w x src_h frame (again when the
-		// frame's size changes; the caller has made sure the previous fill is off the GPU). False to skip this present;
-		// a failure also turns the fill off (FailFill).
-		bool EnsureFillResources(const Internal::VulkanHandles& h, u32 src_w, u32 src_h)
+		// frame's size changes; the caller has made sure the previous fill is off the GPU, or with PacerCopies the images
+		// go with the GS's deferred destruction). False to skip this present; a failure also turns the fill off (FailFill).
+		// with_swapchain false (PacerCopies): no swapchain, the pacer has its own.
+		bool EnsureFillResources(const Internal::VulkanHandles& h, u32 src_w, u32 src_h, bool with_swapchain = true)
 		{
 			if (s_fill.cmd == VK_NULL_HANDLE)
 			{
@@ -4228,7 +4645,7 @@ namespace VR::XRCompositor
 				}
 				s_fill.fence_submitted = false;
 			}
-			if (s_fill.swapchain == XR_NULL_HANDLE)
+			if (with_swapchain && s_fill.swapchain == XR_NULL_HANDLE)
 			{
 				// The screen's format: the canvas's bytes are copied in as they are, like the screen's.
 				XrSwapchainCreateInfo ci = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
@@ -4310,6 +4727,118 @@ namespace VR::XRCompositor
 			b.dstOffsets[0] = {dx0, dy0, 0};
 			b.dstOffsets[1] = {dx1, dy1, 1};
 			return b;
+		}
+
+		// The fill's blits for one present into cmd (GS thread): its images laid out the first time, then the frame src
+		// (its first layer, moved to TransferSrc) down the blur chain, dimmed, scaled up and cut into each eye's half of
+		// the canvas in misc, which the caller then copies out (FillCanvasCopy) to the swapchain image or, with
+		// PacerCopies, to the ring slot's fill.
+		void RecordEdgeFill(VkCommandBuffer cmd, GSTextureVK* src, const FillRegion (*regions)[kFillMaxRegions], const u32* counts)
+		{
+			const FillPlan& p = s_fill.plan;
+			const u32 src_w = static_cast<u32>(src->GetWidth());
+			const u32 src_h = static_cast<u32>(src->GetHeight());
+			const u32 up_w = p.small_w * kFillUpscale;
+			const u32 up_h = p.small_h * kFillUpscale;
+			const VkImage chain = s_fill.chain.image;
+			const VkImage misc = s_fill.misc.image;
+			const VkImage dimmed = s_fill.dimmed.image;
+			const VkImage up = s_fill.up.image;
+			if (!s_fill.images_ready)
+			{
+				// First use: every image to GENERAL for good, misc cleared to black (the interleave's odd columns are
+				// never written again, so they stay black).
+				const VkImage imgs[4] = {chain, misc, dimmed, up};
+				const u32 levels[4] = {p.levels, 1, 1, 1};
+				VkImageMemoryBarrier ib[4];
+				for (int i = 0; i < 4; i++)
+				{
+					ib[i] = VkImageMemoryBarrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+					ib[i].srcAccessMask = 0;
+					ib[i].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+					ib[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+					ib[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+					ib[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+					ib[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+					ib[i].image = imgs[i];
+					ib[i].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels[i], 0, 1};
+				}
+				vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+					nullptr, 4, ib);
+				VkClearColorValue black = {};
+				black.float32[3] = 1.0f;
+				const VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+				vkCmdClearColorImage(cmd, misc, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &range);
+				s_fill.images_ready = true;
+			}
+			// After whatever the last fill read and wrote (an earlier submission on this queue) and the clear.
+			FillBarrier(cmd);
+			src->TransitionToLayout(cmd, GSTextureVK::Layout::TransferSrc);
+
+			// 1. The frame to the chain's first level (a scale of 1 to 2: every texel counts).
+			const s32 sw = static_cast<s32>(src_w), sh = static_cast<s32>(src_h);
+			const s32 smw = static_cast<s32>(p.small_w), smh = static_cast<s32>(p.small_h);
+			VkImageBlit b = FillBlit(0, 0, 0, sw, sh, 0, 0, 0, static_cast<s32>(p.l0_w), static_cast<s32>(p.l0_h));
+			vkCmdBlitImage(cmd, src->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, chain, VK_IMAGE_LAYOUT_GENERAL, 1, &b,
+				VK_FILTER_LINEAR);
+			// 2. Exact halvings, each texel the mean of four.
+			for (u32 lvl = 1; lvl < p.levels; lvl++)
+			{
+				FillBarrier(cmd);
+				b = FillBlit(lvl - 1, 0, 0, static_cast<s32>(std::max(1u, p.l0_w >> (lvl - 1))),
+					static_cast<s32>(std::max(1u, p.l0_h >> (lvl - 1))), lvl, 0, 0, static_cast<s32>(std::max(1u, p.l0_w >> lvl)),
+					static_cast<s32>(std::max(1u, p.l0_h >> lvl)));
+				vkCmdBlitImage(cmd, chain, VK_IMAGE_LAYOUT_GENERAL, chain, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_LINEAR);
+			}
+			// 3. The dim: each small column into an even column of the interleave (its odd columns black).
+			FillBarrier(cmd);
+			VkImageCopy cols[kFillSmallWidth] = {};
+			for (u32 x = 0; x < p.small_w; x++)
+			{
+				cols[x].srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, p.levels - 1, 0, 1};
+				cols[x].srcOffset = {static_cast<s32>(x), 0, 0};
+				cols[x].dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+				cols[x].dstOffset = {static_cast<s32>(2 * x), 0, 0};
+				cols[x].extent = {1, p.small_h, 1};
+			}
+			vkCmdCopyImage(cmd, chain, VK_IMAGE_LAYOUT_GENERAL, misc, VK_IMAGE_LAYOUT_GENERAL, p.small_w, cols);
+			// 4. Halved across: each texel sampled exactly between its own and the black beside it, so half as bright.
+			FillBarrier(cmd);
+			b = FillBlit(0, 0, 0, 2 * smw, smh, 0, 0, 0, smw, smh);
+			vkCmdBlitImage(cmd, misc, VK_IMAGE_LAYOUT_GENERAL, dimmed, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_LINEAR);
+			// 5. Scaled back up, smooth, for a fine cut.
+			FillBarrier(cmd);
+			b = FillBlit(0, 0, 0, smw, smh, 0, 0, 0, static_cast<s32>(up_w), static_cast<s32>(up_h));
+			vkCmdBlitImage(cmd, dimmed, VK_IMAGE_LAYOUT_GENERAL, up, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_LINEAR);
+			// 6. Each eye's half of the canvas (below the interleave in misc): the picture cut to that eye's view, its
+			// edges stretched past it.
+			FillBarrier(cmd);
+			VkImageBlit eb[2 * kFillMaxRegions];
+			u32 nb = 0;
+			for (int e = 0; e < 2; e++)
+			{
+				const s32 ox = e * static_cast<s32>(kFillEyeSize);
+				for (u32 i = 0; i < counts[e]; i++)
+				{
+					const FillRegion& r = regions[e][i];
+					eb[nb++] = FillBlit(0, r.sx0, r.sy0, r.sx1, r.sy1, 0, ox + r.dx0, smh + r.dy0, ox + r.dx1, smh + r.dy1);
+				}
+			}
+			vkCmdBlitImage(cmd, up, VK_IMAGE_LAYOUT_GENERAL, misc, VK_IMAGE_LAYOUT_GENERAL, nb, eb, VK_FILTER_LINEAR);
+			// After the last blit, before the canvas is copied out.
+			FillBarrier(cmd);
+		}
+
+		// The canvas RecordEdgeFill leaves in misc (GENERAL), byte for byte into a 2 * kFillEyeSize x kFillEyeSize image.
+		VkImageCopy FillCanvasCopy()
+		{
+			VkImageCopy canvas = {};
+			canvas.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+			canvas.srcOffset = {0, static_cast<s32>(s_fill.plan.small_h), 0};
+			canvas.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+			canvas.dstOffset = {0, 0, 0};
+			canvas.extent = {2 * kFillEyeSize, kFillEyeSize, 1};
+			return canvas;
 		}
 
 		// This present's fill (GS thread, after the screen copies and before the layers are published): from the frame
@@ -4414,103 +4943,13 @@ namespace VR::XRCompositor
 				FailFill("vkBeginCommandBuffer", static_cast<int>(vr));
 				return;
 			}
-			const VkImage chain = s_fill.chain.image;
-			const VkImage misc = s_fill.misc.image;
-			const VkImage dimmed = s_fill.dimmed.image;
-			const VkImage up = s_fill.up.image;
-			if (!s_fill.images_ready)
-			{
-				// First use: every image to GENERAL for good, misc cleared to black (the interleave's odd columns are
-				// never written again, so they stay black).
-				const VkImage imgs[4] = {chain, misc, dimmed, up};
-				const u32 levels[4] = {p.levels, 1, 1, 1};
-				VkImageMemoryBarrier ib[4];
-				for (int i = 0; i < 4; i++)
-				{
-					ib[i] = VkImageMemoryBarrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-					ib[i].srcAccessMask = 0;
-					ib[i].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-					ib[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-					ib[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
-					ib[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-					ib[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-					ib[i].image = imgs[i];
-					ib[i].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels[i], 0, 1};
-				}
-				vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
-					nullptr, 4, ib);
-				VkClearColorValue black = {};
-				black.float32[3] = 1.0f;
-				const VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-				vkCmdClearColorImage(cmd, misc, VK_IMAGE_LAYOUT_GENERAL, &black, 1, &range);
-				s_fill.images_ready = true;
-			}
-			// After whatever the last fill read and wrote (an earlier submission on this queue) and the clear.
-			FillBarrier(cmd);
-			src->TransitionToLayout(cmd, GSTextureVK::Layout::TransferSrc);
-
-			// 1. The frame to the chain's first level (a scale of 1 to 2: every texel counts).
-			const s32 sw = static_cast<s32>(src_w), sh = static_cast<s32>(src_h);
-			const s32 smw = static_cast<s32>(p.small_w), smh = static_cast<s32>(p.small_h);
-			VkImageBlit b = FillBlit(0, 0, 0, sw, sh, 0, 0, 0, static_cast<s32>(p.l0_w), static_cast<s32>(p.l0_h));
-			vkCmdBlitImage(cmd, src->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, chain, VK_IMAGE_LAYOUT_GENERAL, 1, &b,
-				VK_FILTER_LINEAR);
-			// 2. Exact halvings, each texel the mean of four.
-			for (u32 lvl = 1; lvl < p.levels; lvl++)
-			{
-				FillBarrier(cmd);
-				b = FillBlit(lvl - 1, 0, 0, static_cast<s32>(std::max(1u, p.l0_w >> (lvl - 1))),
-					static_cast<s32>(std::max(1u, p.l0_h >> (lvl - 1))), lvl, 0, 0, static_cast<s32>(std::max(1u, p.l0_w >> lvl)),
-					static_cast<s32>(std::max(1u, p.l0_h >> lvl)));
-				vkCmdBlitImage(cmd, chain, VK_IMAGE_LAYOUT_GENERAL, chain, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_LINEAR);
-			}
-			// 3. The dim: each small column into an even column of the interleave (its odd columns black).
-			FillBarrier(cmd);
-			VkImageCopy cols[kFillSmallWidth] = {};
-			for (u32 x = 0; x < p.small_w; x++)
-			{
-				cols[x].srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, p.levels - 1, 0, 1};
-				cols[x].srcOffset = {static_cast<s32>(x), 0, 0};
-				cols[x].dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-				cols[x].dstOffset = {static_cast<s32>(2 * x), 0, 0};
-				cols[x].extent = {1, p.small_h, 1};
-			}
-			vkCmdCopyImage(cmd, chain, VK_IMAGE_LAYOUT_GENERAL, misc, VK_IMAGE_LAYOUT_GENERAL, p.small_w, cols);
-			// 4. Halved across: each texel sampled exactly between its own and the black beside it, so half as bright.
-			FillBarrier(cmd);
-			b = FillBlit(0, 0, 0, 2 * smw, smh, 0, 0, 0, smw, smh);
-			vkCmdBlitImage(cmd, misc, VK_IMAGE_LAYOUT_GENERAL, dimmed, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_LINEAR);
-			// 5. Scaled back up, smooth, for a fine cut.
-			FillBarrier(cmd);
-			b = FillBlit(0, 0, 0, smw, smh, 0, 0, 0, static_cast<s32>(up_w), static_cast<s32>(up_h));
-			vkCmdBlitImage(cmd, dimmed, VK_IMAGE_LAYOUT_GENERAL, up, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_LINEAR);
-			// 6. Each eye's half of the canvas (below the interleave in misc): the picture cut to that eye's view, its
-			// edges stretched past it.
-			FillBarrier(cmd);
-			VkImageBlit eb[2 * kFillMaxRegions];
-			u32 nb = 0;
-			for (int e = 0; e < 2; e++)
-			{
-				const s32 ox = e * static_cast<s32>(kFillEyeSize);
-				for (u32 i = 0; i < counts[e]; i++)
-				{
-					const FillRegion& r = regions[e][i];
-					eb[nb++] = FillBlit(0, r.sx0, r.sy0, r.sx1, r.sy1, 0, ox + r.dx0, smh + r.dy0, ox + r.dx1, smh + r.dy1);
-				}
-			}
-			vkCmdBlitImage(cmd, up, VK_IMAGE_LAYOUT_GENERAL, misc, VK_IMAGE_LAYOUT_GENERAL, nb, eb, VK_FILTER_LINEAR);
+			RecordEdgeFill(cmd, src, regions, counts);
 			// 7. The canvas into the swapchain image, byte for byte.
-			FillBarrier(cmd);
 			ImageBarrier(cmd, dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 				VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 				VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-			VkImageCopy canvas = {};
-			canvas.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-			canvas.srcOffset = {0, smh, 0};
-			canvas.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-			canvas.dstOffset = {0, 0, 0};
-			canvas.extent = {2 * kFillEyeSize, kFillEyeSize, 1};
-			vkCmdCopyImage(cmd, misc, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &canvas);
+			const VkImageCopy canvas = FillCanvasCopy();
+			vkCmdCopyImage(cmd, s_fill.misc.image, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &canvas);
 			ImageBarrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 				VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
 				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
@@ -4550,6 +4989,188 @@ namespace VR::XRCompositor
 					kFillEyeSize, kFillEyeSize, p.small_w, p.small_h, src_w, src_h,
 					std::atan(0.5f * width_m / distance_m) * kDeg, std::atan(0.5f * height_m / distance_m) * kDeg, distance_m,
 					counts[0], counts[1]);
+			}
+		}
+
+		// PacerCopies, GS thread: a transfer-to-transfer barrier over every layer of a ring image. Only transfers touch the
+		// ring (the GS's copies in, the pacer's out), and the pacer's reads are ordered before the GS's next writes by the xr
+		// timeline wait every later GS submit is held back by (VRVulkanBridge.h), so TRANSFER stages on both sides.
+		void RingBarrier(VkCommandBuffer cmd, VkImage image, u32 layers, VkImageLayout old_layout, VkImageLayout new_layout,
+			VkAccessFlags src_access, VkAccessFlags dst_access)
+		{
+			VkImageMemoryBarrier barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+			barrier.srcAccessMask = src_access;
+			barrier.dstAccessMask = dst_access;
+			barrier.oldLayout = old_layout;
+			barrier.newLayout = new_layout;
+			barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.image = image;
+			barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
+			vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+				&barrier);
+		}
+
+		// PacerCopies, GS thread: a ring slot's frame image for a width x height frame of format, made again when either
+		// changes (the old one goes with the GS's deferred destruction: after the GS work and, through the xr wait the
+		// GS's next submit carries, the pacer's reads that used it). Only ever the slot about to be written, which the pacer
+		// neither has claimed nor can claim (it is not the published one).
+		bool PcEnsureRingImage(PcRingSlot& slot, u32 width, u32 height, VkFormat format)
+		{
+			if (slot.image != VK_NULL_HANDLE && slot.width == width && slot.height == height && slot.format == format)
+				return true;
+			DeferGsImage(&slot.image, &slot.alloc);
+			if (!CreateGsImage(width, height, 1, 2, format, &slot.image, &slot.alloc))
+			{
+				slot.width = 0;
+				slot.height = 0;
+				if (!pc.warned_ring)
+				{
+					pc.warned_ring = true;
+					Console.Warning("(VR) Pacer copies: a %ux%u ring image could not be made; the headset keeps the last frame.",
+						width, height);
+				}
+				return false;
+			}
+			slot.width = width;
+			slot.height = height;
+			slot.format = format;
+			return true;
+		}
+
+		// PacerCopies, GS thread: this present's frame (both eyes' layers, or the one) into a free ring slot, recorded into
+		// the GS's own current command buffer: no submit and no lock here, it goes to the GPU with the GS's next submit,
+		// whose gs value is already known (VR::NextGsSubmitValue) and goes in pc.frame for the publish. Free: neither the
+		// slot the published set shows nor the pacer's claim (the pacer only ever claims the published one). False, and
+		// the screen keeps its last frame, when none is free or its image cannot be made.
+		bool PcCopyFrame(GSTextureVK* src, bool layered)
+		{
+			GSDeviceVK* const dev = GSDeviceVK::GetInstance();
+			const u32 width = static_cast<u32>(src->GetWidth());
+			const u32 height = static_cast<u32>(src->GetHeight());
+			if (!dev || width == 0 || height == 0)
+				return false;
+			int k = -1;
+			{
+				std::lock_guard<std::mutex> lock(s.publish_mutex);
+				for (int i = 0; i < kPcRingSlots && k < 0; i++)
+				{
+					if (i != s.published.pc_frame.slot && i != pc.ring_claimed && i != pc.frame.slot)
+						k = i;
+				}
+			}
+			if (k < 0)
+				return false;
+			PcRingSlot& slot = pc.ring[k];
+			if (!PcEnsureRingImage(slot, width, height, src->GetVkFormat()))
+				return false;
+
+			// Copies may not go inside a render pass (the seat cast can leave one open), and a clear still pending on the
+			// frame is part of it.
+			if (dev->InRenderPass())
+				dev->EndRenderPass();
+			src->CommitClear();
+			const VkCommandBuffer cmd = dev->GetCurrentCommandBuffer();
+			// The GS tracks the frame's layout: later GS work (and the stereo dump after this) moves it on from here.
+			src->TransitionToLayout(cmd, GSTextureVK::Layout::TransferSrc);
+			// The slot is overwritten whole, so what it held needs no layout of its own.
+			RingBarrier(cmd, slot.image, 2, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+				VK_ACCESS_TRANSFER_WRITE_BIT);
+			VkImageCopy regions[2] = {};
+			const u32 count = layered ? 2u : 1u;
+			for (u32 l = 0; l < count; l++)
+			{
+				regions[l].srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, src->GetBaseArrayLayer() + l, 1};
+				regions[l].dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, l, 1};
+				regions[l].extent = {width, height, 1};
+			}
+			vkCmdCopyImage(cmd, src->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, slot.image,
+				VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, count, regions);
+			// Ready for the pacer's copy out, which waits for this submit's gs value.
+			RingBarrier(cmd, slot.image, 2, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+				VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+
+			pc.frame = PcFrame{};
+			pc.frame.slot = k;
+			pc.frame.serial = ++pc.frame_serial;
+			pc.frame.gs_value = VR::NextGsSubmitValue();
+			pc.frame.image = slot.image;
+			pc.frame.width = width;
+			pc.frame.height = height;
+			pc.frame.layered = layered;
+			return true;
+		}
+
+		// PacerCopies, GS thread: the edge fill beside the frame PcCopyFrame just put in the ring (pc.frame), in the GS's
+		// current command buffer after it; the pacer copies it into its fill swapchain with the frame. What goes into it is
+		// UpdateEdgeFill's, without its fence (the GS's own command buffers run in order) or swapchain. A fill that cannot
+		// be built ends the fill's spell (pc.fill_live): the background goes black.
+		void PcUpdateEdgeFill(GSTextureVK* src, float distance_m, float width_m, float height_m)
+		{
+			pc.frame.fill = VK_NULL_HANDLE;
+			pc.frame.fill_spell = 0;
+			if (!s_fill.enabled || s_fill.disabled || !s.bg_ready || pc.frame.slot < 0)
+			{
+				pc.fill_live = false;
+				return;
+			}
+			const EyeInfo eyes = GetEyeInfo();
+			FillEye fe[2];
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			GSDeviceVK* const dev = GSDeviceVK::GetInstance();
+			if (!eyes.valid || !FillEyeTangents(0, eyes, distance_m, width_m, height_m, &fe[0]) ||
+				!FillEyeTangents(1, eyes, distance_m, width_m, height_m, &fe[1]) || !h.IsValid() || !dev)
+			{
+				pc.fill_live = false;
+				return;
+			}
+			const u32 src_w = static_cast<u32>(src->GetWidth());
+			const u32 src_h = static_cast<u32>(src->GetHeight());
+			if (!EnsureFillResources(h, src_w, src_h, false))
+			{
+				pc.fill_live = false;
+				return;
+			}
+			const FillPlan& p = s_fill.plan;
+			FillRegion regions[2][kFillMaxRegions];
+			u32 counts[2] = {0, 0};
+			for (int e = 0; e < 2; e++)
+				counts[e] = PlanFillBlits(fe[e], p.small_w * kFillUpscale, p.small_h * kFillUpscale, kFillEyeSize, kFillEyeSize, regions[e]);
+			PcRingSlot& slot = pc.ring[pc.frame.slot];
+			if (counts[0] == 0 || counts[1] == 0 ||
+				(slot.fill == VK_NULL_HANDLE &&
+					!CreateGsImage(2 * kFillEyeSize, kFillEyeSize, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, &slot.fill, &slot.fill_alloc)))
+			{
+				pc.fill_live = false;
+				return;
+			}
+
+			if (dev->InRenderPass())
+				dev->EndRenderPass();
+			const VkCommandBuffer cmd = dev->GetCurrentCommandBuffer();
+			RecordEdgeFill(cmd, src, regions, counts);
+			RingBarrier(cmd, slot.fill, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+				VK_ACCESS_TRANSFER_WRITE_BIT);
+			const VkImageCopy canvas = FillCanvasCopy();
+			vkCmdCopyImage(cmd, s_fill.misc.image, VK_IMAGE_LAYOUT_GENERAL, slot.fill, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+				&canvas);
+			RingBarrier(cmd, slot.fill, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+				VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+
+			// A new spell when the fill comes back, so the pacer never shows one spell's last fill at the start of the next.
+			if (!pc.fill_live)
+			{
+				pc.fill_live = true;
+				pc.fill_spell++;
+			}
+			pc.frame.fill = slot.fill;
+			pc.frame.fill_spell = pc.fill_spell;
+			if (!s_fill.live_logged)
+			{
+				s_fill.live_logged = true;
+				Console.WriteLn("(VR) Edge fill: on behind the first-person screen (pacer copies): head-locked, %ux%u per eye, "
+								"from a %ux%u box blur of the %ux%u frame at half brightness.",
+					kFillEyeSize, kFillEyeSize, p.small_w, p.small_h, src_w, src_h);
 			}
 		}
 
@@ -4646,20 +5267,19 @@ namespace VR::XRCompositor
 		}
 
 		// The background under every other layer: a projection layer over both eyes' views that shows the one image
-		// cleared to black at Initialize, or (fill: behind the first-person screen, with a live edge fill) each eye's half
-		// of the edge fill.
+		// cleared to black at Initialize, or (fill: behind the first-person screen, with a live edge fill, the swapchain
+		// holding it: s_fill's, or with PacerCopies the pacer's) each eye's half of the edge fill.
 		void MakeBackgroundLayer(const XrView* views, XrCompositionLayerProjectionView* pv, XrCompositionLayerProjection* layer,
-			bool fill)
+			XrSwapchain fill)
 		{
-			fill = fill && s_fill.swapchain != XR_NULL_HANDLE;
 			for (u32 i = 0; i < 2; i++)
 			{
 				pv[i] = XrCompositionLayerProjectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
 				pv[i].pose = views[i].pose;
 				pv[i].fov = views[i].fov;
-				if (fill)
+				if (fill != XR_NULL_HANDLE)
 				{
-					pv[i].subImage.swapchain = s_fill.swapchain;
+					pv[i].subImage.swapchain = fill;
 					pv[i].subImage.imageRect.offset = {static_cast<s32>(i * kFillEyeSize), 0};
 					pv[i].subImage.imageRect.extent = {static_cast<s32>(kFillEyeSize), static_cast<s32>(kFillEyeSize)};
 				}
@@ -4929,6 +5549,12 @@ namespace VR::XRCompositor
 			const PointerPublish* pointer = nullptr;
 			// The body-zone markers' quads, by slot (ZoneMarkers::kSlots; null: none).
 			const XrCompositionLayerQuad* zone_quads = nullptr;
+			// PacerCopies (PublishedSet::Entry::pc_*): each screen layer's eye chain (by its index in quads/cyls), and the
+			// staging post each hand and zone marker image is (by slot), and each HUD card's content key; null: none.
+			const u8* screen_chain = nullptr;
+			const u64* hand_serial = nullptr;
+			const u64* zone_serial = nullptr;
+			const u64* hud_key = nullptr;
 		};
 
 		// Copies each pointed-to layer by value, in order, with its role and, for a hand or a HUD card that rides on a
@@ -4945,6 +5571,8 @@ namespace VR::XRCompositor
 				e.att = HandAttach{};
 				e.pointer = kPointerPartNone;
 				e.parked = false;
+				e.pc_serial = 0;
+				e.pc_key = 0;
 				bool known = false;
 				for (u32 k = 0; k < src.screen_slots && !known; k++)
 				{
@@ -4964,6 +5592,8 @@ namespace VR::XRCompositor
 						e.cyl = src.cyls[k];
 						known = true;
 					}
+					if (known)
+						e.pc_chain = static_cast<u8>(src.screen_chain ? kPcEyeChain + src.screen_chain[k] : kPcEyeChain);
 				}
 				for (int k = 0; k < ControlQuads::kSlots && !known; k++)
 				{
@@ -4986,6 +5616,8 @@ namespace VR::XRCompositor
 						e.quad = src.hand_quads[k];
 						if (src.hand_att)
 							e.att = src.hand_att[k];
+						if (src.hand_serial)
+							e.pc_serial = src.hand_serial[k];
 						known = true;
 					}
 				}
@@ -4997,6 +5629,8 @@ namespace VR::XRCompositor
 						e.role = kRoleZone;
 						e.slot = static_cast<u8>(kSlotZone + k);
 						e.quad = src.zone_quads[k];
+						if (src.zone_serial)
+							e.pc_serial = src.zone_serial[k];
 						known = true;
 					}
 				}
@@ -5015,9 +5649,13 @@ namespace VR::XRCompositor
 							e.pointer = kPointerPartDot;
 						else if (k == HudCards::kLaser && out->pointer.beam)
 							e.pointer = kPointerPartBeam;
+						if (src.hud_key)
+							e.pc_key = src.hud_key[k];
 						known = true;
 					}
 				}
+				if (known && e.role != kRoleScreen)
+					e.pc_chain = static_cast<u8>(PcChainOfSlot(e.slot));
 				if (known)
 					out->count++;
 			}
@@ -5034,8 +5672,9 @@ namespace VR::XRCompositor
 		// the hands, as their depth needs) is almost every time. A slot whose swapchain has no released image yet, or none
 		// at all, stays out, as OpenXR requires. Shown entries keep the capacity they had: parked ones fill what is left,
 		// the last positions going first when it runs short (only split screen with lever cards needs more than 15).
-		// PCSX2_VR_NO_PARKED_LAYERS leaves them all out again (s.no_parked_layers).
-		void ParkFreeSlots(PublishedSet* set)
+		// PCSX2_VR_NO_PARKED_LAYERS leaves them all out again (s.no_parked_layers). pacer_chains (PacerCopies, on the pacer,
+		// PcResolveSet): the pacer's swapchains are the ones that count, the GS having none.
+		void ParkFreeSlots(PublishedSet* set, bool pacer_chains = false)
 		{
 			// In slot order, equal slots (none, in practice) as they came: an insertion sort, the sets being short and
 			// almost always in order already, and no allocation on the GS thread.
@@ -5081,25 +5720,37 @@ namespace VR::XRCompositor
 				e.quad.subImage = {swapchain, {{0, 0}, {static_cast<s32>(width), static_cast<s32>(height)}}, 0};
 				ParkEntry(e);
 			};
-			for (int k = 0; k < ControlQuads::kSlots; k++)
+			if (pacer_chains)
 			{
-				park(static_cast<u8>(kSlotLever + k), kRoleLever, s.levers[k].swapchain, s.levers[k].ever_released,
-					ControlQuads::kWidth, ControlQuads::kHeight);
+				for (int slot = kSlotLever; slot < kSlotCount; slot++)
+				{
+					const PcChain& ch = pc.chains[PcChainOfSlot(static_cast<u8>(slot))];
+					park(static_cast<u8>(slot), RoleOfSlot(static_cast<u8>(slot)), ch.swapchain, ch.released_serial != 0,
+						ch.width, ch.height);
+				}
 			}
-			for (int k = 0; k < kZoneSlots; k++)
+			else
 			{
-				park(static_cast<u8>(kSlotZone + k), kRoleZone, s.zone_chains[k].swapchain, s.zone_chains[k].ever_released,
-					ZoneMarkers::kImageSize, ZoneMarkers::kImageSize);
-			}
-			for (int k = 0; k < HudCards::kCardCount; k++)
-			{
-				const HudCardSize sz = HudChainSize(k);
-				park(HudSlot(k), HudRole(k), s.hud_chains[k].swapchain, s.hud_chains[k].ever_released, sz.width, sz.height);
-			}
-			for (int k = 0; k < kHandSlots; k++)
-			{
-				park(static_cast<u8>(kSlotHand + k), kRoleHand, s.hand_chains[k].swapchain, s.hand_chains[k].ever_released,
-					HandModel::kImageSize, HandModel::kImageSize);
+				for (int k = 0; k < ControlQuads::kSlots; k++)
+				{
+					park(static_cast<u8>(kSlotLever + k), kRoleLever, s.levers[k].swapchain, s.levers[k].ever_released,
+						ControlQuads::kWidth, ControlQuads::kHeight);
+				}
+				for (int k = 0; k < kZoneSlots; k++)
+				{
+					park(static_cast<u8>(kSlotZone + k), kRoleZone, s.zone_chains[k].swapchain, s.zone_chains[k].ever_released,
+						ZoneMarkers::kImageSize, ZoneMarkers::kImageSize);
+				}
+				for (int k = 0; k < HudCards::kCardCount; k++)
+				{
+					const HudCardSize sz = HudChainSize(k);
+					park(HudSlot(k), HudRole(k), s.hud_chains[k].swapchain, s.hud_chains[k].ever_released, sz.width, sz.height);
+				}
+				for (int k = 0; k < kHandSlots; k++)
+				{
+					park(static_cast<u8>(kSlotHand + k), kRoleHand, s.hand_chains[k].swapchain, s.hand_chains[k].ever_released,
+						HandModel::kImageSize, HandModel::kImageSize);
+				}
 			}
 			if (parked_count == 0)
 				return;
@@ -5120,6 +5771,17 @@ namespace VR::XRCompositor
 			}
 			std::copy(merged, merged + n, set->e);
 			set->count = n;
+		}
+
+		// PacerCopies (everything here is empty otherwise): a set's staging posts as of its publish, and no edge fill once
+		// it has gone (a kept frame keeps its fill image, but the background goes black at once, as without PacerCopies).
+		// GS thread, under publish_mutex where the set is published.
+		void PcFinishSet(PublishedSet* set)
+		{
+			for (int c = 0; c < kPcChainCount; c++)
+				set->pc_post[c] = pc.stage[c].post;
+			if (!pc.fill_live)
+				set->pc_frame.fill_spell = 0;
 		}
 
 		// Headset rate: hands the layers this present built to the pacer, copied by value. keep_screen: the screen
@@ -5166,10 +5828,15 @@ namespace VR::XRCompositor
 				merged.turn_rate = prev.fp_screen ? turn_rate : 0.0f;
 				merged.fp_image = prev.fp_image;
 				merged.serial = prev.serial + 1;
+				// PacerCopies: the kept Screen entries show the frame they were published with.
+				merged.pc_frame = prev.pc_frame;
+				PcFinishSet(&merged);
 				ParkFreeSlots(&merged);
 				return merged;
 			}
 			next.serial = prev.serial + 1;
+			next.pc_frame = pc.frame;
+			PcFinishSet(&next);
 			ParkFreeSlots(&next);
 			return next;
 		}
@@ -5180,6 +5847,33 @@ namespace VR::XRCompositor
 			s.stat_gs_frames.fetch_add(1, std::memory_order_relaxed);
 			std::lock_guard<std::mutex> lock(s.publish_mutex);
 			s.published = BuildPublishedSet(layers, layer_count, src, keep_screen, fp_screen, fp_head, fp_image, s.published);
+		}
+
+		// PacerCopies, GS thread: this present's layers published at once, since the pacer copies and releases its own
+		// images (nothing to release first, nothing to wait for): with the frame copied this present unless a copy was
+		// tried and missed, when the previous Screen entries and their frame stay (keep_screen, as ReleaseAndPublish).
+		// PCSX2_VR_PACER_COPIES_FLUSH submits the GS's command buffer first, so the frame's copy is on the GPU now instead
+		// of with the GS's next submit (about one GS frame later).
+		void PcPublish(const XrCompositionLayerBaseHeader* const* layers, u32 layer_count, const LayerSources& src,
+			const int* cl_copy, bool fp_screen, const XrVector3f& fp_head, u64 fp_image)
+		{
+			bool attempted = false;
+			bool all_copied = true;
+			for (u32 l = 0; l < 2; l++)
+			{
+				if (cl_copy[l] < 0)
+					continue;
+				attempted = true;
+				if (cl_copy[l] != static_cast<int>(CopyResult::Copied))
+					all_copied = false;
+			}
+			if (pc.flush && attempted && all_copied)
+			{
+				GSDeviceVK* const dev = GSDeviceVK::GetInstance();
+				if (dev)
+					dev->ExecuteCommandBuffer(false);
+			}
+			PublishLayers(layers, layer_count, src, !attempted || !all_copied, fp_screen, fp_head, fp_image);
 		}
 
 		// Headset rate: releases the screen and hand images this present copied (left acquired by CopyEyes and
@@ -5507,6 +6201,16 @@ namespace VR::XRCompositor
 			u32 no_projection = 0;
 			// Frames whose background went out with the last views located, this frame's not being locatable.
 			u32 views_reused = 0;
+			// PacerCopies (PcCopyPass): frames copied into the eye swapchains and how old their publish was by then;
+			// frames held back a pacer frame because their GS submit had not gone in yet; swapchain images not handed
+			// back within the budget; CPU-drawn layers copied; and frames that skipped their copies with all three
+			// command buffers still on the GPU.
+			u32 pc_frames = 0;
+			WindowMs pc_age;
+			u32 pc_gs_waits = 0;
+			u32 pc_image_waits = 0;
+			u32 pc_uploads = 0;
+			u32 pc_busy = 0;
 			bool sig_valid = false;
 			LayerSignature last_sig;
 			u32 layers = 0;
@@ -5611,28 +6315,38 @@ namespace VR::XRCompositor
 			const double lock_gs_submit_ms = static_cast<double>(VR::TakeXrQueueLockGsSubmitWaitUs()) / 1000.0 / secs;
 			// Legacy only: how long a waited frame sat parked until the GS present began it. The pacer begins its frames
 			// straight after the wait, so there it would always read 0.
-			char parked[64] = "";
+			char legacy_gap[64] = "";
 			if (!s.headset_rate)
 			{
-				std::snprintf(parked, sizeof(parked), ", wait->begin %.1f/%.1f",
+				std::snprintf(legacy_gap, sizeof(legacy_gap), ", wait->begin %.1f/%.1f",
 					(st.wait_begin_n > 0) ? (st.wait_begin_sum_ms / st.wait_begin_n) : 0.0,
 					static_cast<double>(st.wait_begin_max_ms));
+			}
+			// PacerCopies: what the pacer's copy passes did (PcCopyPass).
+			char pacer_copies[192] = "";
+			if (pc.on)
+			{
+				std::snprintf(pacer_copies, sizeof(pacer_copies),
+					", pacer copies: frames %.1f/s age %.1f/%.1f ms (GS submit not in %u, image not back %u, busy %u), "
+					"uploads %.1f/s",
+					st.pc_frames / secs, st.pc_age.Mean(), static_cast<double>(st.pc_age.max_ms), st.pc_gs_waits,
+					st.pc_image_waits, st.pc_busy, st.pc_uploads / secs);
 			}
 			Console.WriteLn("(VR) Frames: submitted %.1f/s (display %.1f Hz), new GS frames %.1f/s, re-sent %.1f/s, stale %u, "
 							"shouldRender=false %u, mean/max ms: xrWaitFrame %.1f/%.1f, xrBeginFrame %.2f/%.1f%s, xrEndFrame "
 							"%.1f/%.1f (queue lock %.2f/%.1f, runtime %.1f/%.1f), display lead vs first min/mean/max "
 							"%+.1f/%+.1f/%+.1f ms, queue-lock wait max %u us total %.1f ms/s (GS thread %.1f, GS submits %.1f), "
 							"copies skipped %u timed out %u, publishes deferred %u, layers %u (parked %u), layer changes %u, no "
-							"projection %u (views reused %u), mode %s, XR queue %s",
+							"projection %u (views reused %u), mode %s, XR queue %s%s",
 				st.submitted / secs, hz, gs_frames / secs, st.resent / secs, st.stale, st.no_render, st.wait.Mean(),
-				static_cast<double>(st.wait.max_ms), st.begin.Mean(), static_cast<double>(st.begin.max_ms), parked, st.end.Mean(),
+				static_cast<double>(st.wait.max_ms), st.begin.Mean(), static_cast<double>(st.begin.max_ms), legacy_gap, st.end.Mean(),
 				static_cast<double>(st.end.max_ms), st.end_lock.Mean(), static_cast<double>(st.end_lock.max_ms), st.end_call.Mean(),
 				static_cast<double>(st.end_call.max_ms), static_cast<double>(st.lead.min_ms), st.lead.Mean(),
 				static_cast<double>(st.lead.max_ms), lock_max_us, lock_total_ms, lock_gs_thread_ms, lock_gs_submit_ms, skipped,
 				timed_out, s.stat_publish_deferred.exchange(0, std::memory_order_relaxed), st.layers, st.parked,
 				st.layer_changes, st.no_projection, st.views_reused,
 				s.headset_rate ? "headset rate (VR pacer)" : "legacy (one per GS present)",
-				VR::XrQueueDedicated() ? "dedicated" : "shared");
+				VR::XrQueueDedicated() ? "dedicated" : "shared", pacer_copies);
 			// Only the pacer places hands (legacy submits each frame for the display time it located the hands for).
 			const u32 hand_new = s.stat_hand_new.exchange(0, std::memory_order_relaxed);
 			const u32 hand_kept = s.stat_hand_kept.exchange(0, std::memory_order_relaxed);
@@ -5664,6 +6378,526 @@ namespace VR::XRCompositor
 			st.last_sig = last_sig;
 			st.lead_base_valid = lead_base_valid;
 			st.lead_base_ns = lead_base_ns;
+		}
+
+		// [VR] PacerCopies: the VR pacer copies every image into the headset's swapchains itself.
+		//
+		// Without it the GS thread acquires a swapchain image, waits for it, copies the frame into it (and draws the hands,
+		// HUD cards, lever cards and zone markers into theirs) on the session's queue and releases it, each step under the
+		// queue lock the pacer holds through xrEndFrame; a runtime that paces inside xrEndFrame (SteamVR for two minutes
+		// after a dashboard blip in the first headset session) then holds the emulation up at every present. With it the
+		// GS thread calls no XR function and takes no queue lock in EndOfFrame:
+		// - The frame: PcCopyFrame records a vkCmdCopyImage of both eyes' layers into a slot of a ring of the compositor's
+		//   own images (kPcRingSlots) into the GS's OWN current command buffer. That costs no submit and no lock; it goes to
+		//   the GPU with the GS's next submit, whose gs timeline value (VRVulkanBridge.h) is known as it is recorded and
+		//   goes in pc.frame. The GS texture's layout moves to TransferSrc in that command buffer through the GS's own
+		//   tracking, so later GS work and the stereo dump right after (which reads it in that command buffer too) move it
+		//   on as usual. The edge fill is recorded after it the same way, into the slot's fill image (PcUpdateEdgeFill).
+		// - The CPU-drawn layers: drawn into a staging ring per layer (host-visible memory, PcStageBegin) and posted
+		//   (PcStagePost); the post is that layer's image from then on, as a release was.
+		// - The layers are then published at once (PcPublish) with the frame (ring slot, gs value, serial) and each layer's
+		//   latest post; poses and FOVs exactly as before, and each entry names what its image must be
+		//   (PublishedSet::Entry::pc_*).
+		// The pacer, after xrBeginFrame, takes the set and claims the ring slot and staging slots it will read (PcClaim,
+		// under publish_mutex), then on its own thread and the session's queue (PcCopyPass) acquires and waits each image
+		// within a budget, copies ring -> eye swapchains (both eyes or neither, as before), the fill, and staging ->
+		// swapchains in one command buffer, submits once, releases, and ends the frame with each entry pointed at its
+		// swapchain (PcResolveSet). That submit waits for the GS's latest submitted gs value (which covers the frame's: a
+		// frame whose GS submit has not gone in yet waits for a later pacer frame) and signals the next xr value.
+		// Pose matching is what it was: an entry goes out only with the image it was built for (the screen's entries with
+		// their frame, a hand or zone marker with its post, the toast and the laser's slot with their content, the rest
+		// with any image of theirs); otherwise with the entries that went out with what its swapchain holds (for the screen
+		// with their set's state, as keep_screen), or parked.
+		// Slot safety. The ring: the GS writes only a slot that is neither the published one (the only one the pacer ever
+		// claims) nor claimed, so with three one is always free; the pacer submits its read of a slot, signalling xr, before
+		// it lets go of the claim, and every GS submit after that is held back by its xr wait (VRVulkanBridge.h), so the GS's
+		// next write to the slot, recorded and submitted later, cannot overtake the read. A ring image made again (a frame
+		// size change) goes with the GS's deferred destruction, after that wait too. The staging rings: written by the CPU,
+		// so a slot is written again only once the copy pass that read it is known done on the GPU (its fence, pc.done_gen),
+		// and never while it is the latest post, the published one or claimed; three slots. It needs [VR] DedicatedXrQueue
+		// in effect (the GS's submits then carry the timelines). The frame reaches the GPU with the GS's next submit, about
+		// one GS frame later than the GS-side copy did; PCSX2_VR_PACER_COPIES_FLUSH submits right after the copy instead.
+
+		// PacerCopies, pacer thread, under publish_mutex with the set just taken: claims the ring slot and the staging slots
+		// this frame copies from (whatever is newer than what the pacer's swapchains hold), so the GS writes none of them
+		// meanwhile. PcUnclaim lets go once the copies are submitted (or not made).
+		void PcClaim(const PublishedSet& set)
+		{
+			pc.ring_claimed = -1;
+			const PcFrame& fr = set.pc_frame;
+			if (fr.slot >= 0 && fr.serial != 0)
+			{
+				const bool newer = pc.chains[kPcEyeChain].released_serial != fr.serial ||
+				                   (fr.layered && pc.chains[kPcEyeChain + 1].released_serial != fr.serial) ||
+				                   (fr.fill != VK_NULL_HANDLE && pc.chains[kPcFillChain].released_serial != fr.serial);
+				if (newer)
+					pc.ring_claimed = fr.slot;
+			}
+			for (int c = kPcSlotChain; c < kPcChainCount; c++)
+			{
+				const PcPost& post = set.pc_post[c];
+				const bool newer = post.slot >= 0 && post.serial > pc.chains[c].released_serial && !pc.chains[c].failed;
+				pc.stage[c].claimed = newer ? post.slot : -1;
+			}
+		}
+
+		// PacerCopies, pacer thread: lets go of the claims, the staging slots read (stage_read) by copy pass gen.
+		void PcUnclaim(const bool* stage_read, u64 gen)
+		{
+			std::lock_guard<std::mutex> lock(s.publish_mutex);
+			pc.ring_claimed = -1;
+			for (int c = kPcSlotChain; c < kPcChainCount; c++)
+			{
+				PcStage& st = pc.stage[c];
+				if (stage_read[c] && st.claimed >= 0)
+					st.read_gen[st.claimed] = gen;
+				st.claimed = -1;
+			}
+		}
+
+		// PacerCopies, pacer thread: waits (at most timeout_ns each) for the copy passes still on the GPU, which may write
+		// into a swapchain about to go; the passes are a few small copies, so this is short.
+		void PcWaitPasses(u64 timeout_ns)
+		{
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			u64 done = pc.done_gen.load(std::memory_order_relaxed);
+			for (int i = 0; i < kPcCmdBuffers; i++)
+			{
+				if (pc.fence_gen[i] == 0 || vkWaitForFences(h.device, 1, &pc.fence[i], VK_TRUE, timeout_ns) != VK_SUCCESS)
+					continue;
+				done = std::max(done, pc.fence_gen[i]);
+				vkResetFences(h.device, 1, &pc.fence[i]);
+				pc.fence_gen[i] = 0;
+			}
+			pc.done_gen.store(done, std::memory_order_release);
+		}
+
+		// PacerCopies, pacer thread: chain c's swapchain at width x height, made (again) when it is missing or its size
+		// changes (a frame size change; the copies already submitted into the old one finish first). What went out with an
+		// old swapchain goes with it.
+		bool PcEnsureChain(int c, u32 width, u32 height)
+		{
+			PcChain& ch = pc.chains[c];
+			if (ch.swapchain != XR_NULL_HANDLE && ch.width == width && ch.height == height)
+				return true;
+			if (ch.failed || width == 0 || height == 0)
+				return false;
+			if (ch.swapchain != XR_NULL_HANDLE)
+			{
+				PcWaitPasses(50000000);
+				if (c == kPcEyeChain || c == kPcEyeChain + 1)
+					pc.shown_screen_valid = false;
+				for (int slot = 0; slot < kSlotCount; slot++)
+				{
+					if (pc.last_valid[slot] && pc.last_entry[slot].quad.subImage.swapchain == ch.swapchain)
+						pc.last_valid[slot] = false;
+				}
+				xrDestroySwapchain(ch.swapchain);
+				ch.swapchain = XR_NULL_HANDLE;
+			}
+			ch.images.clear();
+			ch.acquired = false;
+			ch.waited = false;
+			ch.released_serial = 0;
+			ch.released_key = 0;
+			ch.released_spell = 0;
+			XrSwapchainCreateInfo ci = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
+			ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+			ci.format = static_cast<int64_t>(s.swapchain_format);
+			ci.sampleCount = 1;
+			ci.width = width;
+			ci.height = height;
+			ci.faceCount = 1;
+			ci.arraySize = 1;
+			ci.mipCount = 1;
+			uint32_t count = 0;
+			XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &ch.swapchain);
+			if (XR_SUCCEEDED(res))
+				res = xrEnumerateSwapchainImages(ch.swapchain, 0, &count, nullptr);
+			if (XR_SUCCEEDED(res) && count > 0)
+			{
+				ch.images.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+				res = xrEnumerateSwapchainImages(ch.swapchain, count, &count,
+					reinterpret_cast<XrSwapchainImageBaseHeader*>(ch.images.data()));
+			}
+			if (XR_FAILED(res) || count == 0)
+			{
+				if (ch.swapchain != XR_NULL_HANDLE)
+					xrDestroySwapchain(ch.swapchain);
+				ch.swapchain = XR_NULL_HANDLE;
+				ch.images.clear();
+				// The eyes are tried again next frame (the screen is the game); a card or a hand stays off this session.
+				ch.failed = (c > kPcFillChain);
+				if (!pc.warned_chain)
+				{
+					pc.warned_chain = true;
+					Console.Error("(VR) Pacer copies: xrCreateSwapchain for %ux%u failed (%d); that layer is not shown.", width,
+						height, static_cast<int>(res));
+				}
+				return false;
+			}
+			ch.width = width;
+			ch.height = height;
+			Console.WriteLn("(VR) Pacer copies: swapchain %d made on the pacer (%ux%u, %u images).", c, width, height, count);
+			return true;
+		}
+
+		// PacerCopies, pacer thread: chain c's next image acquired (or the one acquired before kept) and handed over within
+		// what is left of this frame's budget. An image not back yet stays acquired and is waited for again next frame.
+		bool PcAcquireAndWait(int c, int64_t* budget_ns)
+		{
+			PcChain& ch = pc.chains[c];
+			if (!ch.acquired)
+			{
+				uint32_t index = 0;
+				const XrResult ar = LockedAcquire(ch.swapchain, &index);
+				if (XR_FAILED(ar) || index >= ch.images.size())
+				{
+					if (!pc.warned_pass)
+					{
+						pc.warned_pass = true;
+						Console.Error("(VR) Pacer copies: xrAcquireSwapchainImage failed (%d).", static_cast<int>(ar));
+					}
+					return false;
+				}
+				ch.index = index;
+				ch.acquired = true;
+				ch.waited = false;
+			}
+			if (!ch.waited)
+			{
+				XrSwapchainImageWaitInfo wi = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+				wi.timeout = std::max<int64_t>(0, *budget_ns);
+				const s64 start_ns = SteadyNowNs();
+				const XrResult wr = xrWaitSwapchainImage(ch.swapchain, &wi);
+				*budget_ns -= SteadyNowNs() - start_ns;
+				// XR_TIMEOUT_EXPIRED is a success code: the image is not ours yet.
+				if (wr == XR_TIMEOUT_EXPIRED || XR_FAILED(wr))
+					return false;
+				ch.waited = true;
+			}
+			return true;
+		}
+
+		// PacerCopies, pacer thread, between xrBeginFrame and xrEndFrame: brings the pacer's swapchains up to what the set
+		// shows (the scheme above) in one submit on the session's queue. Never waits long: images the runtime has not
+		// handed back within kPcWaitBudgetNs stay acquired for the next frame, all command buffers still on the GPU skip
+		// this frame's copies, and a frame whose GS submit has not gone in yet is copied a later frame.
+		void PcCopyPass(const PublishedSet& set, FrameStats& st, u32 gen)
+		{
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			bool stage_read[kPcChainCount] = {};
+			// The copy passes the GPU has finished: the staging slots they read are the GS's again.
+			u64 done = pc.done_gen.load(std::memory_order_relaxed);
+			for (int i = 0; i < kPcCmdBuffers; i++)
+			{
+				if (pc.fence_gen[i] != 0 && vkGetFenceStatus(h.device, pc.fence[i]) == VK_SUCCESS)
+				{
+					done = std::max(done, pc.fence_gen[i]);
+					vkResetFences(h.device, 1, &pc.fence[i]);
+					pc.fence_gen[i] = 0;
+				}
+			}
+			pc.done_gen.store(done, std::memory_order_release);
+			const u32 ci = pc.next_cmd;
+			if (pc.fence_gen[ci] != 0)
+			{
+				st.pc_busy++;
+				PcUnclaim(stage_read, 0);
+				return;
+			}
+
+			int64_t budget_ns = kPcWaitBudgetNs;
+			const PcFrame& fr = set.pc_frame;
+			const int eyes = fr.layered ? 2 : 1;
+			bool frame_job = false;
+			bool fill_job = false;
+			if (pc.ring_claimed >= 0 && fr.image != VK_NULL_HANDLE)
+			{
+				if (VR::GsSubmittedValue() < fr.gs_value)
+				{
+					st.pc_gs_waits++;
+				}
+				else
+				{
+					bool eyes_newer = false;
+					for (int e = 0; e < eyes; e++)
+						eyes_newer = eyes_newer || pc.chains[kPcEyeChain + e].released_serial != fr.serial;
+					if (eyes_newer)
+					{
+						// Both eyes are acquired and waited for even when one is not ready, so a ready one is kept for the
+						// next frame (both eyes go together or neither, as before).
+						bool ready = true;
+						for (int e = 0; e < eyes; e++)
+						{
+							const bool ok = PcEnsureChain(kPcEyeChain + e, fr.width, fr.height) &&
+							                PcAcquireAndWait(kPcEyeChain + e, &budget_ns);
+							ready = ready && ok;
+						}
+						frame_job = ready;
+						if (!ready)
+							st.pc_image_waits++;
+					}
+					if (fr.fill != VK_NULL_HANDLE && pc.chains[kPcFillChain].released_serial != fr.serial)
+					{
+						fill_job = PcEnsureChain(kPcFillChain, 2 * kFillEyeSize, kFillEyeSize) &&
+						           PcAcquireAndWait(kPcFillChain, &budget_ns);
+					}
+				}
+			}
+			bool stage_job[kPcChainCount] = {};
+			bool any = frame_job || fill_job;
+			for (int c = kPcSlotChain; c < kPcChainCount; c++)
+			{
+				const PcStage& sg = pc.stage[c];
+				if (sg.claimed < 0 || sg.buffer == VK_NULL_HANDLE)
+					continue;
+				if (PcEnsureChain(c, sg.width, sg.height) && PcAcquireAndWait(c, &budget_ns))
+				{
+					stage_job[c] = true;
+					any = true;
+				}
+				else
+				{
+					st.pc_image_waits++;
+				}
+			}
+			// Shutdown gave up on a pacer stuck in one of those calls: touch nothing more (PacerThreadMain).
+			if (s.pacer_gen.load(std::memory_order_acquire) != gen)
+				return;
+			if (!any)
+			{
+				PcUnclaim(stage_read, 0);
+				return;
+			}
+
+			// The copies, each swapchain image moved to TransferDst and back to the attachment layout the runtime expects
+			// at release.
+			const VkCommandBuffer cmd = pc.cmd[ci];
+			VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+			bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+			if (vkBeginCommandBuffer(cmd, &bi) != VK_SUCCESS)
+			{
+				if (!pc.warned_pass)
+				{
+					pc.warned_pass = true;
+					Console.Error("(VR) Pacer copies: vkBeginCommandBuffer failed; this frame's copies wait.");
+				}
+				PcUnclaim(stage_read, 0);
+				return;
+			}
+			const auto to_dst = [cmd](VkImage image) {
+				ImageBarrier(cmd, image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+					VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+			};
+			const auto to_attachment = [cmd](VkImage image) {
+				ImageBarrier(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+					VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+					VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+			};
+			if (frame_job)
+			{
+				for (int e = 0; e < eyes; e++)
+				{
+					const PcChain& ch = pc.chains[kPcEyeChain + e];
+					const VkImage dst = ch.images[ch.index].image;
+					to_dst(dst);
+					VkImageCopy region = {};
+					region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, static_cast<u32>(e), 1};
+					region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+					region.extent = {fr.width, fr.height, 1};
+					vkCmdCopyImage(cmd, fr.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+						&region);
+					to_attachment(dst);
+				}
+			}
+			if (fill_job)
+			{
+				const PcChain& ch = pc.chains[kPcFillChain];
+				const VkImage dst = ch.images[ch.index].image;
+				to_dst(dst);
+				VkImageCopy region = {};
+				region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+				region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+				region.extent = {2 * kFillEyeSize, kFillEyeSize, 1};
+				vkCmdCopyImage(cmd, fr.fill, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+					&region);
+				to_attachment(dst);
+			}
+			for (int c = kPcSlotChain; c < kPcChainCount; c++)
+			{
+				if (!stage_job[c])
+					continue;
+				const PcStage& sg = pc.stage[c];
+				const PcChain& ch = pc.chains[c];
+				const VkImage dst = ch.images[ch.index].image;
+				to_dst(dst);
+				VkBufferImageCopy region = {};
+				region.bufferOffset = sg.slot_bytes * static_cast<VkDeviceSize>(sg.claimed);
+				region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+				region.imageExtent = {sg.width, sg.height, 1};
+				vkCmdCopyBufferToImage(cmd, sg.buffer, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+				to_attachment(dst);
+			}
+			VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+			si.commandBufferCount = 1;
+			si.pCommandBuffers = &cmd;
+			// Reading the ring (written by the GS) waits for the GS's latest submit and signals the next xr value, which
+			// holds back the GS's next submit (and so its next write to the slot) until the read is done.
+			VkResult vr = vkEndCommandBuffer(cmd);
+			if (vr == VK_SUCCESS)
+			{
+				vr = (frame_job || fill_job) ? LockedQueueSubmitReadingGs(h.queue, si, pc.fence[ci]) :
+				                               LockedQueueSubmit(h.queue, si, pc.fence[ci]);
+			}
+			if (vr != VK_SUCCESS)
+			{
+				// The images stay acquired and waited: the copies go in again next frame.
+				if (!pc.warned_pass)
+				{
+					pc.warned_pass = true;
+					Console.Error("(VR) Pacer copies: the copy submit failed (%d); this frame's copies wait.", static_cast<int>(vr));
+				}
+				PcUnclaim(stage_read, 0);
+				return;
+			}
+			pc.fence_gen[ci] = ++pc.gen;
+			pc.next_cmd = (pc.next_cmd + 1) % kPcCmdBuffers;
+
+			// Released, each image holds what was copied into it (a failed release leaves the one before shown).
+			const auto release = [](int c, u64 serial, u64 key, u64 spell) {
+				PcChain& ch = pc.chains[c];
+				ch.acquired = false;
+				ch.waited = false;
+				if (XR_FAILED(LockedRelease(ch.swapchain)))
+				{
+					if (!pc.warned_release)
+					{
+						pc.warned_release = true;
+						Console.Error("(VR) Pacer copies: xrReleaseSwapchainImage failed.");
+					}
+					return;
+				}
+				ch.released_serial = serial;
+				ch.released_key = key;
+				ch.released_spell = spell;
+			};
+			if (frame_job)
+			{
+				for (int e = 0; e < eyes; e++)
+					release(kPcEyeChain + e, fr.serial, 0, 0);
+				st.pc_frames++;
+				const u64 now_ms = CameraDriver::SteadyNowMs();
+				st.pc_age.Add((now_ms > set.publish_ms) ? static_cast<double>(now_ms - set.publish_ms) : 0.0);
+			}
+			if (fill_job)
+				release(kPcFillChain, fr.serial, 0, fr.fill_spell);
+			for (int c = kPcSlotChain; c < kPcChainCount; c++)
+			{
+				if (!stage_job[c])
+					continue;
+				release(c, set.pc_post[c].serial, set.pc_post[c].key, 0);
+				stage_read[c] = true;
+				st.pc_uploads++;
+			}
+			PcUnclaim(stage_read, pc.gen);
+		}
+
+		// PacerCopies, pacer thread, after the copy pass and before anything else touches the set: points each entry at the
+		// pacer's swapchain and keeps only what goes with what that swapchain holds (the rules in the scheme above), the
+		// rest parked, and parks the slots whose swapchain has a released image but no entry (ParkFreeSlots).
+		void PcResolveSet(PublishedSet& set)
+		{
+			// The screen: the set's own entries while the eye chains hold its frame, else the entries that went out with
+			// what they hold, with the state of their set (as keep_screen).
+			const PcFrame& fr = set.pc_frame;
+			const int eyes = fr.layered ? 2 : 1;
+			bool held = (fr.serial != 0);
+			for (int e = 0; e < eyes; e++)
+			{
+				const PcChain& ch = pc.chains[kPcEyeChain + e];
+				held = held && ch.swapchain != XR_NULL_HANDLE && ch.released_serial == fr.serial;
+			}
+			bool from_shown = false;
+			if (!held && pc.shown_screen_valid)
+			{
+				const PcFrame& sf = pc.shown_screen.pc_frame;
+				from_shown = true;
+				for (int e = 0; e < (sf.layered ? 2 : 1); e++)
+					from_shown = from_shown && pc.chains[kPcEyeChain + e].released_serial == sf.serial;
+			}
+
+			PublishedSet::Entry out[kLayerCapacity];
+			u32 n = 0;
+			if (from_shown)
+			{
+				for (u32 i = 0; i < pc.shown_screen.count && n < kLayerCapacity; i++)
+				{
+					if (pc.shown_screen.e[i].role == kRoleScreen)
+						out[n++] = pc.shown_screen.e[i];
+				}
+				set.fp_screen = pc.shown_screen.fp_screen;
+				set.fp_head = pc.shown_screen.fp_head;
+				set.publish_display_time = pc.shown_screen.publish_display_time;
+				set.fp_image = pc.shown_screen.fp_image;
+				if (!set.fp_screen)
+					set.turn_rate = 0.0f;
+			}
+			for (u32 i = 0; i < set.count && n < kLayerCapacity; i++)
+			{
+				PublishedSet::Entry e = set.e[i];
+				if (e.role == kRoleScreen)
+				{
+					if (!held)
+						continue;
+					const PcChain& ch = pc.chains[(e.pc_chain <= kPcEyeChain + 1) ? e.pc_chain : kPcEyeChain];
+					if (e.kind == kKindCylinder)
+						e.cyl.subImage.swapchain = ch.swapchain;
+					else
+						e.quad.subImage.swapchain = ch.swapchain;
+					out[n++] = e;
+					continue;
+				}
+				if (e.pc_chain < kPcSlotChain || e.pc_chain >= kPcChainCount || e.kind != kKindQuad)
+					continue;
+				const PcChain& ch = pc.chains[e.pc_chain];
+				if (ch.swapchain == XR_NULL_HANDLE || ch.released_serial == 0)
+					continue;
+				const bool matches = (e.pc_serial != 0) ? (ch.released_serial == e.pc_serial) :
+				                                          (e.pc_key == 0 || ch.released_key == e.pc_key);
+				if (matches)
+				{
+					e.quad.subImage.swapchain = ch.swapchain;
+					pc.last_entry[e.slot] = e;
+					pc.last_valid[e.slot] = true;
+				}
+				else if (e.pc_serial != 0 && pc.last_valid[e.slot] && pc.last_entry[e.slot].pc_serial == ch.released_serial &&
+				         pc.last_entry[e.slot].quad.subImage.swapchain == ch.swapchain)
+				{
+					// The pose that went out with what the swapchain still holds (the pacer moves a hand's on with its
+					// controller as before).
+					e = pc.last_entry[e.slot];
+				}
+				else if (!s.no_parked_layers)
+				{
+					e.quad.subImage.swapchain = ch.swapchain;
+					ParkEntry(e);
+				}
+				else
+				{
+					continue;
+				}
+				out[n++] = e;
+			}
+			std::copy(out, out + n, set.e);
+			set.count = n;
+			if (held && (!pc.shown_screen_valid || pc.shown_screen.pc_frame.serial != fr.serial))
+			{
+				pc.shown_screen = set;
+				pc.shown_screen_valid = true;
+			}
+			ParkFreeSlots(&set, true);
 		}
 
 		// PCSX2_VR_SYNCLOG: how evenly the first-person screen turns through a smooth stick turn, from the Screen
@@ -6615,10 +7849,25 @@ namespace VR::XRCompositor
 				XrResult eres = XR_SUCCESS;
 				float end_ms = 0.0f;
 				EndFrameTiming end_timing;
+				// PacerCopies: this frame's images into the pacer's swapchains (the scheme above PcCopyPass), outside
+				// submit_mutex (the GS takes it for nothing then), and the set pointed at them.
+				if (!exiting && pc.on)
+				{
+					{
+						std::lock_guard<std::mutex> lock(s.publish_mutex);
+						set = s.published;
+						PcClaim(set);
+					}
+					PcCopyPass(set, stats, gen);
+					if (PacerDetached(gen))
+						return;
+					PcResolveSet(set);
+				}
 				{
 					std::unique_lock<std::timed_mutex> submit_lock(s.submit_mutex);
 					if (!exiting)
 					{
+						if (!pc.on)
 						{
 							std::lock_guard<std::mutex> lock(s.publish_mutex);
 							set = s.published;
@@ -6639,7 +7888,24 @@ namespace VR::XRCompositor
 							turn = set.turn_rate * static_cast<float>(dt);
 						}
 						if (views_ok)
-							MakeBackgroundLayer(views, bg_views, &bg, set.fp_screen && s_fill.live.load(std::memory_order_acquire));
+						{
+							// The edge fill behind the first-person screen while its swapchain holds a fill of this spell.
+							XrSwapchain fill = XR_NULL_HANDLE;
+							if (pc.on)
+							{
+								const PcChain& fc = pc.chains[kPcFillChain];
+								if (set.fp_screen && set.pc_frame.fill_spell != 0 && fc.swapchain != XR_NULL_HANDLE &&
+									fc.released_spell == set.pc_frame.fill_spell)
+								{
+									fill = fc.swapchain;
+								}
+							}
+							else if (set.fp_screen && s_fill.live.load(std::memory_order_acquire))
+							{
+								fill = s_fill.swapchain;
+							}
+							MakeBackgroundLayer(views, bg_views, &bg, fill);
+						}
 						submit_count = BuildSubmitArray(set, views_ok ? &bg : nullptr, stale, turn, submit);
 					}
 					const s64 end_start_ns = SteadyNowNs();
@@ -6730,6 +7996,150 @@ namespace VR::XRCompositor
 			if (XR_FAILED(LockedBeginFrame(session)))
 				return;
 			LockedEndFrame(session, fs.predictedDisplayTime, 0, nullptr);
+		}
+
+		// PacerCopies: everything both sides start from (Initialize, before the pacer starts).
+		void PcReset()
+		{
+			pc.ring_claimed = -1;
+			pc.frame = PcFrame{};
+			pc.frame_serial = 0;
+			pc.post_serial = 0;
+			pc.fill_spell = 0;
+			pc.fill_live = false;
+			for (PcStage& st : pc.stage)
+			{
+				st.post = PcPost{};
+				st.claimed = -1;
+				for (u64& g : st.read_gen)
+					g = 0;
+			}
+			pc.done_gen.store(0, std::memory_order_relaxed);
+			for (PcChain& ch : pc.chains)
+				ch = PcChain{};
+			for (int i = 0; i < kPcCmdBuffers; i++)
+				pc.fence_gen[i] = 0;
+			pc.next_cmd = 0;
+			pc.gen = 0;
+			pc.shown_screen_valid = false;
+			for (bool& v : pc.last_valid)
+				v = false;
+			pc.warned_stage = false;
+			pc.warned_ring = false;
+			pc.warned_pass = false;
+			pc.warned_chain = false;
+			pc.warned_release = false;
+			for (u64& z : s_zone_serial)
+				z = 0;
+		}
+
+		// PacerCopies, Shutdown: the pacer's swapchains, command buffers and fences once it has gone, the staging rings,
+		// and the ring images (with the GS's deferred destruction, its command buffers being the ones that use them).
+		// With the pacer left stuck in the runtime everything it may still touch is left alive, as the XR handles are.
+		void PcDestroy(bool abandoned)
+		{
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			if (!abandoned)
+			{
+				// The copies into the swapchains and out of the staging first, then what they used.
+				if (h.IsValid())
+				{
+					for (int i = 0; i < kPcCmdBuffers; i++)
+					{
+						if (pc.fence_gen[i] != 0 && pc.fence[i] != VK_NULL_HANDLE &&
+							vkWaitForFences(h.device, 1, &pc.fence[i], VK_TRUE, kTeardownFenceNs) == VK_TIMEOUT)
+						{
+							Console.Warning("(VR) Pacer copies: a copy fence was still busy after 250 ms during teardown.");
+						}
+					}
+				}
+				for (PcChain& ch : pc.chains)
+				{
+					if (ch.swapchain != XR_NULL_HANDLE)
+						xrDestroySwapchain(ch.swapchain);
+					ch = PcChain{};
+				}
+				if (h.IsValid())
+				{
+					for (int i = 0; i < kPcCmdBuffers; i++)
+					{
+						pc.fence_gen[i] = 0;
+						if (pc.fence[i] != VK_NULL_HANDLE)
+							vkDestroyFence(h.device, pc.fence[i], nullptr);
+					}
+					if (pc.pool != VK_NULL_HANDLE)
+					{
+						vkFreeCommandBuffers(h.device, pc.pool, static_cast<u32>(kPcCmdBuffers), pc.cmd);
+						vkDestroyCommandPool(h.device, pc.pool, nullptr);
+					}
+					for (PcStage& st : pc.stage)
+					{
+						if (st.map && st.memory != VK_NULL_HANDLE)
+							vkUnmapMemory(h.device, st.memory);
+						if (st.buffer != VK_NULL_HANDLE)
+							vkDestroyBuffer(h.device, st.buffer, nullptr);
+						if (st.memory != VK_NULL_HANDLE)
+							vkFreeMemory(h.device, st.memory, nullptr);
+					}
+				}
+			}
+			for (int i = 0; i < kPcCmdBuffers; i++)
+			{
+				pc.cmd[i] = VK_NULL_HANDLE;
+				pc.fence[i] = VK_NULL_HANDLE;
+			}
+			pc.pool = VK_NULL_HANDLE;
+			for (PcStage& st : pc.stage)
+				st = PcStage{};
+			for (PcRingSlot& slot : pc.ring)
+			{
+				if (!abandoned)
+				{
+					DeferGsImage(&slot.image, &slot.alloc);
+					DeferGsImage(&slot.fill, &slot.fill_alloc);
+				}
+				slot = PcRingSlot{};
+			}
+			pc.on = false;
+		}
+
+		// PacerCopies: the pacer's command pool, command buffers and fences (made here, before the pacer starts, and used
+		// by it alone). False, and PacerCopies stays off, when any cannot be made.
+		bool PcCreatePacerResources()
+		{
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			VkCommandPoolCreateInfo pci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+			pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+			pci.queueFamilyIndex = h.queue_family;
+			if (vkCreateCommandPool(h.device, &pci, nullptr, &pc.pool) != VK_SUCCESS)
+			{
+				pc.pool = VK_NULL_HANDLE;
+				return false;
+			}
+			VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+			cai.commandPool = pc.pool;
+			cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+			cai.commandBufferCount = static_cast<u32>(kPcCmdBuffers);
+			bool ok = (vkAllocateCommandBuffers(h.device, &cai, pc.cmd) == VK_SUCCESS);
+			for (int i = 0; i < kPcCmdBuffers && ok; i++)
+			{
+				VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+				ok = (vkCreateFence(h.device, &fci, nullptr, &pc.fence[i]) == VK_SUCCESS);
+				if (!ok)
+					pc.fence[i] = VK_NULL_HANDLE;
+			}
+			if (ok)
+				return true;
+			for (int i = 0; i < kPcCmdBuffers; i++)
+			{
+				if (pc.fence[i] != VK_NULL_HANDLE)
+					vkDestroyFence(h.device, pc.fence[i], nullptr);
+				pc.fence[i] = VK_NULL_HANDLE;
+				pc.cmd[i] = VK_NULL_HANDLE;
+			}
+			vkDestroyCommandPool(h.device, pc.pool, nullptr);
+			pc.pool = VK_NULL_HANDLE;
+			return false;
 		}
 	}
 
@@ -6977,6 +8387,41 @@ namespace VR::XRCompositor
 		s.layered_logged = -1;
 		s.legacy_have_last_views = false;
 		ParseFaults();
+
+		// [VR] PacerCopies, read once like HeadsetRateSubmit (the scheme is described above PcCopyPass): the pacer then
+		// does every swapchain call, so it needs the pacer to own the frames, and the dedicated queue in effect (its
+		// timelines order the GS's command buffers against the pacer's copies).
+		PcReset();
+		pc.on = false;
+		pc.flush = (std::getenv("PCSX2_VR_PACER_COPIES_FLUSH") != nullptr);
+		if (!EmuConfig.VR.PacerCopies)
+		{
+			Console.WriteLn("(VR) Pacer copies: off ([VR] PacerCopies).");
+		}
+		else if (!s.headset_rate)
+		{
+			Console.Warning("(VR) Pacer copies: [VR] PacerCopies needs HeadsetRateSubmit; staying off.");
+		}
+		else if (!VR::XrQueueDedicated())
+		{
+			Console.Warning("(VR) Pacer copies: [VR] PacerCopies needs the dedicated XR queue ([VR] DedicatedXrQueue = true, "
+							"in effect: the '(VR) XR queue:' line above says why it is shared); staying off.");
+		}
+		else if (!PcCreatePacerResources())
+		{
+			Console.Error("(VR) Pacer copies: the pacer's command buffers could not be made; staying off.");
+		}
+		else
+		{
+			pc.on = true;
+			Console.WriteLn("(VR) Pacer copies: on ([VR] PacerCopies): the GS thread copies each frame into a ring of %d "
+							"images in its own command buffer and draws the hands and cards into staging memory; the VR pacer "
+							"copies them into the headset's swapchains, so the GS never calls into the runtime or takes the "
+							"queue lock. The frame goes to the GPU %s.",
+				kPcRingSlots,
+				pc.flush ? "at once (PCSX2_VR_PACER_COPIES_FLUSH: the GS submits after the copy)" :
+				           "with the GS's next submit (about one GS frame later than before)");
+		}
 
 		s.warned_pacer = false;
 		s.warned_beginframe = false;
@@ -7272,7 +8717,29 @@ namespace VR::XRCompositor
 		// Headset rate: Copied sets ever_released below ahead of the release (ReleaseAndPublish), which restores
 		// these if the release fails.
 		const bool chain_was_released[2] = {s.chains[0].ever_released, s.chains[1].ever_released};
-		if (should_render && current)
+		// PacerCopies: whether this present's frame went into the ring (the edge fill then goes beside it).
+		bool pc_frame_copied = false;
+		if (should_render && current && pc.on)
+		{
+			// PacerCopies: the frame into a ring slot in the GS's own command buffer, both eyes or neither (the
+			// alternate-eye debug mode, PCSX2_VR_INTERLEAVE, goes as mono: its one eye on both). The pacer copies it into
+			// its swapchains (PcCopyPass); ever_released then means posted, s.swapchain_* the frame's size.
+			GSTextureVK* src = static_cast<GSTextureVK*>(current);
+			pc_frame_copied = PcCopyFrame(src, layered);
+			const CopyResult r = pc_frame_copied ? CopyResult::Copied : CopyResult::Skipped;
+			for (u32 l = 0; l < (layered ? 2u : 1u); l++)
+			{
+				cl_copy[l] = static_cast<int>(r);
+				if (pc_frame_copied)
+					s.chains[l].ever_released = true;
+			}
+			if (pc_frame_copied)
+			{
+				s.swapchain_width = pc.frame.width;
+				s.swapchain_height = pc.frame.height;
+			}
+		}
+		else if (should_render && current)
 		{
 			GSTextureVK* src = static_cast<GSTextureVK*>(current);
 			const u32 w = static_cast<u32>(src->GetWidth());
@@ -7314,6 +8781,12 @@ namespace VR::XRCompositor
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}, {XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR},
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}, {XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR},
 			{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR}};
+		// Which eye chain each screen layer shows (by its index in quads/cyls), for PacerCopies, whose swapchains the
+		// pacer fills in; and the staging post each hand and zone marker image is, and each HUD card's content key.
+		u8 screen_chain[5] = {};
+		u64 hand_serial[kHandSlots] = {};
+		u64 zone_serial[kZoneSlots] = {};
+		u64 hud_key[HudCards::kCardCount] = {};
 		// Worst case 14 layers: four for the screen (split screen in stereo, two viewports per eye; five slots
 		// kept), two lever cards, two hands and the six HUD cards (laser or menu beam, wrist, vignette, toast, blink,
 		// menu pointer dot), in a capacity of 15 (kLayerCapacity). The background goes under them in the submit array;
@@ -7516,6 +8989,7 @@ namespace VR::XRCompositor
 					s.chains[chain_idx].swapchain,
 					{{0, 0}, {static_cast<s32>(s.swapchain_width), static_cast<s32>(s.swapchain_height)}},
 					0};
+				screen_chain[layer_count] = static_cast<u8>(chain_idx);
 				if (curved)
 				{
 					XrCompositionLayerCylinderKHR& cyl = cyls[layer_count];
@@ -7589,6 +9063,7 @@ namespace VR::XRCompositor
 					return;
 				const XrSwapchainSubImage sub_image = {
 					s.chains[chain_idx].swapchain, {{rx, ry}, {rw, rh}}, 0};
+				screen_chain[layer_count] = static_cast<u8>(chain_idx);
 				const float rect_aspect = static_cast<float>(rw) / static_cast<float>(rh);
 				const bool is_local = (viewport == split_snap.local_view);
 				const bool focus = (split_snap.mode == 0);
@@ -7787,17 +9262,17 @@ namespace VR::XRCompositor
 		// Hands go last so they draw over the screen and the lever cards.
 		const u32 hands_from = layer_count;
 		if (!force_zero_layers && should_render)
-			BuildHandLayers(hand_quads, layers, layer_count, kLayerCapacity, hand_att);
+			BuildHandLayers(hand_quads, layers, layer_count, kLayerCapacity, hand_att, hand_serial);
 
 		// HUD cards last of all, over the hands and everything else; only the laser sight (or menu beam), the menu
 		// pointer's dot and the toast go in under the hands.
 		if (!force_zero_layers && should_render)
-			BuildHudLayers(hud_quads, layers, layer_count, kLayerCapacity, hands_from, hud_att);
+			BuildHudLayers(hud_quads, layers, layer_count, kLayerCapacity, hands_from, hud_att, hud_key);
 
 		// The body-zone markers from whatever capacity is left (so when layers are short they go first), but in at
 		// hands_from: over the screen and lever cards, under the HUD's under-hands cards and the hands that reach into them.
 		if (!force_zero_layers && should_render)
-			BuildZoneLayers(zone_quads, layers, layer_count, kLayerCapacity, hands_from);
+			BuildZoneLayers(zone_quads, layers, layer_count, kLayerCapacity, hands_from, zone_serial);
 
 		for (u32 l = 0; l < 2; l++)
 		{
@@ -7808,15 +9283,39 @@ namespace VR::XRCompositor
 		}
 
 		// The edge fill behind the first-person screen, released here, before the layers that go with it are published
-		// (anything else has the black background behind it).
-		if (fill_geo && should_render && current)
+		// (anything else has the black background behind it). PacerCopies: built beside this present's frame in the
+		// ring, only when the frame went there (the published slot the pacer may read is never written).
+		if (pc.on)
+		{
+			if (fill_geo && should_render && current)
+			{
+				if (pc_frame_copied)
+					PcUpdateEdgeFill(static_cast<GSTextureVK*>(current), fill_distance, fill_width, fill_height);
+			}
+			else
+			{
+				pc.fill_live = false;
+			}
+		}
+		else if (fill_geo && should_render && current)
+		{
 			UpdateEdgeFill(static_cast<GSTextureVK*>(current), fill_distance, fill_width, fill_height);
+		}
 		else
+		{
 			s_fill.live.store(false, std::memory_order_release);
+		}
 
-		const LayerSources sources = {
-			quads, cyls, 5, lever_quads, hand_quads, hud_quads, hand_att, hud_att, &s_pointer_pub, zone_quads};
+		const LayerSources sources = {quads, cyls, 5, lever_quads, hand_quads, hud_quads, hand_att, hud_att, &s_pointer_pub,
+			zone_quads, screen_chain, hand_serial, zone_serial, hud_key};
 
+		if (s.headset_rate && pc.on)
+		{
+			// PacerCopies: nothing to release (the pacer copies and releases its own images), so the layers are published
+			// at once, never waiting for the pacer; the pose stays with its frame as below.
+			PcPublish(layers, layer_count, sources, cl_copy, pub_fp_screen, pub_fp_head, pub_fp_image);
+			return;
+		}
 		if (s.headset_rate)
 		{
 			// The images copied this present are released together with publishing their layers, so the pacer never
@@ -7836,7 +9335,8 @@ namespace VR::XRCompositor
 		XrCompositionLayerProjectionView bg_views[2] = {};
 		XrCompositionLayerProjection bg = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
 		if (eye_views_ok)
-			MakeBackgroundLayer(eye_views, bg_views, &bg, pub_fp_screen && s_fill.live.load(std::memory_order_acquire));
+			MakeBackgroundLayer(eye_views, bg_views, &bg,
+				(pub_fp_screen && s_fill.live.load(std::memory_order_acquire)) ? s_fill.swapchain : XR_NULL_HANDLE);
 		const XrCompositionLayerBaseHeader* submit[kLayerCapacity + 1] = {};
 		const u32 submit_count = BuildSubmitArray(set, eye_views_ok ? &bg : nullptr, false, 0.0f, submit);
 
@@ -7938,6 +9438,7 @@ namespace VR::XRCompositor
 		DestroyZoneResources();
 		DestroyBackground();
 		DestroyFillResources();
+		PcDestroy(abandoned);
 
 		for (auto& chain : s.chains)
 		{
