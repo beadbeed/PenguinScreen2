@@ -85,9 +85,9 @@ namespace VR
 	// - every compositor submit that reads a GS texture (the screen copies and the edge fill, which also move the
 	//   texture's layout to TransferSrc) waits for the gs value of the GS's latest submit, and so for all GS work
 	//   submitted before it, and signals the next xr value (AddXrReadTimeline);
-	// - the first GS submit after such a read waits for its xr value (once: later GS submits follow it on the same
-	//   queue), so nothing the GS does to the texture afterwards (drawing into it, moving its layout, freeing it, which
-	//   waits for a later GS fence) can overtake the read.
+	// - the first GS submit after such a read waits for its xr value at ALL_COMMANDS (once: a vkQueueSubmit wait also
+	//   holds back every later command on its queue), so nothing the GS does to the texture afterwards (drawing into
+	//   it, moving its layout, freeing it, which waits for a later GS fence) can overtake the read.
 	// Each side waits only for a value the other side has already submitted the signal of (its latest), never for one
 	// still to come, so no submit can end up waiting, through the other queue, for itself: no deadlock. A read therefore
 	// never waits for GS work that is recorded but not yet submitted: the compositor has the GS submit such work first
