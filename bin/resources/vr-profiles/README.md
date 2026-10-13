@@ -375,6 +375,29 @@ the rest of the profile still loads. The `rules` list selects which HUD
 draws are affected and is specific to each game; leave it as shipped. This
 feature works on the Vulkan renderer only.
 
+## A zone that raises a long gun: `PressedLongGun`
+
+A `Zone` control in `controls` presses its `Pressed` binding when you squeeze
+the grip inside it. It can also bind `PressedLongGun`: a squeeze that begins
+while your equipped weapon is a long gun (a shotgun, rifle, submachine gun or
+launcher, read through `feedback.weapon`) goes there instead, at once and held
+while you squeeze, without the zone's `stopFirst`. A squeeze that begins with
+anything else equipped is `Pressed` as before. Which one is decided as the
+squeeze begins, so changing weapon mid-squeeze never moves a held press to the
+other button. The Outbreak profiles put it on the over-the-shoulder backpack
+zone, where the Zone Markers setting draws a long gun slung:
+
+```yaml
+    - device: Zone
+      id: backpack
+      bind:
+        Pressed: Start        # the item screen
+        PressedLongGun: R1    # with a long gun equipped: raise it
+```
+
+Without `feedback.weapon` the emulator cannot tell what is equipped: it logs a
+warning and `Pressed` takes every squeeze.
+
 ## Everything else
 
 Shipped profiles also contain `camera`, `writes`, `guards`, `base` and similar

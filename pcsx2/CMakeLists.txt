@@ -1089,6 +1089,7 @@ set(pcsx2VRSources
 	VR/VRVulkanBridge.cpp
 	VR/XRCompositor.cpp
 	VR/XRSession.cpp
+	VR/ZoneMarkers.cpp
 )
 
 set(pcsx2VRHeaders
@@ -1121,6 +1122,7 @@ set(pcsx2VRHeaders
 	VR/VRVulkanBridge.h
 	VR/XRCompositor.h
 	VR/XRSession.h
+	VR/ZoneMarkers.h
 )
 
 # These ones benefit a lot from LTO

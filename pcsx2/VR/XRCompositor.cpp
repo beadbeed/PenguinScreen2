@@ -19,6 +19,9 @@
 #include "VR/VRInput.h"
 #include "VR/XRSession.h"
 #include "VR/VRVulkanBridge.h"
+#include "VR/BeltPouches.h"
+#include "VR/ItemData.h"
+#include "VR/ZoneMarkers.h"
 #include "Config.h"
 #include "VMManager.h"
 
@@ -127,6 +130,12 @@ namespace VR::XRCompositor
 		constexpr int kHandSlots = 2;
 		constexpr VkDeviceSize kHandImageBytes =
 			static_cast<VkDeviceSize>(HandModel::kImageSize) * HandModel::kImageSize * 4u;
+		// Body-zone markers (ZoneMarkers): the holstered weapon (a hand impostor without the glove), the belt zone's bag
+		// and the pouches' rings, one quad each.
+		constexpr int kZoneSlots = ZoneMarkers::kSlots;
+		static_assert(ZoneMarkers::kImageSize == HandModel::kImageSize, "the holstered weapon is drawn as a hand impostor");
+		constexpr VkDeviceSize kZoneImageBytes =
+			static_cast<VkDeviceSize>(ZoneMarkers::kImageSize) * ZoneMarkers::kImageSize * 4u;
 
 		// Teardown never waits long on the GPU: a runtime that stopped answering must not hold up the GS thread.
 		constexpr int64_t kTeardownFenceNs = 250000000;
@@ -146,7 +155,8 @@ namespace VR::XRCompositor
 
 		// Every layer one present can build: up to five screen slots (split screen in stereo uses four), two lever
 		// cards, two hands and the six HUD cards (laser or menu beam, wrist, vignette, toast, blink, menu pointer dot).
-		// The submit array adds the background under them; SteamVR takes at most 16 a frame.
+		// The submit array adds the background under them; SteamVR takes at most 16 a frame. The body-zone markers have
+		// no room of their own: they take only what a present leaves free (BuildZoneLayers).
 		constexpr u32 kLayerCapacity = 5 + ControlQuads::kSlots + kHandSlots + HudCards::kCardCount;
 		static_assert(kLayerCapacity + 1 <= 16, "more composition layers than SteamVR takes in a frame");
 
@@ -158,6 +168,7 @@ namespace VR::XRCompositor
 		constexpr u8 kRoleHudLaser = 3;
 		constexpr u8 kRoleHudWrist = 4;
 		constexpr u8 kRoleHudView = 5; // view-locked cards: toast, blink, vignette
+		constexpr u8 kRoleZone = 6;    // a body-zone marker: placed in the base space at each present, never moved by the pacer
 		constexpr u8 kKindQuad = 0;
 		constexpr u8 kKindCylinder = 1;
 
@@ -433,6 +444,30 @@ namespace VR::XRCompositor
 			// Comfort blink on a screen-mode change: when (SteadyNowMs) the change waiting for the blink to
 			// go black is made; 0 while none waits.
 			u64 fp_switch_due_ms = 0;
+
+			// Body-zone markers ([VR] ZoneMarkers): the hands' CPU-raster upload path once more, one swapchain per marker
+			// sharing a staging buffer, command buffer and fence, created the first time one shows and kept until
+			// Shutdown; any failure turns the markers off for the session. Each image is released as soon as it is
+			// uploaded, as the HUD cards are: it changes only when what it shows or the view of it does, and then by a
+			// step too small to see for the one display frame the pacer may show it at the previous pose.
+			struct ZoneChain
+			{
+				XrSwapchain swapchain = XR_NULL_HANDLE;
+				std::vector<XrSwapchainImageVulkan2KHR> images;
+				bool ever_released = false;
+				bool wait_pending = false;
+				uint32_t pending_index = 0;
+			};
+			ZoneChain zone_chains[kZoneSlots];
+			VkBuffer zone_staging = VK_NULL_HANDLE;
+			VkDeviceMemory zone_staging_memory = VK_NULL_HANDLE;
+			void* zone_staging_map = nullptr;
+			VkCommandBuffer zone_cmd = VK_NULL_HANDLE;
+			VkFence zone_fence = VK_NULL_HANDLE;
+			bool zone_fence_submitted = false;
+			bool zone_disabled = false;
+			// What each zone swapchain's last released image shows (GS thread only).
+			ZoneMarkers::Drawn zone_drawn[kZoneSlots];
 
 			XrSpace view_space = XR_NULL_HANDLE;
 
@@ -2703,6 +2738,538 @@ namespace VR::XRCompositor
 			return appended;
 		}
 
+		void DestroyZoneResources()
+		{
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			if (h.IsValid() && s.zone_fence != VK_NULL_HANDLE && s.zone_fence_submitted)
+			{
+				if (vkWaitForFences(h.device, 1, &s.zone_fence, VK_TRUE, kTeardownFenceNs) == VK_TIMEOUT)
+					Console.Warning("(VR) Zone markers: upload fence still busy after 250 ms during teardown.");
+				vkResetFences(h.device, 1, &s.zone_fence);
+			}
+			s.zone_fence_submitted = false;
+			for (auto& zc : s.zone_chains)
+			{
+				if (zc.swapchain != XR_NULL_HANDLE)
+				{
+					DestroySwapchainSynced(zc.swapchain);
+					zc.swapchain = XR_NULL_HANDLE;
+				}
+				zc.images.clear();
+				zc.ever_released = false;
+				zc.wait_pending = false;
+				zc.pending_index = 0;
+			}
+			if (h.IsValid())
+			{
+				if (s.zone_staging_map && s.zone_staging_memory != VK_NULL_HANDLE)
+					vkUnmapMemory(h.device, s.zone_staging_memory);
+				if (s.zone_staging != VK_NULL_HANDLE)
+					vkDestroyBuffer(h.device, s.zone_staging, nullptr);
+				if (s.zone_staging_memory != VK_NULL_HANDLE)
+					vkFreeMemory(h.device, s.zone_staging_memory, nullptr);
+				if (s.zone_fence != VK_NULL_HANDLE)
+					vkDestroyFence(h.device, s.zone_fence, nullptr);
+				if (s.zone_cmd != VK_NULL_HANDLE && s.cmd_pool != VK_NULL_HANDLE)
+					vkFreeCommandBuffers(h.device, s.cmd_pool, 1, &s.zone_cmd);
+			}
+			s.zone_staging_map = nullptr;
+			s.zone_staging = VK_NULL_HANDLE;
+			s.zone_staging_memory = VK_NULL_HANDLE;
+			s.zone_fence = VK_NULL_HANDLE;
+			s.zone_cmd = VK_NULL_HANDLE;
+			// The swapchains are gone, and with them the images a kept marker would show.
+			for (ZoneMarkers::Drawn& d : s.zone_drawn)
+				d = ZoneMarkers::Drawn{};
+		}
+
+		// Everything the markers need, created together the first time one shows (as the HUD cards' are). Any failure is
+		// logged once and turns the markers off for the session; nothing else depends on them.
+		bool EnsureZoneResources()
+		{
+			if (s.zone_disabled)
+				return false;
+			bool chains_ok = true;
+			for (const auto& zc : s.zone_chains)
+				chains_ok = chains_ok && (zc.swapchain != XR_NULL_HANDLE);
+			if (chains_ok && s.zone_staging != VK_NULL_HANDLE && s.zone_cmd != VK_NULL_HANDLE && s.zone_fence != VK_NULL_HANDLE)
+				return true;
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			if (!h.IsValid() || s.cmd_pool == VK_NULL_HANDLE)
+				return false;
+			const auto fail = [&](const char* what, int code) {
+				s.zone_disabled = true;
+				Console.Error("(VR) Zone markers: %s failed (%d); the body-zone markers are off for this session.", what, code);
+				DestroyZoneResources();
+				return false;
+			};
+
+			constexpr VkDeviceSize kBytes = kZoneImageBytes * static_cast<VkDeviceSize>(kZoneSlots);
+			if (s.zone_staging == VK_NULL_HANDLE)
+			{
+				VkBufferCreateInfo bci = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+				bci.size = kBytes;
+				bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+				bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+				VkResult vr = vkCreateBuffer(h.device, &bci, nullptr, &s.zone_staging);
+				if (vr != VK_SUCCESS)
+				{
+					s.zone_staging = VK_NULL_HANDLE;
+					return fail("vkCreateBuffer", static_cast<int>(vr));
+				}
+
+				VkMemoryRequirements mr = {};
+				vkGetBufferMemoryRequirements(h.device, s.zone_staging, &mr);
+				VkPhysicalDeviceMemoryProperties mp = {};
+				vkGetPhysicalDeviceMemoryProperties(h.physical_device, &mp);
+				constexpr VkMemoryPropertyFlags kWant = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+				u32 type = UINT32_MAX;
+				for (u32 i = 0; i < mp.memoryTypeCount; i++)
+				{
+					if ((mr.memoryTypeBits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & kWant) == kWant)
+					{
+						type = i;
+						break;
+					}
+				}
+				if (type == UINT32_MAX)
+					return fail("host-visible memory type lookup", 0);
+				VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+				mai.allocationSize = mr.size;
+				mai.memoryTypeIndex = type;
+				vr = vkAllocateMemory(h.device, &mai, nullptr, &s.zone_staging_memory);
+				if (vr != VK_SUCCESS)
+				{
+					s.zone_staging_memory = VK_NULL_HANDLE;
+					return fail("vkAllocateMemory", static_cast<int>(vr));
+				}
+				vr = vkBindBufferMemory(h.device, s.zone_staging, s.zone_staging_memory, 0);
+				if (vr != VK_SUCCESS)
+					return fail("vkBindBufferMemory", static_cast<int>(vr));
+				vr = vkMapMemory(h.device, s.zone_staging_memory, 0, VK_WHOLE_SIZE, 0, &s.zone_staging_map);
+				if (vr != VK_SUCCESS)
+				{
+					s.zone_staging_map = nullptr;
+					return fail("vkMapMemory", static_cast<int>(vr));
+				}
+			}
+
+			if (s.zone_cmd == VK_NULL_HANDLE)
+			{
+				VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+				cai.commandPool = s.cmd_pool;
+				cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+				cai.commandBufferCount = 1;
+				const VkResult vr = vkAllocateCommandBuffers(h.device, &cai, &s.zone_cmd);
+				if (vr != VK_SUCCESS)
+				{
+					s.zone_cmd = VK_NULL_HANDLE;
+					return fail("vkAllocateCommandBuffers", static_cast<int>(vr));
+				}
+			}
+			if (s.zone_fence == VK_NULL_HANDLE)
+			{
+				VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+				const VkResult vr = vkCreateFence(h.device, &fci, nullptr, &s.zone_fence);
+				if (vr != VK_SUCCESS)
+				{
+					s.zone_fence = VK_NULL_HANDLE;
+					return fail("vkCreateFence", static_cast<int>(vr));
+				}
+				s.zone_fence_submitted = false;
+			}
+
+			uint32_t image_count = 0;
+			for (auto& zc : s.zone_chains)
+			{
+				if (zc.swapchain != XR_NULL_HANDLE)
+					continue;
+				// Same format as the screen (sRGB normally): the images are sRGB-encoded bytes with alpha.
+				XrSwapchainCreateInfo ci = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
+				ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+				ci.format = static_cast<int64_t>(s.swapchain_format);
+				ci.sampleCount = 1;
+				ci.width = ZoneMarkers::kImageSize;
+				ci.height = ZoneMarkers::kImageSize;
+				ci.faceCount = 1;
+				ci.arraySize = 1;
+				ci.mipCount = 1;
+				XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &zc.swapchain);
+				if (XR_FAILED(res))
+				{
+					zc.swapchain = XR_NULL_HANDLE;
+					return fail("xrCreateSwapchain", static_cast<int>(res));
+				}
+				uint32_t count = 0;
+				res = xrEnumerateSwapchainImages(zc.swapchain, 0, &count, nullptr);
+				if (XR_FAILED(res) || count == 0)
+					return fail("xrEnumerateSwapchainImages", static_cast<int>(res));
+				zc.images.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+				res = xrEnumerateSwapchainImages(zc.swapchain, count, &count,
+					reinterpret_cast<XrSwapchainImageBaseHeader*>(zc.images.data()));
+				if (XR_FAILED(res))
+					return fail("xrEnumerateSwapchainImages", static_cast<int>(res));
+				zc.ever_released = false;
+				zc.wait_pending = false;
+				image_count = count;
+			}
+			Console.WriteLn("(VR) Zone markers: swapchains created (%d x %ux%u, %u images, %llu-byte staging).", kZoneSlots,
+				ZoneMarkers::kImageSize, ZoneMarkers::kImageSize, image_count, static_cast<unsigned long long>(kBytes));
+			return true;
+		}
+
+		void RecordZoneUpload(VkCommandBuffer cmd, int slot, VkImage dst)
+		{
+			ImageBarrier(cmd, dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+				VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+			VkBufferImageCopy region = {};
+			region.bufferOffset = kZoneImageBytes * static_cast<VkDeviceSize>(slot);
+			region.bufferRowLength = 0;
+			region.bufferImageHeight = 0;
+			region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+			region.imageOffset = {0, 0, 0};
+			region.imageExtent = {ZoneMarkers::kImageSize, ZoneMarkers::kImageSize, 1};
+			vkCmdCopyBufferToImage(cmd, s.zone_staging, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+			ImageBarrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+				VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+		}
+
+		// Body-zone markers ([VR] ZoneMarkers, as HudCards::Poll publishes it): while first person drives the camera with
+		// no menu up, the equipped weapon while it is lowered (in the hip holster zone, or a long gun slung in the
+		// backpack zone over the right shoulder, whose squeeze then raises it), a small bag at the belt zone and rings on
+		// the belt pouches, each where its own test places it (a zone from the input snapshot's head as StepZone does, the
+		// pouches where the last pouch poll put them) and drawn brighter while its hand is in reach. Built after
+		// everything else from the layers still free (ZoneMarkers::Plan: the pouches' rings go first, then the bag, then
+		// the weapon), and put in at insert_at: over the screen and the lever cards, under the HUD's under-hands cards and
+		// the hands, which reach into them. An image is drawn again only when what it shows changes or the view of it
+		// drifts (ZoneMarkers::NeedsRedraw); until then its last image is moved with its frame. Nothing at all while the
+		// HUD cards are off for the session.
+		u32 BuildZoneLayers(XrCompositionLayerQuad* zone_quads, const XrCompositionLayerBaseHeader** layers,
+			u32& layer_count, u32 layer_capacity, u32 insert_at)
+		{
+			// HeadAnchor's yaw for each zone, kept while the head looks straight up or down, as each Zone control keeps its
+			// own (GS thread only).
+			static SpatialControls::ZoneState s_zone_yaw[static_cast<int>(ZoneMarkers::Zone::Count)];
+			if (s.zone_disabled || s.hud_disabled || !HudCards::ZoneMarkersEnabled())
+				return 0;
+			if (!s.head_pose_valid || !s.head_position_valid || !CameraDriver::LookAtActive() || SpatialControls::MenuMode())
+				return 0;
+			if (layer_count >= layer_capacity || insert_at > layer_count)
+				return 0;
+			const VRInputSnapshot snap = GetInputSnapshot();
+			if (snap.generation == 0 || !snap.actions_active)
+				return 0;
+			const float eye[3] = {s.head_pose.position.x, s.head_pose.position.y, s.head_pose.position.z};
+			const float head_quat[4] = {s.head_pose.orientation.x, s.head_pose.orientation.y, s.head_pose.orientation.z,
+				s.head_pose.orientation.w};
+
+			// What each slot shows this present: the frame its image rides, the key of what it shows, and its marks.
+			std::array<bool, kZoneSlots> want{};
+			float frame_pos[kZoneSlots][3] = {};
+			float frame_quat[kZoneSlots][4] = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}};
+			u64 key[kZoneSlots] = {};
+			ZoneMarkers::Mark marks[kZoneSlots][ZoneMarkers::kMaxMarks];
+			int mark_count[kZoneSlots] = {};
+			HandModel::HandState weapon;
+			// A published, armed zone and where its middle is now.
+			const auto zone_at = [&snap](ZoneMarkers::Zone zone, ZoneMarkers::ZoneView* view, SpatialControls::Vec3* centre,
+									 float* yaw) {
+				return ZoneMarkers::GetZone(zone, view) &&
+				       ZoneMarkers::ZoneCentre(snap, view->params, s_zone_yaw[static_cast<int>(zone)], centre, yaw);
+			};
+
+			// The equipped weapon while it is lowered: a long gun slung over the shoulder (ZoneMarkers::LongGunEquipped
+			// decides that and where the backpack zone's press goes), anything else in the hip holster. None with no
+			// weapon equipped (bare hands, a herb), an item ItemData does not know, or the weapon raised (it is in the hand).
+			if (!HandModel::GetWeaponHeld().raised && GameFeedback::WeaponInHand() == GameFeedback::Hold::Weapon)
+			{
+				const GameFeedback::WeaponView wv = GameFeedback::GetWeapon();
+				const ItemData::Kind item_kind = ItemData::KindOf(wv.item_id);
+				const HandModel::WeaponHeld shape = HandModel::HeldFor(true, true, wv.item_id);
+				const bool long_gun = (item_kind == ItemData::Kind::LongGun);
+				ZoneMarkers::ZoneView view;
+				SpatialControls::Vec3 c;
+				float yaw = 0.0f;
+				if (wv.valid && ItemData::IsWeapon(item_kind) && shape.raised &&
+					zone_at(long_gun ? ZoneMarkers::Zone::Backpack : ZoneMarkers::Zone::Holster, &view, &c, &yaw))
+				{
+					const float centre[3] = {c.x, c.y, c.z};
+					weapon.valid = true;
+					weapon.gun = true;
+					weapon.holstered = true;
+					weapon.held = shape.held;
+					weapon.item_id = wv.item_id;
+					weapon.lit = view.inside[0] || view.inside[1];
+					const bool posed = long_gun ? HandModel::SlingPose(centre, yaw, weapon.pos, weapon.quat) :
+					                              HandModel::HolsterPose(shape.held, centre, yaw, weapon.pos, weapon.quat);
+					if (posed)
+					{
+						want[ZoneMarkers::kHolster] = true;
+						for (int k = 0; k < 3; k++)
+							frame_pos[ZoneMarkers::kHolster][k] = weapon.pos[k];
+						for (int k = 0; k < 4; k++)
+							frame_quat[ZoneMarkers::kHolster][k] = weapon.quat[k];
+						key[ZoneMarkers::kHolster] = static_cast<u64>(wv.item_id) | (static_cast<u64>(shape.held) << 16) |
+						                             (static_cast<u64>(long_gun ? 1 : 0) << 24) |
+						                             (static_cast<u64>(weapon.lit ? 1 : 0) << 32);
+					}
+				}
+			}
+
+			// The belt zone's bag, upright at the zone's middle, turned with it.
+			{
+				ZoneMarkers::ZoneView view;
+				SpatialControls::Vec3 c;
+				float yaw = 0.0f;
+				if (zone_at(ZoneMarkers::Zone::Belt, &view, &c, &yaw))
+				{
+					ZoneMarkers::Mark& m = marks[ZoneMarkers::kBelt][0];
+					m.centre[0] = c.x;
+					m.centre[1] = c.y;
+					m.centre[2] = c.z;
+					m.radius = 0.5f * ZoneMarkers::kBagHeightM;
+					m.shape = ZoneMarkers::Shape::Bag;
+					m.lit = view.inside[0] || view.inside[1];
+					if (ZoneMarkers::ClearOfView(eye, head_quat, m.centre))
+					{
+						const SpatialControls::Quat turn = SpatialControls::Quat::FromYaw(yaw);
+						want[ZoneMarkers::kBelt] = true;
+						mark_count[ZoneMarkers::kBelt] = 1;
+						for (int k = 0; k < 3; k++)
+							frame_pos[ZoneMarkers::kBelt][k] = m.centre[k];
+						frame_quat[ZoneMarkers::kBelt][0] = turn.x;
+						frame_quat[ZoneMarkers::kBelt][1] = turn.y;
+						frame_quat[ZoneMarkers::kBelt][2] = turn.z;
+						frame_quat[ZoneMarkers::kBelt][3] = turn.w;
+						key[ZoneMarkers::kBelt] = 1u | (static_cast<u64>(m.lit ? 1 : 0) << 32);
+					}
+				}
+			}
+
+			// The pouches' rings, where the last pouch poll put them, a ring lit while a hand is in its pouch.
+			const BeltPouches::Telemetry pouches = BeltPouches::GetTelemetry();
+			if (pouches.active)
+			{
+				int n = 0;
+				float mid[3] = {0.0f, 0.0f, 0.0f};
+				u64 k_pouches = 0;
+				for (int i = 0; i < static_cast<int>(pouches.count) && i < BeltPouches::kMaxPouches && n < ZoneMarkers::kMaxMarks; i++)
+				{
+					const BeltPouches::Telemetry::PouchView& pv = pouches.pouches[static_cast<size_t>(i)];
+					if (!(pv.radius > 0.0f) || !ZoneMarkers::ClearOfView(eye, head_quat, pv.centre))
+						continue;
+					ZoneMarkers::Mark& m = marks[ZoneMarkers::kPouches][n];
+					for (int k = 0; k < 3; k++)
+					{
+						m.centre[k] = pv.centre[k];
+						mid[k] += pv.centre[k];
+					}
+					m.radius = pv.radius;
+					m.shape = ZoneMarkers::Shape::Ring;
+					m.lit = (pouches.hover[0] == i) || (pouches.hover[1] == i);
+					k_pouches |= (1ull << i) | (m.lit ? (1ull << (32 + i)) : 0ull);
+					n++;
+				}
+				if (n > 0)
+				{
+					want[ZoneMarkers::kPouches] = true;
+					mark_count[ZoneMarkers::kPouches] = n;
+					for (int k = 0; k < 3; k++)
+						frame_pos[ZoneMarkers::kPouches][k] = mid[k] / static_cast<float>(n);
+					key[ZoneMarkers::kPouches] = k_pouches;
+				}
+			}
+
+			const std::array<bool, kZoneSlots> go = ZoneMarkers::Plan(layer_capacity - layer_count, want);
+			bool any = false;
+			for (const bool g : go)
+				any = any || g;
+			if (!any || !EnsureZoneResources())
+				return 0;
+
+			// Which images are drawn again this present, and on which quad.
+			ZoneMarkers::Quad quad[kZoneSlots];
+			bool redraw[kZoneSlots] = {};
+			for (int slot = 0; slot < kZoneSlots; slot++)
+			{
+				if (!go[static_cast<size_t>(slot)])
+					continue;
+				const bool stale = !s.zone_chains[slot].ever_released ||
+				                   ZoneMarkers::NeedsRedraw(s.zone_drawn[slot], frame_pos[slot], frame_quat[slot], eye,
+				                       key[slot], marks[slot], mark_count[slot]);
+				if (!stale)
+					continue;
+				if (slot == ZoneMarkers::kHolster)
+				{
+					HandModel::ImpostorQuad iq;
+					redraw[slot] = HandModel::PlaceImpostor(HandModel::kRight, weapon, eye, &iq);
+					for (int k = 0; k < 3; k++)
+					{
+						quad[slot].centre[k] = iq.centre[k];
+						quad[slot].right[k] = iq.right[k];
+						quad[slot].up[k] = iq.up[k];
+					}
+					for (int k = 0; k < 4; k++)
+						quad[slot].quat[k] = iq.quat[k];
+					quad[slot].size_m = iq.size_m;
+				}
+				else
+				{
+					redraw[slot] = ZoneMarkers::PlaceMarks(marks[slot], mark_count[slot], eye, &quad[slot]);
+				}
+			}
+
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			static std::vector<u32> s_zone_pixels;
+			bool recording = false;
+			int pending[kZoneSlots] = {};
+			int pending_count = 0;
+			bool uploaded[kZoneSlots] = {};
+			for (int slot = 0; slot < kZoneSlots; slot++)
+			{
+				if (!redraw[slot])
+					continue;
+				auto& zc = s.zone_chains[slot];
+				uint32_t index = 0;
+				if (zc.wait_pending)
+				{
+					index = zc.pending_index;
+				}
+				else
+				{
+					if (XR_FAILED(LockedAcquire(zc.swapchain, &index)))
+						continue;
+					zc.pending_index = index;
+					zc.wait_pending = true;
+				}
+				// XR_TIMEOUT_EXPIRED is a success code: the image is not ours yet, so wait again next frame.
+				const XrResult wr = BudgetedWaitSwapchainImage(zc.swapchain, kSwapchainWaitNs);
+				if (wr == XR_TIMEOUT_EXPIRED || XR_FAILED(wr))
+					continue;
+				zc.wait_pending = false;
+
+				if (!recording)
+				{
+					// The staging buffer is shared by the markers: the previous upload must be done with it. An image given
+					// back without a new drawing in it shows something old: no kept image may go with it.
+					if (s.zone_fence_submitted)
+					{
+						if (vkWaitForFences(h.device, 1, &s.zone_fence, VK_TRUE, ONE_SECOND_NS) != VK_SUCCESS)
+						{
+							LockedRelease(zc.swapchain);
+							s.zone_drawn[slot] = ZoneMarkers::Drawn{};
+							break;
+						}
+						vkResetFences(h.device, 1, &s.zone_fence);
+						s.zone_fence_submitted = false;
+					}
+					VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+					bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+					if (vkBeginCommandBuffer(s.zone_cmd, &bi) != VK_SUCCESS)
+					{
+						LockedRelease(zc.swapchain);
+						s.zone_drawn[slot] = ZoneMarkers::Drawn{};
+						break;
+					}
+					recording = true;
+				}
+				const ZoneMarkers::Quad& q = quad[slot];
+				if (slot == ZoneMarkers::kHolster)
+					HandModel::RenderImpostor(HandModel::kRight, weapon, eye, q.centre, q.right, q.up, q.size_m, s_zone_pixels);
+				else
+					ZoneMarkers::RasterMarks(marks[slot], mark_count[slot], eye, q, s_zone_pixels);
+				if (s_zone_pixels.size() * sizeof(u32) == static_cast<size_t>(kZoneImageBytes))
+				{
+					std::memcpy(static_cast<u8*>(s.zone_staging_map) + kZoneImageBytes * static_cast<VkDeviceSize>(slot),
+						s_zone_pixels.data(), static_cast<size_t>(kZoneImageBytes));
+				}
+				RecordZoneUpload(s.zone_cmd, slot, zc.images[index].image);
+				pending[pending_count] = slot;
+				pending_count++;
+			}
+			if (recording)
+			{
+				bool submitted = false;
+				if (vkEndCommandBuffer(s.zone_cmd) == VK_SUCCESS)
+				{
+					VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+					si.commandBufferCount = 1;
+					si.pCommandBuffers = &s.zone_cmd;
+					submitted = (LockedQueueSubmit(h.queue, si, s.zone_fence) == VK_SUCCESS);
+					s.zone_fence_submitted = submitted;
+				}
+				for (int k = 0; k < pending_count; k++)
+				{
+					const int slot = pending[k];
+					auto& zc = s.zone_chains[slot];
+					if (XR_SUCCEEDED(LockedRelease(zc.swapchain)) && submitted)
+					{
+						zc.ever_released = true;
+						uploaded[slot] = true;
+						s.zone_drawn[slot] = ZoneMarkers::Describe(frame_pos[slot], frame_quat[slot], eye, quad[slot], key[slot],
+							marks[slot], mark_count[slot]);
+					}
+					else
+					{
+						s.zone_drawn[slot] = ZoneMarkers::Drawn{};
+					}
+				}
+			}
+
+			// In under the HUD's under-hands cards and the hands, farther first: the weapon and the bag at about arm's
+			// length, then the rings nearer the eye. A marker not drawn this present shows its last image, moved with
+			// its frame, while that still shows the same thing (being a step behind on lit is fine).
+			u32 appended = 0;
+			u32 at = insert_at;
+			for (int slot = 0; slot < kZoneSlots; slot++)
+			{
+				if (!go[static_cast<size_t>(slot)] || layer_count >= layer_capacity)
+					continue;
+				const auto& zc = s.zone_chains[slot];
+				const ZoneMarkers::Drawn& d = s.zone_drawn[slot];
+				if (!zc.ever_released || !d.valid || (d.key & ~ZoneMarkers::kKeyLitMask) != (key[slot] & ~ZoneMarkers::kKeyLitMask) ||
+					d.count != mark_count[slot])
+				{
+					continue;
+				}
+				float centre[3];
+				float orient[4];
+				float size = d.quad.size_m;
+				if (uploaded[slot])
+				{
+					for (int k = 0; k < 3; k++)
+						centre[k] = quad[slot].centre[k];
+					for (int k = 0; k < 4; k++)
+						orient[k] = quad[slot].quat[k];
+					size = quad[slot].size_m;
+				}
+				else
+				{
+					ZoneMarkers::PlaceKept(d, frame_pos[slot], frame_quat[slot], centre, orient);
+				}
+				XrCompositionLayerQuad& lq = zone_quads[slot];
+				lq.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
+				lq.next = nullptr;
+				lq.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+				lq.space = XRSession::GetSpace();
+				lq.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+				lq.subImage = {zc.swapchain,
+					{{0, 0}, {static_cast<s32>(ZoneMarkers::kImageSize), static_cast<s32>(ZoneMarkers::kImageSize)}}, 0};
+				lq.pose.orientation = {orient[0], orient[1], orient[2], orient[3]};
+				lq.pose.position = {centre[0], centre[1], centre[2]};
+				lq.size = {size, size};
+				for (u32 k = layer_count; k > at; k--)
+					layers[k] = layers[k - 1];
+				layers[at] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&lq);
+				at++;
+				layer_count++;
+				appended++;
+			}
+			return appended;
+		}
+
 		float ComputeAspect()
 		{
 			switch (GSConfig.AspectRatio)
@@ -4177,6 +4744,8 @@ namespace VR::XRCompositor
 			const HandAttach* hud_att;
 			// How the menu pointer's beam and dot were placed this present (null: no pointer parts marked).
 			const PointerPublish* pointer = nullptr;
+			// The body-zone markers' quads, by slot (ZoneMarkers::kSlots; null: none).
+			const XrCompositionLayerQuad* zone_quads = nullptr;
 		};
 
 		// Copies each pointed-to layer by value, in order, with its role and, for a hand or a HUD card that rides on a
@@ -4229,6 +4798,16 @@ namespace VR::XRCompositor
 						e.quad = src.hand_quads[k];
 						if (src.hand_att)
 							e.att = src.hand_att[k];
+						known = true;
+					}
+				}
+				for (int k = 0; k < kZoneSlots && src.zone_quads && !known; k++)
+				{
+					if (p == static_cast<const void*>(&src.zone_quads[k]))
+					{
+						e.kind = kKindQuad;
+						e.role = kRoleZone;
+						e.quad = src.zone_quads[k];
 						known = true;
 					}
 				}
@@ -5687,7 +6266,18 @@ namespace VR::XRCompositor
 		s.stat_hand_kept.store(0, std::memory_order_relaxed);
 		// Pure maths, so it runs even when the session below fails.
 		if (std::getenv("PCSX2_VR_HANDS_SELFTEST") != nullptr)
+		{
 			HandModel::SelfTest();
+			ZoneMarkers::SelfTest();
+		}
+		// [VR] ZoneMarkers is read live (HudCards::Poll publishes it), so this says what it is as VR starts.
+		if (EmuConfig.VR.ZoneMarkers)
+			Console.WriteLn("(VR) Zone markers: on: in first person (no menu up), the equipped weapon hangs in the hip holster "
+							"zone while lowered (a long gun is slung in the backpack zone over the right shoulder instead), a "
+							"small bag marks the belt zone and faint rings the belt pouches, each brighter while its hand is in "
+							"reach; they take only the layers left free (the rings go first, then the bag, then the weapon).");
+		else
+			Console.WriteLn("(VR) Zone markers: off ([VR] ZoneMarkers).");
 		// The pacer's menu pointer placement, with the other menu pointer self-tests, and the edge fill's plan.
 		if (std::getenv("PCSX2_VR_SELFTEST") != nullptr)
 		{
@@ -5716,6 +6306,9 @@ namespace VR::XRCompositor
 		s.lever_screen_logged = 0;
 		s.hands_disabled = false;
 		s.hud_disabled = false;
+		s.zone_disabled = false;
+		for (ZoneMarkers::Drawn& d : s.zone_drawn)
+			d = ZoneMarkers::Drawn{};
 		s.hud_wrist_facing = false;
 		s.hud_wrist_opacity = 0.0f;
 		s.hud_last_ms = 0;
@@ -6191,12 +6784,15 @@ namespace VR::XRCompositor
 		// Worst case 14 layers: four for the screen (split screen in stereo, two viewports per eye; five slots
 		// kept), two lever cards, two hands and the six HUD cards (laser or menu beam, wrist, vignette, toast, blink,
 		// menu pointer dot), in a capacity of 15 (kLayerCapacity). The background goes under them in the submit array;
-		// SteamVR takes at most 16 a frame.
+		// SteamVR takes at most 16 a frame. The three body-zone markers only fill what is left (first person: the screen's
+		// one or two, the hands' two and a few HUD cards leave room for all three).
 		XrCompositionLayerQuad lever_quads[ControlQuads::kSlots] = {
 			{XR_TYPE_COMPOSITION_LAYER_QUAD}, {XR_TYPE_COMPOSITION_LAYER_QUAD}};
 		XrCompositionLayerQuad hand_quads[kHandSlots] = {
 			{XR_TYPE_COMPOSITION_LAYER_QUAD}, {XR_TYPE_COMPOSITION_LAYER_QUAD}};
 		XrCompositionLayerQuad hud_quads[HudCards::kCardCount] = {};
+		// The body-zone markers' quads: they only take layers the rest leave free (BuildZoneLayers).
+		XrCompositionLayerQuad zone_quads[kZoneSlots] = {};
 		// The controller pose each hand and HUD card was placed for (not attached unless it rides on a controller).
 		HandAttach hand_att[kHandSlots] = {};
 		HandAttach hud_att[HudCards::kCardCount] = {};
@@ -6665,6 +7261,11 @@ namespace VR::XRCompositor
 		if (!force_zero_layers && should_render)
 			BuildHudLayers(hud_quads, layers, layer_count, kLayerCapacity, hands_from, hud_att);
 
+		// The body-zone markers from whatever capacity is left (so when layers are short they go first), but in at
+		// hands_from: over the screen and lever cards, under the HUD's under-hands cards and the hands that reach into them.
+		if (!force_zero_layers && should_render)
+			BuildZoneLayers(zone_quads, layers, layer_count, kLayerCapacity, hands_from);
+
 		for (u32 l = 0; l < 2; l++)
 		{
 			if (cl_copy[l] == static_cast<int>(CopyResult::Skipped))
@@ -6680,7 +7281,8 @@ namespace VR::XRCompositor
 		else
 			s_fill.live.store(false, std::memory_order_release);
 
-		const LayerSources sources = {quads, cyls, 5, lever_quads, hand_quads, hud_quads, hand_att, hud_att, &s_pointer_pub};
+		const LayerSources sources = {
+			quads, cyls, 5, lever_quads, hand_quads, hud_quads, hand_att, hud_att, &s_pointer_pub, zone_quads};
 
 		if (s.headset_rate)
 		{
@@ -6794,6 +7396,7 @@ namespace VR::XRCompositor
 		DestroyLeverResources();
 		DestroyHandResources();
 		DestroyHudResources();
+		DestroyZoneResources();
 		DestroyBackground();
 		DestroyFillResources();
 

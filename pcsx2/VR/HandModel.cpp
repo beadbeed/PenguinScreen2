@@ -486,6 +486,12 @@ namespace VR::HandModel
 			Fist,
 		};
 
+		// A gun's grip, in the handle frame: in the fist (BuildHand's Gun pose), or alone in the holster.
+		void AddGunGrip(std::vector<Tri>& out)
+		{
+			AddBoxAA(out, 0.0f, -0.6f, 0.0f, 1.35f, 5.2f, 2.0f, kMatGunFrame);
+		}
+
 		// Right hand in the handle frame (handle along +Y through the origin, -Z forward, back of the
 		// hand toward +X); BuildWorld tilts it into the pointing frame.
 		void BuildHand(std::vector<Tri>& out, float grip, float trigger, Pose pose)
@@ -576,7 +582,7 @@ namespace VR::HandModel
 			else if (pose == Pose::Gun)
 			{
 				// The gun's grip in the fist (the rest of a pistol is in BuildGunTop, of a long gun in BuildLongGun).
-				AddBoxAA(out, 0.0f, -0.6f, 0.0f, 1.35f, 5.2f, 2.0f, kMatGunFrame);
+				AddGunGrip(out);
 			}
 		}
 
@@ -798,6 +804,9 @@ namespace VR::HandModel
 		void BuildWorld(int hand, const HandState& h, V3* local_min, V3* local_max, V3* core_min, V3* core_max)
 		{
 			const bool weapon = h.gun && hand == kRight;
+			// A holstered weapon is drawn alone, as it lies in the fist but without the glove: a gun keeps the grip the
+			// fist closes on; nothing in it moves (no slide, flash or kick).
+			const bool holstered = weapon && h.holstered;
 			const Held held = weapon ? h.held : Held::Pistol;
 			Pose pose = Pose::Controller;
 			if (weapon)
@@ -806,7 +815,10 @@ namespace VR::HandModel
 				pose = Pose::Fist;
 			s_mesh.clear();
 			s_mesh.reserve(768);
-			BuildHand(s_mesh, h.grip, h.trigger, pose);
+			if (!holstered)
+				BuildHand(s_mesh, h.grip, h.trigger, pose);
+			else if (held == Held::Pistol || held == Held::LongGun)
+				AddGunGrip(s_mesh);
 			// What sits in the fist goes with the hand (the handle frame); what reaches out from it lies along the
 			// pointing frame.
 			if (weapon && held == Held::Thrown)
@@ -818,20 +830,24 @@ namespace VR::HandModel
 			if (weapon && held == Held::Pistol)
 			{
 				// The slide: back while it cycles after a shot, and held back on an empty gun.
-				const float slide = std::isfinite(h.slide) ? std::clamp(h.slide, 0.0f, 1.0f) : 0.0f;
-				BuildGunTop(s_mesh, kSlideTravelCm * std::max(slide, h.slide_locked ? 1.0f : 0.0f), h.flash);
-				kick = std::isfinite(h.kick) ? std::clamp(h.kick, 0.0f, 1.0f) : 0.0f;
+				const float slide = (std::isfinite(h.slide) && !holstered) ? std::clamp(h.slide, 0.0f, 1.0f) : 0.0f;
+				const bool locked = h.slide_locked && !holstered;
+				BuildGunTop(s_mesh, kSlideTravelCm * std::max(slide, locked ? 1.0f : 0.0f), h.flash && !holstered);
+				kick = (std::isfinite(h.kick) && !holstered) ? std::clamp(h.kick, 0.0f, 1.0f) : 0.0f;
 			}
 			else if (weapon && held == Held::LongGun)
 			{
-				BuildLongGun(s_mesh, h.item_id, h.flash);
-				kick = std::isfinite(h.kick) ? std::clamp(h.kick, 0.0f, 1.0f) : 0.0f;
+				BuildLongGun(s_mesh, h.item_id, h.flash && !holstered);
+				kick = (std::isfinite(h.kick) && !holstered) ? std::clamp(h.kick, 0.0f, 1.0f) : 0.0f;
 			}
 			else if (weapon && held == Held::Melee)
 			{
 				BuildMelee(s_mesh, h.item_id);
 			}
-			const bool reach = weapon && (held == Held::LongGun || held == Held::Melee);
+			// The core is what the eye must stay out of. A long gun's is its grip, in the hand or slung (the barrel of one
+			// slung over the shoulder passes beside the head); a melee weapon alone in the holster has no hand part, but the
+			// hip is far from the eye, so all of it is the core.
+			const bool reach = weapon && (held == Held::LongGun || (held == Held::Melee && !holstered));
 			const size_t core = reach ? tilted : s_mesh.size();
 			// Recoil: the hand and gun pitch up about the grip origin and come back toward the wrist.
 			const bool long_gun = weapon && held == Held::LongGun;
@@ -980,8 +996,9 @@ namespace VR::HandModel
 		}
 
 		// Flat shading per face: ambient (a little brighter from above), Lambert from a light above
-		// and to the right of the viewer, a headlight, a rim on faces turning away, and a small highlight.
-		u32 Shade(const Tables& tab, const Tri& t, const V3& to_eye, const V3& light, const V3& up)
+		// and to the right of the viewer, a headlight, a rim on faces turning away, and a small highlight; all of it
+		// times gain (a lit holstered weapon), the muzzle flash aside.
+		u32 Shade(const Tables& tab, const Tri& t, const V3& to_eye, const V3& light, const V3& up, float gain)
 		{
 			const Material& m = tab.mat[t.mat];
 			if (t.mat == kMatFlash)
@@ -1000,7 +1017,8 @@ namespace VR::HandModel
 			const float nh8 = nh4 * nh4;
 			const float nh16 = nh8 * nh8;
 			const float spec = m.spec * nh16 * nh16; // pow 32
-			return PackLinear(tab, m.r * k + rim * 0.50f + spec, m.g * k + rim * 0.62f + spec, m.b * k + rim * 0.56f + spec);
+			return PackLinear(tab, (m.r * k + rim * 0.50f + spec) * gain, (m.g * k + rim * 0.62f + spec) * gain,
+				(m.b * k + rim * 0.56f + spec) * gain);
 		}
 
 		// Fills one screen-space triangle with a depth test (larger 1/z is nearer).
@@ -1248,6 +1266,44 @@ namespace VR::HandModel
 		return true;
 	}
 
+	bool HolsterPose(Held held, const float centre[3], float yaw, float out_pos[3], float out_quat[4])
+	{
+		if (!Finite(centre, 3) || !std::isfinite(yaw))
+			return false;
+		// A pitch about the body's right (+X), then the body's yaw. A gun or a melee weapon tips its muzzle (-Z) down and
+		// kHolsterCantDeg on past straight down, which stands its grip up and back toward the hand. Something held in the
+		// fist (a can, a molotov) is built round the handle, whose top leans kHandleTiltDeg forward in the pointing frame:
+		// tipped back that far, the handle stands upright on the belt.
+		const bool upright = (held == Held::Thrown || held == Held::Spray);
+		const float pitch = (upright ? kHandleTiltDeg : -(90.0f + kHolsterCantDeg)) * kDegToRad;
+		const float q_yaw[4] = {0.0f, std::sin(0.5f * yaw), 0.0f, std::cos(0.5f * yaw)};
+		const float q_pitch[4] = {std::sin(0.5f * pitch), 0.0f, 0.0f, std::cos(0.5f * pitch)};
+		QuatMul(q_yaw, q_pitch, out_quat);
+		for (int k = 0; k < 3; k++)
+			out_pos[k] = centre[k];
+		return true;
+	}
+
+	bool SlingPose(const float centre[3], float yaw, float out_pos[3], float out_quat[4])
+	{
+		if (!Finite(centre, 3) || !std::isfinite(yaw))
+			return false;
+		// The muzzle (-Z) tipped up past straight up by kSlingBackDeg (a pitch about the body's right), then leaned out by
+		// kSlingOutDeg (about the body's forward axis, the top of the barrel toward +X), then the body's yaw: the barrel
+		// stands up behind the shoulder, clear of the head, and the stock hangs down the back.
+		const float pitch = (90.0f + kSlingBackDeg) * kDegToRad;
+		const float lean = -kSlingOutDeg * kDegToRad;
+		const float q_yaw[4] = {0.0f, std::sin(0.5f * yaw), 0.0f, std::cos(0.5f * yaw)};
+		const float q_lean[4] = {0.0f, 0.0f, std::sin(0.5f * lean), std::cos(0.5f * lean)};
+		const float q_pitch[4] = {std::sin(0.5f * pitch), 0.0f, 0.0f, std::cos(0.5f * pitch)};
+		float q_lp[4];
+		QuatMul(q_lean, q_pitch, q_lp);
+		QuatMul(q_yaw, q_lp, out_quat);
+		for (int k = 0; k < 3; k++)
+			out_pos[k] = centre[k];
+		return true;
+	}
+
 	bool PlaceImpostor(int hand, const HandState& h, const float eye[3], ImpostorQuad* out)
 	{
 		if (!out || !h.valid || !Finite(h.pos, 3) || !Finite(h.quat, 4) || !Finite(eye, 3))
@@ -1268,7 +1324,7 @@ namespace VR::HandModel
 			return false;
 
 		const bool weapon = h.gun && hand == kRight;
-		const float base = weapon ? kQuadSizeGunM : kQuadSizeM;
+		const float base = (weapon && h.holstered) ? kQuadSizeHolsterM : weapon ? kQuadSizeGunM : kQuadSizeM;
 		const float max_size = (weapon && (h.held == Held::LongGun || h.held == Held::Melee)) ? kQuadSizeLongM : base * 2.0f;
 
 		// The quad faces the eye from the middle of everything drawn, so as much of a long gun or a pole as can be lies in
@@ -1359,6 +1415,7 @@ namespace VR::HandModel
 		s_depth.assign(kPixels, 0.0f);
 		const Tables& tab = GetTables();
 		const V3 light = Normalize(Add(Add(Mul(r, 0.35f), Mul(u, 0.8f)), Mul(n, 0.5f)));
+		const float gain = (hand == kRight && h.gun && h.holstered && h.lit) ? kHolsterLitGain : 1.0f;
 		Bounds bounds = {kSize, kSize, -1, -1};
 
 		for (const Tri& t : s_mesh)
@@ -1392,7 +1449,7 @@ namespace VR::HandModel
 			}
 			if (!ok)
 				continue;
-			RasterTri(sv[0], sv[1], sv[2], Shade(tab, t, to_eye, light, u), s_depth.data(), out_rgba.data(), bounds);
+			RasterTri(sv[0], sv[1], sv[2], Shade(tab, t, to_eye, light, u, gain), s_depth.data(), out_rgba.data(), bounds);
 		}
 
 		if (bounds.x1 >= bounds.x0 && bounds.y1 >= bounds.y0)
@@ -1579,7 +1636,7 @@ namespace VR::HandModel
 		if (!ref.valid || !now.valid)
 			return true;
 		if (ref.gun != now.gun || ref.held != now.held || ref.item_id != now.item_id || ref.support != now.support ||
-			ref.slide_locked != now.slide_locked)
+			ref.slide_locked != now.slide_locked || ref.holstered != now.holstered || ref.lit != now.lit)
 		{
 			return true;
 		}

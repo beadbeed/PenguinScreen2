@@ -3571,6 +3571,19 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 					StringUtil::toUpper(serial)));
 	}
 
+	// After controls and feedback: a Zone's PressedLongGun presses only while feedback.weapon reads a long gun equipped.
+	for (const VR::ProfileDB::SpatialControlSpec& c : out.controls)
+	{
+		if (c.kind != VR::SpatialControls::DeviceKind::Zone)
+			continue;
+		const bool long_gun_bound = std::any_of(c.bind.begin(), c.bind.end(),
+			[](const VR::ProfileDB::SpatialControlSpec::Bind& b) { return b.control == "PressedLongGun"; });
+		if (long_gun_bound && !(out.feedback.has_value() && out.feedback->has_weapon))
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' controls VR-{} binds PressedLongGun, which presses only while "
+							   "feedback.weapon reads a long gun equipped; this profile has no feedback.weapon, so Pressed "
+							   "takes every press.", serial, c.id);
+	}
+
 	// After controls, menuPointer and camera: the pouches are checked against all three.
 	if (node.has_child("pouches") && node["pouches"].is_map())
 	{

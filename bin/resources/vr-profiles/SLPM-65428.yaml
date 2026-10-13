@@ -402,9 +402,10 @@ SLPM-65428:
         Pressed: Start
     - device: Zone
       id: backpack
-      notes: "Over the right shoulder: reach back past your ear and squeeze the grip to open the item screen (Start)."
+      notes: "Over the right shoulder: reach back past your ear and squeeze the grip to open the item screen (Start); with a long gun equipped (slung there) the squeeze raises it instead (R1, as at the holster)."
       placement: { side: 0.15, height: -0.05, forward: -0.08 }   # a chair back blocks reaching further
       params: { radius: 0.15, hand: right, grip: true, stopFirst: true }
       pad: 1
       bind:
         Pressed: Start
+        PressedLongGun: R1   # a squeeze begun with a long gun equipped (feedback.weapon): R1 at once, held, no stop first
