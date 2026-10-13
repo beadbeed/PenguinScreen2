@@ -23,6 +23,16 @@ MUTATIONS = [
     ("resolve drops alpha", "ag = ((ag + rounding) >> shift) & 0x00FF00FFu;", "ag = 0u;"),
     ("impostor camera on-axis", "(-half - ec_r) / de, (half - ec_r) / de", "(-half) / de, (half) / de"),
     ("fan skips a triangle", "for (int k = 1; k + 1 < count; k++)", "for (int k = 1; k + 2 < count; k++)"),
+    ("front_ccw ignored", "const float front_sign = (mesh.front_ccw ? 1.0f : -1.0f) * mirror;", "const float front_sign = mirror;"),
+    ("linear light ignored", "return ds.linear ? std::sqrt(l) : l;", "return l;"),
+    ("base colour ignored", "ss.base[i] = Q256(material.base_colour[i]);", "ss.base[i] = 256u;"),
+    ("rim ignored", "ss.rim_on = ds.lit && ds.rim > 0.0f;", "ss.rim_on = false;"),
+    ("repeat taken as clamp", "ss.repeat_u = (tex->wrap_u == Texture::Wrap::Repeat);", "ss.repeat_u = false;"),
+    ("bilinear without the half texel", "const s64 fu = TexelFixed(u, s.u_scale) - kSub / 2;", "const s64 fu = TexelFixed(u, s.u_scale);"),
+    ("every texture taken as power of two", "ss.pot = (tex->width & (tex->width - 1)) == 0 && (tex->height & (tex->height - 1)) == 0;", "ss.pot = true;"),
+    ("dirty rectangle a column short", "static_cast<u32>(fc.bounds.x1) + 1u, static_cast<u32>(fc.bounds.y1) + 1u", "static_cast<u32>(fc.bounds.x1), static_cast<u32>(fc.bounds.y1) + 1u"),
+    ("two-sided light not flipped", "o.lit_b = LightFactor(ds, -ndl, -ndv);", "o.lit_b = LightFactor(ds, ndl, ndv);"),
+    ("rim colour ignored", "ss.rim_colour[i] = Q256(lt.rim_colour[i]);", "ss.rim_colour[i] = 256u;"),
 ]
 
 

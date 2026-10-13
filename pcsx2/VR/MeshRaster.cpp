@@ -2088,6 +2088,33 @@ namespace VR::MeshRaster
 			Draw(t, ortho, face_on.View(), Mat4(), rim_mat);
 			check(Near(ChannelR(t.Pixel(16, 16)), 127u, 1u), "lighting: the headlight lights what faces the viewer");
 
+			// A light along each axis lights the surface that faces it and not the one that faces away.
+			Material axis_mat;
+			axis_mat.cull_back = false;
+			axis_mat.lighting.linear_light = false;
+			axis_mat.lighting.ambient = 0.25f;
+			axis_mat.lighting.key = 0.5f;
+			bool axes_ok = true;
+			for (int axis = 0; axis < 3; axis++)
+			{
+				float dir[3] = {0.0f, 0.0f, 0.0f};
+				dir[axis] = 1.0f;
+				axis_mat.lighting.light_dir[0] = dir[0];
+				axis_mat.lighting.light_dir[1] = dir[1];
+				axis_mat.lighting.light_dir[2] = dir[2];
+				Geometry toward;
+				AddPxQuad(toward, h, 4.0f, 4.0f, 28.0f, 28.0f, 5.0f, 1.0f, dir[0], dir[1], dir[2]);
+				Geometry away;
+				AddPxQuad(away, h, 4.0f, 4.0f, 28.0f, 28.0f, 5.0f, 1.0f, -dir[0], -dir[1], -dir[2]);
+				t.Clear();
+				Draw(t, ortho, toward.View(), Mat4(), axis_mat);
+				axes_ok = axes_ok && Near(ChannelR(t.Pixel(16, 16)), 191u, 1u);
+				t.Clear();
+				Draw(t, ortho, away.View(), Mat4(), axis_mat);
+				axes_ok = axes_ok && Near(ChannelR(t.Pixel(16, 16)), 63u, 1u);
+			}
+			check(axes_ok, "lighting: a light along x, y or z lights the surface facing it and leaves the one facing away to the ambient");
+
 			// No normals: drawn unlit; lighting disabled: the same.
 			Material plain;
 			plain.cull_back = false;

@@ -109,13 +109,11 @@
 //
 // SPEED
 //
-// The cost is in the samples shaded, not the triangles: about 5 ns a sample for a lit flat colour, 10 ns with a nearest
-// texture and 20 with a bilinear one (on a 2.5 GHz cloud core; the self-test logs what this machine does), times 1, 4
-// or 16 for the sample grid. A hand of a thousand triangles filling a third of a 256 x 256 image is a fifth of a
-// millisecond at 1 x 1 and under a millisecond at 2 x 2. Textures with power-of-two sides sample fastest.
-//
-// A Draw allocates nothing: the transformed vertices go to a scratch the Target keeps (vertex_capacity of them; a mesh
-// with more vertices is transformed triangle by triangle instead, slower but the same pixels).
+// The cost is mostly in the samples shaded: the area drawn, times 1, 4 or 16 for the sample grid. On a 2.5 GHz cloud core a
+// sphere of 1008 triangles filling 5.6 thousand pixels of a 256 x 256 image takes (Clear + Draw + Resolve) 0.10 ms at
+// 1 x 1, 0.3 ms at 2 x 2 and 0.9 ms at 4 x 4 as a flat colour, lit, with a rim (a hand's worth), and 0.11, 0.37 and 1.2 ms
+// with a nearest-filtered texture (a weapon's worth); filling 25 thousand pixels with a bilinear texture it takes 0.7,
+// 2.7 and 11 ms. Textures with power-of-two sides sample fastest. SelfTest logs the same for the machine it runs on.
 namespace VR::MeshRaster
 {
 	// Column-major 4 x 4 matrix, identity by default.
