@@ -85,6 +85,23 @@ swapchain and image size in order, differs from the one before; SteamVR re-creat
 what sits there changes size, about 150 times in 11 minutes in the first headset session) and `no projection`
 (submits with layers but no projection layer under them).
 
+Layer positions: every layer has a fixed position in the frame's layer array, in the order they are drawn: the
+background, the screen's layers, the lever cards, the zone markers, the laser (or menu beam), the menu pointer's dot,
+the toast, the hands, then the wrist card, the vignette and the blink. A lever card, zone marker, HUD card or hand that
+is not shown this frame but whose swapchain has been released once stays in its position parked: its own image, 1 cm
+across, 100 m behind the head in the VIEW space, so no eye sees it (valid OpenXR, nothing zero-sized or transparent for
+a runtime to special-case). SteamVR shows our quads as overlays by array index and re-creates a position's texture
+when what sits there changes size, and the volatile cards (laser, dot, toast, zone markers) must stay under the hands
+for their depth, so leaving one out moved every layer after it; parked, a toggle changes nothing in the array. A layer
+whose swapchain was never released stays out (it joins once, the first time it shows), and parked layers only take
+capacity the shown ones leave (15 plus the background). In first person that is 14 layers every frame, `layers 14
+(parked N)` on the Frames line, and `layer changes` should stay at 0 in steady play (a screen size change, the edge
+fill turning on or off and a layer's first show still count one). The HUD cards' images are now 256 x 256 like the
+hands' and the zone markers' (the laser and beam, blink and dot stretched by whole factors, the wrist card padded and
+its quad grown to match; the toast keeps 1024 x 160), so a position that does change occupant mostly keeps its size.
+VR start logs `(VR) Layers: each layer keeps its position ...`; `PCSX2_VR_NO_PARKED_LAYERS=1` leaves a layer that is
+not shown out again (logged), for an A/B of what the parked overlays cost SteamVR (`xrEndFrame` runtime mean and max).
+
 Weapons in hand (both Files, profile `feedback.weapon`): while the weapon is raised in first person the right hand
 holds what the local character has equipped, by the item's kind (`VR/ItemData`, Outbreak-Research's item ids): a
 handgun, the stun gun, nail gun or ampoule shooter as the pistol (recoil, slide, muzzle flash, as before); a long gun

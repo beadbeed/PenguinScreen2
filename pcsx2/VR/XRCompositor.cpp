@@ -178,6 +178,49 @@ namespace VR::XRCompositor
 		constexpr u8 kKindQuad = 0;
 		constexpr u8 kKindCylinder = 1;
 
+		// Where each layer a present can show sits in the submit array, after the background (ParkFreeSlots): the screen's
+		// layers in the order they were built, the lever cards, the body-zone markers, the HUD's under-hands cards (the
+		// laser or menu beam, the menu pointer's dot, the toast), the hands, then the wrist card, the vignette and the
+		// blink on top. It is the order the builders already draw in (BuildZoneLayers' insert, HudCards::PlaceCardLayer),
+		// so nothing seen changes; what it adds is that a position always holds the same layer.
+		constexpr u8 kSlotScreen = 0;
+		constexpr u8 kSlotLever = static_cast<u8>(kSlotScreen + 5);
+		constexpr u8 kSlotZone = static_cast<u8>(kSlotLever + ControlQuads::kSlots);
+		constexpr u8 kSlotLaser = static_cast<u8>(kSlotZone + kZoneSlots);
+		constexpr u8 kSlotPointer = static_cast<u8>(kSlotLaser + 1);
+		constexpr u8 kSlotToast = static_cast<u8>(kSlotPointer + 1);
+		constexpr u8 kSlotHand = static_cast<u8>(kSlotToast + 1);
+		constexpr u8 kSlotWrist = static_cast<u8>(kSlotHand + kHandSlots);
+		constexpr u8 kSlotVignette = static_cast<u8>(kSlotWrist + 1);
+		constexpr u8 kSlotBlink = static_cast<u8>(kSlotVignette + 1);
+		constexpr u8 kSlotCount = static_cast<u8>(kSlotBlink + 1);
+		static_assert(HudCards::kCardCount == 6, "a HUD card without a slot");
+
+		u8 HudSlot(int card)
+		{
+			switch (card)
+			{
+				case HudCards::kLaser: return kSlotLaser;
+				case HudCards::kPointer: return kSlotPointer;
+				case HudCards::kToast: return kSlotToast;
+				case HudCards::kWrist: return kSlotWrist;
+				case HudCards::kVignette: return kSlotVignette;
+				default: return kSlotBlink;
+			}
+		}
+
+		u8 HudRole(int card)
+		{
+			return (card == HudCards::kLaser) ? kRoleHudLaser : (card == HudCards::kWrist) ? kRoleHudWrist : kRoleHudView;
+		}
+
+		// Every hand, zone marker and HUD card image but the toast's is this size, so a layer position whose occupant does
+		// change (a slot showing up before it for the first time, a short capacity) mostly keeps its image size, and
+		// SteamVR the texture it keeps for it.
+		constexpr u32 kCardImageSize = 256;
+		static_assert(HandModel::kImageSize == kCardImageSize && ZoneMarkers::kImageSize == kCardImageSize,
+			"the hands and the zone markers share the cards' image size");
+
 		// A layer that moves with a controller (a hand impostor, the laser, the wrist card): the controller pose it was placed
 		// for. With [VR] HandsDisplayRate the pacer moves it rigidly with that hand to the pose located for each display frame.
 		struct HandAttach
@@ -222,6 +265,8 @@ namespace VR::XRCompositor
 				u8 kind;
 				u8 role;
 				u8 pointer; // kPointerPart*: the menu pointer's beam or dot, placed again by the pacer
+				u8 slot;    // kSlot*: its position in the submit array
+				bool parked; // in the array only to keep its position: out of every eye's sight (ParkEntry)
 				XrCompositionLayerQuad quad;
 				XrCompositionLayerCylinderKHR cyl;
 				HandAttach att; // not attached unless the layer rides on a controller
@@ -272,6 +317,9 @@ namespace VR::XRCompositor
 			int fake_hands = 0;
 			bool fake_sweep = false;
 			bool grip_orient = false;
+			// PCSX2_VR_NO_PARKED_LAYERS (read at Initialize, like the hands' test aids): a layer not shown is left out of the
+			// submit array instead of parked in its position (ParkFreeSlots), for a headset A/B of the runtime's cost.
+			bool no_parked_layers = false;
 
 			// Written by the pacer after each xrWaitFrame.
 			std::atomic<XrTime> latest_display_time{0};
@@ -648,17 +696,41 @@ namespace VR::XRCompositor
 			return res;
 		}
 
-		// Drops every published entry that shows this swapchain (publish_mutex held by the caller).
-		void ForgetPublishedSwapchain(XrSwapchain swapchain)
+		// A layer in the submit array only to keep its position (ParkFreeSlots): its own swapchain and image rect stay, so
+		// the runtime keeps the texture it holds for that position, but it is 1 cm across and 100 m behind the head in the
+		// VIEW space, where no eye can see it (with no VIEW space, 1 km below the base space's origin, which is as good).
+		// That is valid OpenXR as long as the swapchain has a released image, which the callers check; nothing in it is
+		// zero-sized or transparent, so no runtime has to special-case it. Quads only (a screen is never parked).
+		void ParkEntry(PublishedSet::Entry& e)
+		{
+			e.parked = true;
+			e.att = HandAttach{};
+			e.pointer = kPointerPartNone;
+			XrCompositionLayerQuad& q = e.quad;
+			const bool view = (s.view_space != XR_NULL_HANDLE);
+			q.space = view ? s.view_space : XRSession::GetSpace();
+			q.pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+			q.pose.position = view ? XrVector3f{0.0f, 0.0f, 100.0f} : XrVector3f{0.0f, -1000.0f, 0.0f};
+			q.size = {0.01f, 0.01f};
+		}
+
+		// Drops every published entry that shows this swapchain (publish_mutex held by the caller). park: the swapchain
+		// still has a released image the runtime may show (only this present's went wrong), so its entries are parked in
+		// their positions instead (ParkFreeSlots) unless parking is off.
+		void ForgetPublishedSwapchain(XrSwapchain swapchain, bool park = false)
 		{
 			PublishedSet& set = s.published;
 			u32 kept = 0;
 			for (u32 i = 0; i < set.count; i++)
 			{
-				const PublishedSet::Entry& entry = set.e[i];
+				PublishedSet::Entry& entry = set.e[i];
 				const XrSwapchain shown = (entry.kind == kKindCylinder) ? entry.cyl.subImage.swapchain : entry.quad.subImage.swapchain;
 				if (shown == swapchain)
-					continue;
+				{
+					if (!park || s.no_parked_layers || entry.kind != kKindQuad)
+						continue;
+					ParkEntry(entry);
+				}
 				if (kept != i)
 					set.e[kept] = entry;
 				kept++;
@@ -1940,6 +2012,60 @@ namespace VR::XRCompositor
 			return {0, 0};
 		}
 
+		// A card's swapchain image: kCardImageSize square, like the hands' and the zone markers', for every card but the
+		// toast, whose 1024 x 160 line of text keeps its own (ExpandHudRaster lays each raster into it).
+		HudCardSize HudChainSize(int card)
+		{
+			if (card == HudCards::kToast)
+				return HudSize(card);
+			return {kCardImageSize, kCardImageSize};
+		}
+		// The laser (and the menu beam in its slot), the blink and the pointer's dot are stretched by whole factors, so
+		// their quads keep their sizes (PlaceMenuPointerNow sizes the beam and the dot on the pacer); the wrist card is
+		// padded (HudQuadScale) and the vignette already fits.
+		static_assert(kCardImageSize % HudCards::kLaserImageWidth == 0 && kCardImageSize % HudCards::kLaserImageHeight == 0 &&
+						  kCardImageSize % HudCards::kBlinkImageSize == 0 && kCardImageSize % HudCards::kPointerImageSize == 0 &&
+						  HudCards::kWristWidth <= kCardImageSize && HudCards::kWristHeight <= kCardImageSize &&
+						  HudCards::kVignetteImageSize == kCardImageSize,
+			"every card but the toast must fit the shared card image size");
+
+		// A card's raster (HudSize) laid into its swapchain image (HudChainSize): along an axis whose size divides the
+		// image's, each texel repeated (the laser or menu beam across, the blink, the pointer's dot: the same texels on the
+		// same quad); along any other, centred between transparent texels, its quad grown to match (HudQuadScale).
+		void ExpandHudRaster(int card, const std::vector<u32>& raster, std::vector<u32>& out)
+		{
+			const HudCardSize rs = HudSize(card);
+			const HudCardSize cs = HudChainSize(card);
+			out.assign(static_cast<size_t>(cs.width) * cs.height, 0u);
+			if (rs.width == 0 || rs.height == 0 || rs.width > cs.width || rs.height > cs.height ||
+				raster.size() != static_cast<size_t>(rs.width) * rs.height)
+			{
+				return;
+			}
+			const bool stretch_x = (cs.width % rs.width) == 0;
+			const bool stretch_y = (cs.height % rs.height) == 0;
+			const u32 fx = stretch_x ? cs.width / rs.width : 1;
+			const u32 fy = stretch_y ? cs.height / rs.height : 1;
+			const u32 ox = stretch_x ? 0 : (cs.width - rs.width) / 2;
+			const u32 oy = stretch_y ? 0 : (cs.height - rs.height) / 2;
+			for (u32 y = 0; y < rs.height * fy; y++)
+			{
+				const u32* const src_row = raster.data() + static_cast<size_t>(y / fy) * rs.width;
+				u32* const dst_row = out.data() + static_cast<size_t>(oy + y) * cs.width + ox;
+				for (u32 x = 0; x < rs.width * fx; x++)
+					dst_row[x] = src_row[x / fx];
+			}
+		}
+
+		// How much larger a card's quad is than its raster's own (the padding ExpandHudRaster adds): 1 along a stretched axis.
+		void HudQuadScale(int card, float* sx, float* sy)
+		{
+			const HudCardSize rs = HudSize(card);
+			const HudCardSize cs = HudChainSize(card);
+			*sx = (rs.width == 0 || cs.width % rs.width == 0) ? 1.0f : static_cast<float>(cs.width) / static_cast<float>(rs.width);
+			*sy = (rs.height == 0 || cs.height % rs.height == 0) ? 1.0f : static_cast<float>(cs.height) / static_cast<float>(rs.height);
+		}
+
 		// The menu pointer this frame (BuildHudLayers): a beam from the pointing hand to where its aim meets the flat
 		// screen, and a dot lying on the screen there.
 		struct MenuPointerPlacement
@@ -2027,7 +2153,7 @@ namespace VR::XRCompositor
 
 		VkDeviceSize HudImageBytes(int card)
 		{
-			const HudCardSize sz = HudSize(card);
+			const HudCardSize sz = HudChainSize(card);
 			return static_cast<VkDeviceSize>(sz.width) * sz.height * 4u;
 		}
 
@@ -2049,11 +2175,12 @@ namespace VR::XRCompositor
 			return std::clamp(static_cast<int>(std::lround(o * static_cast<float>(kHudLevels))), 0, kHudLevels);
 		}
 
-		// Full-opacity rasters of the cards, redrawn only when a card's content changes; the fades scale
-		// their alpha on the way into the staging buffer.
+		// Full-opacity rasters of the cards, redrawn only when a card's content changes, and each laid into its swapchain's
+		// image size (image, ExpandHudRaster); the fades scale their alpha on the way into the staging buffer.
 		struct HudRaster
 		{
 			std::vector<u32> pixels;
+			std::vector<u32> image;
 			u64 content = 0;
 			bool valid = false;
 		};
@@ -2206,7 +2333,7 @@ namespace VR::XRCompositor
 				if (hc.swapchain != XR_NULL_HANDLE)
 					continue;
 				// Same format as the screen (sRGB normally): the cards are sRGB-encoded bytes with alpha.
-				const HudCardSize sz = HudSize(i);
+				const HudCardSize sz = HudChainSize(i);
 				XrSwapchainCreateInfo ci = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
 				ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
 				ci.format = static_cast<int64_t>(s.swapchain_format);
@@ -2237,14 +2364,16 @@ namespace VR::XRCompositor
 				hc.shown_level = -1;
 				image_count = count;
 			}
-			Console.WriteLn("(VR) HUD: card swapchains created (%d card(s), %u images, %llu-byte staging).",
-				HudCards::kCardCount, image_count, static_cast<unsigned long long>(bytes));
+			Console.WriteLn("(VR) HUD: card swapchains created (%d card(s), %ux%u but the toast's %ux%u, %u images, %llu-byte "
+							"staging).",
+				HudCards::kCardCount, kCardImageSize, kCardImageSize, HudChainSize(HudCards::kToast).width,
+				HudChainSize(HudCards::kToast).height, image_count, static_cast<unsigned long long>(bytes));
 			return true;
 		}
 
 		void RecordHudUpload(VkCommandBuffer cmd, int card, VkImage dst)
 		{
-			const HudCardSize sz = HudSize(card);
+			const HudCardSize sz = HudChainSize(card);
 			ImageBarrier(cmd, dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 				VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 				VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -2588,12 +2717,16 @@ namespace VR::XRCompositor
 						HudCards::RasterVignette(raster.pixels);
 					else if (i == HudCards::kPointer)
 						HudCards::RasterPointer(raster.pixels, wv.content == 2);
+					ExpandHudRaster(i, raster.pixels, raster.image);
 					raster.content = wv.content;
 					raster.valid = true;
 				}
 				const HudCardSize sz = HudSize(i);
-				const size_t pixel_count = static_cast<size_t>(sz.width) * sz.height;
-				if (raster.pixels.size() != pixel_count)
+				if (raster.pixels.size() != static_cast<size_t>(sz.width) * sz.height)
+					continue;
+				const HudCardSize chain_sz = HudChainSize(i);
+				const size_t pixel_count = static_cast<size_t>(chain_sz.width) * chain_sz.height;
+				if (raster.image.size() != pixel_count)
 					continue;
 
 				uint32_t index = 0;
@@ -2637,7 +2770,7 @@ namespace VR::XRCompositor
 					recording = true;
 				}
 				u32* dst = reinterpret_cast<u32*>(static_cast<u8*>(s.hud_staging_map) + HudStagingOffset(i));
-				HudCards::ScaleAlpha(raster.pixels.data(), pixel_count,
+				HudCards::ScaleAlpha(raster.image.data(), pixel_count,
 					static_cast<float>(wv.level) / static_cast<float>(kHudLevels), dst);
 				RecordHudUpload(s.hud_cmd, i, hc.images[index].image);
 				pending[pending_count] = i;
@@ -2678,7 +2811,7 @@ namespace VR::XRCompositor
 				// the laser or the menu beam it is placed as; being a fade step behind is fine.
 				if ((i == HudCards::kToast || i == HudCards::kLaser) && hc.shown_content != wv.content)
 					continue;
-				const HudCardSize sz = HudSize(i);
+				const HudCardSize sz = HudChainSize(i);
 				XrCompositionLayerQuad& quad = hud_quads[i];
 				quad.type = XR_TYPE_COMPOSITION_LAYER_QUAD;
 				quad.next = nullptr;
@@ -2752,6 +2885,12 @@ namespace VR::XRCompositor
 					quad.pose.position = {pos[0], pos[1], pos[2]};
 					quad.size = {HudCards::kVignetteSizeM, HudCards::kVignetteSizeM};
 				}
+				// A raster padded into the shared card image size (the wrist card's height) covers that much more quad.
+				float scale_x = 1.0f;
+				float scale_y = 1.0f;
+				HudQuadScale(i, &scale_x, &scale_y);
+				quad.size.width *= scale_x;
+				quad.size.height *= scale_y;
 				// The laser, the dot and the toast go in under the hands (the dot over the beam, the toast over both), the
 				// rest on top; layer_count < capacity, checked above.
 				const XrCompositionLayerBaseHeader* layer = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
@@ -4778,6 +4917,7 @@ namespace VR::XRCompositor
 				PublishedSet::Entry& e = out->e[out->count];
 				e.att = HandAttach{};
 				e.pointer = kPointerPartNone;
+				e.parked = false;
 				bool known = false;
 				for (u32 k = 0; k < src.screen_slots && !known; k++)
 				{
@@ -4785,6 +4925,7 @@ namespace VR::XRCompositor
 					{
 						e.kind = kKindQuad;
 						e.role = kRoleScreen;
+						e.slot = static_cast<u8>(kSlotScreen + k);
 						e.quad = src.quads[k];
 						known = true;
 					}
@@ -4792,6 +4933,7 @@ namespace VR::XRCompositor
 					{
 						e.kind = kKindCylinder;
 						e.role = kRoleScreen;
+						e.slot = static_cast<u8>(kSlotScreen + k);
 						e.cyl = src.cyls[k];
 						known = true;
 					}
@@ -4802,6 +4944,7 @@ namespace VR::XRCompositor
 					{
 						e.kind = kKindQuad;
 						e.role = kRoleLever;
+						e.slot = static_cast<u8>(kSlotLever + k);
 						e.quad = src.lever_quads[k];
 						known = true;
 					}
@@ -4812,6 +4955,7 @@ namespace VR::XRCompositor
 					{
 						e.kind = kKindQuad;
 						e.role = kRoleHand;
+						e.slot = static_cast<u8>(kSlotHand + k);
 						e.quad = src.hand_quads[k];
 						if (src.hand_att)
 							e.att = src.hand_att[k];
@@ -4824,6 +4968,7 @@ namespace VR::XRCompositor
 					{
 						e.kind = kKindQuad;
 						e.role = kRoleZone;
+						e.slot = static_cast<u8>(kSlotZone + k);
 						e.quad = src.zone_quads[k];
 						known = true;
 					}
@@ -4833,7 +4978,8 @@ namespace VR::XRCompositor
 					if (p == static_cast<const void*>(&src.hud_quads[k]))
 					{
 						e.kind = kKindQuad;
-						e.role = (k == HudCards::kLaser) ? kRoleHudLaser : (k == HudCards::kWrist) ? kRoleHudWrist : kRoleHudView;
+						e.role = HudRole(k);
+						e.slot = HudSlot(k);
 						e.quad = src.hud_quads[k];
 						if (src.hud_att)
 							e.att = src.hud_att[k];
@@ -4848,6 +4994,105 @@ namespace VR::XRCompositor
 				if (known)
 					out->count++;
 			}
+		}
+
+		// The last step of every publish (GS thread): every layer keeps its position in the submit array from one frame to
+		// the next. SteamVR shows our quads as overlays by array index (openxr_quadlayer_N) and re-creates the texture it
+		// keeps for a position whenever what sits there changes size (research note 2026-10-12: 150 times in the first 11
+		// minutes, each with an xrEndFrame of 4 - 15 ms); a layer left out moved every later one down. So the entries go
+		// in slot order (kSlot*), and each lever card, zone marker, HUD card and hand not shown this present whose
+		// swapchain has a released image goes in too, parked (ParkEntry): its own image in its own position, out of sight.
+		// That costs the runtime one more overlay that draws nothing, where leaving it out costs a texture re-creation for
+		// it and for every layer after it as soon as anything moves, which in our array (the volatile HUD cards sit under
+		// the hands, as their depth needs) is almost every time. A slot whose swapchain has no released image yet, or none
+		// at all, stays out, as OpenXR requires. Shown entries keep the capacity they had: parked ones fill what is left,
+		// the last positions going first when it runs short (only split screen with lever cards needs more than 15).
+		// PCSX2_VR_NO_PARKED_LAYERS leaves them all out again (s.no_parked_layers).
+		void ParkFreeSlots(PublishedSet* set)
+		{
+			// In slot order, equal slots (none, in practice) as they came: an insertion sort, the sets being short and
+			// almost always in order already, and no allocation on the GS thread.
+			const auto sort_by_slot = [](PublishedSet::Entry* e, u32 count) {
+				for (u32 i = 1; i < count; i++)
+				{
+					if (e[i - 1].slot <= e[i].slot)
+						continue;
+					const PublishedSet::Entry moving = e[i];
+					u32 j = i;
+					while (j > 0 && e[j - 1].slot > moving.slot)
+					{
+						e[j] = e[j - 1];
+						j--;
+					}
+					e[j] = moving;
+				}
+			};
+			sort_by_slot(set->e, set->count);
+			if (s.no_parked_layers || set->count >= kLayerCapacity)
+				return;
+
+			bool present[kSlotCount] = {};
+			for (u32 i = 0; i < set->count; i++)
+			{
+				if (set->e[i].slot < kSlotCount)
+					present[set->e[i].slot] = true;
+			}
+			PublishedSet::Entry parked[kSlotCount];
+			u32 parked_count = 0;
+			const auto park = [&](u8 slot, u8 role, XrSwapchain swapchain, bool released, u32 width, u32 height) {
+				if (present[slot] || swapchain == XR_NULL_HANDLE || !released)
+					return;
+				PublishedSet::Entry& e = parked[parked_count++];
+				e = PublishedSet::Entry{};
+				e.kind = kKindQuad;
+				e.role = role;
+				e.slot = slot;
+				e.quad = XrCompositionLayerQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+				e.quad.layerFlags =
+					XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+				e.quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+				e.quad.subImage = {swapchain, {{0, 0}, {static_cast<s32>(width), static_cast<s32>(height)}}, 0};
+				ParkEntry(e);
+			};
+			for (int k = 0; k < ControlQuads::kSlots; k++)
+			{
+				park(static_cast<u8>(kSlotLever + k), kRoleLever, s.levers[k].swapchain, s.levers[k].ever_released,
+					ControlQuads::kWidth, ControlQuads::kHeight);
+			}
+			for (int k = 0; k < kZoneSlots; k++)
+			{
+				park(static_cast<u8>(kSlotZone + k), kRoleZone, s.zone_chains[k].swapchain, s.zone_chains[k].ever_released,
+					ZoneMarkers::kImageSize, ZoneMarkers::kImageSize);
+			}
+			for (int k = 0; k < HudCards::kCardCount; k++)
+			{
+				const HudCardSize sz = HudChainSize(k);
+				park(HudSlot(k), HudRole(k), s.hud_chains[k].swapchain, s.hud_chains[k].ever_released, sz.width, sz.height);
+			}
+			for (int k = 0; k < kHandSlots; k++)
+			{
+				park(static_cast<u8>(kSlotHand + k), kRoleHand, s.hand_chains[k].swapchain, s.hand_chains[k].ever_released,
+					HandModel::kImageSize, HandModel::kImageSize);
+			}
+			if (parked_count == 0)
+				return;
+
+			// The first positions first: what does not fit is the end of the array.
+			sort_by_slot(parked, parked_count);
+			parked_count = std::min(parked_count, kLayerCapacity - set->count);
+			PublishedSet::Entry merged[kLayerCapacity];
+			u32 n = 0;
+			u32 i = 0;
+			u32 j = 0;
+			while (i < set->count || j < parked_count)
+			{
+				if (j >= parked_count || (i < set->count && set->e[i].slot < parked[j].slot))
+					merged[n++] = set->e[i++];
+				else
+					merged[n++] = parked[j++];
+			}
+			std::copy(merged, merged + n, set->e);
+			set->count = n;
 		}
 
 		// Headset rate: hands the layers this present built to the pacer, copied by value. keep_screen: the screen
@@ -4894,9 +5139,11 @@ namespace VR::XRCompositor
 				merged.turn_rate = prev.fp_screen ? turn_rate : 0.0f;
 				merged.fp_image = prev.fp_image;
 				merged.serial = prev.serial + 1;
+				ParkFreeSlots(&merged);
 				return merged;
 			}
 			next.serial = prev.serial + 1;
+			ParkFreeSlots(&next);
 			return next;
 		}
 
@@ -4987,8 +5234,10 @@ namespace VR::XRCompositor
 			}
 			s.deferred_since_ms = 0;
 
-			// Swapchains whose release failed and that must not appear in the published set.
+			// Swapchains whose release failed and that must not be shown in the published set, and whether each still has an
+			// earlier released image to keep its position with (parked, ParkFreeSlots).
 			XrSwapchain dropped[2 + kHandSlots] = {};
+			bool dropped_park[2 + kHandSlots] = {};
 			u32 dropped_count = 0;
 			for (u32 l = 0; l < 2; l++)
 			{
@@ -5029,7 +5278,9 @@ namespace VR::XRCompositor
 				}
 				else
 				{
-					// A hand's layer is only ever this present's image at this present's pose: drop it.
+					// A hand's layer is only ever this present's image at this present's pose: drop it (parked, if the
+					// swapchain was released before).
+					dropped_park[dropped_count] = hc.ever_released;
 					dropped[dropped_count++] = hc.swapchain;
 				}
 				// What the runtime shows for this hand from now on: this present's drawing (committed with the pose it was
@@ -5062,7 +5313,7 @@ namespace VR::XRCompositor
 			{
 				std::lock_guard<std::mutex> publish(s.publish_mutex);
 				for (u32 k = 0; k < dropped_count; k++)
-					ForgetPublishedSwapchain(dropped[k]);
+					ForgetPublishedSwapchain(dropped[k], dropped_park[k]);
 			}
 		}
 
@@ -5083,8 +5334,9 @@ namespace VR::XRCompositor
 			pose.position.z = head.z - sa * dx + ca * dz;
 		}
 
-		// The submit array: the background first, then the set's entries (only Screen and Lever while the GS is
-		// idle), Screen entries turned by `turn`. Returns the layer count; the pointers point into `set`.
+		// The submit array: the background first, then the set's entries (only Screen and Lever shown while the GS is
+		// idle: the rest parked in their positions, ParkFreeSlots, or left out with parking off), Screen entries turned by
+		// `turn`. Returns the layer count; the pointers point into `set`.
 		u32 BuildSubmitArray(PublishedSet& set, const XrCompositionLayerProjection* background, bool stale, float turn,
 			const XrCompositionLayerBaseHeader** out)
 		{
@@ -5094,8 +5346,12 @@ namespace VR::XRCompositor
 			for (u32 i = 0; i < set.count && n < kLayerCapacity + 1; i++)
 			{
 				PublishedSet::Entry& e = set.e[i];
-				if (stale && e.role != kRoleScreen && e.role != kRoleLever)
-					continue;
+				if (stale && e.role != kRoleScreen && e.role != kRoleLever && !e.parked)
+				{
+					if (s.no_parked_layers || e.kind != kKindQuad)
+						continue;
+					ParkEntry(e);
+				}
 				if (e.role == kRoleScreen && turn != 0.0f)
 					ApplyTurn(e, set.fp_head, turn);
 				out[n++] = (e.kind == kKindCylinder) ? reinterpret_cast<const XrCompositionLayerBaseHeader*>(&e.cyl) :
@@ -5225,6 +5481,7 @@ namespace VR::XRCompositor
 			bool sig_valid = false;
 			LayerSignature last_sig;
 			u32 layers = 0;
+			u32 parked = 0; // of the last frame's layers, how many were parked (ParkFreeSlots)
 			u64 last_serial = 0;
 			// The Hands line (the pacer, headset rate only): layers riding on a controller placed, and how many of them
 			// moved to the controller pose of their display frame; how old the controller pose each went out with was;
@@ -5279,6 +5536,15 @@ namespace VR::XRCompositor
 			st.end_call.Add(static_cast<double>(timing.call_ns) / 1.0e6);
 		}
 
+		// How many of a submitted set's entries are parked (ParkFreeSlots).
+		u32 CountParked(const PublishedSet& set)
+		{
+			u32 n = 0;
+			for (u32 i = 0; i < set.count; i++)
+				n += set.e[i].parked ? 1u : 0u;
+			return n;
+		}
+
 		// The layer array one accepted xrEndFrame carried: a change against the one before, and layers with no projection
 		// layer under them.
 		void NoteSubmittedLayers(FrameStats& st, const XrCompositionLayerBaseHeader* const* layers, u32 count)
@@ -5327,15 +5593,15 @@ namespace VR::XRCompositor
 							"shouldRender=false %u, mean/max ms: xrWaitFrame %.1f/%.1f, xrBeginFrame %.2f/%.1f%s, xrEndFrame "
 							"%.1f/%.1f (queue lock %.2f/%.1f, runtime %.1f/%.1f), display lead vs first min/mean/max "
 							"%+.1f/%+.1f/%+.1f ms, queue-lock wait max %u us total %.1f ms/s (GS thread %.1f, GS submits %.1f), "
-							"copies skipped %u timed out %u, publishes deferred %u, layers %u, layer changes %u, no projection %u, "
-							"mode %s, XR queue %s",
+							"copies skipped %u timed out %u, publishes deferred %u, layers %u (parked %u), layer changes %u, no "
+							"projection %u, mode %s, XR queue %s",
 				st.submitted / secs, hz, gs_frames / secs, st.resent / secs, st.stale, st.no_render, st.wait.Mean(),
 				static_cast<double>(st.wait.max_ms), st.begin.Mean(), static_cast<double>(st.begin.max_ms), parked, st.end.Mean(),
 				static_cast<double>(st.end.max_ms), st.end_lock.Mean(), static_cast<double>(st.end_lock.max_ms), st.end_call.Mean(),
 				static_cast<double>(st.end_call.max_ms), static_cast<double>(st.lead.min_ms), st.lead.Mean(),
 				static_cast<double>(st.lead.max_ms), lock_max_us, lock_total_ms, lock_gs_thread_ms, lock_gs_submit_ms, skipped,
-				timed_out, s.stat_publish_deferred.exchange(0, std::memory_order_relaxed), st.layers, st.layer_changes,
-				st.no_projection, s.headset_rate ? "headset rate (VR pacer)" : "legacy (one per GS present)",
+				timed_out, s.stat_publish_deferred.exchange(0, std::memory_order_relaxed), st.layers, st.parked,
+				st.layer_changes, st.no_projection, s.headset_rate ? "headset rate (VR pacer)" : "legacy (one per GS present)",
 				VR::XrQueueDedicated() ? "dedicated" : "shared");
 			// Only the pacer places hands (legacy submits each frame for the display time it located the hands for).
 			const u32 hand_new = s.stat_hand_new.exchange(0, std::memory_order_relaxed);
@@ -5659,8 +5925,9 @@ namespace VR::XRCompositor
 		// rate. The GS placement goes out unchanged for a PINE test hit (no hand to follow) and when no aim pose was
 		// located for that hand this frame (none, or the test hands). Its aim missing the screen this frame leaves the
 		// beam and the dot out of it (the next present drops them too), and a beam that cannot be placed (the eye on its
-		// line, the hand at the screen) goes alone. Only poses and sizes change and entries only ever go, so the layer
-		// count never grows; s.published is never written.
+		// line, the hand at the screen) goes alone: parked in their positions (ParkFreeSlots), or with parking off left
+		// out. Only poses and sizes change and entries only ever go or park, so the layer count never grows;
+		// s.published is never written.
 		int PlaceMenuPointerNow(PublishedSet& set, const HandsNow& now)
 		{
 			int beam = -1;
@@ -5726,8 +5993,16 @@ namespace VR::XRCompositor
 					keep_beam = true;
 				}
 			}
-			// What could not be placed for this frame goes out of it; the rest keep their order (the dot over the beam,
-			// both under the hands).
+			// What could not be placed for this frame is parked in its position (ParkFreeSlots), or with parking off goes out
+			// of the frame; the rest keep their order (the dot over the beam, both under the hands).
+			if (!s.no_parked_layers)
+			{
+				if (beam >= 0 && !keep_beam)
+					ParkEntry(set.e[beam]);
+				if (dot >= 0 && !keep_dot)
+					ParkEntry(set.e[dot]);
+				return (hand >= 0) ? kPointerNowPlaced : kPointerNowDropped;
+			}
 			u32 kept = 0;
 			for (u32 i = 0; i < set.count; i++)
 			{
@@ -5792,6 +6067,18 @@ namespace VR::XRCompositor
 			const auto near3 = [](const XrVector3f& a, const float b[3], float tol) {
 				return std::fabs(a.x - b[0]) < tol && std::fabs(a.y - b[1]) < tol && std::fabs(a.z - b[2]) < tol;
 			};
+			// The entries still shown, in order: what a frame leaves out is parked in its position (ParkFreeSlots), or
+			// with parking off (PCSX2_VR_NO_PARKED_LAYERS) not in the set at all; the checks hold either way.
+			const auto shown = [](const PublishedSet& set, u32* idx) {
+				u32 n = 0;
+				for (u32 i = 0; i < set.count; i++)
+				{
+					if (!set.e[i].parked)
+						idx[n++] = i;
+				}
+				return n;
+			};
+			u32 vis[kLayerCapacity] = {};
 			// An aim pose at from whose -Z runs toward to: yaw about +Y, then pitch about +X.
 			const auto aim_at = [](HandsNow::H& hn, const float from[3], const float to[3]) {
 				const float d[3] = {to[0] - from[0], to[1] - from[1], to[2] - from[2]};
@@ -5882,7 +6169,7 @@ namespace VR::XRCompositor
 					now.eye[k] = eye[k];
 				aim_at(now.hand[HandModel::kRight], right_from, away);
 				aim_at(now.hand[HandModel::kLeft], left_from, target);
-				check(PlaceMenuPointerNow(set, now) == kPointerNowDropped && set.count == 2,
+				check(PlaceMenuPointerNow(set, now) == kPointerNowDropped && shown(set, vis) == 2,
 					"placed by the right hand, its aim off the screen drops them, whatever the left hand points at");
 				make_set(set);
 				now.hand[HandModel::kRight] = HandsNow::H{};
@@ -5915,9 +6202,13 @@ namespace VR::XRCompositor
 				make_set(set);
 				HandsNow now;
 				aim_at(now.hand[HandModel::kRight], right_from, away);
-				check(PlaceMenuPointerNow(set, now) == kPointerNowDropped && set.count == 2 && set.e[0].role == kRoleScreen &&
-						  set.e[1].role == kRoleHand,
+				check(PlaceMenuPointerNow(set, now) == kPointerNowDropped && shown(set, vis) == 2 &&
+						  set.e[vis[0]].role == kRoleScreen && set.e[vis[1]].role == kRoleHand,
 					"an aim off the screen leaves the beam and the dot out of the frame, the rest in order");
+				check(s.no_parked_layers ||
+						  (set.count == 4 && set.e[1].parked && set.e[2].parked && set.e[1].pointer == kPointerPartNone &&
+							  set.e[1].quad.size.width < 0.02f && set.e[2].quad.size.width < 0.02f),
+					"parked in their positions, out of sight");
 			}
 
 			// No aim this frame, or a PINE test hit: the GS placement goes out unchanged.
@@ -5950,8 +6241,8 @@ namespace VR::XRCompositor
 				const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
 				for (int k = 0; k < 3; k++)
 					now.eye[k] = right_from[k] - d[k] / len * 0.3f;
-				check(PlaceMenuPointerNow(set, now) == kPointerNowPlaced && set.count == 3 && set.e[1].pointer == kPointerPartDot &&
-						  near3(set.e[1].quad.pose.position, dot_at, 1.0e-3f),
+				check(PlaceMenuPointerNow(set, now) == kPointerNowPlaced && shown(set, vis) == 3 &&
+						  set.e[vis[1]].pointer == kPointerPartDot && near3(set.e[vis[1]].quad.pose.position, dot_at, 1.0e-3f),
 					"looking straight down the beam, the beam goes alone and the dot stays");
 			}
 
@@ -6342,6 +6633,7 @@ namespace VR::XRCompositor
 					stats.no_render++;
 				NoteEndFrame(stats, end_ms, end_timing);
 				stats.layers = fs.shouldRender ? submit_count : 0;
+				stats.parked = fs.shouldRender ? CountParked(set) : 0;
 				if (XR_SUCCEEDED(eres))
 					NoteSubmittedLayers(stats, submit, stats.layers);
 				if (fs.shouldRender && XR_SUCCEEDED(eres))
@@ -6430,6 +6722,14 @@ namespace VR::XRCompositor
 			const char* reraster = std::getenv("PCSX2_VR_HANDS_RERASTER");
 			s.hands_reraster_always = (reraster != nullptr && std::strcmp(reraster, "always") == 0);
 		}
+		// Read before the pacer's self-test below, which checks the menu pointer's parts parked or left out by it.
+		s.no_parked_layers = (std::getenv("PCSX2_VR_NO_PARKED_LAYERS") != nullptr);
+		if (s.no_parked_layers)
+			Console.WriteLn("(VR) Layers: PCSX2_VR_NO_PARKED_LAYERS: a layer not shown is left out of the frame (positions "
+							"after it move; an A/B against parking it).");
+		else
+			Console.WriteLn("(VR) Layers: each layer keeps its position in the frame; one not shown is parked there out of "
+							"sight (its own image, 1 cm, behind the head) once its swapchain has a released image.");
 		s.fake_sweep = false;
 		if (std::getenv("PCSX2_VR_FAKE_HANDS_SWEEP") != nullptr)
 		{
@@ -7488,6 +7788,7 @@ namespace VR::XRCompositor
 		// Legacy: this present ends the frame, with the background under its layers.
 		PublishedSet set = {};
 		FillPublishedSet(&set, layers, layer_count, sources);
+		ParkFreeSlots(&set);
 		set.fp_screen = pub_fp_screen;
 		set.fp_head = pub_fp_head;
 		set.fp_image = pub_fp_image;
@@ -7516,6 +7817,7 @@ namespace VR::XRCompositor
 			s_legacy_stats.no_render++;
 		NoteEndFrame(s_legacy_stats, end_ms, end_timing);
 		s_legacy_stats.layers = submit_count;
+		s_legacy_stats.parked = CountParked(set);
 		if (XR_SUCCEEDED(eres))
 		{
 			NoteSubmittedLayers(s_legacy_stats, submit, submit_count);
