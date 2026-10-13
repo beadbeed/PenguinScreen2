@@ -1078,6 +1078,7 @@ set(pcsx2VRSources
 	VR/DepthHistogram.cpp
 	VR/HeadPose.cpp
 	VR/MemWatch.cpp
+	VR/MeshRaster.cpp
 	VR/PadLook.cpp
 	VR/StereoDump.cpp
 	VR/StereoAuto.cpp
@@ -1108,6 +1109,7 @@ set(pcsx2VRHeaders
 	VR/DepthHistogram.h
 	VR/HeadPose.h
 	VR/MemWatch.h
+	VR/MeshRaster.h
 	VR/PadLook.h
 	VR/StereoDump.h
 	VR/StereoAuto.h

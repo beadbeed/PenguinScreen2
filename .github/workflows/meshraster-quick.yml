@@ -1,0 +1,59 @@
+# Scratch check for the meshraster branch work: builds MeshRaster.cpp alone and runs its self-test, in minutes
+# instead of the hour the full build takes. Lives only on the meshraster-quick branch.
+name: MeshRaster quick check
+
+on:
+  push:
+    branches: [meshraster-quick]
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Locate vcvars
+        shell: cmd
+        run: |
+            for /f "usebackq tokens=*" %%i in (`call vswhere -latest -property installationPath`) do set "VSINSTPATH=%%i"
+            echo VCVARSPATH=%VSINSTPATH%\VC\Auxiliary\Build\vcvars64.bat>>%GITHUB_ENV%
+
+      - name: Build with MSVC (cl)
+        shell: cmd
+        run: |
+          call "%VCVARSPATH%" || exit /b
+          mkdir out
+          cl /nologo /std:c++20 /O2 /Zc:__cplusplus /permissive- /Zc:preprocessor /utf-8 /W4 /D_HAS_EXCEPTIONS=0 /D_CRT_SECURE_NO_WARNINGS /I tools\meshraster-quick\stub /I . /I pcsx2 pcsx2\VR\MeshRaster.cpp tools\meshraster-quick\main.cpp /Fe:out\meshraster_cl.exe /Fo:out\ || exit /b
+
+      - name: Build with clang-cl
+        shell: cmd
+        run: |
+          call "%VCVARSPATH%" || exit /b
+          clang-cl --version
+          clang-cl /nologo /std:c++20 /O2 /EHs-c- -Wall -Wextra -Wno-unused-parameter -D_HAS_EXCEPTIONS=0 -D_CRT_SECURE_NO_WARNINGS -I tools\meshraster-quick\stub -I . -I pcsx2 pcsx2\VR\MeshRaster.cpp tools\meshraster-quick\main.cpp /Fe:out\meshraster_clang.exe /Fo:out\ || exit /b
+
+      - name: Run self-test (cl build)
+        shell: cmd
+        working-directory: out
+        run: meshraster_cl.exe
+
+      - name: Run self-test (clang-cl build)
+        if: always()
+        shell: cmd
+        working-directory: out
+        run: |
+          mkdir clang
+          cd clang
+          ..\meshraster_clang.exe
+
+      - name: Upload pictures
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: meshraster-pictures
+          path: |
+            out/*.png
+            out/clang/*.png
