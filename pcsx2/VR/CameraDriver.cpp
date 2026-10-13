@@ -2100,7 +2100,9 @@ namespace VR::CameraDriver
 		u64 s_frame_published_seq = 0;
 		float s_view_prev[16] = {};
 		bool s_view_prev_valid = false;
+		u32 s_view_still_vsyncs = 0; // vsyncs in a row the view matrix has not changed (saturates)
 		bool s_render_published = false; // a valid render pose is on the GS side
+		FramePose s_render_sent;         // what was last sent down the GS queue (the CPU thread's copy of s_gs_render_pose)
 		bool s_render_sync_logged = false;
 
 		std::mutex s_gs_render_mutex;
@@ -2108,16 +2110,20 @@ namespace VR::CameraDriver
 		bool s_gs_render_valid = false;
 		u32 s_gs_render_shows = 0; // how many times RenderPose has handed out the current pose
 
-		void PublishRenderPose(bool valid, const FramePose& pose)
+		// fov_refresh: the same frame sent again with a newer FOV, which is not a new showing (RenderPose's horizon samples
+		// count only the first few showings of a pose, and a pose that keeps being shown only ages).
+		void PublishRenderPose(bool valid, const FramePose& pose, bool fov_refresh = false)
 		{
 			s_render_published = valid;
+			s_render_sent = pose;
 			if (!MTGS::IsOpen())
 				return;
-			MTGS::RunOnGSThread([valid, pose]() {
+			MTGS::RunOnGSThread([valid, pose, fov_refresh]() {
 				std::lock_guard<std::mutex> lock(s_gs_render_mutex);
 				s_gs_render_valid = valid;
 				s_gs_render_pose = pose;
-				s_gs_render_shows = 0;
+				if (!fov_refresh)
+					s_gs_render_shows = 0;
 			});
 		}
 
@@ -2135,6 +2141,39 @@ namespace VR::CameraDriver
 			s_written[s_written_next] = WrittenPose{w, pose};
 			s_written_next = (s_written_next + 1) % s_written.size();
 			s_written_count = std::min(s_written_count + 1, s_written.size());
+		}
+
+		// A change of FOV alone leaves the view matrix as it was, so the match in TrackRenderPose never sees it. With the
+		// view held still the game keeps drawing it with each newer FOV (an ease after an arm, or the retarget when the
+		// headset's eyes arrive), while the frame sent to the compositor would stay sized for the FOV it was matched with:
+		// the world up to 23% too small until the view moved. Send it again with the FOV of the write the game draws from
+		// now, as far back as the last match found it. Only once the view has held still for a few vsyncs: while it moves
+		// the matrix changes every other vsync (a 30 fps game on 60 Hz), the frame on screen is an older one drawn with its
+		// own FOV, and the next match carries that. The ring of frames is left alone (queueing a copy would shift
+		// syncFramesBack's count of matched frames and the frames_matched telemetry).
+		void FollowFovOfStillView()
+		{
+			constexpr u32 kStillVsyncs = 4; // two frames of a 30 fps game; a 20 fps one changes it every third vsync
+			if (s_view_still_vsyncs < kStillVsyncs || !s_render_published || s_frame_count == 0)
+				return;
+			const size_t newest = (s_frame_next + s_frame_poses.size() - 1) % s_frame_poses.size();
+			const u32 age = s_frame_age[newest];
+			if (age == 0 || age > s_written_count)
+				return;
+			const WrittenPose& drawn_from = s_written[(s_written_next + s_written.size() - age) % s_written.size()];
+			const float fov = drawn_from.w.fov_deg;
+			if (!(std::abs(fov - s_render_sent.fov_deg) > 0.05f))
+				return;
+			static const bool s_synclog = (std::getenv("PCSX2_VR_SYNCLOG") != nullptr);
+			if (s_synclog)
+			{
+				Console.WriteLn("(VR) sync: vsync %llu, the view held still for %u vsync(s): its frame's FOV %.2f follows the "
+								"write %u back, %.2f.",
+					static_cast<unsigned long long>(s_vsync_counter), s_view_still_vsyncs, s_render_sent.fov_deg, age, fov);
+			}
+			FramePose refreshed = s_render_sent;
+			refreshed.fov_deg = fov;
+			PublishRenderPose(true, refreshed, true);
 		}
 
 		// Before this vsync's write: if the view matrix changed since the last vsync, the game built a frame
@@ -2156,8 +2195,14 @@ namespace VR::CameraDriver
 			const bool changed = !s_view_prev_valid || std::memcmp(m, s_view_prev, sizeof(m)) != 0;
 			std::memcpy(s_view_prev, m, sizeof(m));
 			s_view_prev_valid = true;
-			if (!changed || s_written_count == 0)
+			s_view_still_vsyncs = changed ? 0 : std::min<u32>(s_view_still_vsyncs + 1, 1000);
+			if (s_written_count == 0)
 				return;
+			if (!changed)
+			{
+				FollowFovOfStillView();
+				return;
+			}
 
 			// Row vectors: the camera looks down -column 2, and the eye is -(row 3) * R^T.
 			const float look[3] = {-m[2], -m[6], -m[10]};
@@ -2234,7 +2279,8 @@ namespace VR::CameraDriver
 				memWrite32(cam.fov->ee_address, s_fov_saved_raw);
 		}
 
-		// The furthest both eyes reach, in degrees from the view axis (EyeInfo's fov: L, R, U, D with L and D negative).
+		// The furthest both eyes reach, in degrees from the view axis (EyeInfo's fov: L, R, U, D with L and D negative);
+		// side is measured from the head's forward, so it includes the outward cant of the views.
 		struct EyeReach
 		{
 			bool ok = false;
@@ -2243,7 +2289,10 @@ namespace VR::CameraDriver
 			float side = 0.0f;
 		};
 
-		EyeReach ReachOf(const float fov_deg[2][4])
+		// cant_deg: how far each view is turned outward from the head's forward (EyeInfo::cant_deg; canted displays, 0 for
+		// parallel views). The eyes' angles are relative to their own views, so for views turned outward the reach from the
+		// head is the angle plus the cant; turned inward it is not made smaller (the outer edge stays the furthest).
+		EyeReach ReachOf(const float fov_deg[2][4], float cant_deg)
 		{
 			EyeReach r;
 			if (!fov_deg)
@@ -2261,6 +2310,9 @@ namespace VR::CameraDriver
 			}
 			// Zeros mean nothing was reported; a view never reaches 90 degrees off its axis.
 			r.ok = r.up > 1.0f && r.down > 1.0f && r.side > 1.0f && r.up < 89.0f && r.down < 89.0f && r.side < 89.0f;
+			// After that check, which is about each eye's own angles; the fit caps the sum itself.
+			if (r.ok && std::isfinite(cant_deg))
+				r.side += std::max(cant_deg, 0.0f);
 			return r;
 		}
 
@@ -2302,7 +2354,7 @@ namespace VR::CameraDriver
 			const bool want_auto =
 				sizes_screen && EmuConfig.VR.FirstPersonFov == Pcsx2Config::VROptions::FirstPersonFovMode::Auto;
 			const XRCompositor::EyeInfo eyes = XRCompositor::GetEyeInfo();
-			const EyeReach reach = eyes.valid ? ReachOf(eyes.fov_deg) : EyeReach{};
+			const EyeReach reach = eyes.valid ? ReachOf(eyes.fov_deg, eyes.cant_deg) : EyeReach{};
 			const float margin = std::isfinite(EmuConfig.VR.FirstPersonFovMarginDeg) ?
 			                         std::clamp(EmuConfig.VR.FirstPersonFovMarginDeg,
 										 Pcsx2Config::VROptions::MIN_FP_FOV_MARGIN_DEG,
@@ -2332,7 +2384,8 @@ namespace VR::CameraDriver
 			{
 				s_fov_eyes_used = want_auto && reach.ok;
 				s_fov_awaiting_eyes = want_auto && !reach.ok;
-				s_fov_target = s_fov_eyes_used ? AutoFirstPersonFovDeg(eyes.fov_deg, aspect, margin, profile_fov) : profile_fov;
+				s_fov_target =
+					s_fov_eyes_used ? AutoFirstPersonFovDeg(eyes.fov_deg, eyes.cant_deg, aspect, margin, profile_fov) : profile_fov;
 				s_fov_source = s_fov_eyes_used ? "auto" :
 				               !sizes_screen   ? "profile: its first-person screen is not sized to camera.fov" :
 				               !want_auto      ? "profile: VR FirstPersonFov = Profile" :
@@ -2411,27 +2464,51 @@ namespace VR::CameraDriver
 			const float none[2][4] = {};
 			const float bad[2][4] = {{-45.0f, 45.0f, qnan, -45.0f}, {-45.0f, 45.0f, 45.0f, -45.0f}};
 
-			const EyeReach rf = ReachOf(frame);
+			const EyeReach rf = ReachOf(frame, 0.0f);
 			check(rf.ok && near_eq(rf.up, 51.0f, 1e-4f) && near_eq(rf.down, 54.0f, 1e-4f) && near_eq(rf.side, 52.0f, 1e-4f),
 				"union reach over both eyes");
-			check(!ReachOf(none).ok && !ReachOf(bad).ok, "no reach from zeros or a NaN");
+			check(!ReachOf(none, 0.0f).ok && !ReachOf(bad, 0.0f).ok, "no reach from zeros or a NaN");
 			// Twice the further of up and down plus the margin, 2 * 54 + 6 = 114 (a 4:3 picture's sides then reach 64 deg).
-			check(near_eq(AutoFirstPersonFovDeg(frame, k43, 6.0f, 100.0f), 114.0f, 1e-3f), "2 * max(up, down) + margin");
-			check(near_eq(AutoFirstPersonFovDeg(frame, k43, 0.0f, 100.0f), 108.0f, 1e-3f), "no margin");
+			check(near_eq(AutoFirstPersonFovDeg(frame, 0.0f, k43, 6.0f, 100.0f), 114.0f, 1e-3f), "2 * max(up, down) + margin");
+			check(near_eq(AutoFirstPersonFovDeg(frame, 0.0f, k43, 0.0f, 100.0f), 108.0f, 1e-3f), "no margin");
 			// The null headset needs 96 deg: the profile's 100 is the floor.
-			check(near_eq(AutoFirstPersonFovDeg(null_hmd, k43, 6.0f, 100.0f), 100.0f, 1e-3f), "camera.fov is the floor");
-			check(near_eq(AutoFirstPersonFovDeg(null_hmd, k43, 6.0f, 80.0f), 96.0f, 1e-3f), "null headset over a lower floor");
+			check(near_eq(AutoFirstPersonFovDeg(null_hmd, 0.0f, k43, 6.0f, 100.0f), 100.0f, 1e-3f), "camera.fov is the floor");
+			check(near_eq(AutoFirstPersonFovDeg(null_hmd, 0.0f, k43, 6.0f, 80.0f), 96.0f, 1e-3f), "null headset over a lower floor");
 			// Very wide: the sides decide, 2 * atan(tan 73 / aspect).
-			check(near_eq(AutoFirstPersonFovDeg(wide, 2.0f, 6.0f, 60.0f),
+			check(near_eq(AutoFirstPersonFovDeg(wide, 0.0f, 2.0f, 6.0f, 60.0f),
 					  2.0f * std::atan(std::tan(73.0f / kToDeg) / 2.0f) * kToDeg, 1e-2f),
 				"the sideways reach through the aspect");
-			check(near_eq(AutoFirstPersonFovDeg(wide, k43, 6.0f, 100.0f), kMaxAutoFovDeg, 1e-3f), "sideways reach, then the cap");
-			check(near_eq(AutoFirstPersonFovDeg(tall, k43, 6.0f, 100.0f), kMaxAutoFovDeg, 1e-3f), "the cap");
-			check(near_eq(AutoFirstPersonFovDeg(tall, k43, 6.0f, 140.0f), 140.0f, 1e-3f), "a floor above the cap stays");
-			check(near_eq(AutoFirstPersonFovDeg(none, k43, 6.0f, 100.0f), 100.0f, 1e-3f) &&
-					  near_eq(AutoFirstPersonFovDeg(bad, k43, 6.0f, 100.0f), 100.0f, 1e-3f),
+			check(near_eq(AutoFirstPersonFovDeg(wide, 0.0f, k43, 6.0f, 100.0f), kMaxAutoFovDeg, 1e-3f), "sideways reach, then the cap");
+			check(near_eq(AutoFirstPersonFovDeg(tall, 0.0f, k43, 6.0f, 100.0f), kMaxAutoFovDeg, 1e-3f), "the cap");
+			check(near_eq(AutoFirstPersonFovDeg(tall, 0.0f, k43, 6.0f, 140.0f), 140.0f, 1e-3f), "a floor above the cap stays");
+			check(near_eq(AutoFirstPersonFovDeg(none, 0.0f, k43, 6.0f, 100.0f), 100.0f, 1e-3f) &&
+					  near_eq(AutoFirstPersonFovDeg(bad, 0.0f, k43, 6.0f, 100.0f), 100.0f, 1e-3f),
 				"no usable eyes: camera.fov");
-			check(near_eq(AutoFirstPersonFovDeg(frame, k43, qnan, 100.0f), 114.0f, 1e-3f), "NaN margin: the default");
+			check(near_eq(AutoFirstPersonFovDeg(frame, 0.0f, k43, qnan, 100.0f), 114.0f, 1e-3f), "NaN margin: the default");
+			// Canted displays: a view turned outward by the cant reaches the angle plus the cant from the head's forward,
+			// sideways only; turned inward (or a NaN) it adds nothing.
+			const EyeReach rc = ReachOf(frame, 10.0f);
+			check(rc.ok && near_eq(rc.side, 62.0f, 1e-4f) && near_eq(rc.up, 51.0f, 1e-4f) && near_eq(rc.down, 54.0f, 1e-4f),
+				"the cant adds to the sideways reach only");
+			check(near_eq(ReachOf(frame, -10.0f).side, 52.0f, 1e-4f) && near_eq(ReachOf(frame, qnan).side, 52.0f, 1e-4f),
+				"an inward or NaN cant adds nothing");
+			check(!ReachOf(none, 10.0f).ok && !ReachOf(bad, 10.0f).ok, "a cant does not make unusable eyes usable");
+			// 4:3 at 6 deg margin: the uncanted pair is decided by its vertical reach (114), a 5 deg cant still is, a 10 deg
+			// one makes the sides decide (half_side 62 + 3).
+			check(near_eq(AutoFirstPersonFovDeg(frame, 5.0f, k43, 6.0f, 100.0f), 114.0f, 1e-3f), "a small cant: the vertical reach decides");
+			check(near_eq(AutoFirstPersonFovDeg(frame, 10.0f, k43, 6.0f, 100.0f),
+					  2.0f * std::atan(std::tan(65.0f / kToDeg) / k43) * kToDeg, 1e-2f),
+				"a cant widens the fit through the aspect");
+			check(near_eq(AutoFirstPersonFovDeg(wide, -10.0f, 2.0f, 6.0f, 60.0f), AutoFirstPersonFovDeg(wide, 0.0f, 2.0f, 6.0f, 60.0f), 1e-4f),
+				"an inward cant changes nothing");
+			check(near_eq(AutoFirstPersonFovDeg(wide, 25.0f, 2.0f, 6.0f, 60.0f), kMaxAutoFovDeg, 1e-3f),
+				"a reach past 89 deg with the cant: capped, not refused");
+			{
+				const float fov = AutoFirstPersonFovDeg(frame, 10.0f, k43, 6.0f, 100.0f);
+				const float h = ScreenHeightForFov(1.5f, fov);
+				const float half_w = std::atan(0.5f * h * k43 / 1.5f) * kToDeg;
+				check(half_w - rc.side >= 3.0f - 1e-3f, "coverage margin sideways with a cant");
+			}
 			// The screen follows the FOV: the profiles' 1.5 m, 100 deg screen is 3.575 m tall and 4.767 m wide at 4:3.
 			check(near_eq(ScreenHeightForFov(1.5f, 100.0f), 3.5753f, 1e-3f), "height 2 d tan(fov / 2)");
 			check(near_eq(ScreenHeightForFov(1.5f, 100.0f) * k43, 4.7670f, 1e-3f), "width = height * aspect");
@@ -2443,7 +2520,7 @@ namespace VR::CameraDriver
 				"a screen sized to camera.fov");
 			// The fitted screen covers every edge of the frame-like headset by at least half the margin.
 			{
-				const float fov = AutoFirstPersonFovDeg(frame, k43, 6.0f, 100.0f);
+				const float fov = AutoFirstPersonFovDeg(frame, 0.0f, k43, 6.0f, 100.0f);
 				const float h = ScreenHeightForFov(1.5f, fov);
 				const float half_v = std::atan(0.5f * h / 1.5f) * kToDeg;
 				const float half_w = std::atan(0.5f * h * k43 / 1.5f) * kToDeg;
@@ -3463,19 +3540,20 @@ namespace VR::CameraDriver
 		return s_fov_state;
 	}
 
-	float AutoFirstPersonFovDeg(const float fov_deg[2][4], float aspect, float margin_deg, float profile_fov_deg)
+	float AutoFirstPersonFovDeg(const float fov_deg[2][4], float cant_deg, float aspect, float margin_deg, float profile_fov_deg)
 	{
 		constexpr float kToDeg = 180.0f / PI_F;
 		const float floor_deg =
 			(std::isfinite(profile_fov_deg) && profile_fov_deg > 0.0f) ? std::min(profile_fov_deg, 179.0f) : 0.0f;
-		const EyeReach reach = ReachOf(fov_deg);
+		const EyeReach reach = ReachOf(fov_deg, cant_deg);
 		if (!reach.ok)
 			return floor_deg;
 		const float margin = std::isfinite(margin_deg) ? std::clamp(margin_deg, 0.0f, 40.0f) : kDefaultFovMarginDeg;
 		const float a = (std::isfinite(aspect) && aspect > 0.1f) ? aspect : (4.0f / 3.0f);
 		// Symmetric about the view axis: as far up as down, the further of the two plus half the margin.
 		const float half_v = std::max(reach.up, reach.down) + 0.5f * margin;
-		// And tall enough that the picture, `a` times as wide, reaches the furthest side plus half the margin.
+		// And tall enough that the picture, `a` times as wide, reaches the furthest side (from the head, so with the views'
+		// outward cant) plus half the margin.
 		const float half_side = std::min(reach.side + 0.5f * margin, 89.0f);
 		const float half_v_for_side = std::atan(std::tan(half_side / kToDeg) / a) * kToDeg;
 		const float fit = 2.0f * std::max(half_v, half_v_for_side);

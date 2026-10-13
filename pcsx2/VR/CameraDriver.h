@@ -60,12 +60,14 @@ namespace VR::CameraDriver
 	inline constexpr float kDefaultFovMarginDeg = 6.0f;
 	inline constexpr u32 kFovEaseVsyncs = 30;
 
-	// The vertical FOV that covers both eyes plus margin_deg. fov_deg[eye][L, R, U, D] in degrees as
-	// XRCompositor::EyeInfo has them (left and down negative). The game's projection is symmetric about its axis, so it
-	// takes twice the further of the eyes' furthest up and down reach (each plus half the margin), widened if a picture
-	// `aspect` times as wide as tall would not reach their furthest left or right (plus half the margin) either. Clamped
-	// to [profile_fov_deg, max(profile_fov_deg, kMaxAutoFovDeg)]; profile_fov_deg when the eyes are not usable.
-	float AutoFirstPersonFovDeg(const float fov_deg[2][4], float aspect, float margin_deg, float profile_fov_deg);
+	// The vertical FOV that covers both eyes plus margin_deg. fov_deg[eye][L, R, U, D] in degrees and cant_deg (how far
+	// the views are turned outward) as XRCompositor::EyeInfo has them (left and down negative). The game's projection is
+	// symmetric about its axis, so it takes twice the further of the eyes' furthest up and down reach (each plus half the
+	// margin), widened if a picture `aspect` times as wide as tall would not reach their furthest left or right (plus half
+	// the margin) either; that side reach is measured from the head's forward, so views turned outward add their cant to
+	// it (max(-L, R) + max(cant_deg, 0)). Clamped to [profile_fov_deg, max(profile_fov_deg, kMaxAutoFovDeg)];
+	// profile_fov_deg when the eyes are not usable.
+	float AutoFirstPersonFovDeg(const float fov_deg[2][4], float cant_deg, float aspect, float margin_deg, float profile_fov_deg);
 
 	// The height of a flat screen distance_m away that spans fov_deg vertically: 2 * distance * tan(fov / 2). 0 for a
 	// FOV outside 1-179 deg or a distance not above 0.
