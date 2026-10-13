@@ -574,6 +574,44 @@ namespace VR::ProfileDB
 		float danger_below = 0.25f;
 	};
 
+	// reach: a read-only copy of the game's own Circle-press item search, for the "you can pick this up" cue (VR::ItemReach).
+	// The game walks a linked list of trigger nodes (the u32 at list_head is the first node's address, each node's next
+	// field the following one, 0 ends) and takes the floor items among them. The search circle's centre lies `ahead` +
+	// the character's own reach float in front of it along its heading, with the given radius. A node counts when its type
+	// and mode bytes are the accepted ones, its enabled byte is non-zero and its busy byte zero, the circle overlaps the
+	// node's quad (four s32 x, z corners) and the character's height is between the node's y min and y max, or the node's
+	// y min is up to `above` over it (an item on a counter). Among the nodes that count the lowest priority byte wins. The
+	// item is record `item` of the item table (stride bytes each) and its id the u16 at id_offset; the cue names it from
+	// ItemData. Node offsets are into a node; probe offsets are into the record camera.base resolves to.
+	// Every default is Resident Evil Outbreak's (File #1 checked live, 25 of 25 against the game's own press), so a profile
+	// has to give only list and items.table.
+	struct ReachParams
+	{
+		u32 list_head = 0;
+		u32 next_offset = 0x28;
+		u32 quad_offset = 0x00;
+		u32 y_min_offset = 0x20;
+		u32 y_max_offset = 0x24;
+		u32 type_offset = 0x30;
+		u32 mode_offset = 0x31;
+		u32 priority_offset = 0x32;
+		u32 enabled_offset = 0x3C;
+		u32 busy_offset = 0x3D;
+		u32 item_offset = 0x40;
+		u8 accept_type = 0x80;
+		u8 accept_mode = 0x00;
+		u32 item_table = 0;
+		u32 item_stride = 60;
+		u32 item_id_offset = 0x06;
+		u32 position_offset = 0x38; // f32 x, y, z
+		u32 heading_offset = 0x92;  // s16, 0x10000 = 360 degrees, 0 faces +z
+		u32 reach_offset = 0x1B4;   // f32, added to ahead
+		float ahead = 46.0f;
+		float radius = 50.0f;
+		float above = 200.0f;
+		u32 max_nodes = 256; // the walk stops here (and at the first repeated node)
+	};
+
 	// hud.wrist: a card on the back of the left wrist while first person is active (VR only), with the
 	// character's condition, an HP bar and the virus gauge. Reads only. Offsets are into the record
 	// camera.base resolves to (the local character's in Outbreak), so it needs camera.base.
@@ -718,6 +756,7 @@ namespace VR::ProfileDB
 		std::optional<float> fp_screen_pose_lag_ms;
 		std::optional<PresentationParams> presentation;
 		std::optional<FeedbackParams> feedback;
+		std::optional<ReachParams> reach;
 		std::optional<HudParams> hud;
 		std::optional<MenuPointerParams> menu_pointer;
 		std::optional<PouchParams> pouches;

@@ -1319,6 +1319,10 @@ struct Pcsx2Config
 		// First person, while a menu is up: the menu on a small screen tilted up in front of the chest, like a tablet,
 		// instead of the world screen. Shown in the headset only.
 		bool MenuTablet = false;
+		// First person, for profiles with a reach block: a light tick in the right hand and a short toast naming the item
+		// (and the button, "Kevin's 45 Auto  (A)") when something on the floor comes within reach of the character's own
+		// Circle press. Only reads the game's memory; shown in the headset only. Ini only for now.
+		bool PickupCue = true;
 		// First person: darkens the edges of the headset view while the view turns or walks without the head
 		// (smooth stick turns, walking), the more the faster it moves; snap turns keep the blink instead.
 		// Drawn in the headset only, so only what this player sees.

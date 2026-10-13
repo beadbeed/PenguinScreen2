@@ -2650,6 +2650,176 @@ static VR::ProfileDB::FeedbackParams parseFeedback(const std::string_view serial
 	return fp;
 }
 
+// reach: the pickup cue's copy of the game's own Circle-press item search (VR::ItemReach). A model that is only partly
+// right would cue pickups that are not there and miss ones that are, so one bad entry drops the whole block with a warning
+// instead of loading half of it. Reads only. Addresses and offsets are hex like everywhere else (a decimal-looking value
+// that differs is warned about); ahead, radius and above are plain decimal game units.
+static std::optional<VR::ProfileDB::ReachParams> parseReach(const std::string_view serial, const ryml::ConstNodeRef& rnode)
+{
+	using VR::ProfileDB::ReachParams;
+	ReachParams rp;
+	bool ok = true;
+	const auto bad = [&](const std::string& why) {
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' reach {}.", serial, why);
+		ok = false;
+	};
+	warnUnknownKeys(serial, rnode, "reach", {"list", "node", "accept", "items", "probe", "maxNodes"});
+
+	// A hex number under key; absent keeps the default, present but not a number makes the block bad.
+	const auto hex = [&](const ryml::ConstNodeRef& map, const char* key, const std::string& what, u32& dst) {
+		if (!map.has_child(key))
+			return;
+		const std::string_view raw = nodeVal(map[key]);
+		const std::optional<u32> v = parseHexU32(raw);
+		if (!v.has_value())
+		{
+			bad(fmt::format("{} '{}' is not a number", what, raw));
+			return;
+		}
+		warnHexTrap(serial, raw, v.value(), what.c_str());
+		dst = v.value();
+	};
+	// A decimal number in [lo, hi].
+	const auto real = [&](const ryml::ConstNodeRef& map, const char* key, const std::string& what, float lo, float hi, float& dst) {
+		if (!map.has_child(key))
+			return;
+		const std::string_view raw = nodeVal(map[key]);
+		const std::optional<float> v = StringUtil::FromChars<float>(raw);
+		if (!v.has_value() || !std::isfinite(v.value()) || v.value() < lo || v.value() > hi)
+			bad(fmt::format("{} '{}' must be a number from {} to {}", what, raw, lo, hi));
+		else
+			dst = v.value();
+	};
+	// A sub-map whose keys are all optional: absent is fine, present but not a map makes the block bad.
+	const auto sub = [&](const char* key, std::initializer_list<const char*> known, ryml::ConstNodeRef& out) {
+		if (!rnode.has_child(key))
+			return false;
+		const ryml::ConstNodeRef child = rnode[key];
+		if (!child.is_map())
+		{
+			bad(fmt::format("{} is not a map", key));
+			return false;
+		}
+		warnUnknownKeys(serial, child, fmt::format("reach.{}", key).c_str(), known);
+		out = child;
+		return true;
+	};
+
+	// list: where the game keeps the address of the first trigger node (a pointer, so 4-byte aligned).
+	if (!rnode.has_child("list"))
+		bad("needs list (the address of the u32 that holds the first trigger node)");
+	else
+	{
+		const std::string_view raw = nodeVal(rnode["list"]);
+		const std::optional<u32> v = parseAddress(raw);
+		if (!v.has_value() || !inMainRam(v.value(), 4) || (v.value() & 3u) != 0)
+			bad(fmt::format("list '{}' must be a 4-byte aligned address in main RAM", raw));
+		else
+		{
+			warnHexTrap(serial, raw, v.value(), "reach.list");
+			rp.list_head = v.value();
+		}
+	}
+
+	// node: the offsets of a trigger node's fields. Under 0x1000 catches typos; a 4-byte field sits on a 4-byte boundary.
+	ryml::ConstNodeRef n;
+	struct NodeField
+	{
+		const char* key;
+		u32* dst;
+		u32 width;
+	};
+	const NodeField node_fields[] = {
+		{"next", &rp.next_offset, 4},
+		{"quad", &rp.quad_offset, 4},
+		{"yMin", &rp.y_min_offset, 4},
+		{"yMax", &rp.y_max_offset, 4},
+		{"type", &rp.type_offset, 1},
+		{"mode", &rp.mode_offset, 1},
+		{"priority", &rp.priority_offset, 1},
+		{"enabled", &rp.enabled_offset, 1},
+		{"busy", &rp.busy_offset, 1},
+		{"item", &rp.item_offset, 4},
+	};
+	if (sub("node", {"next", "quad", "yMin", "yMax", "type", "mode", "priority", "enabled", "busy", "item"}, n))
+	{
+		for (const NodeField& f : node_fields)
+			hex(n, f.key, std::string("reach.node.") + f.key, *f.dst);
+	}
+	for (const NodeField& f : node_fields)
+	{
+		if (static_cast<u64>(*f.dst) + f.width > 0x1000 || (*f.dst % f.width) != 0)
+			bad(fmt::format("node.{} {:#x} must lie inside the node (under 0x1000) and be aligned to its {} byte(s)", f.key,
+				*f.dst, f.width));
+	}
+
+	// accept: which nodes are floor items (type and search mode, one byte each).
+	if (sub("accept", {"type", "mode"}, n))
+	{
+		u32 type = rp.accept_type;
+		u32 mode = rp.accept_mode;
+		hex(n, "type", "reach.accept.type", type);
+		hex(n, "mode", "reach.accept.mode", mode);
+		if (type > 0xFF || mode > 0xFF)
+			bad("accept type and mode are one byte each");
+		else
+		{
+			rp.accept_type = static_cast<u8>(type);
+			rp.accept_mode = static_cast<u8>(mode);
+		}
+	}
+
+	// items: the table a node's item number indexes, which differs per File.
+	if (sub("items", {"table", "stride", "id"}, n))
+	{
+		const std::optional<u32> table = n.has_child("table") ? parseAddress(nodeVal(n["table"])) : std::nullopt;
+		if (!table.has_value() || !inMainRam(table.value(), 4))
+			bad("items.table must be an address in main RAM");
+		else
+		{
+			warnHexTrap(serial, nodeVal(n["table"]), table.value(), "reach.items.table");
+			rp.item_table = table.value();
+		}
+		hex(n, "stride", "reach.items.stride", rp.item_stride);
+		hex(n, "id", "reach.items.id", rp.item_id_offset);
+	}
+	else if (!rnode.has_child("items"))
+		bad("needs items: { table: <address of the item table> }");
+	if (rp.item_stride == 0 || rp.item_stride > 0x1000 || static_cast<u64>(rp.item_id_offset) + 2 > rp.item_stride ||
+		(rp.item_id_offset & 1u) != 0)
+		bad("items need a stride of 1-0x1000 with the item id (a 2-byte, 2-byte aligned u16) inside one record");
+
+	// probe: where the search circle is, from the local character's record. A record is a few KB, so 1 MB catches typos.
+	if (sub("probe", {"position", "heading", "reach", "ahead", "radius", "above"}, n))
+	{
+		hex(n, "position", "reach.probe.position", rp.position_offset);
+		hex(n, "heading", "reach.probe.heading", rp.heading_offset);
+		hex(n, "reach", "reach.probe.reach", rp.reach_offset);
+		real(n, "ahead", "reach.probe.ahead", 0.0f, 500.0f, rp.ahead);
+		real(n, "radius", "reach.probe.radius", 1.0f, 500.0f, rp.radius);
+		real(n, "above", "reach.probe.above", 0.0f, 2000.0f, rp.above);
+	}
+	if (static_cast<u64>(rp.position_offset) + 12 > 0x100000 || (rp.position_offset & 3u) != 0)
+		bad("probe.position must be a 4-byte aligned offset into the camera.base record (x, y and z are three f32)");
+	if (static_cast<u64>(rp.heading_offset) + 2 > 0x100000 || (rp.heading_offset & 1u) != 0)
+		bad("probe.heading must be a 2-byte aligned offset into the camera.base record (an s16)");
+	if (static_cast<u64>(rp.reach_offset) + 4 > 0x100000 || (rp.reach_offset & 3u) != 0)
+		bad("probe.reach must be a 4-byte aligned offset into the camera.base record (an f32)");
+
+	// maxNodes: the walk's cap (it also stops at the first node it sees twice).
+	hex(rnode, "maxNodes", "reach.maxNodes", rp.max_nodes);
+	if (rp.max_nodes == 0 || rp.max_nodes > 0x1000)
+		bad("maxNodes must be from 1 to 0x1000");
+
+	if (!ok)
+	{
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' reach is invalid, so the whole block is IGNORED and this game gets no "
+						   "pickup cue.", serial);
+		return std::nullopt;
+	}
+	return rp;
+}
+
 // hud: in-headset cards. Reads only, like feedback: a bad entry drops that part with a warning and the
 // rest still loads.
 static VR::ProfileDB::HudParams parseHud(const std::string_view serial, const ryml::ConstNodeRef& hnode)
@@ -3530,6 +3700,17 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 	}
 	else if (node.has_child("feedback"))
 		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a feedback that is not a map; ignoring it.", serial);
+
+	if (node.has_child("reach") && node["reach"].is_map())
+	{
+		out.reach = parseReach(serial, node["reach"]);
+		// The cue starts from the local character's record, so it needs camera.base.
+		if (out.reach.has_value() && !(out.camera.has_value() && out.camera->base.has_value()))
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a reach block but no camera.base; the pickup cue starts from "
+							   "that record and runs only while first person is armed, so it never will.", serial);
+	}
+	else if (node.has_child("reach"))
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a reach that is not a map; ignoring it.", serial);
 
 	if (node.has_child("hud") && node["hud"].is_map())
 	{

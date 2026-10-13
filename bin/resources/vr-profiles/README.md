@@ -42,6 +42,7 @@ SLUS-20851:              # the disc serial; must match the file name
   screen: { ... }        # where the virtual screen sits
   presentation: { ... }  # optional: brighter picture in the headset only
   feedback: { ... }      # optional: controller vibration from the game
+  reach: { ... }         # optional: a cue when something is within reach of your pickup press
   hud: { ... }           # optional: a status card on your wrist
   stereo: { ... }        # depth tuning
 ```
@@ -108,6 +109,58 @@ The `hurt`, `fire` and `danger` cues run only while the head-tracked
 first-person camera is active, so they stay quiet on title screens, in
 cutscenes and with first person off. The Haptic Strength setting scales all
 of this vibration, and `0` turns it off.
+
+## `reach`: you can pick this up
+
+`reach` tells you when something on the floor is within reach of the character's
+own pickup press, in first person. The game has no flag for that: it searches
+for an item only at the moment Circle is pressed. So the emulator runs that same
+search read-only, about 30 times a second, from the local character's position
+and heading, and when an item comes into reach the right controller gives a
+light tick and a short message names it with the button, for example `Kevin's
+45 Auto  (A)`. It shows once per approach: not again while the item stays in
+reach, and again only after you have been out of reach of it for half a second.
+Nothing is shown for an item the emulator has no name for, while a game screen
+is up (Circle answers its prompt there), or while the weapon is raised (Circle
+fires). Nothing is ever written to the game and nothing is pressed for you, so
+it works the same online, where first person itself only runs in private co-op.
+The VR setting `PickupCue` (in the `[VR]` section of `PCSX2.ini`, on by default)
+turns it off, and the Haptic Strength setting scales the tick.
+
+The game keeps its triggers in a linked list of nodes. A node is a floor item
+when its type and search mode bytes are the accepted ones, it is enabled and not
+busy, the search circle overlaps its quad and the character's height fits the
+node's. Among those the lowest priority number wins, as the game's press picks
+it. The block gives the addresses and offsets of that search; the numbers below
+are all hex except the three distances.
+
+```yaml
+reach:
+  list: 0x23BD90                  # the u32 here is the first node's address
+  node: { next: 0x28, quad: 0x00, yMin: 0x20, yMax: 0x24, type: 0x30, mode: 0x31, priority: 0x32, enabled: 0x3C, busy: 0x3D, item: 0x40 }
+  accept: { type: 0x80, mode: 0x00 }
+  items: { table: 0x3967D0, stride: 0x3C, id: 0x06 }
+  probe: { position: 0x38, heading: 0x92, reach: 0x1B4, ahead: 46, radius: 50, above: 200 }
+  maxNodes: 0x100
+```
+
+Only `list` and `items.table` are required: every other key defaults to the
+values above, which are Resident Evil Outbreak's.
+
+| Key | Meaning |
+|---|---|
+| `list` | required: the address of the 4-byte value that holds the first node's address (`0` means an empty list). 4-byte aligned, in main RAM |
+| `node` | offsets inside a node, each under `0x1000` and aligned to its size. `next`: the u32 address of the next node (`0` ends the list). `quad`: the node's four s32 (x, z) corners, 32 bytes. `yMin`, `yMax`: s32 heights. `type`, `mode`, `priority`, `enabled`, `busy`: one byte each. `item`: the u32 number of the item's record |
+| `accept` | `{ type, mode }`: the type and search-mode bytes of a floor item (one byte each; `0x80` and `0` in Outbreak). A node counts only with `enabled` not `0` and `busy` `0` |
+| `items` | `table` is required: the address of the item table, which differs between the two Outbreak files. `stride` is the size of a record (`0x3C`) and `id` the offset of the item's 2-byte id inside it (even); the id is what the emulator names the item from |
+| `probe` | where the search circle is, from the record `camera.base` finds. `position`: three f32 (x, y, z) at that offset; `heading`: an s16 where `0x10000` is a full turn and `0` faces +z; `reach`: an f32 added to `ahead`. `ahead` (decimal, game units, `46`): how far in front of the character the circle's centre is; `radius` (`50`): the circle's radius; `above` (`200`): a node whose lowest height is up to this much above the character's still counts (an item on a counter). A node also counts when the character's height is between its `yMin` and `yMax` |
+| `maxNodes` | the most nodes one search visits (`1` to `0x1000`, default `0x100`). The search also stops at the first node it meets twice and at any node address that is outside main RAM or not 4-byte aligned |
+
+Any invalid part makes the emulator ignore the whole block, with a log line
+saying why: a search that is only partly right would show items that are not
+there. Without `camera.base` the cue never runs, as it starts from the local
+character's record. So far only Resident Evil Outbreak's first file (File #1)
+has a block; the second needs its own `list` address first.
 
 ## `hud`: a status card on your wrist
 
