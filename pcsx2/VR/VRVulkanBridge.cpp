@@ -4,6 +4,7 @@
 #ifdef ENABLE_VULKAN
 
 #include "VR/VRVulkanBridge.h"
+#include "VR/GameModels.h"
 #include "VR/SeatSession.h"
 #include "VR/VRInternal.h"
 #include "VR/VRManager.h"
@@ -230,6 +231,7 @@ namespace VR
 		}
 
 		Console.WriteLn("(VR) VR session active. Put on the headset.");
+		GameModels::StartLoad();
 		return true;
 	}
 
