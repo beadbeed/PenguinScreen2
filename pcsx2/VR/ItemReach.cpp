@@ -469,9 +469,13 @@ namespace VR::ItemReach
 			Console.WriteLn("(VR) Pickup cue: on (reach model from the profile, list head 0x%X)", params->list_head);
 		}
 
+		// The camera guards' flicker (the room-camera byte flips about 12 times a second): the same scene, so the search sits
+		// this vsync out and everything stays as it was.
+		if (!live.guards_now)
+			return;
 		// Where Circle answers something else (a screen's prompt, firing) there is nothing to cue, and the tracker keeps what
 		// it knew, so a prompt declined with Cross, or a weapon lowered beside the same item, is not announced again.
-		if (!live.guards_now || live.screen_up || live.weapon_raised)
+		if (live.screen_up || live.weapon_raised)
 		{
 			Publish(false, 0, 0);
 			return;

@@ -68,7 +68,7 @@ namespace VR::ItemReach
 	// CPU thread, every vsync from GameFeedback::Poll with profile null when there is no VR session or no profile. Does
 	// nothing without a reach block, with the PickupCue setting off or while first person is not armed (then the next
 	// approach cues afresh). Not evaluated (and the state kept, so a prompt declined with Cross is not announced again)
-	// while a screen is up, the weapon is raised or the guards are in their grace.
+	// while a screen is up or the weapon is raised, nor while the camera guards are in their flicker.
 	void Poll(const ProfileDB::Profile* profile, const Live& live, u64 now_ms, float haptic_strength);
 
 	// CPU thread: a loaded state is a new scene, so the next approach cues afresh.
