@@ -5,6 +5,7 @@
 
 #include "common/Pcsx2Defs.h"
 
+#include <cstddef>
 #include <vector>
 
 // A small CPU rasteriser for textured, lit triangle meshes: the game's weapon models (a few hundred triangles, one RGBA8
@@ -252,6 +253,8 @@ namespace VR::MeshRaster
 	{
 	public:
 		static constexpr u32 kMaxSize = 4096;
+		// Samples (pixels times the grid's square), so that a target stays within 128 MB.
+		static constexpr size_t kMaxSamples = static_cast<size_t>(1) << 24;
 		static constexpr u32 kDefaultVertexCapacity = 4096;
 
 		Target() = default;
@@ -260,7 +263,7 @@ namespace VR::MeshRaster
 		Target(u32 width, u32 height, u32 samples_per_axis = 1, u32 vertex_capacity = kDefaultVertexCapacity);
 
 		// Reallocates only when the buffers have to grow. False, and the target left empty, for a side of 0 or past
-		// kMaxSize, or a samples_per_axis other than 1, 2 or 4. Clears to transparent black.
+		// kMaxSize, a samples_per_axis other than 1, 2 or 4, or more than kMaxSamples samples. Clears to transparent black.
 		bool Resize(u32 width, u32 height, u32 samples_per_axis);
 
 		u32 Width() const { return m_width; }

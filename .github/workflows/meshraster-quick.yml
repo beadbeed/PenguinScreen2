@@ -49,6 +49,13 @@ jobs:
           cd clang
           ..\meshraster_clang.exe
 
+      - name: Mutation check (the self-test must notice each deliberate bug)
+        if: always()
+        shell: cmd
+        run: |
+          call "%VCVARSPATH%" || exit /b
+          python tools\meshraster-quick\mutate.py
+
       - name: Upload pictures
         if: always()
         uses: actions/upload-artifact@v7

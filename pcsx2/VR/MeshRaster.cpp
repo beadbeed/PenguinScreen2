@@ -334,8 +334,9 @@ namespace VR::MeshRaster
 	{
 		m_dirty = Rect();
 		m_clean = 0u;
+		const size_t samples = static_cast<size_t>(width) * samples_per_axis * height * samples_per_axis;
 		if (width == 0 || height == 0 || width > kMaxSize || height > kMaxSize ||
-			(samples_per_axis != 1 && samples_per_axis != 2 && samples_per_axis != 4))
+			(samples_per_axis != 1 && samples_per_axis != 2 && samples_per_axis != 4) || samples > kMaxSamples)
 		{
 			m_width = 0;
 			m_height = 0;
@@ -348,7 +349,6 @@ namespace VR::MeshRaster
 		m_width = width;
 		m_height = height;
 		m_grid = samples_per_axis;
-		const size_t samples = static_cast<size_t>(width) * samples_per_axis * height * samples_per_axis;
 		m_colour.assign(samples, 0u);
 		m_depth.assign(samples, 1.0f);
 		if (samples_per_axis > 1)
@@ -2384,6 +2384,10 @@ namespace VR::MeshRaster
 			return s;
 		}
 
+		// A thousand triangles into 256 x 256: a hand's worth (the sphere filling a few thousand pixels, one flat colour, lit,
+		// with a rim), a weapon's worth (the same with a nearest-filtered texture) and a big, heavy one (a quarter of the
+		// image or more, bilinear texture, lit, with a rim), each at every sample grid. A Clear, a Draw and a Resolve a time,
+		// on one core. Only logged: a loaded machine must not fail the test.
 		void TestTiming(Checker& check)
 		{
 			const Sphere sphere = MakeSphere(21, 24);
@@ -2397,12 +2401,6 @@ namespace VR::MeshRaster
 			tex.texels = texels;
 			tex.width = 64;
 			tex.height = 64;
-			tex.filter = Texture::Filter::Bilinear;
-			Material mat;
-			mat.texture = &tex;
-			mat.lighting.light_in_view_space = true;
-			mat.lighting.rim = 0.4f;
-			mat.lighting.headlight = 0.2f;
 			Mesh mesh;
 			mesh.positions = sphere.positions.data();
 			mesh.normals = sphere.positions.data(); // a unit sphere's normals are its positions
@@ -2410,38 +2408,63 @@ namespace VR::MeshRaster
 			mesh.vertex_count = static_cast<u32>(sphere.positions.size() / 3);
 			mesh.indices16 = sphere.indices.data();
 			mesh.index_count = static_cast<u32>(sphere.indices.size());
-			const float pos[3] = {0.0f, 0.0f, -2.4f};
-			const float rot[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-			const float scale[3] = {0.9f, 0.9f, 0.9f};
-			const Mat4 model = ModelMatrix(pos, rot, scale);
 			const Camera cam = Camera::Perspective(Mat4(), 60.0f * kPi / 180.0f, 1.0f, 0.03f, 20.0f);
 
-			double ms[3] = {};
-			DrawStats st;
-			u32 sink = 0;
-			const u32 grids[3] = {1, 2, 4};
-			for (int k = 0; k < 3; k++)
+			struct Scene
 			{
-				Target t(256, 256, grids[k]);
-				const int runs = (k == 0) ? 40 : 20;
-				for (int i = 0; i < runs + 2; i++)
+				const char* name;
+				float radius;
+				bool textured;
+				Texture::Filter filter;
+				float rim;
+			};
+			const Scene scenes[3] = {
+				{"hand-like (flat colour, lit, rim)", 0.45f, false, Texture::Filter::Nearest, 0.4f},
+				{"weapon-like (nearest texture, lit)", 0.45f, true, Texture::Filter::Nearest, 0.0f},
+				{"heavy (bilinear texture, lit, rim)", 0.9f, true, Texture::Filter::Bilinear, 0.4f},
+			};
+			const u32 grids[3] = {1, 2, 4};
+			const int runs[3] = {30, 15, 6};
+			u32 sink = 0;
+			bool drew = true;
+			for (const Scene& scene : scenes)
+			{
+				Material mat;
+				tex.filter = scene.filter;
+				mat.texture = scene.textured ? &tex : nullptr;
+				mat.lighting.light_in_view_space = true;
+				mat.lighting.rim = scene.rim;
+				mat.lighting.headlight = 0.2f;
+				const float pos[3] = {0.0f, 0.0f, -2.4f};
+				const float rot[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+				const float scale[3] = {scene.radius, scene.radius, scene.radius};
+				const Mat4 model = ModelMatrix(pos, rot, scale);
+
+				double ms[3] = {};
+				DrawStats st;
+				for (int k = 0; k < 3; k++)
 				{
-					const auto begin = std::chrono::steady_clock::now();
-					t.Clear();
-					Draw(t, cam, mesh, model, mat, &st);
-					t.Resolve();
-					const auto end = std::chrono::steady_clock::now();
-					sink += t.Pixel(128, 128);
-					// The first two runs warm the caches and the scratch.
-					if (i >= 2)
-						ms[k] += std::chrono::duration<double, std::milli>(end - begin).count() / static_cast<double>(runs);
+					Target t(256, 256, grids[k]);
+					for (int i = 0; i < runs[k] + 2; i++)
+					{
+						const auto begin = std::chrono::steady_clock::now();
+						t.Clear();
+						Draw(t, cam, mesh, model, mat, &st);
+						t.Resolve();
+						const auto end = std::chrono::steady_clock::now();
+						sink += t.Pixel(128, 128);
+						// The first two runs warm the caches and the scratch.
+						if (i >= 2)
+							ms[k] += std::chrono::duration<double, std::milli>(end - begin).count() / static_cast<double>(runs[k]);
+					}
+					if (k == 0)
+						drew = drew && st.triangles == 1008u && st.written > 1000u;
 				}
+				Console.WriteLn("(VR) MeshRaster timing: %u triangles into 256x256, %s, %u px drawn: %.3f ms at 1x1, %.3f ms at 2x2, %.3f ms at 4x4 "
+								"(Clear + Draw + Resolve, one core)",
+					static_cast<unsigned>(st.triangles), scene.name, static_cast<unsigned>(st.written / 16u), ms[0], ms[1], ms[2]);
 			}
-			Console.WriteLn("(VR) MeshRaster timing: %u triangles (%u front-facing, %llu samples covered at 4x4) into 256x256, "
-							"textured bilinear, lit with a rim: %.3f ms at 1x1, %.3f ms at 2x2, %.3f ms at 4x4 per Clear + Draw + Resolve on one core.",
-				static_cast<unsigned>(st.triangles), static_cast<unsigned>(st.triangles - st.culled), static_cast<unsigned long long>(st.covered),
-				ms[0], ms[1], ms[2]);
-			check(sink != 0u && st.triangles == 1008u && st.written > 1000u, "the timing scene draws a thousand triangles");
+			check(sink != 0u && drew, "the timing scenes draw a thousand triangles");
 		}
 	}
 

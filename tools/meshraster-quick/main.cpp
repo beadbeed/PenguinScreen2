@@ -208,9 +208,11 @@ static void Bench(const Mesh& mesh, const Texture& nearest_tex, const Texture& b
 	std::fflush(stdout);
 }
 
-int main()
+int main(int argc, char** argv)
 {
 	const int failed = SelfTest();
+	if (argc > 1)
+		return failed == 0 ? 0 : 1;
 
 	// A textured, lit sphere at each sample grid.
 	const Sphere sphere = MakeSphere(21, 24);
