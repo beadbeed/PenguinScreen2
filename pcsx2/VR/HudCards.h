@@ -214,6 +214,10 @@ namespace VR::HudCards
 	// the first vsync, as its default is). Any thread.
 	bool MenuTabletEnabled();
 
+	// The VR ZoneMarkers setting (the holstered weapon and the belt and pouch markers, VR/ZoneMarkers.h) as published by
+	// Poll (on until the first vsync, as its default is). Any thread.
+	bool ZoneMarkersEnabled();
+
 	// The comfort vignette's strength as published by Poll: the VR VignetteStrength setting (clamped to its
 	// range) while ComfortVignette is on, else 0 (off until the first vsync, as its default is), so the GS
 	// thread never reads EmuConfig. Any thread.
@@ -255,7 +259,7 @@ namespace VR::HudCards
 
 	// CPU thread, every vsync right after CameraDriver::Apply: reads the record Apply resolved, the same
 	// way GameFeedback does. Reads only, so the same online. Also publishes the ComfortBlink, LaserSight,
-	// MenuPointer, MenuTablet and comfort vignette (ComfortVignette, VignetteStrength) settings.
+	// MenuPointer, MenuTablet, ZoneMarkers and comfort vignette (ComfortVignette, VignetteStrength) settings.
 	void Poll();
 
 	// Any thread: true while first person is armed with the record resolved and the profile has a

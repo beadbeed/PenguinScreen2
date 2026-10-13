@@ -82,6 +82,38 @@ left hand on the fore-end too.`. Test aid on the null headset: `PCSX2_VR_FAKE_WE
 a long gun also holds the fake left hand just under its fore-end), e.g. 11 the shotgun, 106 the long pole, 114 a
 molotov, 28 the pesticide spray.
 
+Zone markers (VR setting `ZoneMarkers`, on by default, checkbox under Laser Sight; read live): while first person
+drives the camera with no menu up, the body zones show where a squeeze works. The equipped weapon (`feedback.weapon`,
+an ItemData weapon kind; nothing for bare hands, a non-weapon item or an id the table lacks) hangs in the right-hip
+holster zone while it is lowered, drawn by HandModel as the hand holds it but without the glove: a handgun, the stun
+gun, nail gun or ampoule shooter, or a melee weapon muzzle or blade down and 15 deg back so the grip stands up toward
+the hand (`HandModel::HolsterPose`), something to throw or a spray can upright on the belt. A long gun (shotgun,
+rifle, SMG, launcher) is slung over the right shoulder in the backpack zone instead, barrel up behind the shoulder
+(15 deg back, 10 deg out: `HandModel::SlingPose`; it sits beside and behind the head, so you mostly see it looking up),
+and nothing hangs at the hip then. It goes the moment the weapon is raised (it is in your hand) and comes back when it
+is lowered; it is drawn 1.45x brighter while the right hand is in that zone's reach. With a long gun equipped a
+right-grip squeeze over the shoulder raises it (R1, at once and held while squeezed, no stop first: the profiles'
+`PressedLongGun` bind on the backpack zone); with anything else equipped it opens the item screen (Start) as before,
+and the hip holster presses R1 either way. The route is fixed as the squeeze begins, so changing weapon mid-squeeze
+never turns a held R1 into Start. A small dim bag (6 cm) marks the left-hip belt zone and faint rings (half each
+pouch's ball, so the shipped rig's rows, which line up along the line of sight from the eyes, stay apart) mark the five
+pouches where BeltPouches places them; a ring or the bag brightens, with a faint fill, while its hand is in reach (the
+pouch the hand is in, per the pouch telemetry; the zone's own StepZone verdict for the bag and the weapon). A zone
+marker is placed from the input snapshot's head exactly as StepZone places that zone (HeadAnchor, then PlaceControl:
+the head's position, turned with its yaw), and the zone must be armed (its `when` guards); the pouches come from the
+last pouch poll (seat frame: the neck and the recentered forward). While the head looks ahead (tipped down less than
+25 deg) no bag or ring within 20 deg of the line of sight is drawn, so nothing covers the middle of the game; looking
+down at your body they all show. Layers: the markers have no room of their own in the compositor's 15 (plus the
+background, SteamVR's 16): they are built after everything else from what is left, the pouches' rings dropped first,
+then the bag, then the weapon, and go in under the HUD's under-hands cards and the hands (which reach into them), over
+the screen. First person usually leaves room for all three (the screen's one or two, two hands, a few cards). Each is
+a 256 x 256 image of its own drawn again only when what it shows changes (the weapon, lit or not, which pouches) or
+the view of it drifts 2 deg or 3% in distance; otherwise its last image moves with its zone. Hidden while the HUD
+cards are off for the session. VR start logs `(VR) Zone markers: on: ...` (or `off`), the first marker `(VR) Zone
+markers: swapchains created (...)`, and nothing per frame; `PCSX2_VR_HANDS_SELFTEST=1` also runs `(VR) Zone markers
+self-test: N checks passed` (the placement against StepZone, the holster and sling poses, the press route, the
+budget, the view rule, the rings and the bag, and the redraw rules).
+
 Comfort blink (VR setting `ComfortBlink`, on by default): a view-locked black quad 0.3 m ahead that goes black
 over 40 ms, holds 60 ms and clears over 80 ms, on each snap turn and each change between the first-person and
 the world screen. The screen change itself is made once the blink is black (`(VR) HUD blink (world screen).`

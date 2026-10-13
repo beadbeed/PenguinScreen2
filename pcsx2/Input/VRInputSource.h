@@ -7,6 +7,7 @@
 
 #include "VR/SpatialControls.h"
 #include "VR/VRProfileDB.h"
+#include "VR/ZoneMarkers.h"
 
 #include <array>
 #include <chrono>
@@ -100,6 +101,9 @@ private:
 		std::array<bool, 2> at_stop{};
 		std::array<float, 2> break_away_flash_s{};
 		float zone_press_s = -1.0f; // time since a stop-first zone was squeezed; -1 = no press pending
+		// A Zone whose profile binds PressedLongGun: where its press in progress goes (ZoneMarkers::RouteToLongGun).
+		bool long_gun_bound = false;
+		VR::ZoneMarkers::PressRoute zone_route;
 		std::array<bool, VR::SpatialControls::kControlCount> stick_bound{};
 		// Release-first after an input gap (ReleaseFirst): the digital outputs that were already pressed when the gate
 		// opened, held at 0 until each reads released once (the Gamepad's confirm controls by the controller itself, which

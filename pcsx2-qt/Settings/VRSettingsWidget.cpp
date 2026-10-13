@@ -52,6 +52,7 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 	SettingWidgetBinder::BindWidgetToFloatSetting(sif, m_ui.firstPersonFovMargin, "VR", "FirstPersonFovMarginDeg", 6.0f);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.edgeFill, "VR", "EdgeFill", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.laserSight, "VR", "LaserSight", true);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.zoneMarkers, "VR", "ZoneMarkers", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.menuPointer, "VR", "MenuPointer", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.menuTablet, "VR", "MenuTablet", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.onlineSafe, "VR", "OnlineSafe", false);
@@ -150,6 +151,14 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 		   "in your hand straight along where it points, fading out over about 6 metres. It is drawn over the picture "
 		   "and does not stop at walls or enemies. Only changes what you see; the game itself is not touched. Takes "
 		   "effect immediately."));
+
+	dialog()->registerWidgetHelp(m_ui.zoneMarkers, tr("Zone Markers"), tr("Checked"),
+		tr("In first-person profiles with body zones (Resident Evil Outbreak), shows where your hands can reach: while "
+		   "your weapon is lowered it hangs in the holster at your right hip (a shotgun or rifle is slung over your right "
+		   "shoulder instead, where reaching back and squeezing raises it), a small bag marks the belt at your left hip, "
+		   "and faint rings mark the belt pouches on your chest. Each brightens when your hand is close enough to squeeze "
+		   "there. Hidden in menus, and never in the middle of your view while you look ahead. Only changes what you see "
+		   "in the headset. Takes effect immediately."));
 
 	dialog()->registerWidgetHelp(m_ui.menuPointer, tr("Menu Pointer and Point-to-Select"), tr("Checked"),
 		tr("In first-person profiles, while a menu such as the item screen is up, the controller casts a thin beam "

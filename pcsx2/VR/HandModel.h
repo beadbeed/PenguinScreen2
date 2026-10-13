@@ -59,7 +59,40 @@ namespace VR::HandModel
 		bool slide_locked = false;
 		// Left hand only: closed round a long gun's fore-end (OffHandSupports) instead of holding the controller.
 		bool support = false;
+		// Right hand only, with gun: the weapon alone, hanging in the hip holster (ZoneMarkers), no glove. pos and quat
+		// are then the pointing frame the weapon has in its holster (HolsterPose), pos where the hand closes on it; grip,
+		// trigger and the shot feedback are not used. lit draws it brighter (the right hand is in the holster's reach).
+		bool holstered = false;
+		bool lit = false;
 	};
+
+	// A holstered weapon's quad is at least this big, and twice that at most (a long gun's or a melee weapon's up to
+	// kQuadSizeLongM, as in the hand).
+	static constexpr float kQuadSizeHolsterM = 0.25f;
+	// The holster carries a gun or a melee weapon muzzle (or blade) down, tipped this far back from straight down, so its
+	// grip stands up and back toward the hand reaching down for it, as a hip holster with a slight cant does.
+	static constexpr float kHolsterCantDeg = 15.0f;
+	// A lit holstered weapon is drawn this much brighter.
+	static constexpr float kHolsterLitGain = 1.45f;
+
+	// Where a weapon hangs in the hip holster whose middle is centre, the body facing yaw (radians, OpenXR yaw: 0 faces
+	// -Z, positive turns left, as SpatialControls::HeadAnchor gives it): out_pos is centre (the grip position, where the
+	// hand closes) and out_quat the pointing frame (as HandState takes it). A gun or a melee weapon hangs muzzle or blade
+	// down, kHolsterCantDeg back from straight down, its top to the front and its right side out; something to throw or a
+	// spray can stands upright on the belt (its handle axis vertical). False, with nothing written, for a centre or yaw
+	// that is not finite. Pure: any thread.
+	bool HolsterPose(Held held, const float centre[3], float yaw, float out_pos[3], float out_quat[4]);
+
+	// A long gun slung over the right shoulder leans its barrel this far back from straight up and this far out, away
+	// from the head.
+	static constexpr float kSlingBackDeg = 15.0f;
+	static constexpr float kSlingOutDeg = 10.0f;
+
+	// Where a long gun hangs slung over the shoulder whose reach is centred at centre, the body facing yaw (as
+	// HolsterPose): out_pos is centre (the grip position, where the hand reaching back closes), the barrel up behind the
+	// shoulder (kSlingBackDeg back, kSlingOutDeg out), the stock down the back, the gun's right side out. False, with
+	// nothing written, for a centre or yaw that is not finite. Pure: any thread.
+	bool SlingPose(const float centre[3], float yaw, float out_pos[3], float out_quat[4]);
 
 	// What the hands show for the raised weapon. CameraDriver publishes it every vsync (SetWeaponHeld); the compositor
 	// reads it.
@@ -112,8 +145,8 @@ namespace VR::HandModel
 	// Where a hand's impostor quad goes: on the plane through the middle of the hand (with a pistol, can or thrown item
 	// in it), so the hand keeps its true depth in stereo, its +Z turned to the eye from the middle of the hand and all it
 	// holds; "up" kept close to world up; centred on and just big enough for all of it, a long gun's or a melee weapon's
-	// reach included, as seen from the eye (at least kQuadSizeM, kQuadSizeGunM with a weapon; at most twice that, or
-	// kQuadSizeLongM for a long gun or a melee weapon).
+	// reach included, as seen from the eye (at least kQuadSizeM, kQuadSizeGunM with a weapon, kQuadSizeHolsterM for a
+	// holstered one; at most twice that, or kQuadSizeLongM for a long gun or a melee weapon).
 	struct ImpostorQuad
 	{
 		float centre[3] = {0.0f, 0.0f, 0.0f};
@@ -176,8 +209,8 @@ namespace VR::HandModel
 	static constexpr u64 kRerasterMaxAgeMs = 500;
 
 	// Whether a hand image drawn for ref, seen from ref_eye and centred at ref_centre, has to be drawn again to show
-	// now seen from now_eye: ref invalid, the weapon held (or what it is), the left hand's grip on a fore-end or the
-	// locked slide changed, a shot plays in either (kick, flash, slide), grip or trigger moved past
+	// now seen from now_eye: ref invalid, the weapon held (or what it is), the left hand's grip on a fore-end, the
+	// locked slide, holstered or lit changed, a shot plays in either (kick, flash, slide), grip or trigger moved past
 	// kRerasterArticulation, the view drifted past kRerasterDriftDeg or kRerasterDistanceRatio (or cannot be measured),
 	// or the image is older than kRerasterMaxAgeMs.
 	bool NeedsReraster(const HandState& ref, const float ref_eye[3], const float ref_centre[3], const HandState& now,

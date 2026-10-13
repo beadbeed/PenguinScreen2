@@ -376,6 +376,8 @@ namespace VR::SpatialControls
 		View,
 		RightStickUp,
 		RightStickDown,
+		// A Zone's press while the equipped weapon is a long gun, when the profile binds it (VRInputSource; see Zone below).
+		PressedLongGun,
 		Count,
 	};
 	static constexpr u32 kControlCount = static_cast<u32>(ControlId::Count);
@@ -653,6 +655,12 @@ namespace VR::SpatialControls
 	// presses its button when the grip is squeezed inside it, and holds it until the grip
 	// opens, wherever the hand goes; a grip already closed on the way in does nothing.
 	// Without it, the zone presses while a hand is inside.
+	//
+	// A Zone has a second button, PressedLongGun. Bound in the profile, a press that begins while the local character's
+	// equipped weapon is a long gun (feedback.weapon's item, ItemData's LongGun kind) goes out there instead of on Pressed,
+	// at once and held while squeezed, without the zone's stopFirst (a raise, as at the holster); one that begins with
+	// anything else equipped is Pressed as before. Decided as the press begins (VRInputSource, ZoneMarkers::RouteToLongGun),
+	// so a weapon change mid-squeeze never moves a held press to the other button. Unbound, Pressed takes every press.
 	enum class ZoneHand : u8
 	{
 		Either,

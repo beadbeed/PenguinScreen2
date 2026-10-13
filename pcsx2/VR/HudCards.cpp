@@ -440,6 +440,8 @@ namespace VR::HudCards
 		// defaults are).
 		std::atomic<bool> s_menu_pointer_enabled{true};
 		std::atomic<bool> s_menu_tablet_enabled{false};
+		// The ZoneMarkers setting, published the same way (on until the first vsync, as its default is).
+		std::atomic<bool> s_zone_markers_enabled{true};
 		// The comfort vignette's strength (0 while ComfortVignette is off), published the same way; off until the
 		// first vsync, as the setting's default is.
 		std::atomic<float> s_vignette_strength{0.0f};
@@ -740,6 +742,7 @@ namespace VR::HudCards
 		s_laser_enabled.store(EmuConfig.VR.LaserSight, std::memory_order_relaxed);
 		s_menu_pointer_enabled.store(EmuConfig.VR.MenuPointer, std::memory_order_relaxed);
 		s_menu_tablet_enabled.store(EmuConfig.VR.MenuTablet, std::memory_order_relaxed);
+		s_zone_markers_enabled.store(EmuConfig.VR.ZoneMarkers, std::memory_order_relaxed);
 		// Clamped here too, for a value that did not come through LoadSave.
 		float vignette = 0.0f;
 		if (EmuConfig.VR.ComfortVignette)
@@ -881,6 +884,11 @@ namespace VR::HudCards
 	bool MenuTabletEnabled()
 	{
 		return s_menu_tablet_enabled.load(std::memory_order_relaxed);
+	}
+
+	bool ZoneMarkersEnabled()
+	{
+		return s_zone_markers_enabled.load(std::memory_order_relaxed);
 	}
 
 	float VignetteStrength()

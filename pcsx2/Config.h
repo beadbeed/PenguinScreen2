@@ -1307,6 +1307,10 @@ struct Pcsx2Config
 		// First person: a thin red beam from the pistol's muzzle along the aim while the weapon is raised.
 		// Drawn in the headset only, so only what this player sees.
 		bool LaserSight = true;
+		// First person: the equipped weapon drawn in the hip holster zone while it is lowered (a long gun slung over the
+		// right shoulder), a small dim bag at the belt zone and faint rings on the belt pouches, each brighter while its
+		// hand is in reach, so a reach for the hip or a pouch has something to aim at. Drawn in the headset only.
+		bool ZoneMarkers = true;
 		// First person, while a menu is up: a beam and a dot where the controller points at the menu screen, the hands
 		// drawn as empty pointing hands, and (for games whose profile maps the menu) the game's own cursor steered to
 		// the cell pointed at with D-pad presses from this player's own pad; the trigger stays the player's confirm,

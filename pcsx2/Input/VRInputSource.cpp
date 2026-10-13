@@ -18,6 +18,7 @@
 #include "VR/SplitState.h"
 #include "VR/VRInput.h"
 #include "VR/XRCompositor.h"
+#include "VR/ZoneMarkers.h"
 
 #include "common/Console.h"
 #include "common/StringUtil.h"
@@ -342,6 +343,7 @@ void VRInputSource::Instance::ResetState()
 	at_stop = {};
 	break_away_flash_s = {};
 	zone_press_s = -1.0f;
+	zone_route = VR::ZoneMarkers::PressRoute{};
 }
 
 // Release-first after an input gap. While the gate is closed (no session, the session not focused: the SteamVR
@@ -573,6 +575,8 @@ void VRInputSource::BuildInstance(Instance& in) const
 			in.zone.require_grip = s.zone_require_grip;
 			in.zone.stop_first = s.zone_stop_first;
 			in.zone.press_delay_s = s.zone_press_delay;
+			in.long_gun_bound = std::any_of(s.bind.begin(), s.bind.end(),
+				[](const VR::ProfileDB::SpatialControlSpec::Bind& b) { return b.control == "PressedLongGun"; });
 			break;
 		case SC::DeviceKind::Gamepad:
 			in.gamepad.sprint_latch = s.sprint_latch;
@@ -868,6 +872,11 @@ void VRInputSource::PollEvents()
 			if (in.ever_emitted)
 				Emit(in, SC::ControlValues{});
 			publish_cards(SC::ControlValues{}, false);
+			// The body-zone markers stop showing a zone that is at rest (its squeeze would do nothing).
+			const VR::ZoneMarkers::Zone marked = (in.kind == SC::DeviceKind::Zone) ? VR::ZoneMarkers::ZoneOf(in.spec.id) :
+			                                                                        VR::ZoneMarkers::Zone::Count;
+			if (marked != VR::ZoneMarkers::Zone::Count)
+				VR::ZoneMarkers::PublishZone(marked, VR::ZoneMarkers::ZoneView{});
 			continue;
 		}
 
@@ -925,6 +934,16 @@ void VRInputSource::PollEvents()
 				// presses nor stops the character until the grip has opened once.
 				in.ReleaseFirst(values, snap, opened);
 				const bool held_over = in.held_through_gap[static_cast<u32>(SC::ControlId::Pressed)];
+				// The body-zone markers show this zone where this poll tested it, lit while its hand is in reach.
+				const VR::ZoneMarkers::Zone marked = VR::ZoneMarkers::ZoneOf(in.spec.id);
+				if (marked != VR::ZoneMarkers::Zone::Count)
+				{
+					VR::ZoneMarkers::ZoneView view;
+					view.armed = true;
+					view.params = in.zone;
+					view.inside = in.zone_state.inside;
+					VR::ZoneMarkers::PublishZone(marked, view);
+				}
 				for (int hand = 0; hand < 2; ++hand)
 				{
 					// A light tick on reaching the zone says it is armed; a firmer one when it presses (not for a squeeze
@@ -934,10 +953,23 @@ void VRInputSource::PollEvents()
 					else if (ev.entered[hand])
 						VR::XRInput::QueuePulse(hand, SC::kHapticZoneEnter.amplitude, SC::kHapticZoneEnter.seconds);
 				}
+				// With PressedLongGun bound, a squeeze begun while a long gun is equipped (the gun slung over this shoulder)
+				// raises it: PressedLongGun at once and held while squeezed, as the holster's press, with no stop first. Its
+				// own press only (a pouch's open press below always opens the item screen), decided as it begins.
+				float& zone_pressed = values[static_cast<u32>(SC::ControlId::Pressed)];
+				const bool long_gun_press = VR::ZoneMarkers::RouteToLongGun(zone_pressed > 0.5f,
+					in.long_gun_bound && VR::ZoneMarkers::LongGunEquipped(), in.zone_route);
+				if (long_gun_press)
+				{
+					values[static_cast<u32>(SC::ControlId::PressedLongGun)] = zone_pressed;
+					zone_pressed = 0.0f;
+					in.zone_press_s = -1.0f;
+					break;
+				}
 				// A belt pouch squeezed with the item screen closed opens it through the zone the profile's pouches.open
 				// names, as a squeeze in this zone would: a stopFirst zone stops the character first, then presses.
 				if (VR::BeltPouches::OpenPressFor(in.spec.id))
-					values[static_cast<u32>(SC::ControlId::Pressed)] = 1.0f;
+					zone_pressed = 1.0f;
 				if (in.zone.stop_first)
 				{
 					// The game takes this button only standing still (Outbreak's item screen won't open while

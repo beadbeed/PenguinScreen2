@@ -430,6 +430,13 @@
        </widget>
       </item>
       <item>
+       <widget class="QCheckBox" name="zoneMarkers">
+        <property name="text">
+         <string>Zone Markers (first person: your holstered weapon, the belt and pouch spots)</string>
+        </property>
+       </widget>
+      </item>
+      <item>
        <widget class="QCheckBox" name="menuPointer">
         <property name="text">
          <string>Menu Pointer and Point-to-Select (beam and dot in menus)</string>
@@ -551,6 +558,7 @@
   <tabstop>comfortVignette</tabstop>
   <tabstop>vignetteStrength</tabstop>
   <tabstop>laserSight</tabstop>
+  <tabstop>zoneMarkers</tabstop>
   <tabstop>onlineSafe</tabstop>
   <tabstop>privateCoopFirstPerson</tabstop>
   <tabstop>gameRumble</tabstop>

@@ -642,6 +642,7 @@ namespace VR::SpatialControls
 			"LeftTriggerPress", "RightTriggerPress", "LeftGripPress", "RightGripPress",
 			"DpadUp", "DpadDown", "DpadLeft", "DpadRight", "LeftBumper", "RightBumper", "View",
 			"RightStickUp", "RightStickDown",
+			"PressedLongGun",
 		};
 		static_assert(std::size(kControlNames) == kControlCount);
 
@@ -732,6 +733,7 @@ namespace VR::SpatialControls
 		};
 		constexpr ControlDef kZoneControls[] = {
 			{ControlId::Pressed, "Pressed", ControlType::Button},
+			{ControlId::PressedLongGun, "PressedLongGun", ControlType::Button},
 		};
 
 		constexpr DeviceDef kCatalogue[] = {
