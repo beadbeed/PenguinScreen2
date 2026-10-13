@@ -154,7 +154,9 @@ static void HotkeySaveStateSlot(s32 slot)
 
 static bool CanPause()
 {
-	if (OnlineLocked())
+	// Only pausing is refused: a VM that is already paused (the adapter was switched on while it was paused) must
+	// still be able to resume.
+	if (VMManager::GetState() != VMState::Paused && OnlineLocked())
 		return false;
 	static constexpr const float PAUSE_INTERVAL = 3.0f;
 	static Common::Timer::Value s_last_pause_time = 0;

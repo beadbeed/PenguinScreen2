@@ -1412,9 +1412,10 @@ bool MainWindow::shouldAbortForMemcardBusy(const VMLock& lock)
 }
 
 // Online (network adapter on) the game must never pause: the server drops a client that goes quiet. Says why.
+// Asks VMManager rather than the adapter setting, so PCSX2_TEST_ONLINE_LOCKS=1 covers these buttons too.
 static bool PauseLockedOnline()
 {
-	if (!s_vm_valid || s_vm_paused || !EmuConfig.DEV9.EthEnable)
+	if (!s_vm_valid || s_vm_paused || !VMManager::IsOnlineLocked())
 		return false;
 	Host::AddKeyedOSDMessage("PauseOnlineLocked",
 		QCoreApplication::translate("MainWindow", "Pausing is disabled while the network adapter is on.").toStdString(),
