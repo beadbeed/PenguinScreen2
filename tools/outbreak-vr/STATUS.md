@@ -136,12 +136,13 @@ time:
 **Port back to PenguinScreen2** (found by the ARMSX2 port; listed in ARMSX2's `pcsx2/VR/VR-SOURCE.md`):
 - the frame-advance online lock: **done**, in `e6dbd77`;
 - the pose-to-photon log line in `XRCompositor.cpp`;
-- `CanPause` refusing online only while the VM runs, so a paused VM can be resumed;
-- the Qt pause lock asking `VMManager::IsOnlineLocked()` (so `PCSX2_TEST_ONLINE_LOCKS=1` covers the buttons);
-- PINE's state save and load refusals using `IsOnlineLocked()`;
+- `CanPause` refusing online only while the VM runs, so a paused VM can be resumed: **done**, in `portback`;
+- the Qt pause lock asking `VMManager::IsOnlineLocked()` (so `PCSX2_TEST_ONLINE_LOCKS=1` covers the buttons): **done**, in `portback`;
+- PINE's state save and load refusals using `IsOnlineLocked()`: **done**, in `portback`;
 - the VR settings page's Edge Fill "recommended" value: it should be Unchecked now that `EdgeFill` defaults to false;
 - the M3 layer budget (`maxLayerCount`) and the flat-quad fallback lines in `XRSession.cpp` and `XRCompositor.cpp`;
-- `pine.py`'s Linux socket transport (it changes nothing on Windows).
+- `pine.py`'s Linux socket transport (it changes nothing on Windows): **done**, in `portback`. The offline check's ini path is
+  still the Windows one; on Linux set `PCSX2_INI`.
 
 ## Needs more investigation
 
