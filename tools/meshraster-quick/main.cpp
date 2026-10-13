@@ -201,8 +201,7 @@ static void Bench(const Mesh& mesh, const Texture& nearest_tex, const Texture& b
 			const double ms1 = TimeMs(t, cam, mesh, model, m, 200, &st);
 			Target t2(256, 256, 2);
 			const double ms2 = TimeMs(t2, cam, mesh, model, m, 100, nullptr);
-			std::printf("bench radius %.2f: %-18s 1x1 %.3f ms (%llu samples, %.1f ns each)   2x2 %.3f ms
-", sc, c.name, ms1, static_cast<unsigned long long>(st.written),
+			std::printf("bench radius %.2f: %-18s 1x1 %.3f ms (%llu samples, %.1f ns each)   2x2 %.3f ms\n", sc, c.name, ms1, static_cast<unsigned long long>(st.written),
 				st.written ? ms1 * 1.0e6 / static_cast<double>(st.written) : 0.0, ms2);
 		}
 	}
