@@ -1323,6 +1323,12 @@ struct Pcsx2Config
 		// (and the button, "Kevin's 45 Auto  (A)") when something on the floor comes within reach of the character's own
 		// Circle press. Only reads the game's memory; shown in the headset only. Ini only for now.
 		bool PickupCue = true;
+		// First person, File #1 offline only (not online, not private co-op): a read-only prototype of reaching for the
+		// J's Bar Handgun with the right hand. It maps the hand's position into the game's coordinates, tests it against
+		// the Handgun's trigger volume (the one the pickup cue's list walk reads), draws that volume as a wireframe box
+		// that brightens as the hand nears, and gives one light tick in the right hand on entering it. It writes nothing
+		// to the game and presses nothing; what it measures is in the emulog ("Hand targeting:" lines). Ini only.
+		bool HandTargeting = false;
 		// First person: darkens the edges of the headset view while the view turns or walks without the head
 		// (smooth stick turns, walking), the more the faster it moves; snap turns keep the blink instead.
 		// Drawn in the headset only, so only what this player sees.

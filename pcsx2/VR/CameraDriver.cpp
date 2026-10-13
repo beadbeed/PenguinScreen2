@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <limits>
 #include <string>
 #include <mutex>
@@ -328,6 +329,33 @@ namespace VR::CameraDriver
 			Console.WriteLn("(VR) CameraDriver hook self-test: %d mismatch(es).", fail);
 		}
 
+		// The eye camera.lookAt writes (ApplyLookAt, and the mapping's self-test against the same code): the character's
+		// position plus the eye height and eye_forward ahead along the view yaw yaw_cam, plus, with a recenter reference
+		// and a scale (with_offset), the head's movement since the recenter (dx, dy, dz in metres, the headset's space)
+		// turned from the recenter's yaw to cam_base and scaled to game units. m carries the character, eye height and
+		// forward, scale, yaw sign and recenter yaw; the same arithmetic ApplyLookAt always had.
+		void LookAtEye(const Mapping& m, float cam_base, float yaw_cam, bool with_offset, float dx, float dy, float dz,
+			float eye[3])
+		{
+			const float sy = std::sin(yaw_cam), cy = std::cos(yaw_cam);
+			eye[0] = m.character[0] + m.eye_forward * sy;
+			eye[1] = m.character[1] + m.eye_height;
+			eye[2] = m.character[2] + m.eye_forward * cy;
+			if (with_offset)
+			{
+				// OpenXR: right +X, up +Y, forward -Z, rotated by the recenter yaw.
+				const float rs = std::sin(m.ref_yaw), rc = std::cos(m.ref_yaw);
+				const float fwd = -dx * rs - dz * rc;
+				const float right = dx * rc - dz * rs;
+				// Game: forward at the camera's base yaw; "right" is a quarter turn clockwise, i.e. -yawSign * 90 deg.
+				const float right_yaw = cam_base - m.yaw_sign * (PI_F * 0.5f);
+				const float u = m.units_per_meter;
+				eye[0] += u * (fwd * std::sin(cam_base) + right * std::sin(right_yaw));
+				eye[1] += u * dy;
+				eye[2] += u * (fwd * std::cos(cam_base) + right * std::cos(right_yaw));
+			}
+		}
+
 		int CountMathMismatches(bool log)
 		{
 			int fail = 0;
@@ -366,6 +394,83 @@ namespace VR::CameraDriver
 				for (int c = 0; c < 3; ++c)
 					ortho = ortho && approxEq(RRt.m[r * 3 + c], (r == c) ? 1.0f : 0.0f);
 			check(ortho, "R * transpose(R) == I");
+
+			// Hand targeting's mapping (GameFromVr / VrFromGame) against the eye ApplyLookAt writes (LookAtEye): J's Bar
+			// coordinates, both yaw signs, a recenter yaw that is not zero and a base yaw that is not the recenter's.
+			for (const float ys : {1.0f, -1.0f})
+			{
+				Mapping m;
+				m.valid = true;
+				m.character[0] = 8497.0f;
+				m.character[1] = 0.0f;
+				m.character[2] = 13027.0f;
+				m.eye_height = 155.0f;
+				m.eye_forward = 0.0f;
+				m.units_per_meter = 100.0f;
+				m.yaw_sign = ys;
+				m.base_yaw = 0.7f;
+				m.ref_pos[0] = 0.12f;
+				m.ref_pos[1] = 1.2f;
+				m.ref_pos[2] = -0.3f;
+				m.ref_yaw = -0.4f;
+				const float mm_tol = 1.0e-3f; // 1 mm, in metres
+
+				// A round trip, headset -> game -> headset, for a few points.
+				const float pts[3][3] = {{0.30f, 1.00f, -0.60f}, {-0.50f, 0.80f, -0.20f}, {0.00f, 1.40f, 0.40f}};
+				bool round_ok = true;
+				for (int i = 0; i < 3; i++)
+				{
+					float g[3], back[3];
+					round_ok = round_ok && GameFromVr(m, pts[i], g) && VrFromGame(m, g, back);
+					for (int k = 0; k < 3 && round_ok; k++)
+						round_ok = std::abs(back[k] - pts[i][k]) < mm_tol;
+				}
+				check(round_ok, "mapping: headset -> game -> headset within 1 mm");
+				float g0[3];
+				float v0[3];
+				const float pt0[3] = {0.0f, 1.2f, 0.0f};
+				check(GameFromVr(m, pt0, g0) && VrFromGame(m, g0, v0) && std::abs(v0[0]) < mm_tol && std::abs(v0[1] - 1.2f) < mm_tol &&
+						  std::abs(v0[2]) < mm_tol,
+					"mapping: a second round trip");
+
+				// The eye the code writes for a head at H (its yaw theta, the camera not predicted: cam_base = the true base
+				// yaw) is H mapped, exactly, when eye_forward is 0.
+				const float head[3] = {0.05f, 1.30f, -0.45f};
+				const float theta = 0.9f;
+				const float yaw_cam = m.base_yaw + ys * (theta - m.ref_yaw);
+				float eye[3];
+				float back[3];
+				LookAtEye(m, m.base_yaw, yaw_cam, true, head[0] - m.ref_pos[0], head[1] - m.ref_pos[1], head[2] - m.ref_pos[2], eye);
+				check(VrFromGame(m, eye, back) && std::abs(back[0] - head[0]) < mm_tol && std::abs(back[1] - head[1]) < mm_tol &&
+						  std::abs(back[2] - head[2]) < mm_tol,
+					"mapping: VrFromGame(the eye the code writes) is the head position within 1 mm (eye_forward 0)");
+				// With eye_forward 10 the eye is 10 game units along the view yaw further on, and VrFromGame(eye) is the head
+				// moved 10 / 100 metres along the head's horizontal forward (-sin theta, 0, -cos theta): not the head.
+				Mapping with_forward = m;
+				with_forward.eye_forward = 10.0f;
+				LookAtEye(with_forward, m.base_yaw, yaw_cam, true, head[0] - m.ref_pos[0], head[1] - m.ref_pos[1],
+					head[2] - m.ref_pos[2], eye);
+				check(VrFromGame(with_forward, eye, back) && std::abs(back[0] - (head[0] - 0.10f * std::sin(theta))) < mm_tol &&
+						  std::abs(back[1] - head[1]) < mm_tol && std::abs(back[2] - (head[2] - 0.10f * std::cos(theta))) < mm_tol,
+					"mapping: with eye_forward 10 the eye maps 10 cm ahead of the head along its horizontal forward");
+				// Standing still at the recenter, looking along the base yaw: the character's own place, eye height up.
+				LookAtEye(m, m.base_yaw, m.base_yaw, true, 0.0f, 0.0f, 0.0f, eye);
+				check(std::abs(eye[0] - 8497.0f) < 1.0e-3f && std::abs(eye[1] - 155.0f) < 1.0e-3f && std::abs(eye[2] - 13027.0f) < 1.0e-3f,
+					"mapping: the head at the recenter is the character's position at eye height");
+				// Straight ahead 1 m from the recenter head at the recenter yaw is 100 units along the base yaw's forward.
+				const float ahead[3] = {m.ref_pos[0] - std::sin(m.ref_yaw), m.ref_pos[1], m.ref_pos[2] - std::cos(m.ref_yaw)};
+				float ga[3];
+				check(GameFromVr(m, ahead, ga) && std::abs(ga[0] - (8497.0f + 100.0f * std::sin(m.base_yaw))) < 0.1f &&
+						  std::abs(ga[2] - (13027.0f + 100.0f * std::cos(m.base_yaw))) < 0.1f,
+					"mapping: 1 m ahead of the recenter head is 100 units ahead along the base yaw");
+				// Unusable input.
+				Mapping bad = m;
+				bad.valid = false;
+				float junk[3];
+				const float nan_pt[3] = {std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f};
+				check(!GameFromVr(bad, pt0, junk) && !VrFromGame(bad, g0, junk) && !GameFromVr(m, nan_pt, junk),
+					"mapping: no mapping, or a point that is not a number, maps nothing");
+			}
 
 			return fail;
 		}
@@ -1454,6 +1559,17 @@ namespace VR::CameraDriver
 			}
 		}
 
+		// The mapping the latest lookAt write used (Mapping, hand targeting). Written by ApplyLookAt on the CPU thread, read
+		// from any thread under the lock; a copy is a few dozen bytes.
+		std::mutex s_mapping_mutex;
+		Mapping s_mapping;
+
+		void PublishMapping(const Mapping& m)
+		{
+			std::lock_guard<std::mutex> lock(s_mapping_mutex);
+			s_mapping = m;
+		}
+
 		// What camera.lookAt wrote this vsync, for matching against the game's view matrix later.
 		struct LookAtWrite
 		{
@@ -1772,27 +1888,32 @@ namespace VR::CameraDriver
 			const float sy = std::sin(yaw_cam), cy = std::cos(yaw_cam);
 			const float sp = std::sin(pitch), cp = std::cos(pitch);
 
-			float eye[3] = {p[0] + la.eye_forward * sy, p[1] + la.eye_height, p[2] + la.eye_forward * cy};
-			if (la.units_per_meter != 0.0f && s_ref_pos_valid)
+			// The mapping this write uses (Mapping, published below for hand targeting): the true base yaw, not cam_base.
+			Mapping mp;
+			for (int i = 0; i < 3; i++)
 			{
-				if (pose.position_valid)
-				{
-					s_last_dx = pose.position_x - s_ref_px;
-					s_last_dy = pose.position_y - s_ref_py;
-					s_last_dz = pose.position_z - s_ref_pz;
-				}
-				const float dx = s_last_dx, dy = s_last_dy, dz = s_last_dz;
-				// OpenXR: right +X, up +Y, forward -Z, rotated by the recenter yaw.
-				const float rs = std::sin(s_ref_yaw), rc = std::cos(s_ref_yaw);
-				const float fwd = -dx * rs - dz * rc;
-				const float right = dx * rc - dz * rs;
-				// Game: forward at the camera's base yaw; "right" is a quarter turn clockwise, i.e. -yawSign * 90 deg.
-				const float right_yaw = cam_base - la.yaw_sign * (PI_F * 0.5f);
-				const float u = la.units_per_meter;
-				eye[0] += u * (fwd * std::sin(cam_base) + right * std::sin(right_yaw));
-				eye[1] += u * dy;
-				eye[2] += u * (fwd * std::cos(cam_base) + right * std::cos(right_yaw));
+				mp.character[i] = p[i];
+				mp.ref_pos[i] = (i == 0) ? s_ref_px : (i == 1) ? s_ref_py : s_ref_pz;
 			}
+			mp.eye_height = la.eye_height;
+			mp.eye_forward = la.eye_forward;
+			mp.base_yaw = base_yaw;
+			mp.ref_yaw = s_ref_yaw;
+			mp.units_per_meter = la.units_per_meter;
+			mp.yaw_sign = la.yaw_sign;
+			mp.pitch_sign = la.pitch_sign;
+			const bool with_offset = (la.units_per_meter != 0.0f && s_ref_pos_valid);
+			if (with_offset && pose.position_valid)
+			{
+				s_last_dx = pose.position_x - s_ref_px;
+				s_last_dy = pose.position_y - s_ref_py;
+				s_last_dz = pose.position_z - s_ref_pz;
+			}
+			float eye[3];
+			LookAtEye(mp, cam_base, yaw_cam, with_offset, s_last_dx, s_last_dy, s_last_dz, eye);
+			mp.valid = with_offset && std::isfinite(mp.units_per_meter) && std::isfinite(mp.yaw_sign) && std::isfinite(mp.base_yaw) &&
+			           std::isfinite(mp.ref_yaw) && std::isfinite(mp.eye_height) && std::isfinite(mp.ref_pos[0]) &&
+			           std::isfinite(mp.ref_pos[1]) && std::isfinite(mp.ref_pos[2]);
 
 			// Point-to-aim: while the stance says the weapon is raised, face where the aim hand points
 			// (recenter-relative, around the camera anchor), so the camera itself does not turn.
@@ -1925,6 +2046,8 @@ namespace VR::CameraDriver
 			s_base_yaw_ms.store(now_ms, std::memory_order_release);
 			// d(turn_yaw)/dt: RenderPose's turn is yawSign * WrapPi(B_r - B_now), and B_now moves at stick_rate.
 			s_screen_turn_rate.store(-la.yaw_sign * stick_rate, std::memory_order_release);
+			mp.stamp_ms = now_ms;
+			PublishMapping(mp);
 			if (out)
 			{
 				out->base_yaw = WrapPi(cam_base - la.yaw_sign * s_ref_yaw);
@@ -2100,6 +2223,9 @@ namespace VR::CameraDriver
 		u64 s_frame_published_seq = 0;
 		float s_view_prev[16] = {};
 		bool s_view_prev_valid = false;
+		// The newest view matrix read (s_view_prev) was matched to a lookAt write, so the newest matched frame's head pose is
+		// the one it was built from (ProjectionCheck); cleared at each change of the matrix until it matches.
+		bool s_view_matched = false;
 		u32 s_view_still_vsyncs = 0; // vsyncs in a row the view matrix has not changed (saturates)
 		bool s_render_published = false; // a valid render pose is on the GS side
 		FramePose s_render_sent;         // what was last sent down the GS queue (the CPU thread's copy of s_gs_render_pose)
@@ -2132,6 +2258,7 @@ namespace VR::CameraDriver
 			s_written_count = 0;
 			s_frame_count = 0;
 			s_view_prev_valid = false;
+			s_view_matched = false;
 			if (s_render_published)
 				PublishRenderPose(false, FramePose{});
 		}
@@ -2196,6 +2323,8 @@ namespace VR::CameraDriver
 			std::memcpy(s_view_prev, m, sizeof(m));
 			s_view_prev_valid = true;
 			s_view_still_vsyncs = changed ? 0 : std::min<u32>(s_view_still_vsyncs + 1, 1000);
+			if (changed)
+				s_view_matched = false;
 			if (s_written_count == 0)
 				return;
 			if (!changed)
@@ -2235,6 +2364,7 @@ namespace VR::CameraDriver
 			s_frame_next = (s_frame_next + 1) % s_frame_poses.size();
 			s_frame_count = std::min(s_frame_count + 1, s_frame_poses.size());
 			s_frame_seq++;
+			s_view_matched = true;
 		}
 
 		// Send the head pose of the frame on screen now, `syncFramesBack` matched frames behind the newest.
@@ -3675,6 +3805,256 @@ namespace VR::CameraDriver
 			return false;
 		if (base)
 			*base = s_local_any_base;
+		return true;
+	}
+
+	bool NetworkOffline()
+	{
+		return s_net_mode == NetMode::Offline;
+	}
+
+	bool GetMapping(Mapping* out)
+	{
+		constexpr u64 kMappingStaleMs = 250;
+		Mapping m;
+		{
+			std::lock_guard<std::mutex> lock(s_mapping_mutex);
+			m = s_mapping;
+		}
+		const u64 now = NowMs();
+		if (!m.valid || m.stamp_ms == 0 || (now > m.stamp_ms && now - m.stamp_ms > kMappingStaleMs))
+			return false;
+		if (out)
+			*out = m;
+		return true;
+	}
+
+	namespace
+	{
+		// The mapping's trigonometry, in double: sin/cos of the base yaw b and of b - yaw_sign pi/2 (the camera's "right"),
+		// the recenter yaw's, and the determinant of the (forward, right) -> game x, z matrix (sin b cos r - sin r cos b,
+		// +-1 for yaw_sign +-1). False for a mapping that cannot be inverted.
+		struct MapTrig
+		{
+			double sb = 0.0, cb = 0.0, srs = 0.0, crs = 0.0, rs = 0.0, rc = 0.0, det = 0.0, u = 0.0;
+		};
+
+		bool MapTrigOf(const Mapping& m, MapTrig* t)
+		{
+			if (!m.valid || !std::isfinite(m.units_per_meter) || m.units_per_meter == 0.0f || !std::isfinite(m.yaw_sign) ||
+				!std::isfinite(m.base_yaw) || !std::isfinite(m.ref_yaw) || !std::isfinite(m.eye_height))
+				return false;
+			for (int i = 0; i < 3; i++)
+			{
+				if (!std::isfinite(m.character[i]) || !std::isfinite(m.ref_pos[i]))
+					return false;
+			}
+			constexpr double kPi = 3.14159265358979323846;
+			const double b = static_cast<double>(m.base_yaw);
+			const double right_yaw = b - static_cast<double>(m.yaw_sign) * (kPi * 0.5);
+			t->sb = std::sin(b);
+			t->cb = std::cos(b);
+			t->srs = std::sin(right_yaw);
+			t->crs = std::cos(right_yaw);
+			t->rs = std::sin(static_cast<double>(m.ref_yaw));
+			t->rc = std::cos(static_cast<double>(m.ref_yaw));
+			t->det = t->sb * t->crs - t->srs * t->cb;
+			t->u = static_cast<double>(m.units_per_meter);
+			return std::fabs(t->det) > 1.0e-6;
+		}
+
+		bool AllFinite3(const float v[3])
+		{
+			return v && std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+		}
+
+		double Dist3(const float a[3], const float b[3])
+		{
+			const double dx = static_cast<double>(a[0]) - b[0], dy = static_cast<double>(a[1]) - b[1],
+			             dz = static_cast<double>(a[2]) - b[2];
+			return std::sqrt(dx * dx + dy * dy + dz * dz);
+		}
+	}
+
+	bool GameFromVr(const Mapping& m, const float vr[3], float game[3])
+	{
+		MapTrig t;
+		if (!game || !AllFinite3(vr) || !MapTrigOf(m, &t))
+			return false;
+		const double dx = static_cast<double>(vr[0]) - m.ref_pos[0];
+		const double dy = static_cast<double>(vr[1]) - m.ref_pos[1];
+		const double dz = static_cast<double>(vr[2]) - m.ref_pos[2];
+		const double fwd = -dx * t.rs - dz * t.rc;
+		const double right = dx * t.rc - dz * t.rs;
+		const double g[3] = {m.character[0] + t.u * (fwd * t.sb + right * t.srs),
+			static_cast<double>(m.character[1]) + m.eye_height + t.u * dy,
+			m.character[2] + t.u * (fwd * t.cb + right * t.crs)};
+		for (int i = 0; i < 3; i++)
+		{
+			if (!std::isfinite(g[i]))
+				return false;
+		}
+		for (int i = 0; i < 3; i++)
+			game[i] = static_cast<float>(g[i]);
+		return true;
+	}
+
+	bool VrFromGame(const Mapping& m, const float game[3], float vr[3])
+	{
+		MapTrig t;
+		if (!vr || !AllFinite3(game) || !MapTrigOf(m, &t))
+			return false;
+		const double gx = (static_cast<double>(game[0]) - m.character[0]) / t.u;
+		const double gy = (static_cast<double>(game[1]) - m.character[1] - m.eye_height) / t.u;
+		const double gz = (static_cast<double>(game[2]) - m.character[2]) / t.u;
+		// Solve (gx, gz) = [[sb, srs], [cb, crs]] (fwd, right).
+		const double fwd = (t.crs * gx - t.srs * gz) / t.det;
+		const double right = (-t.cb * gx + t.sb * gz) / t.det;
+		const double v[3] = {m.ref_pos[0] + (-t.rs * fwd + t.rc * right), m.ref_pos[1] + gy,
+			m.ref_pos[2] + (-t.rc * fwd - t.rs * right)};
+		for (int i = 0; i < 3; i++)
+		{
+			if (!std::isfinite(v[i]))
+				return false;
+		}
+		for (int i = 0; i < 3; i++)
+			vr[i] = static_cast<float>(v[i]);
+		return true;
+	}
+
+	bool GameFromVr(const float vr[3], float game[3])
+	{
+		Mapping m;
+		return GetMapping(&m) && GameFromVr(m, vr, game);
+	}
+
+	bool VrFromGame(const float game[3], float vr[3])
+	{
+		Mapping m;
+		return GetMapping(&m) && VrFromGame(m, game, vr);
+	}
+
+	bool MappingCheck(const float head_vr[3], const float extra_vr[3], double* eye_err_mm, double* round_trip_mm)
+	{
+		Mapping m;
+		if (!AllFinite3(head_vr) || !GetMapping(&m))
+			return false;
+		// The eye the code writes for this head (eye_forward is not part of the map), mapped back against the head.
+		m.eye_forward = 0.0f;
+		float eye[3];
+		float back[3];
+		LookAtEye(m, m.base_yaw, m.base_yaw, true, head_vr[0] - m.ref_pos[0], head_vr[1] - m.ref_pos[1], head_vr[2] - m.ref_pos[2],
+			eye);
+		if (!VrFromGame(m, eye, back))
+			return false;
+		const double eye_err = Dist3(back, head_vr) * 1000.0;
+		// A round trip over the head, the hand (when given) and two points about an arm's length off.
+		const float offsets[2][3] = {{0.3f, -0.2f, -0.4f}, {-0.5f, 0.1f, 0.6f}};
+		float pts[4][3];
+		int n = 0;
+		for (int k = 0; k < 3; k++)
+			pts[n][k] = head_vr[k];
+		n++;
+		if (AllFinite3(extra_vr))
+		{
+			for (int k = 0; k < 3; k++)
+				pts[n][k] = extra_vr[k];
+			n++;
+		}
+		for (int i = 0; i < 2; i++)
+		{
+			for (int k = 0; k < 3; k++)
+				pts[n][k] = head_vr[k] + offsets[i][k];
+			n++;
+		}
+		double worst = 0.0;
+		for (int i = 0; i < n; i++)
+		{
+			float g[3];
+			float r[3];
+			if (!GameFromVr(m, pts[i], g) || !VrFromGame(m, g, r))
+				return false;
+			worst = std::max(worst, Dist3(r, pts[i]) * 1000.0);
+		}
+		if (eye_err_mm)
+			*eye_err_mm = eye_err;
+		if (round_trip_mm)
+			*round_trip_mm = worst;
+		return true;
+	}
+
+	bool ProjectionCheck(const float game_point[3], ProjectionResult* out)
+	{
+		if (!AllFinite3(game_point) || !out || !s_view_prev_valid || !s_view_matched || s_frame_count == 0)
+			return false;
+		Mapping m;
+		// A reflected map (yaw_sign -1, no shipped profile) would flip the yaw of the head's frame against the view's.
+		if (!GetMapping(&m) || std::fabs(m.yaw_sign - 1.0f) > 1.0e-3f)
+			return false;
+		const size_t newest = (s_frame_next + s_frame_poses.size() - 1) % s_frame_poses.size();
+		const HeadPose::Snapshot& hp = s_frame_poses[newest].pose;
+		if (!hp.valid || !hp.position_valid)
+			return false;
+		// That pose and the matrix are one consistent pair (the write the matrix matched). The mapping is today's, though:
+		// with the camera's base yaw turned since that write (a stick turn) the two sides would disagree for a reason that
+		// has nothing to do with the mapping, so the check is not made then. (A character that walked since moves the
+		// mapping too and is not detected here: the check is meant for standing still.)
+		if (std::fabs(WrapPi(m.base_yaw - s_frame_poses[newest].base_yaw)) > 1.0e-3f)
+			return false;
+		float vr[3];
+		if (!VrFromGame(m, game_point, vr))
+			return false;
+
+		// The game's side: the point through the view matrix (row vectors, the camera looking down -z, as in
+		// TrackRenderPose), then yaw to the right and pitch up from the view's forward.
+		double view[3];
+		for (int j = 0; j < 3; j++)
+		{
+			view[j] = static_cast<double>(s_view_prev[12 + j]);
+			for (int i = 0; i < 3; i++)
+				view[j] += static_cast<double>(game_point[i]) * static_cast<double>(s_view_prev[i * 4 + j]);
+		}
+		const double game_yaw = std::atan2(view[0], -view[2]);
+		const double game_pitch = std::atan2(view[1], std::hypot(view[0], view[2]));
+
+		// The headset's side: the head pose of that frame without its roll (the camera is written from yaw and pitch only), the
+		// game's eye eye_forward units ahead of the head along its yaw, the point's direction in that frame.
+		const EulerAngles he = QuaternionToEulerYXZ(hp.orientation_x, hp.orientation_y, hp.orientation_z, hp.orientation_w);
+		const double theta = static_cast<double>(he.yaw);
+		const double ahead_m = static_cast<double>(m.eye_forward) / static_cast<double>(m.units_per_meter);
+		const double rel[3] = {static_cast<double>(vr[0]) - (static_cast<double>(hp.position_x) - ahead_m * std::sin(theta)),
+			static_cast<double>(vr[1]) - static_cast<double>(hp.position_y),
+			static_cast<double>(vr[2]) - (static_cast<double>(hp.position_z) - ahead_m * std::cos(theta))};
+		const double pitch = static_cast<double>(std::clamp(m.pitch_sign * he.pitch, -1.45f, 1.45f));
+		const double cy = std::cos(theta), sy = std::sin(theta);
+		const double x1 = rel[0] * cy - rel[2] * sy;
+		const double y1 = rel[1];
+		const double z1 = rel[0] * sy + rel[2] * cy;
+		const double cp = std::cos(pitch), sp = std::sin(pitch);
+		const double x2 = x1;
+		const double y2 = y1 * cp + z1 * sp;
+		const double z2 = -y1 * sp + z1 * cp;
+		const double head_yaw = std::atan2(x2, -z2);
+		const double head_pitch = std::atan2(y2, std::hypot(x2, z2));
+		if (!std::isfinite(game_yaw) || !std::isfinite(game_pitch) || !std::isfinite(head_yaw) || !std::isfinite(head_pitch))
+			return false;
+
+		const auto unit = [](double yaw, double pitch_rad, double d[3]) {
+			d[0] = std::sin(yaw) * std::cos(pitch_rad);
+			d[1] = std::sin(pitch_rad);
+			d[2] = -std::cos(yaw) * std::cos(pitch_rad);
+		};
+		double a[3];
+		double b[3];
+		unit(game_yaw, game_pitch, a);
+		unit(head_yaw, head_pitch, b);
+		const double dot = std::clamp(a[0] * b[0] + a[1] * b[1] + a[2] * b[2], -1.0, 1.0);
+		constexpr double kToDeg = 180.0 / 3.14159265358979323846;
+		out->game_yaw_deg = static_cast<float>(game_yaw * kToDeg);
+		out->game_pitch_deg = static_cast<float>(game_pitch * kToDeg);
+		out->head_yaw_deg = static_cast<float>(head_yaw * kToDeg);
+		out->head_pitch_deg = static_cast<float>(head_pitch * kToDeg);
+		out->diff_deg = static_cast<float>(std::acos(dot) * kToDeg);
 		return true;
 	}
 

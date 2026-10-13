@@ -190,6 +190,28 @@ markers: swapchains created (...)`, and nothing per frame; `PCSX2_VR_HANDS_SELFT
 self-test: N checks passed` (the placement against StepZone, the holster and sling poses, the press route, the
 budget, the view rule, the rings and the bag, and the redraw rules).
 
+Hand targeting (VR setting `HandTargeting`, off by default, ini only, read live; a prototype for File #1 played offline,
+not in private co-op or online): it measures the right hand against the J's Bar Handgun's trigger volume and writes
+nothing to the game and presses nothing. `CameraDriver` publishes the numbers `camera.lookAt` places the eye with (the
+character, eye height, the true base yaw, the recenter) so `GameFromVr` / `VrFromGame` can map the grip position into
+game centimetres and back (the eye_forward offset is not part of the map). `ItemReach::EvaluateHandTarget` walks the
+pickup cue's trigger list (same filters and node cap) for nodes whose item is id 0 AND whose volume centre lies within
+10 cm of the J's Bar counter pistol's (8493.5, 140, 12922.5 game cm, from a RAM dump), so no other Handgun is ever a target
+and reports the hand's distance to its floor quad (0 inside) and height range, whether it is `inside` (no margin) and
+whether the game's own forward search would pick the same node. A dim wireframe box (a fourth zone-marker layer, the first
+dropped when layers are short) shows the volume, brighter within 30 cm and brightest inside; the right hand gets one
+light tick on entering it. A target exists while the volume's middle is within 3 m of the hand. Emulog lines:
+`(VR) Hand targeting: on (offline File #1, right hand, the J's Bar counter pistol's trigger only; read-only)` and `... mapping check: eye->head
+error X mm, round trip Y mm` once per first-person arm; `target found: node ..., item ..., volume centre game (...) cm,
+VR (...) m` and `target lost ...`; and once a second while a target exists the hand (VR m, game cm), the horizontal and
+vertical distance to the volume, to its middle, `inside` and `forward search agrees`, and a projection check: the volume
+middle's direction (yaw, pitch) from the game's own view matrix (0x3062E0) against its direction from the head pose that
+frame was rendered from (the newest matched frame, the very write that view matrix was built from: a consistent pair, so
+the check measures the mapping, not display timing; it is skipped while the camera's base yaw has turned since that frame,
+and meant for standing still), with the difference in degrees. A difference of about a degree, steady while standing still,
+means the map puts a world point where the game's camera sees it; it does not show that the volume matches the visible
+pistol (the volumes are 2-5 times the objects) or cover display latency.
+
 Comfort blink (VR setting `ComfortBlink`, on by default): a view-locked black quad 0.3 m ahead that goes black
 over 40 ms, holds 60 ms and clears over 80 ms, on each snap turn and each change between the first-person and
 the world screen. The screen change itself is made once the blink is black (`(VR) HUD blink (world screen).`

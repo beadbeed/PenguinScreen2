@@ -27,7 +27,11 @@ namespace VR::ZoneMarkers
 	static constexpr int kHolster = 0;
 	static constexpr int kBelt = 1;
 	static constexpr int kPouches = 2;
-	static constexpr int kSlots = 3;
+	// Hand targeting's volume (ItemReach::TargetMark, VR setting HandTargeting): a wireframe box, eight corner marks. It has
+	// a slot of its own and is the first thing dropped when layers are short; nothing is drawn in it unless that setting
+	// has published a target.
+	static constexpr int kTarget = 3;
+	static constexpr int kSlots = 4;
 
 	// The images: square RGBA8, the hands' byte order (sRGB-encoded colour, unpremultiplied alpha), background alpha 0.
 	static constexpr u32 kImageSize = 256;
@@ -101,23 +105,30 @@ namespace VR::ZoneMarkers
 	bool ClearOfView(const float eye[3], const float head_quat[4], const float point[3]);
 
 	// Which of the wanted layers go in the free_layers left: the holster first, then the belt's bag, then the pouches'
-	// rings (so the markers go first when layers are short, then the holster). Pure.
+	// rings, then hand targeting's box (so the box goes first when layers are short, then the markers, then the holster).
+	// Pure.
 	std::array<bool, kSlots> Plan(u32 free_layers, const std::array<bool, kSlots>& want);
 
 	enum class Shape : u8
 	{
 		Ring, // a pouch: a ring round its point, half its ball's outline as seen from the eye
 		Bag,  // the belt zone: a small pouch with a flap, buckle and loop, upright
+		Box,  // hand targeting: one corner of a wireframe box; eight marks make the box (see below)
 	};
 
 	struct Mark
 	{
 		float centre[3] = {0.0f, 0.0f, 0.0f}; // in the XR base space
-		float radius = 0.0f; // metres: a ring's ball; the bag's half height
+		float radius = 0.0f; // metres: a ring's ball; the bag's half height; a Box corner's size (just above 0)
 		Shape shape = Shape::Ring;
 		bool lit = false; // a hand is in reach: drawn brighter
+		// Box only: 0 dim (the hand is far), 1 brighter (near), 2 brightest (inside). A Box mark set is exactly eight
+		// corners, the floor quad's four in order and then the same four at the top, and is drawn as its twelve edges.
+		u8 glow = 0;
 	};
 	static constexpr int kMaxMarks = 8;
+	// A Box corner's radius: only what keeps PlaceMarks' quad clear of the lines at the box's corners.
+	static constexpr float kBoxCornerM = 0.004f;
 
 	// A marker image's quad: facing the eye on the plane through the marks' middle (so in stereo they sit at about their
 	// depth), "up" as near world up as it goes, square and just big enough for every mark as seen from the eye.

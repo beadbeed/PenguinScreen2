@@ -588,7 +588,7 @@ namespace VR::GameFeedback
 		// only while first person is armed with camera.base resolved; menu mode is any game screen up (the item screen, map,
 		// pause, a take-it prompt, held through the camera guards' flicker) and weapon_raised is lookAt.aim's stance, both
 		// where Circle answers something other than a pickup.
-		void PollPickupCue(const ProfileDB::Profile* profile, float strength)
+		void PollPickupCue(const ProfileDB::Profile* profile, float strength, bool is_file1)
 		{
 			ItemReach::Live live;
 			if (profile && profile->reach.has_value() && VMManager::GetState() == VMState::Running &&
@@ -597,8 +597,13 @@ namespace VR::GameFeedback
 				live.armed = true;
 				live.screen_up = SpatialControls::MenuMode();
 				live.weapon_raised = CameraDriver::GetTelemetry().weapon_raised;
+				// Hand targeting (VR HandTargeting, a read-only prototype) is for File #1 played offline only.
+				live.hand_game = is_file1;
+				live.net_offline = CameraDriver::NetworkOffline();
 			}
-			ItemReach::Poll(profile, live, CameraDriver::SteadyNowMs(), strength);
+			const u64 now_ms = CameraDriver::SteadyNowMs();
+			ItemReach::Poll(profile, live, now_ms, strength);
+			ItemReach::PollHandTarget(profile, live, now_ms, strength);
 		}
 
 		void MaybeRunSelfTest()
@@ -625,11 +630,15 @@ namespace VR::GameFeedback
 		// Haptics need a running session; without one (flat play) no profile is looked up and nothing is read.
 		const bool session = XRSession::IsSessionRunning();
 		const ProfileDB::Profile* profile = nullptr;
+		bool is_file1 = false;
 		if (session)
 		{
 			const std::string serial = VMManager::GetDiscSerial();
 			if (!serial.empty())
+			{
 				profile = ProfileDB::Lookup(serial, VMManager::GetDiscCRC());
+				is_file1 = (serial == "SLPM-65428");
+			}
 		}
 		const ProfileDB::FeedbackParams* fb =
 			(profile && profile->feedback.has_value()) ? &profile->feedback.value() : nullptr;
@@ -637,7 +646,7 @@ namespace VR::GameFeedback
 		const float strength = HapticStrength();
 		s_strength.store(strength, std::memory_order_relaxed);
 		UpdateRumbleTarget(profile, fb);
-		PollPickupCue(profile, strength);
+		PollPickupCue(profile, strength, is_file1);
 
 		// The cues use the camera's guards and its record: no cues on the title screen or in cutscenes. They
 		// keep going while grabbed, down or dead (LocalRecordAny ignores releaseWhen), so a bite still pulses.

@@ -55,6 +55,41 @@ namespace VR::ItemReach
 	// returns the item the game's Circle would take now, if any. reader null = guest main RAM. Reads only.
 	Reach Evaluate(const ProfileDB::ReachParams& params, u32 record, MemReader reader);
 
+	// --- Hand targeting (VR setting HandTargeting; a read-only prototype, File #1 offline only) ---
+	//
+	// Where the right hand is against the Handgun's trigger volume, for the J's Bar pistol on the counter. The model is the
+	// same list walk as Evaluate (same list head, node filters and node cap), but instead of the character's probe circle it
+	// asks about a point, the hand's grip position in game centimetres (CameraDriver::GameFromVr), and only trigger nodes
+	// whose item record names item id 0 (the Handgun).
+
+	struct HandTarget
+	{
+		bool found = false;    // a Handgun node passed the filters: the one nearest the hand (first in the list on a tie)
+		u32 node = 0;          // its address
+		u32 index = 0;         // its item record index
+		u16 item_id = 0;       // that record's item id (0)
+		double quad_x[4] = {}; // its floor quad's corners, game cm (x, z pairs as the node holds them)
+		double quad_z[4] = {};
+		double y_min = 0.0;    // its height range, game cm
+		double y_max = 0.0;
+		double centre[3] = {}; // the volume's middle: the corners' mean, the range's middle
+		double hand[3] = {};   // the point asked about, game cm
+		double horizontal_cm = 0.0; // from the hand to the quad on the floor plane, 0 inside it
+		double vertical_cm = 0.0;   // from the hand's height to the range, 0 within it
+		bool inside = false;   // inside the quad and within the range, no margin
+		bool forward_agrees = false; // the game's own forward search (Evaluate) selects this node now
+		u32 walked = 0;        // nodes visited
+		Fault fault = Fault::None;
+	};
+
+	// Reads only. record is the local character's record (the forward search's, for forward_agrees); hand_game is the hand's
+	// position, game cm. reader null = guest main RAM.
+	// only_centre (may be null): consider only a volume whose centre (the corners' mean, the y range's middle) lies within
+	// only_tol_cm of that game point; PollHandTarget passes the J's Bar counter pistol's, so no other Handgun trigger is
+	// ever a target.
+	HandTarget EvaluateHandTarget(const ProfileDB::ReachParams& params, u32 record, const double hand_game[3], MemReader reader,
+		const double* only_centre = nullptr, double only_tol_cm = 0.0);
+
 	// What the caller knows about this vsync (GameFeedback::Poll fills it from CameraDriver and SpatialControls).
 	struct Live
 	{
@@ -63,6 +98,8 @@ namespace VR::ItemReach
 		u32 record = 0;            // the local character's record
 		bool screen_up = false;    // a game screen is up (the item screen, map, pause, a take-it prompt): Circle answers it
 		bool weapon_raised = false; // the weapon is up: Circle fires
+		bool hand_game = false;    // the running game is File #1 (SLPM-65428), the only one hand targeting is for
+		bool net_offline = false;  // CameraDriver::NetworkOffline: not online, not private co-op
 	};
 
 	// CPU thread, every vsync from GameFeedback::Poll with profile null when there is no VR session or no profile. Does
@@ -85,6 +122,26 @@ namespace VR::ItemReach
 		u32 serial = 0;
 	};
 	View Current();
+
+	// CPU thread, every vsync from GameFeedback::Poll after Poll. Does nothing (and drops its marker) unless the HandTargeting
+	// setting is on, the profile has a reach block, Live says File #1 offline, first person is armed with the camera driving
+	// (CameraDriver::GetMapping), no game screen is up and the right hand's grip pose is tracked. Then, every other vsync, it
+	// maps the hand into the game, evaluates the Handgun volume (EvaluateHandTarget), publishes the marker, ticks the right
+	// hand once when the hand enters the volume (not again until it has left) and logs: the activation and the mapping's
+	// self-check, a target found or lost, and once a second the hand, the distances and the projection check. Reads only.
+	void PollHandTarget(const ProfileDB::Profile* profile, const Live& live, u64 now_ms, float haptic_strength);
+
+	// The selected volume as the compositor draws it (any thread): its eight corners in the XR base space, metres (the floor
+	// quad's four at the lowest height, then the same four at the highest), and how near the hand is: 0 more than 30 cm from
+	// the volume, 1 within 30 cm, 2 inside it. node is the node's address (what the image shows). False with no target, with
+	// hand targeting off or when the last publish is over 250 ms old.
+	struct TargetMark
+	{
+		float corner[8][3] = {};
+		int glow = 0;
+		u32 node = 0;
+	};
+	bool GetTargetMark(TargetMark* out);
 
 	// Overlap and height rules, ties and the walk's safety on synthetic trigger lists in scripted RAM (the bathroom Green
 	// Herb's measured numbers among them), the once-per-approach rules, the toast text and the shipped File #1 block;

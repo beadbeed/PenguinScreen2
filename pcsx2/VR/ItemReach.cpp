@@ -3,6 +3,8 @@
 
 #include "VR/ItemReach.h"
 
+#include "VR/CameraDriver.h"
+#include "VR/HeadPose.h"
 #include "VR/HudCards.h"
 #include "VR/ItemData.h"
 #include "VR/VRInput.h"
@@ -22,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
+#include <limits>
 #include <mutex>
 #include <string>
 
@@ -302,6 +305,152 @@ namespace VR::ItemReach
 
 	namespace
 	{
+		// The only item the hand prototype is about: the Handgun (J's Bar's pistol on the counter).
+		constexpr u16 kHandTargetItemId = 0;
+
+		// The list walk Evaluate does (the same head, node range check, loop check and cap), calling visit(node) for each node
+		// it reaches; visit returns false when something it needed did not read (the walk stops there, as Evaluate's does).
+		// *walked counts the nodes visited. Returns why it stopped early, or Fault::None at the end of the list.
+		template <class Visit>
+		Fault WalkTriggerList(const Peek& peek, const ProfileDB::ReachParams& p, u32* walked, Visit&& visit)
+		{
+			u32 node = 0;
+			if (!peek(p.list_head, 4, &node))
+				return Fault::ListHead;
+			const u64 node_bytes = NodeBytes(p);
+			const u32 cap = std::clamp<u32>(p.max_nodes, 1u, kHardNodeCap);
+			u32 mark = 0;
+			u32 since = 0;
+			u32 limit = 1;
+			while (node != 0)
+			{
+				if (*walked >= cap)
+					return Fault::NodeCap;
+				if ((node & 3u) != 0 || static_cast<u64>(node) + node_bytes > static_cast<u64>(Ps2MemSize::MainRam))
+					return Fault::NodePointer;
+				if (node == mark)
+					return Fault::Cycle;
+				if (++since == limit)
+				{
+					mark = node;
+					limit <<= 1;
+					since = 0;
+				}
+				(*walked)++;
+				u32 next = 0;
+				if (!peek(static_cast<u64>(node) + p.next_offset, 4, &next) || !visit(node))
+					return Fault::NodePointer;
+				node = next;
+			}
+			return Fault::None;
+		}
+	}
+
+	HandTarget EvaluateHandTarget(const ProfileDB::ReachParams& p, u32 record, const double hand_game[3], MemReader reader,
+		const double* only_centre, double only_tol_cm)
+	{
+		HandTarget out;
+		if (!hand_game || !std::isfinite(hand_game[0]) || !std::isfinite(hand_game[1]) || !std::isfinite(hand_game[2]))
+			return out;
+		for (int k = 0; k < 3; k++)
+			out.hand[k] = hand_game[k];
+		const Peek peek{reader ? reader : &ReadGuest};
+		const double hx = hand_game[0];
+		const double hy = hand_game[1];
+		const double hz = hand_game[2];
+
+		double best_d2 = 0.0;
+		out.fault = WalkTriggerList(peek, p, &out.walked, [&](u32 node) {
+			// A floor item the game's search would look at (Evaluate's filters), then only the Handgun's.
+			u32 type = 0;
+			u32 mode = 0;
+			u32 enabled = 0;
+			u32 busy = 0;
+			if (!peek(static_cast<u64>(node) + p.type_offset, 1, &type) || !peek(static_cast<u64>(node) + p.mode_offset, 1, &mode) ||
+				!peek(static_cast<u64>(node) + p.enabled_offset, 1, &enabled) ||
+				!peek(static_cast<u64>(node) + p.busy_offset, 1, &busy))
+				return false;
+			if (!(type == p.accept_type && mode == p.accept_mode && enabled != 0 && busy == 0))
+				return true;
+			u32 index = 0;
+			u32 id = 0;
+			// A record that does not read names nothing: not a candidate, as in Evaluate.
+			if (!peek(static_cast<u64>(node) + p.item_offset, 4, &index) ||
+				!peek(static_cast<u64>(p.item_table) + static_cast<u64>(index) * p.item_stride + p.item_id_offset, 2, &id))
+				return true;
+			if (id != kHandTargetItemId)
+				return true;
+			double y_min = 0.0;
+			double y_max = 0.0;
+			Quad q{};
+			bool have = peek.S32(static_cast<u64>(node) + p.y_min_offset, &y_min) &&
+			            peek.S32(static_cast<u64>(node) + p.y_max_offset, &y_max);
+			for (int i = 0; i < 4 && have; i++)
+			{
+				have = peek.S32(static_cast<u64>(node) + p.quad_offset + static_cast<u64>(i) * 8, &q.x[i]) &&
+				       peek.S32(static_cast<u64>(node) + p.quad_offset + static_cast<u64>(i) * 8 + 4, &q.z[i]);
+			}
+			if (!have)
+				return true;
+			if (only_centre)
+			{
+				const double cx = 0.25 * (q.x[0] + q.x[1] + q.x[2] + q.x[3]) - only_centre[0];
+				const double cy = 0.5 * (y_min + y_max) - only_centre[1];
+				const double cz = 0.25 * (q.z[0] + q.z[1] + q.z[2] + q.z[3]) - only_centre[2];
+				if (!(cx * cx + cy * cy + cz * cz <= only_tol_cm * only_tol_cm))
+					return true;
+			}
+
+			// How far the hand is from the volume: on the floor plane from the quad (0 inside it), in height from the range.
+			const bool in_quad = PointInQuad(hx, hz, q);
+			double horizontal = 0.0;
+			if (!in_quad)
+			{
+				double edge_sq = std::numeric_limits<double>::max();
+				for (int i = 0; i < 4; i++)
+				{
+					const int j = (i + 1) & 3;
+					edge_sq = std::min(edge_sq, SegmentDistanceSq(hx, hz, q.x[i], q.z[i], q.x[j], q.z[j]));
+				}
+				horizontal = std::sqrt(edge_sq);
+			}
+			const double vertical = (hy < y_min) ? (y_min - hy) : (hy > y_max) ? (hy - y_max) : 0.0;
+			const double d2 = horizontal * horizontal + vertical * vertical;
+			// The nearest to the hand wins, the first in the list on a tie.
+			if (out.found && !(d2 < best_d2))
+				return true;
+			out.found = true;
+			best_d2 = d2;
+			out.node = node;
+			out.index = index;
+			out.item_id = static_cast<u16>(id);
+			for (int i = 0; i < 4; i++)
+			{
+				out.quad_x[i] = q.x[i];
+				out.quad_z[i] = q.z[i];
+			}
+			out.y_min = y_min;
+			out.y_max = y_max;
+			out.horizontal_cm = horizontal;
+			out.vertical_cm = vertical;
+			// On an edge the distance can come out a rounding error above 0: that is still the quad's edge, inside.
+			out.inside = (in_quad || horizontal < 1.0e-9) && vertical == 0.0;
+			return true;
+		});
+
+		if (!out.found)
+			return out;
+		out.centre[0] = 0.25 * (out.quad_x[0] + out.quad_x[1] + out.quad_x[2] + out.quad_x[3]);
+		out.centre[1] = 0.5 * (out.y_min + out.y_max);
+		out.centre[2] = 0.25 * (out.quad_z[0] + out.quad_z[1] + out.quad_z[2] + out.quad_z[3]);
+		// What the game's own press would pick from where the character stands: the same node or another.
+		const Reach forward = Evaluate(p, record, reader);
+		out.forward_agrees = forward.found && forward.node == out.node;
+		return out;
+	}
+
+	namespace
+	{
 		// --- Once per approach ---
 
 		struct Tracker
@@ -433,6 +582,74 @@ namespace VR::ItemReach
 			s_view.item_id = in_reach ? item_id : 0;
 		}
 
+		// --- Hand targeting (the CPU thread's, except the published mark) ---
+
+		// A target exists while the nearest Handgun volume's middle is within kTargetRangeCm of the hand (kTargetKeepCm once it
+		// has one, so the edge of the range does not flicker it); farther, the volume is in another room or part of the level
+		// and drawing it would only confuse. kNearCm is the marker's "brighter within".
+		constexpr double kTargetRangeCm = 300.0;
+		// The one trigger this prototype targets: the Handgun lying on J's Bar counter at the start of File #1's first scenario.
+		// Its volume, read from a RAM dump in J's Bar (2026-10-12; node 0x3B6158 then): corners (8503, 12896), (8467, 12913),
+		// (8484, 12949), (8520, 12932) cm, a 40 cm square turned about 25 deg, y 120-160. Any other Handgun trigger is ignored.
+		constexpr double kJsBarPistolCentre[3] = {8493.5, 140.0, 12922.5};
+		constexpr double kJsBarPistolTolCm = 10.0;
+		constexpr double kTargetKeepCm = 320.0;
+		constexpr double kNearCm = 30.0;
+		constexpr u32 kHandEvalEveryVsyncs = 2;
+		constexpr u64 kHandLogMs = 1000;
+		constexpr u64 kMarkStaleMs = 250;
+
+		struct HandState
+		{
+			bool logged_arm = false; // the activation lines were said since first person last armed
+			bool has_target = false;
+			u32 node = 0;
+			u16 item_id = 0;
+			float centre_game[3] = {}; // the target's volume centre as found, game cm, and in the headset's space, metres
+			float centre_vr[3] = {};   // (said again when it is lost)
+			bool inside = false;     // the last evaluation's verdict, for the one tick per entry
+			bool published = false;  // a marker is out there (so a vsync with nothing to do touches no lock)
+			u32 vsync = 0;
+			u64 next_log_ms = 0;
+		};
+		HandState s_hand;
+
+		std::mutex s_mark_mutex;
+		TargetMark s_mark;
+		bool s_mark_valid = false;
+		u64 s_mark_ms = 0;
+
+		void PublishMark(const TargetMark* mark)
+		{
+			s_hand.published = (mark != nullptr);
+			std::lock_guard<std::mutex> lock(s_mark_mutex);
+			s_mark_valid = (mark != nullptr);
+			if (mark)
+			{
+				s_mark = *mark;
+				const u64 now = CameraDriver::SteadyNowMs();
+				s_mark_ms = (now != 0) ? now : 1;
+			}
+		}
+
+		// No target any more (or not evaluating at all): the marker goes, and a target that was there is said lost.
+		void HandStop(bool say)
+		{
+			if (!s_hand.has_target && !s_hand.published)
+				return;
+			if (s_hand.has_target && say)
+				Console.WriteLn("(VR) Hand targeting: target lost: node 0x%08X, item %u (%s), volume centre game (%.1f, %.1f, %.1f) cm, "
+								"VR (%.3f, %.3f, %.3f) m",
+					s_hand.node, static_cast<u32>(s_hand.item_id), ItemData::Name(s_hand.item_id),
+					static_cast<double>(s_hand.centre_game[0]), static_cast<double>(s_hand.centre_game[1]),
+					static_cast<double>(s_hand.centre_game[2]), static_cast<double>(s_hand.centre_vr[0]),
+					static_cast<double>(s_hand.centre_vr[1]), static_cast<double>(s_hand.centre_vr[2]));
+			s_hand.has_target = false;
+			s_hand.inside = false;
+			s_hand.next_log_ms = 0;
+			PublishMark(nullptr);
+		}
+
 		std::atomic<bool> s_selftest_ran{false};
 
 		void MaybeRunSelfTest()
@@ -500,11 +717,175 @@ namespace VR::ItemReach
 			Announce(u, haptic_strength);
 	}
 
+	void PollHandTarget(const ProfileDB::Profile* profile, const Live& live, u64 now_ms, float haptic_strength)
+	{
+		const ProfileDB::ReachParams* params =
+			(profile && profile->reach.has_value()) ? &profile->reach.value() : nullptr;
+		if (!params || !EmuConfig.VR.HandTargeting || !live.hand_game || !live.net_offline || !live.armed ||
+			!VMManager::HasValidVM())
+		{
+			// Off, or not first person offline in File #1: nothing is shown, and the next arm says its lines afresh.
+			HandStop(true);
+			s_hand.logged_arm = false;
+			return;
+		}
+		// The camera guards' flicker: the same scene, so this vsync is sat out and everything stays as it was.
+		if (!live.guards_now)
+			return;
+		if (live.screen_up)
+		{
+			HandStop(true);
+			return;
+		}
+		// The mapping exists only while the camera is being driven (CameraDriver::GetMapping), the hand only while it is tracked.
+		CameraDriver::Mapping map;
+		const VRInputSnapshot snap = GetInputSnapshot();
+		const VRPose& grip = snap.hands[VRInputSnapshot::RIGHT].grip_pose;
+		if (!CameraDriver::GetMapping(&map) || snap.generation == 0 || !snap.actions_active || !grip.valid)
+		{
+			HandStop(true);
+			return;
+		}
+
+		if (!s_hand.logged_arm)
+		{
+			// Once each time first person arms: what this is, and whether the mapping agrees with the code that places the eye.
+			const HeadPose::Snapshot head = HeadPose::Get();
+			const float head_vr[3] = {head.position_x, head.position_y, head.position_z};
+			double eye_err_mm = 0.0;
+			double round_trip_mm = 0.0;
+			if (head.valid && head.position_valid &&
+				CameraDriver::MappingCheck(head_vr, grip.position_xyz.data(), &eye_err_mm, &round_trip_mm))
+			{
+				s_hand.logged_arm = true;
+				Console.WriteLn("(VR) Hand targeting: on (offline File #1, right hand, the J's Bar counter pistol's trigger only; read-only)");
+				Console.WriteLn("(VR) Hand targeting: mapping check: eye->head error %.3f mm, round trip %.3f mm", eye_err_mm,
+					round_trip_mm);
+			}
+		}
+
+		if ((s_hand.vsync++ % kHandEvalEveryVsyncs) != 0)
+			return;
+
+		float hand_game[3];
+		if (!CameraDriver::GameFromVr(map, grip.position_xyz.data(), hand_game))
+		{
+			HandStop(true);
+			return;
+		}
+		const double hand[3] = {hand_game[0], hand_game[1], hand_game[2]};
+		const HandTarget t = EvaluateHandTarget(*params, live.record, hand, nullptr, kJsBarPistolCentre, kJsBarPistolTolCm);
+		const double to_centre = std::sqrt((t.hand[0] - t.centre[0]) * (t.hand[0] - t.centre[0]) +
+		                                   (t.hand[1] - t.centre[1]) * (t.hand[1] - t.centre[1]) +
+		                                   (t.hand[2] - t.centre[2]) * (t.hand[2] - t.centre[2]));
+		if (!t.found || to_centre > (s_hand.has_target ? kTargetKeepCm : kTargetRangeCm))
+		{
+			HandStop(true);
+			return;
+		}
+
+		// The volume centre and the box's corners in the headset's space.
+		const float centre_game[3] = {static_cast<float>(t.centre[0]), static_cast<float>(t.centre[1]),
+			static_cast<float>(t.centre[2])};
+		float centre_vr[3] = {};
+		TargetMark mark;
+		bool mapped = CameraDriver::VrFromGame(map, centre_game, centre_vr);
+		for (int i = 0; i < 4 && mapped; i++)
+		{
+			const float low[3] = {static_cast<float>(t.quad_x[i]), static_cast<float>(t.y_min), static_cast<float>(t.quad_z[i])};
+			const float high[3] = {static_cast<float>(t.quad_x[i]), static_cast<float>(t.y_max), static_cast<float>(t.quad_z[i])};
+			mapped = CameraDriver::VrFromGame(map, low, mark.corner[i]) && CameraDriver::VrFromGame(map, high, mark.corner[4 + i]);
+		}
+		if (!mapped)
+		{
+			HandStop(true);
+			return;
+		}
+
+		// A different node is another target: the old one is lost first.
+		if (s_hand.has_target && s_hand.node != t.node)
+			HandStop(true);
+		if (!s_hand.has_target)
+		{
+			s_hand.has_target = true;
+			s_hand.node = t.node;
+			s_hand.item_id = t.item_id;
+			for (int k = 0; k < 3; k++)
+			{
+				s_hand.centre_game[k] = centre_game[k];
+				s_hand.centre_vr[k] = centre_vr[k];
+			}
+			s_hand.inside = false;
+			s_hand.next_log_ms = 0;
+			Console.WriteLn("(VR) Hand targeting: target found: node 0x%08X, item %u (%s), volume centre game (%.1f, %.1f, %.1f) cm, "
+							"VR (%.3f, %.3f, %.3f) m",
+				t.node, static_cast<u32>(t.item_id), ItemData::Name(t.item_id), t.centre[0], t.centre[1], t.centre[2],
+				static_cast<double>(centre_vr[0]), static_cast<double>(centre_vr[1]), static_cast<double>(centre_vr[2]));
+		}
+
+		// The marker: dim while the hand is far, brighter within kNearCm of the volume, brightest inside it.
+		const double volume_cm = std::sqrt(t.horizontal_cm * t.horizontal_cm + t.vertical_cm * t.vertical_cm);
+		mark.node = t.node;
+		mark.glow = t.inside ? 2 : (volume_cm <= kNearCm ? 1 : 0);
+		PublishMark(&mark);
+
+		// One light tick when the hand enters the volume, not again until it has left.
+		if (t.inside && !s_hand.inside)
+		{
+			const float amp = std::clamp(kTickAmp * (std::isfinite(haptic_strength) ? haptic_strength : 0.0f), 0.0f, 1.0f);
+			if (amp > 0.0f)
+				XRInput::QueuePulse(kRightHand, amp, kTickSeconds);
+		}
+		s_hand.inside = t.inside;
+
+		if (now_ms < s_hand.next_log_ms)
+			return;
+		s_hand.next_log_ms = now_ms + kHandLogMs;
+		Console.WriteLn("(VR) Hand targeting: hand VR (%.3f, %.3f, %.3f) m, game (%.1f, %.1f, %.1f) cm; volume %.1f cm horizontal, "
+						"%.1f cm vertical, %.1f cm to its centre; inside %s; forward search agrees %s",
+			static_cast<double>(grip.position_xyz[0]), static_cast<double>(grip.position_xyz[1]),
+			static_cast<double>(grip.position_xyz[2]), t.hand[0], t.hand[1], t.hand[2], t.horizontal_cm, t.vertical_cm, to_centre,
+			t.inside ? "yes" : "no", t.forward_agrees ? "yes" : "no");
+
+		// The projection check: is the volume's middle where the game's own camera sees it, as the map says it is? (What
+		// agreement does and does not prove is on CameraDriver::ProjectionCheck.)
+		CameraDriver::ProjectionResult pr;
+		if (CameraDriver::ProjectionCheck(centre_game, &pr))
+		{
+			Console.WriteLn("(VR) Hand targeting: projection check: game view yaw %.2f pitch %.2f deg, headset yaw %.2f pitch %.2f deg, "
+							"difference %.2f deg",
+				static_cast<double>(pr.game_yaw_deg), static_cast<double>(pr.game_pitch_deg), static_cast<double>(pr.head_yaw_deg),
+				static_cast<double>(pr.head_pitch_deg), static_cast<double>(pr.diff_deg));
+		}
+		else
+		{
+			Console.WriteLn("(VR) Hand targeting: projection check: not available (no matched frame this vsync, the camera turned since that frame, or the view's yaw sign is not 1)");
+		}
+	}
+
+	bool GetTargetMark(TargetMark* out)
+	{
+		std::lock_guard<std::mutex> lock(s_mark_mutex);
+		if (!s_mark_valid)
+			return false;
+		const u64 now = CameraDriver::SteadyNowMs();
+		if (now > s_mark_ms && now - s_mark_ms > kMarkStaleMs)
+			return false;
+		if (out)
+			*out = s_mark;
+		return true;
+	}
+
 	void OnStateLoaded()
 	{
 		s_tracker = Tracker{};
 		s_vsync = 0;
 		Publish(false, 0, 0);
+		// A loaded state is another scene (and another character position): hand targeting starts over quietly.
+		s_hand.has_target = false;
+		s_hand.inside = false;
+		s_hand.next_log_ms = 0;
+		PublishMark(nullptr);
 	}
 
 	View Current()
@@ -945,6 +1326,102 @@ namespace VR::ItemReach
 			PutNode(0, herb);
 		}
 
+		// --- Hand targeting: the Handgun's volume against a hand point (EvaluateHandTarget). ---
+		{
+			const auto hand_at = [&](double x, double y, double z) {
+				const double hand[3] = {x, y, z};
+				return EvaluateHandTarget(p, kTestRecord, hand, TestRead);
+			};
+			// The character stands where the herb test had it (z 13000, facing +z): the game's own search reaches the node.
+			PutCharacter(9602, 137, 13000, 0, 0.0f);
+			TestPut(kTestHead, 4, NodeAddress(0));
+			NodeSpec gun = herb; // x 9581-9622, z 13052-13093, y 100-200, priority 0
+			gun.item = 2;        // the Handgun (id 0) in the table above
+			PutNode(0, herb);
+			check(!hand_at(9600, 150, 13060).found, "hand target: a list with only a Green Herb has no Handgun target");
+			PutNode(0, gun);
+			HandTarget ht = hand_at(9600, 150, 13060);
+			check(ht.found && ht.node == NodeAddress(0) && ht.item_id == 0 && ht.index == 2 && ht.fault == Fault::None && ht.walked == 1,
+				"hand target: the Handgun's node is found, with its record and the walk");
+			check(ht.inside && ht.horizontal_cm == 0.0 && ht.vertical_cm == 0.0, "hand target: in the quad and the range is inside");
+			check(std::fabs(ht.centre[0] - 9601.5) < 1.0e-9 && std::fabs(ht.centre[1] - 150.0) < 1.0e-9 &&
+					  std::fabs(ht.centre[2] - 13072.5) < 1.0e-9,
+				"hand target: the volume's middle is the corners' mean and the range's middle");
+			check(ht.y_min == 100.0 && ht.y_max == 200.0 && ht.quad_x[0] == 9581.0 && ht.quad_z[2] == 13093.0,
+				"hand target: the quad and the range as the node holds them");
+			ht = hand_at(9650, 150, 13060);
+			check(ht.found && !ht.inside && std::fabs(ht.horizontal_cm - 28.0) < 1.0e-9 && ht.vertical_cm == 0.0,
+				"hand target: 28 cm outside an edge is 28 cm horizontal, not inside");
+			ht = hand_at(9632, 150, 13102);
+			check(!ht.inside && std::fabs(ht.horizontal_cm - std::sqrt(181.0)) < 1.0e-9, "hand target: past a corner it is the distance to the corner");
+			ht = hand_at(9600, 210, 13060);
+			check(!ht.inside && ht.horizontal_cm == 0.0 && std::fabs(ht.vertical_cm - 10.0) < 1.0e-9, "hand target: 10 cm over the range");
+			ht = hand_at(9600, 90, 13060);
+			check(!ht.inside && std::fabs(ht.vertical_cm - 10.0) < 1.0e-9, "hand target: 10 cm under the range");
+			check(hand_at(9600, 100, 13060).inside && hand_at(9600, 200, 13060).inside, "hand target: the range's ends are inside (no margin)");
+			check(hand_at(9622, 150, 13060).inside, "hand target: a point on the quad's edge is inside");
+			check(!hand_at(9622.5, 150, 13060).inside, "hand target: half a centimetre past the edge is not");
+			const double nan_hand[3] = {std::nan(""), 150.0, 13060.0};
+			check(!EvaluateHandTarget(p, kTestRecord, nan_hand, TestRead).found, "hand target: a hand that is not a number finds nothing");
+
+			// Only item id 0: a Green Herb node on the hand does not count, and the Handgun's farther node does.
+			{
+				NodeSpec near_herb = herb;
+				near_herb.next = 1;
+				PutNode(0, near_herb);
+				PutNode(1, gun);
+				ht = hand_at(9600, 150, 13060);
+				check(ht.found && ht.node == NodeAddress(1) && ht.item_id == 0, "hand target: only Handgun nodes count, the herb's is passed over");
+				// Two Handgun nodes: the nearer to the hand.
+				NodeSpec far_gun = gun;
+				Rect(far_gun, 0, 0, 10, 10);
+				far_gun.next = 1;
+				PutNode(0, far_gun);
+				ht = hand_at(9600, 150, 13060);
+				check(ht.found && ht.node == NodeAddress(1), "hand target: of two Handgun nodes the nearer one");
+				ht = hand_at(5, 150, 5);
+				check(ht.found && ht.node == NodeAddress(0) && ht.inside, "hand target: and the other when the hand is there");
+			}
+
+			// The node filters are the pickup cue's.
+			const auto gun_variant = [&](const char* name, const NodeSpec& spec, bool want) {
+				PutNode(0, spec);
+				check(hand_at(9600, 150, 13060).found == want, name);
+			};
+			NodeSpec vspec = gun;
+			gun_variant("hand target: the plain Handgun node counts", vspec, true);
+			vspec.type = 0x81;
+			gun_variant("hand target: another trigger type does not", vspec, false);
+			vspec = gun;
+			vspec.mode = 1;
+			gun_variant("hand target: another search mode does not", vspec, false);
+			vspec = gun;
+			vspec.enabled = 0;
+			gun_variant("hand target: a disabled node does not", vspec, false);
+			vspec = gun;
+			vspec.busy = 1;
+			gun_variant("hand target: a busy node does not", vspec, false);
+			vspec = gun;
+			vspec.item = 0x10000000;
+			gun_variant("hand target: a node whose record does not read does not", vspec, false);
+
+			// Does the game's own forward search pick the same node? Both nodes cover the probe; the lower priority wins, the
+			// first in the list on a tie.
+			NodeSpec gun_first = gun;
+			gun_first.next = 1;
+			NodeSpec herb_second = herb;
+			PutNode(0, gun_first);
+			PutNode(1, herb_second);
+			ht = hand_at(9600, 150, 13060);
+			check(ht.found && ht.node == NodeAddress(0) && ht.forward_agrees, "hand target: the game's search picks the same node (a tie, the first in the list)");
+			gun_first.priority = 3;
+			PutNode(0, gun_first);
+			ht = hand_at(9600, 150, 13060);
+			check(ht.found && ht.node == NodeAddress(0) && !ht.forward_agrees,
+				"hand target: another node wins the game's search (a lower priority number): does not agree");
+			PutNode(0, herb);
+		}
+
 		// --- Once per approach. ---
 		{
 			Tracker t;
@@ -1044,7 +1521,7 @@ namespace VR::ItemReach
 		if (failures == 0)
 			Console.WriteLn(Color_StrongGreen, "(VR) Pickup cue self-test: passed (%d checks: the herb's measured reach, heights, "
 											   "node filters, priority, headings, quad shapes, unreadable data, the walk's loop and "
-											   "cap, once per approach, the toast, the shipped block).", checks);
+											   "cap, hand targeting's Handgun volume, once per approach, the toast, the shipped block).", checks);
 		else
 			Console.WriteLn(Color_StrongRed, "(VR) Pickup cue self-test FAIL: %s (%d of %d checks failed).", first, failures, checks);
 		return failures == 0;

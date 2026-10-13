@@ -125,6 +125,93 @@ namespace VR::CameraDriver
 	// grab breakout's grabbed checks); resolved only for profiles with a feedback or breakout block.
 	bool LocalRecordAny(u32* base);
 
+	// CPU thread: true while the network mode Apply last resolved is Offline (adapter off and the game not in network
+	// play); false in private co-op and when restricted. Hand targeting runs only offline.
+	bool NetworkOffline();
+
+	// --- The headset's space against the game's (hand targeting; reads only, nothing here writes the game) ---
+	//
+	// What camera.lookAt does to place the eye, as numbers a hand position can be mapped with. ApplyLookAt publishes one
+	// on each vsync it writes the camera (first person armed, no menu): the character's position, the eye height and
+	// forward, the TRUE base yaw (the character's heading or the camera's own yaw anchor; not the stick-predicted
+	// cam_base the frame is written with), the recenter's head position and yaw, and the scale. OpenXR space: right +X,
+	// up +Y, forward -Z, metres, yaw counter-clockwise about +Y. Game space: centimetres, Y up, heading 0 faces +Z,
+	// (sin y, cos y) on the floor plane, y grows with yaw_sign (1: counter-clockwise like the headset's).
+	//
+	//   d      = vr - ref_pos                                         (metres from the recenter's head)
+	//   fwd    = -dx sin(ref_yaw) - dz cos(ref_yaw)                    (the recenter yaw taken out: forward / right)
+	//   right  =  dx cos(ref_yaw) - dz sin(ref_yaw)
+	//   game.x = char.x + u (fwd sin b + right sin(b - yaw_sign pi/2))   b = base_yaw, u = units_per_meter
+	//   game.z = char.z + u (fwd cos b + right cos(b - yaw_sign pi/2))
+	//   game.y = char.y + eye_height + u dy
+	//
+	// which is exactly the eye ApplyLookAt writes (LookAtEye), less eye_forward: the game puts its eye eye_forward units
+	// ahead of that along the view yaw (sin yaw_cam, cos yaw_cam), so a head at VR point H has its game EYE at
+	// GameFromVr(H) + eye_forward * (sin yaw_cam, 0, cos yaw_cam), and VrFromGame(eye) is H moved eye_forward / u metres
+	// along the head's horizontal forward (File #1: 10 cm), not H. yaw_cam is cam_base plus yaw_sign times the head's yaw
+	// since the recenter. With yaw_sign -1 the map is a reflection (the game's yaw grows the other way); the inverse still
+	// holds. The map follows the character: it changes as the character walks and as the base yaw turns, so a game point
+	// is only as old as the latest publish (GetMapping is false once that is over 250 ms old, which is also every vsync
+	// the camera is not driven: disarmed, a menu up, a cutscene).
+	struct Mapping
+	{
+		bool valid = false;            // numbers usable: finite, units_per_meter non-zero, a recenter reference taken
+		float character[3] = {};       // the character's position (camera.lookAt.position), game units
+		float eye_height = 0.0f;       // game units over character[1] the recentered head's eye sits
+		float eye_forward = 0.0f;      // game units ahead of the head along the view yaw (not part of the map)
+		float base_yaw = 0.0f;         // radians, the true base yaw
+		float ref_pos[3] = {};         // the head position at the recenter, metres
+		float ref_yaw = 0.0f;          // the head's yaw at the recenter, radians
+		float units_per_meter = 0.0f;  // game units per metre
+		float yaw_sign = 1.0f;
+		float pitch_sign = 1.0f;       // camera.lookAt.pitchSign (ProjectionCheck)
+		u64 stamp_ms = 0;              // SteadyNowMs when published
+	};
+
+	// The latest published mapping, false when there is none or it is over 250 ms old. Any thread.
+	bool GetMapping(Mapping* out);
+
+	// Pure: false for an unusable mapping or a point that is not finite. The two are exact inverses (in double, so the
+	// float outputs round trip within a few hundredths of a millimetre at File #1's coordinates).
+	bool GameFromVr(const Mapping& m, const float vr[3], float game[3]);
+	bool VrFromGame(const Mapping& m, const float game[3], float vr[3]);
+	// The same with the latest published mapping (GetMapping), false without one.
+	bool GameFromVr(const float vr[3], float game[3]);
+	bool VrFromGame(const float game[3], float vr[3]);
+
+	// CPU thread, hand targeting's activation line: the mapping's self-consistency on live numbers. eye_err_mm: for the
+	// head position head_vr, the eye ApplyLookAt would write (with eye_forward taken as 0) mapped back with VrFromGame
+	// against head_vr; round_trip_mm: the worst of GameFromVr then VrFromGame over the head, extra_vr (may be null) and
+	// two fixed offsets from the head. False without a mapping.
+	bool MappingCheck(const float head_vr[3], const float extra_vr[3], double* eye_err_mm, double* round_trip_mm);
+
+	// What hand targeting's projection check compares for one game point (see ProjectionCheck).
+	struct ProjectionResult
+	{
+		float game_yaw_deg = 0.0f, game_pitch_deg = 0.0f; // where the game's own view matrix puts the point
+		float head_yaw_deg = 0.0f, head_pitch_deg = 0.0f; // where the head the frame was rendered from sees VrFromGame(point)
+		float diff_deg = 0.0f;                            // the angle between the two directions
+	};
+
+	// CPU thread, after Apply: for a game point (centimetres) the direction from the game's eye, in the frame of its view
+	// (yaw to the right and pitch up, in degrees from the view's forward), taken from the game's own view matrix (the 4x4
+	// at camera.lookAt.viewMatrix, row vectors, the camera looking down -z, as TrackRenderPose reads it) against the
+	// direction from the head to the same point mapped into the headset's space (VrFromGame), in the frame of the head pose
+	// that view was rendered from (the newest matched frame), with the head's roll dropped as the camera drops it and the
+	// eye moved eye_forward ahead as the game moves it.
+	//
+	// What agreement (a difference of a degree or less, steady as the head turns and moves) means: the map's position,
+	// yaw, handedness and scale put a world point where the game's own camera sees it, so a hand position mapped with
+	// GameFromVr is where that hand is in the picture the game rendered. What it does NOT prove: that the trigger volume
+	// matches the pistol you can see (the volumes are 2-5 times the objects and their middles are not the models'
+	// middles: this only checks the point it is given); anything about display latency (the frame is shown some tens of
+	// milliseconds after the head pose it was rendered from, and the compositor places it by that pose; the hand pose
+	// sampled for the poll is a different instant again); or the eyes (each eye is half the IPD to a side of the head the
+	// check uses). Only meaningful while the character stands still and the view does not turn: the matrix is the newest
+	// matched frame's, up to a few vsyncs old, mapped with the mapping of this vsync. False without a mapping, a view
+	// matrix read this vsync that matched a write, or a head pose with a position.
+	bool ProjectionCheck(const float game_point[3], ProjectionResult* out);
+
 	void OnStateLoaded();
 
 	// Why the camera is not armed (the DISARMED log line), for telemetry.

@@ -21,6 +21,7 @@
 #include "VR/VRVulkanBridge.h"
 #include "VR/BeltPouches.h"
 #include "VR/ItemData.h"
+#include "VR/ItemReach.h"
 #include "VR/ZoneMarkers.h"
 #include "Config.h"
 #include "VMManager.h"
@@ -3286,9 +3287,12 @@ namespace VR::XRCompositor
 		{
 			if (s.zone_disabled)
 				return false;
+			// Hand targeting's slot gets its swapchain only while the HandTargeting setting is on, so with it off the
+			// resources are exactly what they were before the slot existed (a later switch-on creates it on the next call).
+			const auto chain_wanted = [](int k) { return k != ZoneMarkers::kTarget || EmuConfig.VR.HandTargeting; };
 			bool chains_ok = true;
-			for (const auto& zc : s.zone_chains)
-				chains_ok = chains_ok && (zc.swapchain != XR_NULL_HANDLE);
+			for (int k = 0; k < kZoneSlots; k++)
+				chains_ok = chains_ok && (!chain_wanted(k) || s.zone_chains[k].swapchain != XR_NULL_HANDLE);
 			if (chains_ok && s.zone_staging != VK_NULL_HANDLE && s.zone_cmd != VK_NULL_HANDLE && s.zone_fence != VK_NULL_HANDLE)
 				return true;
 			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
@@ -3377,9 +3381,10 @@ namespace VR::XRCompositor
 			}
 
 			uint32_t image_count = 0;
-			for (auto& zc : s.zone_chains)
+			for (int k = 0; k < kZoneSlots; k++)
 			{
-				if (zc.swapchain != XR_NULL_HANDLE)
+				auto& zc = s.zone_chains[k];
+				if (zc.swapchain != XR_NULL_HANDLE || !chain_wanted(k))
 					continue;
 				// Same format as the screen (sRGB normally): the images are sRGB-encoded bytes with alpha.
 				XrSwapchainCreateInfo ci = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
@@ -3452,7 +3457,14 @@ namespace VR::XRCompositor
 			// HeadAnchor's yaw for each zone, kept while the head looks straight up or down, as each Zone control keeps its
 			// own (GS thread only).
 			static SpatialControls::ZoneState s_zone_yaw[static_cast<int>(ZoneMarkers::Zone::Count)];
-			if (s.zone_disabled || s.hud_disabled || !HudCards::ZoneMarkersEnabled())
+			if (s.zone_disabled || s.hud_disabled)
+				return 0;
+			// Hand targeting's box (ItemReach::GetTargetMark; only ever published with the HandTargeting setting on) shows with
+			// or without the ZoneMarkers setting; the body-zone markers only with it.
+			ItemReach::TargetMark target_mark;
+			const bool target_on = EmuConfig.VR.HandTargeting && ItemReach::GetTargetMark(&target_mark);
+			const bool zones_on = HudCards::ZoneMarkersEnabled();
+			if (!zones_on && !target_on)
 				return 0;
 			if (!s.head_pose_valid || !s.head_position_valid || !CameraDriver::LookAtActive() || SpatialControls::MenuMode())
 				return 0;
@@ -3468,7 +3480,9 @@ namespace VR::XRCompositor
 			// What each slot shows this present: the frame its image rides, the key of what it shows, and its marks.
 			std::array<bool, kZoneSlots> want{};
 			float frame_pos[kZoneSlots][3] = {};
-			float frame_quat[kZoneSlots][4] = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}};
+			float frame_quat[kZoneSlots][4] = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f},
+				{0.0f, 0.0f, 0.0f, 1.0f}};
+			static_assert(kZoneSlots == 4, "one frame quaternion per zone slot");
 			u64 key[kZoneSlots] = {};
 			ZoneMarkers::Mark marks[kZoneSlots][ZoneMarkers::kMaxMarks];
 			int mark_count[kZoneSlots] = {};
@@ -3483,7 +3497,7 @@ namespace VR::XRCompositor
 			// The equipped weapon while it is lowered: a long gun slung over the shoulder (ZoneMarkers::LongGunEquipped
 			// decides that and where the backpack zone's press goes), anything else in the hip holster. None with no
 			// weapon equipped (bare hands, a herb), an item ItemData does not know, or the weapon raised (it is in the hand).
-			if (!HandModel::GetWeaponHeld().raised && GameFeedback::WeaponInHand() == GameFeedback::Hold::Weapon)
+			if (zones_on && !HandModel::GetWeaponHeld().raised && GameFeedback::WeaponInHand() == GameFeedback::Hold::Weapon)
 			{
 				const GameFeedback::WeaponView wv = GameFeedback::GetWeapon();
 				const ItemData::Kind item_kind = ItemData::KindOf(wv.item_id);
@@ -3523,7 +3537,7 @@ namespace VR::XRCompositor
 				ZoneMarkers::ZoneView view;
 				SpatialControls::Vec3 c;
 				float yaw = 0.0f;
-				if (zone_at(ZoneMarkers::Zone::Belt, &view, &c, &yaw))
+				if (zones_on && zone_at(ZoneMarkers::Zone::Belt, &view, &c, &yaw))
 				{
 					ZoneMarkers::Mark& m = marks[ZoneMarkers::kBelt][0];
 					m.centre[0] = c.x;
@@ -3550,7 +3564,7 @@ namespace VR::XRCompositor
 
 			// The pouches' rings, where the last pouch poll put them, a ring lit while a hand is in its pouch.
 			const BeltPouches::Telemetry pouches = BeltPouches::GetTelemetry();
-			if (pouches.active)
+			if (zones_on && pouches.active)
 			{
 				int n = 0;
 				float mid[3] = {0.0f, 0.0f, 0.0f};
@@ -3580,6 +3594,33 @@ namespace VR::XRCompositor
 						frame_pos[ZoneMarkers::kPouches][k] = mid[k] / static_cast<float>(n);
 					key[ZoneMarkers::kPouches] = k_pouches;
 				}
+			}
+
+			// Hand targeting's volume: a wireframe box of eight corner marks where the Handgun's trigger volume is, drawn
+			// dim, brighter with the hand within 30 cm and brightest with it inside. Not kept clear of the middle of the view
+			// (that is where the pistol is looked at). It rides a frame at its middle, so a kept image moves with the box;
+			// the key names the node, the glow rides in the lit bits.
+			if (target_on)
+			{
+				float mid[3] = {0.0f, 0.0f, 0.0f};
+				for (int i = 0; i < 8; i++)
+				{
+					ZoneMarkers::Mark& m = marks[ZoneMarkers::kTarget][i];
+					for (int k = 0; k < 3; k++)
+					{
+						m.centre[k] = target_mark.corner[i][k];
+						mid[k] += target_mark.corner[i][k];
+					}
+					m.radius = ZoneMarkers::kBoxCornerM;
+					m.shape = ZoneMarkers::Shape::Box;
+					m.glow = static_cast<u8>(std::clamp(target_mark.glow, 0, 2));
+					m.lit = m.glow > 0;
+				}
+				want[ZoneMarkers::kTarget] = true;
+				mark_count[ZoneMarkers::kTarget] = 8;
+				for (int k = 0; k < 3; k++)
+					frame_pos[ZoneMarkers::kTarget][k] = mid[k] * 0.125f;
+				key[ZoneMarkers::kTarget] = static_cast<u64>(target_mark.node) | (static_cast<u64>(std::clamp(target_mark.glow, 0, 2)) << 32);
 			}
 
 			const std::array<bool, kZoneSlots> go = ZoneMarkers::Plan(layer_capacity - layer_count, want);

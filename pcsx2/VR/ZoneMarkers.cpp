@@ -187,6 +187,8 @@ namespace VR::ZoneMarkers
 		{
 			if (m.shape == Shape::Bag)
 				return kBagReach * m.radius * p.s;
+			if (m.shape == Shape::Box)
+				return m.radius * p.s; // a corner: a point, with a little room for the lines that meet there
 			const float sq = p.dist * p.dist - m.radius * m.radius;
 			if (!(sq > 1.0e-8f))
 				return -1.0f; // the eye inside the ball
@@ -384,7 +386,7 @@ namespace VR::ZoneMarkers
 	{
 		std::array<bool, kSlots> go{};
 		// In order of what matters most, so the last ones go first when layers are short.
-		static constexpr int kOrder[kSlots] = {kHolster, kBelt, kPouches};
+		static constexpr int kOrder[kSlots] = {kHolster, kBelt, kPouches, kTarget};
 		for (const int slot : kOrder)
 		{
 			if (!want[static_cast<size_t>(slot)] || free_layers == 0)
@@ -450,12 +452,78 @@ namespace VR::ZoneMarkers
 		return true;
 	}
 
+	namespace
+	{
+		// Hand targeting's box: the eight Box marks (the floor quad's corners, then the same four at the top) joined by the
+		// twelve edges of a box, each a line kLineM wide at its corner (kMinLinePx to kMaxLinePx in the image) in the dim
+		// colour at kRingAlpha, or in the lit colour, brighter, as the marks' glow says (1 near, 2 inside). Nothing is
+		// drawn when a corner cannot be projected (one nearer the eye than 5 cm along the view): a half box would mislead.
+		void RasterBox(const Mark* marks, int count, const float eye[3], const Quad& quad, std::vector<u32>& out_rgba)
+		{
+			if (count != 8)
+				return;
+			Vec3 c, r, u, n;
+			QuadFrame(quad, &c, &r, &u, &n);
+			const Vec3 e = Load(eye);
+			const float px_per_m = static_cast<float>(kImageSize) / quad.size_m;
+			const float half = 0.5f * static_cast<float>(kImageSize);
+			float xs[8];
+			float ys[8];
+			float ws[8];
+			for (int i = 0; i < 8; i++)
+			{
+				OnPlane p;
+				if (!Finite(marks[i].centre, 3) || !ProjectOnPlane(e, c, r, u, n, Load(marks[i].centre), &p))
+					return;
+				xs[i] = half + p.x * px_per_m;
+				ys[i] = half - p.y * px_per_m;
+				ws[i] = std::clamp(kLineM * p.s * px_per_m, kMinLinePx, kMaxLinePx);
+			}
+			static constexpr float kBoxAlpha[3] = {kRingAlpha, 0.62f, 0.95f};
+			const int glow = std::clamp<int>(marks[0].glow, 0, 2);
+			const float line_alpha = kBoxAlpha[glow];
+			const u32 cr = (glow > 0) ? kLitR : kDimR;
+			const u32 cg = (glow > 0) ? kLitG : kDimG;
+			const u32 cb = (glow > 0) ? kLitB : kDimB;
+			static constexpr int kEdges[12][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6}, {6, 7}, {7, 4}, {0, 4}, {1, 5},
+				{2, 6}, {3, 7}};
+			for (const auto& edge : kEdges)
+			{
+				const int a = edge[0];
+				const int b = edge[1];
+				const float w = 0.5f * (ws[a] + ws[b]);
+				const float reach = w + 1.0f;
+				const int bx0 = std::max(0, static_cast<int>(std::floor(std::min(xs[a], xs[b]) - reach)));
+				const int bx1 = std::min(kSize - 1, static_cast<int>(std::ceil(std::max(xs[a], xs[b]) + reach)));
+				const int by0 = std::max(0, static_cast<int>(std::floor(std::min(ys[a], ys[b]) - reach)));
+				const int by1 = std::min(kSize - 1, static_cast<int>(std::ceil(std::max(ys[a], ys[b]) + reach)));
+				for (int py = by0; py <= by1; py++)
+				{
+					u32* row = out_rgba.data() + static_cast<size_t>(py) * kImageSize;
+					for (int px = bx0; px <= bx1; px++)
+					{
+						const float d = SegmentDistance(static_cast<float>(px) + 0.5f, static_cast<float>(py) + 0.5f, xs[a], ys[a], xs[b], ys[b]);
+						const float alpha = LineCover(d, w) * line_alpha;
+						// Where lines overlap, the stronger one shows.
+						if (alpha > static_cast<float>(row[px] >> 24) / 255.0f + 1.0e-3f)
+							row[px] = Pack(cr, cg, cb, alpha);
+					}
+				}
+			}
+		}
+	}
+
 	void RasterMarks(const Mark* marks, int count, const float eye[3], const Quad& quad, std::vector<u32>& out_rgba)
 	{
 		out_rgba.assign(kPixels, 0u);
 		if (!marks || count <= 0 || !Finite(eye, 3) || !Finite(quad.centre, 3) || !Finite(quad.right, 3) ||
 			!Finite(quad.up, 3) || !(quad.size_m > 0.0f))
 		{
+			return;
+		}
+		if (marks[0].shape == Shape::Box)
+		{
+			RasterBox(marks, count, eye, quad, out_rgba);
 			return;
 		}
 		Vec3 c, r, u, n;
@@ -937,6 +1005,79 @@ namespace VR::ZoneMarkers
 				moved[i] = marks[i];
 			moved[2].centre[0] += 0.01f;
 			check(NeedsRedraw(d, frame_pos, frame_quat, eye, 0x1Full, moved, 5), "one pouch moved 1 cm: drawn again");
+		}
+
+		// --- Hand targeting's box (the fourth slot) -----------------------------------------------------------------
+		{
+			const std::array<bool, kSlots> with_box{{true, true, true, true}};
+			check(Plan(4, with_box)[kTarget] && !Plan(3, with_box)[kTarget] && Plan(3, with_box)[kPouches] && !Plan(0, with_box)[kTarget],
+				"the hand-targeting box is the first thing dropped when layers are short");
+			check(Plan(1, std::array<bool, kSlots>{{false, false, false, true}})[kTarget], "with nothing else wanted it takes a free layer");
+
+			// A box 0.5 m wide and 0.4 m tall, 0.6 to 1.1 m ahead of a head at the origin (+Y up, forward -Z).
+			const float beye[3] = {0.0f, 1.2f, 0.0f};
+			const float bx[4] = {-0.25f, 0.25f, 0.25f, -0.25f};
+			const float bz[4] = {-0.6f, -0.6f, -1.1f, -1.1f};
+			Mark box[8];
+			for (int i = 0; i < 4; i++)
+			{
+				box[i].centre[0] = bx[i];
+				box[i].centre[1] = 0.9f;
+				box[i].centre[2] = bz[i];
+				box[4 + i].centre[0] = bx[i];
+				box[4 + i].centre[1] = 1.3f;
+				box[4 + i].centre[2] = bz[i];
+			}
+			for (Mark& m : box)
+			{
+				m.radius = kBoxCornerM;
+				m.shape = Shape::Box;
+			}
+			Quad box_quad;
+			std::vector<u32> box_pixels;
+			const bool placed = PlaceMarks(box, 8, beye, &box_quad);
+			check(placed, "a hand-targeting box in front of the eye gets a quad");
+			u32 alpha_max[3] = {0, 0, 0};
+			u32 dim_pixels = 0;
+			for (int g = 0; g < 3 && placed; g++)
+			{
+				for (Mark& m : box)
+					m.glow = static_cast<u8>(g);
+				RasterMarks(box, 8, beye, box_quad, box_pixels);
+				for (const u32 v : box_pixels)
+				{
+					alpha_max[g] = std::max(alpha_max[g], v >> 24);
+					if (g == 0 && (v >> 24) != 0)
+						dim_pixels++;
+				}
+			}
+			check(placed && dim_pixels > 500 && alpha_max[0] > 60 && alpha_max[0] < 100,
+				"a far box is twelve faint lines");
+			check(placed && alpha_max[1] > alpha_max[0] && alpha_max[2] > alpha_max[1] && alpha_max[2] > 200,
+				"a box brightens as the hand comes near, and is brightest with the hand inside");
+			// A corner behind the eye (or nearer than 5 cm) draws no box at all, not half of one.
+			Mark behind[8];
+			for (int i = 0; i < 8; i++)
+			{
+				behind[i] = box[i];
+			}
+			behind[3].centre[2] = 0.5f;
+			Quad behind_quad;
+			check(!PlaceMarks(behind, 8, beye, &behind_quad), "a box with a corner behind the eye gets no quad");
+			if (placed)
+			{
+				RasterMarks(behind, 8, beye, box_quad, box_pixels);
+				u32 any = 0;
+				for (const u32 v : box_pixels)
+					any |= v;
+				check(any == 0, "and rasterised on another box's quad it draws nothing");
+				std::vector<u32> seven;
+				RasterMarks(box, 7, beye, box_quad, seven);
+				any = 0;
+				for (const u32 v : seven)
+					any |= v;
+				check(any == 0, "seven corners are not a box: nothing is drawn");
+			}
 		}
 
 		if (failed == 0)
