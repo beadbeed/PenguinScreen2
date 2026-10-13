@@ -58,7 +58,10 @@ PROFILES_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__f
 # --check-profile compares them with the shipped profiles. Record offsets are into the local character record
 # (records + local slot byte * stride).
 #   records/stride/local_slot     character records, their stride and the u8 local slot byte
-#   menu_open                     u8 1 while the item screen, the map or pause is up (the profile's pauseWhen)
+#   menu_open                     u8 non-zero while the item screen, the map or pause is up (the menu pointer's when;
+#                                 the openers store the local slot + 1)
+#   screen_up                     u32 1 while any game screen is drawn, the take-it prompts included (the profile's
+#                                 pauseWhen); None: pauseWhen still reads menu_open
 #   eye/target                    the game camera's eye and target vectors (f32 x, y, z)
 #   cut_handler                   the fixed-cut handler call the profile NOPs while first person is armed
 #   focus_slot/near_cull          the camera focus slot byte and the characters' near-cull radius (f32) the profile holds
@@ -82,7 +85,7 @@ GAMES = {
     "SLPM-65428": dict(
         title="File #1",
         records=0x476DD0, stride=0x10E0, local_slot=0x48BF7D,
-        menu_open=0x48BF7E,
+        menu_open=0x48BF7E, screen_up=0x720AA0,
         eye=0x306338, target=0x306344,
         cut_handler=0x58EAEC, focus_slot=0x3AEF74, near_cull=0x6D6CF4,
         max_hp=0x546,
@@ -638,8 +641,9 @@ def sc_belt(r):
         opened = wait_until(lambda: r.p.read8(MENU_OPEN) == 1, 2.0)
         check(opened is not None, "item screen flag %d after squeezing at the belt, expected 1" % r.p.read8(MENU_OPEN))
         try:
-            time.sleep(0.5)
-            check(r.p.telemetry()["pause_when_hit"], "telemetry does not see pauseWhen")
+            # pauseWhen (File #1: any game screen drawn, 0x720AA0) rises 0.55-0.65 s after the item screen flag.
+            held = wait_until(lambda: r.p.telemetry()["pause_when_hit"], 1.5)
+            check(held is not None, "telemetry does not see pauseWhen")
             # The camera must hold still while the menu is up, even with the head turning.
             fc.set_head(pose(yaw_deg=20.0))
             _, spread, _ = r.track_yaw(1.0)
@@ -964,8 +968,9 @@ def profile_problems(serial, prof):
 
     # Menu flag: the camera's pauseWhen and the menu pointer's when.
     pause = [c.get("address") for c in look.get("pauseWhen") or []]
-    has("camera.lookAt.pauseWhen", g["menu_open"] in pause, "no entry on 0x%X (has %s)" % (
-        g["menu_open"], ", ".join(_fmt(a) for a in pause) or "none"))
+    pause_flag = g.get("screen_up") or g["menu_open"]
+    has("camera.lookAt.pauseWhen", pause_flag in pause, "no entry on 0x%X (has %s)" % (
+        pause_flag, ", ".join(_fmt(a) for a in pause) or "none"))
     if "menuPointer" in prof:
         when = [c.get("address") for c in (prof["menuPointer"] or {}).get("when") or []]
         has("menuPointer.when", g["menu_open"] in when, "no entry on 0x%X" % g["menu_open"])

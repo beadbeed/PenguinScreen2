@@ -92,7 +92,9 @@ SLPM-65428:
   menuPointer:
     when:
       - { address: 0x540004, equals: 3 }             # GAME overlay resident
-      - { address: 0x48BF7E, equals: 1, width: 1 }   # item screen, map or pause open
+      - { address: 0x48BF7E, notEquals: 0, width: 1 }   # item screen, map or pause open (the openers store slot + 1, so
+                                                        # not 1 for a co-op player in slots 1-3; the take-it prompts
+                                                        # leave it 0, so the pointer stays off there)
       - { address: 0x720B80, equals: 1 }             # the item screen has been up (stays 1 after it closes)
     liveWhen:
       - { address: 0x723F94, equals: 1, width: 1 }   # the cursor in your own item grid (where the screen opens)
@@ -174,12 +176,12 @@ SLPM-65428:
     # own text looks doubled or sunk into a surface, [VR] NearDepthMetres = 1.0 brings back wave 8's near
     # field and -1 turns it off.
     firstPerson: { separation: 0.0132, convergence: 150, nearest: 0.5, auto: true }
-    # Menus flat: while the item screen, the map or pause is up (u8 0x48BF7E = 1, the flag camera.lookAt.pauseWhen
-    # reads; first person stands down then, so this rule applies) the picture goes at zero separation, so the menu
-    # lies exactly on the screen's plane, where the menu pointer's dot is drawn. With the base separation the menu's
-    # draws took depth from their Z and floated off the plane, away from the dot.
+    # Menus flat: while any game screen is drawn (u32 0x720AA0 = 1, the flag camera.lookAt.pauseWhen reads; first
+    # person stands down then, so this rule applies) the picture goes at zero separation, so the menu lies exactly on
+    # the screen's plane, where the menu pointer's dot is drawn. With the base separation the menu's draws took depth
+    # from their Z and floated off the plane, away from the dot.
     scenes:
-      - { when: { address: 0x48BF7E, equals: 1, width: 1 }, separation: 0, label: menu }
+      - { when: { address: 0x720AA0, equals: 1 }, separation: 0, label: menu }
   # First-person camera (only with --vr and the VR 'Head-Tracked Camera' setting, on by default).
   # Outbreak builds its view from an eye and a target vector. During normal room play (GAME overlay
   # resident, scenario in game, room camera in normal mode) the room camera's three cut handlers and the
@@ -252,9 +254,16 @@ SLPM-65428:
       smoothTurnDegPerSec: 120
       snapTurnDeg: 30
       snapStick: right
-      # Item screen, map or pause open (u8 0x48BF7E = 1, next to the local slot byte; checked with all
-      # three): the camera holds still and the menu goes on the world screen in front of you.
-      pauseWhen: [{ address: 0x48BF7E, equals: 1, width: 1 }]
+      # Any game screen drawn: the item screen (every tab, the command and REQUEST submenus), the map, pause and the
+      # "Will you take it?" prompt (a floor pickup or a partner's hand-over). u32 0x720AA0 is written only by
+      # FUN_006A5A10: 1 from the shared screen opener FUN_006B95C0, 0 from the shared close path at 0x6AEA10 (which also
+      # clears 0x48BF7E); offline 2026-10-12 it read 1 in all 430 samples with a screen open and 0 in all 1255 of
+      # normal play (walk, run, aim, shots, ad-libs, doors, the opening cutscene, a grab, "X Obtained", examine text).
+      # The take-it prompts raise it alone, which is why they stayed on the big first-person screen when this read
+      # 0x48BF7E; on the item screen and the map it rises 0.55-0.65 s after 0x48BF7E, as the screen is drawn. The camera
+      # then holds still and the screen goes on the world screen in front of you.
+      # (tools/outbreak-vr/research/2026-10-12-ui-flags-research.md)
+      pauseWhen: [{ address: 0x720AA0, equals: 1 }]
       # Standing idle (stance 1, action 0) with the stick centred, the character turns to face where you
       # look, so picking things up and examining them works on what you're looking at.
       bodyFollow:
