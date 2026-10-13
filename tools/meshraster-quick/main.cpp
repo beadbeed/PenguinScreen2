@@ -2,6 +2,7 @@
 #include "VR/MeshRaster.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -142,6 +143,72 @@ static Sphere MakeSphere(int stacks, int slices)
 	return s;
 }
 
+
+static double TimeMs(Target& t, const Camera& cam, const Mesh& mesh, const Mat4& model, const Material& mat, int runs, DrawStats* out_stats)
+{
+	double total = 0.0;
+	for (int i = 0; i < runs + 3; i++)
+	{
+		const auto begin = std::chrono::steady_clock::now();
+		t.Clear();
+		Draw(t, cam, mesh, model, mat, out_stats);
+		t.Resolve();
+		const auto end = std::chrono::steady_clock::now();
+		if (i >= 3)
+			total += std::chrono::duration<double, std::milli>(end - begin).count();
+	}
+	return total / runs;
+}
+
+static void Bench(const Mesh& mesh, const Texture& nearest_tex, const Texture& bilinear_tex)
+{
+	struct Case
+	{
+		const char* name;
+		bool lit;
+		bool rim;
+		const Texture* tex;
+		bool cull;
+	};
+	const Case cases[] = {
+		{"flat unlit", false, false, nullptr, true},
+		{"lit", true, false, nullptr, true},
+		{"lit+rim", true, true, nullptr, true},
+		{"nearest unlit", false, false, &nearest_tex, true},
+		{"nearest lit", true, false, &nearest_tex, true},
+		{"nearest lit+rim", true, true, &nearest_tex, true},
+		{"bilinear lit", true, false, &bilinear_tex, true},
+		{"bilinear lit+rim", true, true, &bilinear_tex, true},
+		{"lit, no culling", true, false, nullptr, false},
+	};
+	const float scales[2] = {0.9f, 0.45f};
+	for (const float sc : scales)
+	{
+		const float pos[3] = {0.0f, 0.0f, -2.4f};
+		const float rot[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+		const float scale[3] = {sc, sc, sc};
+		const Mat4 model = ModelMatrix(pos, rot, scale);
+		const Camera cam = Camera::Perspective(Mat4(), 60.0f * 3.14159265f / 180.0f, 1.0f, 0.03f, 20.0f);
+		for (const Case& c : cases)
+		{
+			Material m;
+			m.texture = c.tex;
+			m.lighting.enabled = c.lit;
+			m.lighting.rim = c.rim ? 0.4f : 0.0f;
+			m.cull_back = c.cull;
+			Target t(256, 256, 1);
+			DrawStats st;
+			const double ms1 = TimeMs(t, cam, mesh, model, m, 200, &st);
+			Target t2(256, 256, 2);
+			const double ms2 = TimeMs(t2, cam, mesh, model, m, 100, nullptr);
+			std::printf("bench radius %.2f: %-18s 1x1 %.3f ms (%llu samples, %.1f ns each)   2x2 %.3f ms
+", sc, c.name, ms1, static_cast<unsigned long long>(st.written),
+				st.written ? ms1 * 1.0e6 / static_cast<double>(st.written) : 0.0, ms2);
+		}
+	}
+	std::fflush(stdout);
+}
+
 int main()
 {
 	const int failed = SelfTest();
@@ -179,6 +246,10 @@ int main()
 	const float scale[3] = {0.9f, 0.9f, 0.9f};
 	const Mat4 model = ModelMatrix(pos, rot, scale);
 	const Camera cam = Camera::Perspective(Mat4(), 60.0f * 3.14159265f / 180.0f, 1.0f, 0.03f, 20.0f);
+
+	Texture nearest_tex = tex;
+	nearest_tex.filter = Texture::Filter::Nearest;
+	Bench(mesh, nearest_tex, tex);
 
 	std::vector<unsigned char> strip(static_cast<size_t>(768) * 256 * 3);
 	const unsigned int grids[3] = {1, 2, 4};
