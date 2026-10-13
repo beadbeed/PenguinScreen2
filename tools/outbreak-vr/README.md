@@ -83,7 +83,9 @@ one frame further out shows as a jump of one display period (11.1 ms at 90 Hz). 
 deferrals as before, the last frame's `layers`, `layer changes` (submits whose layer array, each layer's type,
 swapchain and image size in order, differs from the one before; SteamVR re-creates a layer position's texture when
 what sits there changes size, about 150 times in 11 minutes in the first headset session) and `no projection`
-(submits with layers but no projection layer under them).
+(submits with layers but no projection layer under them; with `OpaqueBackground` on this should read 0 after the first
+frame: a frame whose views cannot be located, as around a focus change, sends the background with the last views
+located instead, counted as `views reused`).
 
 Layer positions: every layer has a fixed position in the frame's layer array, in the order they are drawn: the
 background, the screen's layers, the lever cards, the zone markers, the laser (or menu beam), the menu pointer's dot,

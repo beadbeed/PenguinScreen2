@@ -360,6 +360,9 @@ namespace VR::XRCompositor
 			XrSwapchain bg_swapchain = XR_NULL_HANDLE;
 			bool bg_ready = false;
 			bool bg_logged = false;
+			// Legacy: the last views located for it (LocateEyeViewsOrLast; the pacer keeps its own). GS thread only.
+			XrView legacy_last_views[2] = {XrView{XR_TYPE_VIEW}, XrView{XR_TYPE_VIEW}};
+			bool legacy_have_last_views = false;
 
 			// The runtime's recommended per-eye image width, for the headset's pixel density (Initialize).
 			u32 view_rec_width[2] = {0, 0};
@@ -3867,6 +3870,30 @@ namespace VR::XRCompositor
 			return true;
 		}
 
+		// The views the background projection layer goes out with: located for display time t, or, when that fails (no
+		// head orientation this frame, as around a focus change), the last ones located, so a frame with layers never goes
+		// without its projection layer (SteamVR 2.13 notes an app that submits none waiting 100 ms on alternate frames with
+		// some drivers; the background is opaque black or the head-locked edge fill, so an older pose for it shows nothing
+		// wrong). last and have_last belong to the calling thread; reused says the last views went out. False only before
+		// any views were located.
+		bool LocateEyeViewsOrLast(XrTime t, XrView* views, XrView* last, bool* have_last, bool* reused)
+		{
+			*reused = false;
+			if (LocateEyeViews(t, views))
+			{
+				last[0] = views[0];
+				last[1] = views[1];
+				*have_last = true;
+				return true;
+			}
+			if (!*have_last)
+				return false;
+			views[0] = last[0];
+			views[1] = last[1];
+			*reused = true;
+			return true;
+		}
+
 		// Edge fill ([VR] EdgeFill, on by default; needs the opaque background). Behind the first-person screen the
 		// background layer shows a dim, blurred continuation of the picture instead of black, so a head turn faster than
 		// the screen's margin shows more of the room rather than a black border.
@@ -5478,6 +5505,8 @@ namespace VR::XRCompositor
 			// projection layer among them.
 			u32 layer_changes = 0;
 			u32 no_projection = 0;
+			// Frames whose background went out with the last views located, this frame's not being locatable.
+			u32 views_reused = 0;
 			bool sig_valid = false;
 			LayerSignature last_sig;
 			u32 layers = 0;
@@ -5594,14 +5623,15 @@ namespace VR::XRCompositor
 							"%.1f/%.1f (queue lock %.2f/%.1f, runtime %.1f/%.1f), display lead vs first min/mean/max "
 							"%+.1f/%+.1f/%+.1f ms, queue-lock wait max %u us total %.1f ms/s (GS thread %.1f, GS submits %.1f), "
 							"copies skipped %u timed out %u, publishes deferred %u, layers %u (parked %u), layer changes %u, no "
-							"projection %u, mode %s, XR queue %s",
+							"projection %u (views reused %u), mode %s, XR queue %s",
 				st.submitted / secs, hz, gs_frames / secs, st.resent / secs, st.stale, st.no_render, st.wait.Mean(),
 				static_cast<double>(st.wait.max_ms), st.begin.Mean(), static_cast<double>(st.begin.max_ms), parked, st.end.Mean(),
 				static_cast<double>(st.end.max_ms), st.end_lock.Mean(), static_cast<double>(st.end_lock.max_ms), st.end_call.Mean(),
 				static_cast<double>(st.end_call.max_ms), static_cast<double>(st.lead.min_ms), st.lead.Mean(),
 				static_cast<double>(st.lead.max_ms), lock_max_us, lock_total_ms, lock_gs_thread_ms, lock_gs_submit_ms, skipped,
 				timed_out, s.stat_publish_deferred.exchange(0, std::memory_order_relaxed), st.layers, st.parked,
-				st.layer_changes, st.no_projection, s.headset_rate ? "headset rate (VR pacer)" : "legacy (one per GS present)",
+				st.layer_changes, st.no_projection, st.views_reused,
+				s.headset_rate ? "headset rate (VR pacer)" : "legacy (one per GS present)",
 				VR::XrQueueDedicated() ? "dedicated" : "shared");
 			// Only the pacer places hands (legacy submits each frame for the display time it located the hands for).
 			const u32 hand_new = s.stat_hand_new.exchange(0, std::memory_order_relaxed);
@@ -6400,6 +6430,9 @@ namespace VR::XRCompositor
 			bool warned_begin = false;
 			bool warned_end = false;
 			u64 next_eye_probe_ms = 0;
+			// The last views located, for a frame whose own cannot be (LocateEyeViewsOrLast).
+			XrView last_views[2] = {XrView{XR_TYPE_VIEW}, XrView{XR_TYPE_VIEW}};
+			bool have_last_views = false;
 
 			while (!PacerShouldStop(gen))
 			{
@@ -6527,6 +6560,7 @@ namespace VR::XRCompositor
 				const bool exiting = s.pacer_exit.load(std::memory_order_acquire);
 				XrView views[2] = {XrView{XR_TYPE_VIEW}, XrView{XR_TYPE_VIEW}};
 				bool views_ok = false;
+				bool views_reused = false;
 				HandsNow hands_now;
 				if (!exiting)
 				{
@@ -6553,11 +6587,13 @@ namespace VR::XRCompositor
 					// locks), for the layers riding on them.
 					LocateHandsNow(fs.predictedDisplayTime, head, head_valid, head_position_valid, &hands_now);
 
-					// Every frame for the background; about once a second without it, for the Eyes line alone.
+					// Every frame for the background (the last views when this frame's cannot be located); about once a
+					// second without it, for the Eyes line alone.
 					const u64 probe_ms = CameraDriver::SteadyNowMs();
 					if (s.opaque_bg && s.bg_ready)
 					{
-						views_ok = LocateEyeViews(fs.predictedDisplayTime, views);
+						views_ok = LocateEyeViewsOrLast(fs.predictedDisplayTime, views, last_views, &have_last_views,
+							&views_reused);
 					}
 					else if (probe_ms >= next_eye_probe_ms)
 					{
@@ -6636,6 +6672,8 @@ namespace VR::XRCompositor
 				stats.parked = fs.shouldRender ? CountParked(set) : 0;
 				if (XR_SUCCEEDED(eres))
 					NoteSubmittedLayers(stats, submit, stats.layers);
+				if (views_reused && fs.shouldRender)
+					stats.views_reused++;
 				if (fs.shouldRender && XR_SUCCEEDED(eres))
 				{
 					NoteScreenYaw(set, fs.predictedDisplayTime);
@@ -6937,6 +6975,7 @@ namespace VR::XRCompositor
 		s.begin_owed_presents = 0;
 		s.runtime_failures.store(0, std::memory_order_relaxed);
 		s.layered_logged = -1;
+		s.legacy_have_last_views = false;
 		ParseFaults();
 
 		s.warned_pacer = false;
@@ -7047,6 +7086,7 @@ namespace VR::XRCompositor
 		bool should_render = false;
 		XrView eye_views[2] = {XrView{XR_TYPE_VIEW}, XrView{XR_TYPE_VIEW}};
 		bool eye_views_ok = false;
+		bool eye_views_reused = false;
 		static FrameStats s_legacy_stats;
 		if (s.headset_rate)
 		{
@@ -7146,7 +7186,8 @@ namespace VR::XRCompositor
 			const u64 probe_ms = CameraDriver::SteadyNowMs();
 			if (s.opaque_bg && s.bg_ready)
 			{
-				eye_views_ok = LocateEyeViews(fs.predictedDisplayTime, eye_views);
+				eye_views_ok = LocateEyeViewsOrLast(fs.predictedDisplayTime, eye_views, s.legacy_last_views,
+					&s.legacy_have_last_views, &eye_views_reused);
 			}
 			else if (probe_ms >= s_next_eye_probe_ms)
 			{
@@ -7818,6 +7859,8 @@ namespace VR::XRCompositor
 		NoteEndFrame(s_legacy_stats, end_ms, end_timing);
 		s_legacy_stats.layers = submit_count;
 		s_legacy_stats.parked = CountParked(set);
+		if (eye_views_reused)
+			s_legacy_stats.views_reused++;
 		if (XR_SUCCEEDED(eres))
 		{
 			NoteSubmittedLayers(s_legacy_stats, submit, submit_count);
