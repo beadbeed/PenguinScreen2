@@ -15,6 +15,7 @@
 #include "VR/CameraDriver.h"
 #include "VR/ControlQuads.h"
 #include "VR/MenuPointer.h"
+#include "VR/ReloadDriver.h"
 #include "VR/SplitState.h"
 #include "VR/VRInput.h"
 #include "VR/XRCompositor.h"
@@ -602,10 +603,46 @@ void VRInputSource::BuildInstance(Instance& in) const
 		}
 	}
 
+	in.bind_ids.clear();
+	for (const VR::ProfileDB::SpatialControlSpec::Bind& b : s.bind)
+	{
+		const SC::ControlDef* c = in.def ? SC::FindControl(*in.def, b.control) : nullptr;
+		in.bind_ids.push_back(c ? static_cast<u32>(c->id) : SC::kControlCount);
+	}
+
 	in.ResetState();
 	in.last = {};
 	in.ever_emitted = false;
 	in.held_through_gap = {};
+	in.reload_latched = {};
+}
+
+// The reload (VR::ReloadDriver) on this instance, if it sits on the reload's pad: while a reload runs every control bound
+// to R1 reads 0 (the Gamepad's bumper, the holster's and the backpack's presses: whatever raises the weapon), and the
+// Gamepad's controls bound to the reload button read 1 while it is held, 0 while it is held back, and the player's own
+// value otherwise (ReloadButton keeps a press held through the end back until it is let go once). Only ever takes R1 away
+// and presses the reload button; everything else goes out as composed.
+void VRInputSource::ApplyReload(Instance& in, SC::ControlValues& values, const VR::ReloadDriver::Frame& reload)
+{
+	if (reload.pad_port < 0 || in.spec.usb_port >= 0 || in.spec.pad_port != static_cast<u32>(reload.pad_port))
+		return;
+	const size_t count = std::min(in.spec.bind.size(), in.bind_ids.size());
+	for (size_t k = 0; k < count; ++k)
+	{
+		const u32 i = in.bind_ids[k];
+		if (i >= SC::kControlCount)
+			continue;
+		const std::string& target = in.spec.bind[k].target;
+		if (target == VR::ReloadDriver::kRaiseButton)
+		{
+			if (reload.suppress_raise)
+				values[i] = 0.0f;
+		}
+		else if (in.kind == SC::DeviceKind::Gamepad && !reload.reload_button.empty() && target == reload.reload_button)
+		{
+			values[i] = VR::ReloadDriver::ReloadButton(values[i], reload.hold_reload, reload.mask_reload, in.reload_latched[i]);
+		}
+	}
 }
 
 VRInputSource::VRInputSource() = default;
@@ -814,13 +851,24 @@ void VRInputSource::PollEvents()
 	const bool split = VR::SplitState::Active();
 	const GuestReader reader = s_guest_reader.load(std::memory_order_acquire);
 
+	// Reloading with the hands: first, so while the gesture owns the magazine hand (a magazine taken at the hip, on its
+	// way to the gun) neither the pouches nor the zones see that hand, and its squeeze at the hip opens no item screen;
+	// and before the instances compose, so this poll's R1 hold-back and reload press go out with them.
+	const VR::ReloadDriver::Frame reload = VR::ReloadDriver::Poll(snap, hands, reader, dt);
+
 	// Belt pouches: before the menu pointer, so a pouch squeeze's cell request and the pouch hands' grips reach it this
 	// poll, and before the instances compose, so the zones see a hand in a pouch as gone and an open press goes out now.
-	VR::BeltPouches::Poll(snap, reader, dt);
+	if (reload.owned_hand >= 0)
+		VR::BeltPouches::Poll(VR::ReloadDriver::HideHand(snap, reload.owned_hand), reader, dt);
+	else
+		VR::BeltPouches::Poll(snap, reader, dt);
 
 	// Point-to-select menus: decided before the instances compose, so the Gamepad sends this poll's D-pad press and
 	// confirm hold (SpatialControls::SetPointerDpad / SetPointerConfirmHold) at once.
 	VR::MenuPointer::Poll(snap, reader, dt);
+
+	// The hands as the Zone controls see them: without a hand in a pouch, or the reload's magazine hand.
+	const SC::Hands zone_hands = VR::ReloadDriver::HideHand(VR::BeltPouches::HandsOutsidePouches(hands), reload.owned_hand);
 
 	for (Instance& in : m_instances)
 	{
@@ -922,8 +970,9 @@ void VRInputSource::PollEvents()
 				{
 					// A hand inside a belt pouch is the pouch's: the zone does not see it there, so a pouch can sit at the
 					// edge of a bigger zone (the hip holster) and a squeeze in it presses only the pouch. A press the zone
-					// already holds carries on, as it does wherever the hand goes.
-					ev = SC::StepZone(head, in.zone, VR::BeltPouches::HandsOutsidePouches(hands), in.zone_state);
+					// already holds carries on, as it does wherever the hand goes. Nor does it see a reload gesture's
+					// magazine hand (zone_hands), so the belt zone's Start never takes the squeeze that took the magazine.
+					ev = SC::StepZone(head, in.zone, zone_hands, in.zone_state);
 				}
 				else
 				{
@@ -993,6 +1042,7 @@ void VRInputSource::PollEvents()
 			default:
 				break;
 		}
+		ApplyReload(in, values, reload);
 		QueueHapticCues(in, hands_before, at_stop_before);
 		Emit(in, values);
 		publish_cards(values, true);

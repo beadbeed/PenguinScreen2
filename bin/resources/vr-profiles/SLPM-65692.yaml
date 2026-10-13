@@ -120,7 +120,9 @@ SLPM-65692:
   # rise is a reload, and an empty gun clicks on a trigger pull. The reload action byte is not measured
   # yet, so no action/reload here. Nothing equipped shows bare hands; the wrist card shows the weapon's name and
   # rounds ("45 AUTO 7"), and the belt pouches name their items from the same table.
-  feedback: { padRumble: true, hurt: { offset: 0x540, max: 0x542, width: 2 }, danger: { below: 0.20 }, weapon: { equipped: 0xC8C, table: 0x397B40 } }
+  # reloadButton: the game reloads with L1 held while the weapon is lowered (the whole magazine at once); the reload
+  # gesture (VR ReloadGesture setting: take a magazine at the left hip, bring it to the gun, let go) holds it for you.
+  feedback: { padRumble: true, hurt: { offset: 0x540, max: 0x542, width: 2 }, danger: { below: 0.20 }, weapon: { equipped: 0xC8C, table: 0x397B40, reloadButton: L1 } }
   # Wrist card (VR only, first person): turn the left wrist to the face to read the character's condition
   # (FINE / CAUTION below 60% of max HP / DANGER below 20% / BLEED), an HP bar and the virus gauge. Reads
   # only. Local record offsets: HP u16 +0x540 of max +0x542; virus counter u32 +0xBC4 over the u32 maximum

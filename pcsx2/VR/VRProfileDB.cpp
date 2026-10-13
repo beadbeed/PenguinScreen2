@@ -2536,7 +2536,7 @@ static VR::ProfileDB::FeedbackParams parseFeedback(const std::string_view serial
 		else
 		{
 			warnUnknownKeys(serial, w, "feedback.weapon",
-				{"equipped", "table", "stride", "id", "count", "owner", "stance", "raised", "action", "reload"});
+				{"equipped", "table", "stride", "id", "count", "owner", "stance", "raised", "action", "reload", "reloadButton"});
 			bool ok = true;
 			// A plain hex value (with the decimal-looking trap warned about); false when present but not a number.
 			const auto read_value = [serial, &w](const char* key, const char* what, u32& dst) {
@@ -2621,6 +2621,25 @@ static VR::ProfileDB::FeedbackParams parseFeedback(const std::string_view serial
 					fp.weapon_action_offset = action.value();
 					fp.weapon_reload_action = reload;
 				}
+			}
+			// reloadButton: the game's reload button with the weapon lowered, which the reload gesture holds. A digital
+			// DualShock 2 button, and not R1: the gesture holds R1 back to lower the weapon, so it can never be the reload.
+			// A bad value loses only the gesture; the weapon reads above stay.
+			if (fp.has_weapon && w.has_child("reloadButton"))
+			{
+				static constexpr std::string_view kButtons[] = {"Up", "Right", "Down", "Left", "Triangle", "Circle", "Cross",
+					"Square", "Select", "Start", "L1", "L2", "R2", "L3", "R3"};
+				const std::string_view button = nodeVal(w["reloadButton"]);
+				const bool known = std::find(std::begin(kButtons), std::end(kButtons), button) != std::end(kButtons);
+				if (button == "R1")
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.weapon.reloadButton cannot be R1 (the reload gesture "
+									   "holds R1 back to lower the weapon); no reload gesture.", serial);
+				else if (!known)
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.weapon.reloadButton '{}' is not a DualShock 2 button "
+									   "(Up, Down, Left, Right, Triangle, Circle, Cross, Square, Select, Start, L1, L2, R2, L3, "
+									   "R3; case matters); no reload gesture.", serial, button);
+				else
+					fp.weapon_reload_button.assign(button);
 			}
 		}
 	}
@@ -3582,6 +3601,21 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 			Console.WarningFmt("(VR) ProfileDB: Serial '{}' controls VR-{} binds PressedLongGun, which presses only while "
 							   "feedback.weapon reads a long gun equipped; this profile has no feedback.weapon, so Pressed "
 							   "takes every press.", serial, c.id);
+	}
+
+	// After controls and feedback: the reload gesture presses feedback.weapon.reloadButton through the VR Gamepad control
+	// bound to it on a pad port, so without one it never runs.
+	if (out.feedback.has_value() && !out.feedback->weapon_reload_button.empty())
+	{
+		const std::string& button = out.feedback->weapon_reload_button;
+		const bool bound = std::any_of(out.controls.begin(), out.controls.end(), [&button](const VR::ProfileDB::SpatialControlSpec& c) {
+			return c.kind == VR::SpatialControls::DeviceKind::Gamepad && c.usb_port < 0 &&
+			       std::any_of(c.bind.begin(), c.bind.end(),
+					   [&button](const VR::ProfileDB::SpatialControlSpec::Bind& b) { return b.target == button; });
+		});
+		if (!bound)
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.weapon.reloadButton is {}, but no VR Gamepad control on a "
+							   "pad port binds {}; the reload gesture stays off.", serial, button, button);
 	}
 
 	// After controls, menuPointer and camera: the pouches are checked against all three.

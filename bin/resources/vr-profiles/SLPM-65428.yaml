@@ -47,7 +47,9 @@ SLPM-65428:
   # both hands (reload; the action byte +0x54F reads 0x1C then, expected, not yet checked live); an empty
   # gun clicks on a trigger pull. Nothing equipped shows bare hands (no pistol, no laser). The wrist card
   # shows the weapon's name and rounds ("45 AUTO 7"), and the belt pouches name their items from the same table.
-  feedback: { padRumble: true, hurt: { offset: 0x544, max: 0x546, width: 2 }, danger: { below: 0.20 }, weapon: { equipped: 0xC7C, table: 0x3967D0, action: 0x54F, reload: 0x1C } }
+  # reloadButton: the game reloads with L1 held while the weapon is lowered (one round per 0.33 s); the reload gesture
+  # (VR ReloadGesture setting: take a magazine at the left hip, bring it to the gun, let go) holds it for you.
+  feedback: { padRumble: true, hurt: { offset: 0x544, max: 0x546, width: 2 }, danger: { below: 0.20 }, weapon: { equipped: 0xC7C, table: 0x3967D0, action: 0x54F, reload: 0x1C, reloadButton: L1 } }
   # Wrist card (VR only, first person): turn the left wrist to the face to read the character's condition
   # (FINE / CAUTION below 60% of max HP / DANGER below 20% / BLEED), an HP bar and the virus gauge. Reads
   # only. Local record offsets: HP u16 +0x544 of max +0x546; virus counter u32 +0xBAC over the u32 maximum

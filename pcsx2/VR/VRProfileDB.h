@@ -569,6 +569,9 @@ namespace VR::ProfileDB
 		bool has_weapon_reload = false;
 		u32 weapon_action_offset = 0;
 		u32 weapon_reload_action = 0;
+		// reloadButton: the DualShock 2 button the game reloads with while the weapon is lowered (Outbreak: L1). The reload
+		// gesture (VR::ReloadDriver) holds it on the VR Gamepad control bound to it; empty: no reload gesture.
+		std::string weapon_reload_button;
 		// Heartbeat in the left hand while HP is below danger_below * max (needs hurt).
 		bool has_danger = false;
 		float danger_below = 0.25f;

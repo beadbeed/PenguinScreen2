@@ -8,6 +8,7 @@
 #include "VR/SpatialControls.h"
 #include "VR/HeadPose.h"
 #include "VR/PadLook.h"
+#include "VR/ReloadDriver.h"
 #include "VR/VRManager.h"
 #include "VR/SplitState.h"
 #include "VR/StereoState.h"
@@ -391,6 +392,8 @@ namespace VR::CameraDriver
 				Console.WriteLn("(VR) Gamepad self-test: passed (sprint latch, ad-lib flicks, unchanged without sprintLatch).");
 			else
 				Console.WriteLn("(VR) Gamepad self-test FAIL: %s", gamepad_fail ? gamepad_fail : "?");
+			// The reload gesture's detector and the driver that turns a request into the game's own reload.
+			ReloadDriver::LogSelfTests();
 		}
 
 		u32 s_delta_crc = 0;

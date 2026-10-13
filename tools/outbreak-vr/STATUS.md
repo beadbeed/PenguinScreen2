@@ -48,6 +48,10 @@ First person in both Files:
 - **Belt pouches:** a 2x2 chest rig mirrors the item grid, and the belt buckle is the equipped box. Reaching in names the item
   and ticks; a squeeze opens the item screen at that cell.
 - **Grabbed:** shaking a controller breaks free. Hurt and heartbeat haptics keep working.
+- **Reload gesture** (branch `reloadwire`, VR setting `ReloadGesture`, on by default): with a gun raised, squeeze the left
+  grip at the left hip to take a magazine, carry it to the gun and open the hand (or pull the left trigger). The build then
+  lets go of R1 for you (the weapon lowers), holds L1 until the rounds stop going in, and gives R1 back. Without it:
+  lower the gun and hold the left trigger (the game's own reload; a toast says so the first time a gun is raised).
 - **Stereo:**
   - true depth down to 1.0 m;
   - parallax follows head roll;
@@ -94,8 +98,18 @@ stay as Alex has them.
 9. **Weapon:** raise it. Do the hand and laser look right? Does the shot land where the laser points? Does the wrist card name
    the weapon?
 10. Get grabbed and shake to break free. Take a hit and feel the haptics.
-11. Take the headset off for 30 s, then put it back. The game must keep running.
-12. Optional, after the above: set `[VR] FirstPersonFov = Auto` and `EdgeFill = true` and compare.
+11. **Reload** (fire a few shots first, with spare ammo in a cell):
+    - the plain way: let go of R1 (or the holster grip), stand still, hold the left trigger: one round per 0.33 s on
+      File #1, the whole magazine on File #2;
+    - the gesture: keep the gun raised, reach the left hand to the left hip (the belt bag), squeeze the grip (a short
+      tick), bring it under the gun (a firmer tick), open the hand. The gun should lower, load, and come back up while you
+      still hold R1. The emulog says `(VR) Reload: 3 -> 7 rounds in 1.4 s (gesture).`;
+    - the squeeze at the hip with the gun raised must NOT open the item screen; with the gun lowered it still must;
+    - with a full magazine: the toast `Magazine full`; with no ammo: `No spare ammo`; walking: `Stand still to reload`;
+    - does the 12 cm magazine spot feel big enough, and is the gun's reach (15 cm) right? If the hip squeeze misses
+      the spot it opens the item screen (the belt zone is 20 cm round).
+12. Take the headset off for 30 s, then put it back. The game must keep running.
+13. Optional, after the above: set `[VR] FirstPersonFov = Auto` and `EdgeFill = true` and compare.
 
 Save the emulog (`D:\Games\PS2\PenguinScreen2\logs\emulog.txt`, or the `emulog-<time>.txt` copies), SteamVR's
 `vrserver.txt` and the session recorder folder (`D:\Games\PS2\sessions\<time>`).
@@ -112,6 +126,7 @@ time:
 | `RollParallax` | true | false: parallax not turned with head roll |
 | `NearDepthMetres` | 0 | 0 = the profile's 1.0 m; negative = flat near field (the old look); 0.45 to 1.5 = that depth |
 | `MenuPointer` | true | false: no beam, dot or point-to-select |
+| `ReloadGesture` | true | false: no reload gesture (the hip squeeze opens the item screen even with the gun raised; L1 by hand still reloads) |
 | `FirstPersonFov` | Profile | Auto: FOV fitted to the headset |
 | `EdgeFill` | false | true: blurred edges instead of black |
 | `DedicatedXrQueue` | false | true: the OpenXR session gets a Vulkan queue of its own, so a runtime stuck in `xrEndFrame` no longer holds up the GS's submits (the emulog says `(VR) XR queue: dedicated` or `shared with the GS (why)`) |
@@ -130,7 +145,8 @@ time:
    - finger curl on the hand models;
    - aim assist (optional);
    - reconnecting after a SteamVR restart;
-   - physical reload (a gesture);
+   - physical reload (a gesture): **in**, branch `reloadwire` (`VR/ReloadDriver.cpp`), to be tried in the headset
+     (checklist item 11);
    - a dedicated XR VkQueue: in as an opt-in (`DedicatedXrQueue`, branch `xrqueue`), to be tried in the headset and made
      the default if it holds;
    - research item B1 (`ndcWidthRatio`; needs a null-headset stereo dump).
