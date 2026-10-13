@@ -54,6 +54,24 @@ network adapter is on) sweeps the fake hands +-12 cm and +-20 deg of yaw at 0.5 
 `PCSX2_VR_HANDS_SELFTEST=1` checks the placement maths, the weapon shapes, the left hand's grip on a fore-end and the
 laser by kind at VR start (`(VR) Hands self-test: N checks passed`).
 
+Dedicated XR queue (VR setting `DedicatedXrQueue`, off by default, ini only, read when the GS device is created): the
+OpenXR session gets a Vulkan queue of its own in the GS graphics family instead of sharing the GS queue. Shared, the VR
+pacer holds the queue lock through `xrEndFrame` (the runtime uses the session's queue inside it) and every GS submit and
+present takes the same lock, so a runtime that blocks in `xrEndFrame` (about 10.7 ms a frame for two minutes after a
+SteamVR dashboard blip in Alex's first headset session) stalls the emulation. Dedicated, the GS's own submits and
+presents take no lock (only its `vkDeviceWaitIdle` does); the two queues are ordered by two timeline semaphores: each GS
+submit signals a gs value, each screen copy or edge fill (the compositor reads of GS textures) waits for the GS's latest
+submitted value and signals an xr value, and the GS's next submit waits for that xr value. The compositor's own calls on
+the session's queue (swapchain acquire and release, the copies, the hand, HUD and lever uploads) still take the lock
+against the pacer. It needs a graphics family with a queue to spare and `VK_KHR_timeline_semaphore`; without them, or if
+the device or the session cannot be created that way, the session shares the GS queue as before. VR start logs
+`(VR) XR queue: dedicated (family F, index I); the GS queue no longer waits on the runtime.` or `(VR) XR queue: shared
+with the GS (<why>).` The `(VR) Frames:` line splits its queue-lock waits as `total X ms/s (GS thread Y, GS submits Z)`
+(Y is what the emulation waited, Z the GS's own submits and presents, about 0 when dedicated) and ends with
+`XR queue dedicated` or `shared`. If the GS ever has work not yet submitted when the compositor reads its frame, that
+work is submitted first and `(VR) XR queue: the GS had work not yet submitted ... (N so far)` is logged (the first time
+and every 600th); it should not show in normal play.
+
 Weapons in hand (both Files, profile `feedback.weapon`): while the weapon is raised in first person the right hand
 holds what the local character has equipped, by the item's kind (`VR/ItemData`, Outbreak-Research's item ids): a
 handgun, the stun gun, nail gun or ampoule shooter as the pistol (recoil, slide, muzzle flash, as before); a long gun

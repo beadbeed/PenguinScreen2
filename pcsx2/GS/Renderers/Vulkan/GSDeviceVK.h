@@ -92,7 +92,21 @@ public:
 
 	VkRenderPass GetRenderPassForRestarting(VkRenderPass pass);
 
-	__fi VkCommandBuffer GetCurrentCommandBuffer() const { return m_current_command_buffer; }
+	__fi VkCommandBuffer GetCurrentCommandBuffer() const
+	{
+#ifdef ENABLE_VR
+		m_vr_command_buffer_used = true;
+#endif
+		return m_current_command_buffer;
+	}
+#ifdef ENABLE_VR
+	// VR with a dedicated XR queue (VRVulkanBridge.h): whether the current command buffer may hold GS work that is not
+	// submitted yet, which a compositor read of a GS texture on the XR queue would not wait for. Every GS recording
+	// goes through GetCurrentCommandBuffer() or GetCurrentInitCommandBuffer() (and so does anything recorded from
+	// outside the device), each of which sets it, whether or not anything is then recorded; a new current command
+	// buffer clears it (MoveToNextCommandBuffer). Conservative: at worst one submit more.
+	__fi bool VRMayHaveUnsubmittedWork() const { return m_vr_command_buffer_used; }
+#endif
 	__fi VKStreamBuffer& GetTextureUploadBuffer() { return m_texture_stream_buffer; }
 	VkCommandBuffer GetCurrentInitCommandBuffer();
 
@@ -228,6 +242,10 @@ private:
 	VmaAllocator m_allocator = VK_NULL_HANDLE;
 
 	VkCommandBuffer m_current_command_buffer = VK_NULL_HANDLE;
+#ifdef ENABLE_VR
+	// VRMayHaveUnsubmittedWork.
+	mutable bool m_vr_command_buffer_used = false;
+#endif
 
 	VkDescriptorPool m_global_descriptor_pool = VK_NULL_HANDLE;
 

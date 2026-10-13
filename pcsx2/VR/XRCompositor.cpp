@@ -24,6 +24,7 @@
 
 #ifdef ENABLE_VULKAN
 #include "GS/GS.h"
+#include "GS/Renderers/Vulkan/GSDeviceVK.h"
 #include "GS/Renderers/Vulkan/GSTextureVK.h"
 #endif
 
@@ -506,8 +507,9 @@ namespace VR::XRCompositor
 			vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 		}
 
-		// The XR and Vulkan calls that use the queue the session shares with the GS, each under the queue lock
-		// (VRVulkanBridge.h). xrWaitSwapchainImage and xrWaitFrame never take it.
+		// The XR and Vulkan calls that use the session's queue (the GS's own, or with [VR] DedicatedXrQueue one of its
+		// own that the GS thread and the VR pacer still share), each under the queue lock (VRVulkanBridge.h).
+		// xrWaitSwapchainImage and xrWaitFrame never take it.
 		XrResult LockedAcquire(XrSwapchain swapchain, uint32_t* index)
 		{
 			XrSwapchainImageAcquireInfo ai = {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
@@ -526,6 +528,47 @@ namespace VR::XRCompositor
 		{
 			const VR::ScopedXrQueueLock lock;
 			return vkQueueSubmit(queue, 1, &si, fence);
+		}
+
+		// A submit that reads a GS texture (the screen copies, the edge fill; GS thread). Sharing the GS queue it is
+		// ordered by the queue itself, and goes in as any other. On a dedicated XR queue it waits for the GS's latest
+		// submit and signals the xr value the GS's next submit waits for (VRVulkanBridge.h); the values are taken under
+		// the lock so they go in in the order they were given.
+		VkResult LockedQueueSubmitReadingGs(VkQueue queue, VkSubmitInfo si, VkFence fence)
+		{
+			VR::XrReadTimeline timeline = {};
+			const VR::ScopedXrQueueLock lock;
+			const bool dedicated = VR::AddXrReadTimeline(&si, &timeline);
+			const VkResult res = vkQueueSubmit(queue, 1, &si, fence);
+			if (dedicated && res == VK_SUCCESS)
+				VR::XrReadTimelineDone(timeline);
+			return res;
+		}
+
+		// Before recording a read of a GS texture on a dedicated XR queue (GS thread). The read waits only for GS work
+		// already submitted, and the GS's current command buffer may hold work on that texture still to go in: its
+		// drawing, or a layout transition the texture's tracked layout already shows. The usual paths leave none
+		// (EndPresent, BeginPresent's own flushes and EnsureFrameSubmitted all submit right before EndOfFrame), but a
+		// present that fails after recording (BeginPresent's framebuffer error) and the seat cast's stretch before the
+		// edge fill can. That work is submitted first, so the read waits for it. It cannot instead wait for the
+		// submit still to come: that one waits for this read's xr value (a deadlock). Sharing the GS queue nothing is
+		// done here, as before.
+		void SubmitPendingGsWork()
+		{
+			if (!VR::XrQueueDedicated())
+				return;
+			GSDeviceVK* const dev = GSDeviceVK::GetInstance();
+			if (!dev || !dev->VRMayHaveUnsubmittedWork())
+				return;
+			static u64 s_flushes = 0;
+			s_flushes++;
+			if (s_flushes == 1 || (s_flushes % 600) == 0)
+			{
+				Console.WriteLn("(VR) XR queue: the GS had work not yet submitted when the compositor read its frame; "
+								"submitted it first (%llu so far).",
+					static_cast<unsigned long long>(s_flushes));
+			}
+			dev->ExecuteCommandBuffer(false);
 		}
 
 		XrResult LockedBeginFrame(XrSession session)
@@ -737,6 +780,8 @@ namespace VR::XRCompositor
 				s.fence_submitted[i] = false;
 			}
 
+			SubmitPendingGsWork();
+
 			VkCommandBuffer cmd = s.cmd_buffers[i];
 			VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
 			bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -780,7 +825,7 @@ namespace VR::XRCompositor
 			VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
 			si.commandBufferCount = 1;
 			si.pCommandBuffers = &cmd;
-			vr = LockedQueueSubmit(h.queue, si, s.fences[i]);
+			vr = LockedQueueSubmitReadingGs(h.queue, si, s.fences[i]);
 			if (vr != VK_SUCCESS)
 			{
 				Console.Error("(VR) vkQueueSubmit failed (%d).", static_cast<int>(vr));
@@ -3605,6 +3650,9 @@ namespace VR::XRCompositor
 			s_fill.wait_pending = false;
 			const VkImage dst = s_fill.images[index].image;
 
+			// GS work on src may still be unsubmitted (the seat cast stretches it between the screen copies and here).
+			SubmitPendingGsWork();
+
 			// From here the waited image must go back to the runtime whatever happens.
 			const VkCommandBuffer cmd = s_fill.cmd;
 			VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -3727,7 +3775,7 @@ namespace VR::XRCompositor
 			VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
 			si.commandBufferCount = 1;
 			si.pCommandBuffers = &cmd;
-			vr = LockedQueueSubmit(h.queue, si, s_fill.fence);
+			vr = LockedQueueSubmitReadingGs(h.queue, si, s_fill.fence);
 			if (vr != VK_SUCCESS)
 			{
 				LockedRelease(s_fill.swapchain);
@@ -4522,15 +4570,23 @@ namespace VR::XRCompositor
 			const u32 gs_frames = s.stat_gs_frames.exchange(0, std::memory_order_relaxed);
 			const u32 skipped = s.stat_copy_skipped.exchange(0, std::memory_order_relaxed);
 			const u32 timed_out = s.stat_copy_timeout.exchange(0, std::memory_order_relaxed);
+			// The queue-lock waits: all threads, then the GS thread's share (what the emulation waited) and within it
+			// GSDeviceVK's own submits and presents, which a dedicated XR queue takes off the lock.
+			const u32 lock_max_us = VR::TakeXrQueueLockMaxWaitUs();
+			const double lock_total_ms = static_cast<double>(VR::TakeXrQueueLockTotalWaitUs()) / 1000.0 / secs;
+			const double lock_gs_thread_ms = static_cast<double>(VR::TakeXrQueueLockGsThreadWaitUs()) / 1000.0 / secs;
+			const double lock_gs_submit_ms = static_cast<double>(VR::TakeXrQueueLockGsSubmitWaitUs()) / 1000.0 / secs;
 			Console.WriteLn("(VR) Frames: submitted %.1f/s (display %.1f Hz), new GS frames %.1f/s, re-sent %.1f/s, stale %u, "
 							"shouldRender=false %u, wait->begin mean %.1f max %.1f ms, xrEndFrame mean %.1f max %.1f ms, queue-lock "
-							"wait max %u us total %.1f ms/s, copies skipped %u timed out %u, publishes deferred %u, layers %u, mode %s",
+							"wait max %u us total %.1f ms/s (GS thread %.1f, GS submits %.1f), copies skipped %u timed out %u, "
+							"publishes deferred %u, layers %u, mode %s, XR queue %s",
 				st.submitted / secs, hz, gs_frames / secs, st.resent / secs, st.stale, st.no_render,
 				(st.wait_begin_n > 0) ? (st.wait_begin_sum_ms / st.wait_begin_n) : 0.0, st.wait_begin_max_ms,
 				(st.end_n > 0) ? (st.end_sum_ms / st.end_n) : 0.0, st.end_max_ms,
-				VR::TakeXrQueueLockMaxWaitUs(), static_cast<double>(VR::TakeXrQueueLockTotalWaitUs()) / 1000.0 / secs, skipped, timed_out, s.stat_publish_deferred.exchange(0, std::memory_order_relaxed),
-				st.layers,
-				s.headset_rate ? "headset rate (VR pacer)" : "legacy (one per GS present)");
+				lock_max_us, lock_total_ms, lock_gs_thread_ms, lock_gs_submit_ms, skipped, timed_out,
+				s.stat_publish_deferred.exchange(0, std::memory_order_relaxed), st.layers,
+				s.headset_rate ? "headset rate (VR pacer)" : "legacy (one per GS present)",
+				VR::XrQueueDedicated() ? "dedicated" : "shared");
 			// Only the pacer places hands (legacy submits each frame for the display time it located the hands for).
 			const u32 hand_new = s.stat_hand_new.exchange(0, std::memory_order_relaxed);
 			const u32 hand_kept = s.stat_hand_kept.exchange(0, std::memory_order_relaxed);
@@ -5281,6 +5337,8 @@ namespace VR::XRCompositor
 		void PacerThreadMain(u32 gen)
 		{
 			Threading::SetNameOfCurrentThread("VR Pacer");
+			// Its waits for the queue lock are kept apart from the GS thread's on the Frames line.
+			VR::MarkXrQueueLockPacerThread();
 
 			const XrSession session = XRSession::GetSession();
 			const bool headset_rate = s.headset_rate;
