@@ -157,8 +157,6 @@ time:
 - **`hand: left` no longer works** for the menu pointer. Both shipped profiles use `right`. Since wave 8, a left ray only
   stands in for an untracked right controller.
 - **Full view, minor review findings left (they only apply when it is turned on):**
-  - a FOV change while the camera holds perfectly still can keep the quad sized for the old FOV until the view moves;
-  - canted displays understate the sideways reach in the fit and the logged margin;
   - the wider FOV may cost some speed or show pop-in at the edges (not checked in the game);
   - the edge fill is head-locked, so it is slightly off during fast turns.
 - **vrtest `smooth-turn` comes up short on this PC.** It turned 96 to 146 deg where the test expects 180 +-20. The

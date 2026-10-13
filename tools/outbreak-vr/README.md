@@ -225,12 +225,15 @@ default 6, 0-20; both on the VR settings page): with Auto the game camera's vert
 0x313590) is fitted to the headset on each first-person arm, so the game draws the room out to the edge of the view
 instead of the old 100 deg picture with black around it. The FOV is twice the further of the eyes' furthest up and down
 reach (both eyes, from the runtime's views; the game's projection is symmetric) plus the margin, widened if the 4:3
-picture would not reach the furthest side plus half the margin, never below the profile's 100 (the floor) nor above
+picture would not reach the furthest side plus half the margin (a side reach counts from the head, so a canted display's
+outward cant is added to its eyes' angles), never below the profile's 100 (the floor) nor above
 130 (the cap; the game builds its projection as cot(fov/2) through libvu0's sincos, fine far beyond that). It eases in
 from 100 over 30 vsyncs on each arm and changes while armed only once, when the headset's eyes first arrive; a setting
 change applies at the next arm. Only for a profile whose flat `screen.firstPerson` height is 2 x distance x
 tan(camera.fov / 2) (both Outbreak profiles): the first-person screen is then sized to the FOV each frame was rendered
-with (carried with the render pose through the view-matrix match), and the same size feeds auto stereo and the log.
+with (carried with the render pose through the view-matrix match; a view that holds still for four vsyncs gets its
+frame's FOV followed too, since the matrix does not change with the FOV; `PCSX2_VR_SYNCLOG=1` logs each such step), and
+the same size feeds auto stereo and the log.
 Objects keep their size; the same picture covers more of the view, so the centre gets softer (100 to about 114 deg is
 about 23% fewer pixels per degree; the internal resolution is left alone). Each new choice logs `(VR) First-person FOV: 114.0 deg vertical, fitted to the
 headset (the eyes reach up 51.0, down 54.0, sideways 52.0 deg; margin 6.0, screen aspect 1.33; camera.fov 100.0 is
