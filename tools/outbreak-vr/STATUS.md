@@ -114,6 +114,7 @@ time:
 | `MenuPointer` | true | false: no beam, dot or point-to-select |
 | `FirstPersonFov` | Profile | Auto: FOV fitted to the headset |
 | `EdgeFill` | false | true: blurred edges instead of black |
+| `DedicatedXrQueue` | false | true: the OpenXR session gets a Vulkan queue of its own, so a runtime stuck in `xrEndFrame` no longer holds up the GS's submits (the emulog says `(VR) XR queue: dedicated` or `shared with the GS (why)`) |
 
 ## What's next (in order)
 
@@ -130,7 +131,8 @@ time:
    - aim assist (optional);
    - reconnecting after a SteamVR restart;
    - physical reload (a gesture);
-   - a dedicated XR VkQueue (it removes the shared-queue lock, if the GPU has a second queue);
+   - a dedicated XR VkQueue: in as an opt-in (`DedicatedXrQueue`, branch `xrqueue`), to be tried in the headset and made
+     the default if it holds;
    - research item B1 (`ndcWidthRatio`; needs a null-headset stereo dump).
 
 **Port back to PenguinScreen2** (found by the ARMSX2 port; listed in ARMSX2's `pcsx2/VR/VR-SOURCE.md`):

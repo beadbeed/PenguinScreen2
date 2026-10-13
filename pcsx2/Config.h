@@ -1387,6 +1387,10 @@ struct Pcsx2Config
 		// for that frame (their images are still drawn on the GS thread); false = placed once per GS present. Only with
 		// HeadsetRateSubmit.
 		bool HandsDisplayRate = true;
+		// The OpenXR session gets a Vulkan queue of its own in the GS graphics family (when the GPU has one to spare and
+		// timeline semaphores), so a runtime that blocks inside xrEndFrame no longer holds up the GS's own submits;
+		// false = the session shares the GS queue under the queue lock. Read when the GS device is created.
+		bool DedicatedXrQueue = false;
 
 		VROptions();
 		void LoadSave(SettingsWrapper& wrap);

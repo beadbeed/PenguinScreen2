@@ -1083,6 +1083,9 @@ VkRenderPass GSDeviceVK::GetRenderPassForRestarting(VkRenderPass pass)
 
 VkCommandBuffer GSDeviceVK::GetCurrentInitCommandBuffer()
 {
+#ifdef ENABLE_VR
+	m_vr_command_buffer_used = true;
+#endif
 	FrameResources& res = m_frame_resources[m_current_frame];
 	VkCommandBuffer buf = res.command_buffers[0];
 	if (res.init_buffer_used)
@@ -1134,8 +1137,8 @@ void GSDeviceVK::WaitForFenceCounter(u64 fence_counter)
 void GSDeviceVK::WaitForGPUIdle()
 {
 #ifdef ENABLE_VR
-	// vkDeviceWaitIdle uses every queue of the device, including the one the OpenXR session shares.
-	const VR::ScopedXrQueueLock xr_queue_lock;
+	// vkDeviceWaitIdle uses every queue of the device, including the OpenXR session's (shared or its own).
+	const VR::ScopedXrQueueLock xr_queue_lock(VR::XrQueueUser::GSDevice);
 #endif
 	vkDeviceWaitIdle(m_device);
 }
@@ -1323,10 +1326,17 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
 	}
 
 #ifdef ENABLE_VR
-	// The OpenXR session shares this queue (the VR pacer submits frames on it): held from the submit through the
-	// present, early returns included, and given back before the next swap chain image is acquired.
+	// With [VR] DedicatedXrQueue the OpenXR session has a queue of its own, which neither this submit nor the present
+	// below touches: no queue lock, and the submit is ordered against the compositor's reads of GS textures on that
+	// queue by the timelines instead (it signals the next gs value, and waits for a read no GS submit has waited for
+	// yet; VRVulkanBridge.h). Otherwise the session shares this queue (the VR pacer submits frames on it): the lock is
+	// held from the submit through the present, early returns included, and given back before the next swap chain
+	// image is acquired.
+	VR::GsSubmitTimeline xr_timeline = {};
+	const bool xr_queue_dedicated = VR::AddGsSubmitTimeline(&submit_info, &xr_timeline);
 	std::optional<VR::ScopedXrQueueLock> xr_queue_lock;
-	xr_queue_lock.emplace();
+	if (!xr_queue_dedicated)
+		xr_queue_lock.emplace(VR::XrQueueUser::GSDevice);
 #endif
 	res = vkQueueSubmit(m_graphics_queue, 1, &submit_info, resources.fence);
 	if (res != VK_SUCCESS)
@@ -1335,6 +1345,10 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
 		m_last_submit_failed = true;
 		return;
 	}
+#ifdef ENABLE_VR
+	if (xr_queue_dedicated)
+		VR::GsSubmitTimelineDone(xr_timeline);
+#endif
 
 	if (spin_cycles != 0)
 		SubmitSpinCommand(m_current_frame, spin_cycles);
@@ -1419,6 +1433,10 @@ void GSDeviceVK::MoveToNextCommandBuffer()
 	ActivateCommandBuffer((m_current_frame + 1) % NUM_COMMAND_BUFFERS);
 	InvalidateCachedState();
 	SetInitialState(m_current_command_buffer);
+#ifdef ENABLE_VR
+	// Only timestamps, queries and the vertex buffer binding so far: nothing a compositor read could depend on.
+	m_vr_command_buffer_used = false;
+#endif
 }
 
 void GSDeviceVK::ActivateCommandBuffer(u32 index)
@@ -2020,10 +2038,11 @@ void GSDeviceVK::SubmitSpinCommand(u32 index, u32 cycles)
 	}
 #ifdef ENABLE_VR
 	// The spin queue is the graphics queue the OpenXR session shares (nothing more to take when called from inside
-	// SubmitCommandBuffer, which holds the lock already).
+	// SubmitCommandBuffer, which holds the lock already). With [VR] DedicatedXrQueue the session has a queue of its own
+	// and the spin queue is never it; the spin work touches no texture, so it needs no timeline either.
 	std::optional<VR::ScopedXrQueueLock> xr_queue_lock;
-	if (m_spin_queue_is_graphics_queue)
-		xr_queue_lock.emplace();
+	if (m_spin_queue_is_graphics_queue && !VR::XrQueueDedicated())
+		xr_queue_lock.emplace(VR::XrQueueUser::GSDevice);
 #endif
 	vkQueueSubmit(m_spin_queue, 1, &submit_info, resources.fence);
 	resources.in_progress = true;
