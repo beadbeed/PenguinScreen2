@@ -980,7 +980,8 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 				if (!VMManager::HasValidVM())
 					goto error;
 				// Online (network adapter on) a state save/load or a MemWatch pause would stall or desync the room.
-				if (EmuConfig.DEV9.EthEnable)
+				// IsOnlineLocked also covers PCSX2_TEST_ONLINE_LOCKS=1.
+				if (VMManager::IsOnlineLocked())
 				{
 					Console.Warning("(PINE) %s refused: the network adapter is on.", "MsgSaveState");
 					goto error;
@@ -1001,7 +1002,8 @@ PINEServer::IPCBuffer PINEServer::ParseCommand(std::span<u8> buf, std::vector<u8
 				if (!VMManager::HasValidVM())
 					goto error;
 				// Online (network adapter on) a state save/load or a MemWatch pause would stall or desync the room.
-				if (EmuConfig.DEV9.EthEnable)
+				// IsOnlineLocked also covers PCSX2_TEST_ONLINE_LOCKS=1.
+				if (VMManager::IsOnlineLocked())
 				{
 					Console.Warning("(PINE) %s refused: the network adapter is on.", "MsgLoadState");
 					goto error;

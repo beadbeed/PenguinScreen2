@@ -1,7 +1,18 @@
-"""Small PINE client for PenguinScreen2 (PCSX2 fork) on Windows, used to reverse-engineer
+"""Small PINE client for PenguinScreen2 (PCSX2 fork), used to reverse-engineer
 Resident Evil Outbreak's memory for the first-person VR camera.
 
-PINE listens on TCP 127.0.0.1:<slot> (default 28011) when [EmuCore] EnablePINE = true.
+PINE serves when [EmuCore] EnablePINE = true and a game is running. Where it listens depends on the emulator's
+platform (pcsx2/PINE.cpp):
+  - Windows: TCP 127.0.0.1:<slot>, default slot 28011.
+  - Linux: a Unix socket, $XDG_RUNTIME_DIR/pcsx2.sock (/tmp/pcsx2.sock when XDG_RUNTIME_DIR is unset), with
+    ".<slot>" added when the slot is not 28011 (slot 28012: pcsx2.sock.28012). macOS: the same name in $TMPDIR.
+This client picks the same one for the platform it runs on (on Windows that is the TCP port, as it always was). To
+reach another machine's PINE, or to override:
+  PINE_SOCKET=/path/to/pcsx2.sock   a Unix socket at that path
+  PINE_TCP=1 (or PINE_HOST=<host>)  TCP <host>:<slot> (host 127.0.0.1 unless PINE_HOST says otherwise)
+Reaching a Linux machine's socket from the PC: forward a local TCP port to it and use TCP,
+  ssh -N -L 28011:/run/user/1000/pcsx2.sock user@machine
+(TCP is the default on Windows).
 Wire format: request  = u32 total_len (incl. these 4 bytes) + commands back to back;
              reply    = u32 total_len + u8 result (0 OK, 0xFF fail) + replies back to back.
 
@@ -45,6 +56,42 @@ class PineError(RuntimeError):
     pass
 
 
+DEFAULT_SLOT = 28011
+
+
+def unix_socket_path(slot=DEFAULT_SLOT):
+    """Where a Linux or macOS emulator's PINE listens for this slot (the rule in pcsx2/PINE.cpp)."""
+    if sys.platform == "darwin":
+        runtime_dir = os.environ.get("TMPDIR")
+    else:
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    path = (runtime_dir + "/pcsx2.sock") if runtime_dir else "/tmp/pcsx2.sock"  # as PINE.cpp builds it
+    if int(slot) != DEFAULT_SLOT:
+        path += ".%d" % int(slot)
+    return path
+
+
+def endpoint(slot=DEFAULT_SLOT, host=None, path=None):
+    """("unix", path) or ("tcp", (host, slot)): what Pine() connects to. An explicit path or host wins, then PINE_SOCKET,
+    then PINE_TCP / PINE_HOST, then the platform's own transport (TCP on Windows, the Unix socket elsewhere)."""
+    if path:
+        return "unix", path
+    if host:
+        return "tcp", (host, int(slot))
+    if os.environ.get("PINE_SOCKET"):
+        return "unix", os.environ["PINE_SOCKET"]
+    if os.environ.get("PINE_HOST") or os.environ.get("PINE_TCP", "") not in ("", "0"):
+        return "tcp", (os.environ.get("PINE_HOST") or "127.0.0.1", int(slot))
+    if os.name == "nt" or not hasattr(socket, "AF_UNIX"):
+        return "tcp", ("127.0.0.1", int(slot))
+    return "unix", unix_socket_path(slot)
+
+
+def describe_endpoint(ep):
+    kind, where = ep
+    return ("unix socket %s" % where) if kind == "unix" else ("%s:%d" % where)
+
+
 def pose(yaw_deg=0.0, pitch_deg=0.0, pos=(0.0, 0.0, 0.0)):
     """A VR pose ((qx, qy, qz, qw), (x, y, z)) in OpenXR axes (x right, y up, z back): turned yaw_deg
     about +Y (counter-clockwise seen from above, i.e. left) then pitched pitch_deg about +X (up)."""
@@ -74,10 +121,23 @@ class Pine:
     """One connection; PINE serves a single client at a time, so share this object (it is thread-safe)
     instead of opening a second one."""
 
-    def __init__(self, slot=28011, host="127.0.0.1", timeout=15.0):
+    def __init__(self, slot=DEFAULT_SLOT, host=None, timeout=15.0, path=None):
+        """slot: the PINE slot ([EmuCore] PINESlot). host: connect over TCP to host:slot. path: connect to the Unix
+        socket at path. With neither, the platform's own transport (see endpoint())."""
         self.lock = threading.Lock()
-        self.sock = socket.create_connection((host, slot), timeout=timeout)
-        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.endpoint = endpoint(slot, host, path)
+        kind, where = self.endpoint
+        if kind == "unix":
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.settimeout(timeout)
+            try:
+                self.sock.connect(where)
+            except OSError:
+                self.sock.close()
+                raise
+        else:
+            self.sock = socket.create_connection(where, timeout=timeout)
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
     def close(self):
         self.sock.close()
@@ -373,14 +433,15 @@ class FakeController:
         self._send()
 
 
-def wait_for_pine(slot=28011, seconds=60):
+def wait_for_pine(slot=DEFAULT_SLOT, seconds=60, host=None, path=None):
     deadline = time.time() + seconds
     while time.time() < deadline:
         try:
-            return Pine(slot)
+            return Pine(slot, host=host, path=path)
         except OSError:
             time.sleep(1)
-    raise PineError("PINE not reachable on 127.0.0.1:%d (EnablePINE on? game running?)" % slot)
+    raise PineError("PINE not reachable on %s (EnablePINE on? game running?)" %
+                    describe_endpoint(endpoint(slot, host, path)))
 
 
 # The emulator's ini (portable install on the test PC; PCSX2_INI overrides) and each game's network-play flag.
@@ -420,6 +481,7 @@ def require_offline(p=None):
 
 
 if __name__ == "__main__":
+    print("PINE:", describe_endpoint(endpoint()))
     with wait_for_pine(seconds=5) as p:
         print("status:", p.status(), "| id:", p.game_id(), "| title:", p.title())
         t = time.time()
