@@ -173,6 +173,18 @@ jobs:
           set PATH=%PATH%;%GITHUB_WORKSPACE%\bin
           cmake --build build --config Release --target unittests
 
+      # The VR layer's pure self-tests (tests/vr: no OpenXR session, no Vulkan device, no VM), every one each build. Any
+      # failure fails the job before the artifact is uploaded; the log lists each self-test with its own summary line.
+      - name: Run VR Self-Tests
+        if: inputs.configuration == 'CMake' && contains(inputs.cmakeFlags, '-DENABLE_VR=ON')
+        timeout-minutes: 20
+        shell: cmd
+        run: |
+          call "%VCVARSPATH%" || exit /b
+          cmake --build build --config Release --target vr_selftests || exit /b
+          set "PATH=%GITHUB_WORKSPACE%\bin;%GITHUB_WORKSPACE%\deps\bin;%PATH%"
+          build\tests\vr\vr_selftests.exe "%GITHUB_WORKSPACE%\bin\resources"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
