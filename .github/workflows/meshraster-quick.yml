@@ -26,14 +26,14 @@ jobs:
         run: |
           call "%VCVARSPATH%" || exit /b
           mkdir out
-          cl /nologo /std:c++20 /O2 /Zc:__cplusplus /permissive- /Zc:preprocessor /utf-8 /W4 /D_HAS_EXCEPTIONS=0 /D_CRT_SECURE_NO_WARNINGS /I tools\meshraster-quick\stub /I . /I pcsx2 pcsx2\VR\MeshRaster.cpp tools\meshraster-quick\main.cpp /Fe:out\meshraster_cl.exe /Fo:out\ || exit /b
+          cl /nologo /std:c++20 /O2 /Zc:__cplusplus /permissive- /Zc:preprocessor /utf-8 /W4 /D_HAS_EXCEPTIONS=0 /D_M_X86 /D_CRT_SECURE_NO_WARNINGS /I tools\meshraster-quick\stub /I . /I pcsx2 pcsx2\VR\MeshRaster.cpp tools\meshraster-quick\main.cpp /Fe:out\meshraster_cl.exe /Fo:out\ || exit /b
 
       - name: Build with clang-cl
         shell: cmd
         run: |
           call "%VCVARSPATH%" || exit /b
           clang-cl --version
-          clang-cl /nologo /std:c++20 /O2 /EHs-c- -Wall -Wextra -Wno-unused-parameter -D_HAS_EXCEPTIONS=0 -D_CRT_SECURE_NO_WARNINGS -I tools\meshraster-quick\stub -I . -I pcsx2 pcsx2\VR\MeshRaster.cpp tools\meshraster-quick\main.cpp /Fe:out\meshraster_clang.exe /Fo:out\ || exit /b
+          clang-cl /nologo /std:c++20 /O2 /EHs-c- -Wall -Wextra -Wno-unused-parameter -D_HAS_EXCEPTIONS=0 -D_M_X86 -D_CRT_SECURE_NO_WARNINGS -I tools\meshraster-quick\stub -I . -I pcsx2 pcsx2\VR\MeshRaster.cpp tools\meshraster-quick\main.cpp /Fe:out\meshraster_clang.exe /Fo:out\ || exit /b
 
       - name: Run self-test (cl build)
         shell: cmd
