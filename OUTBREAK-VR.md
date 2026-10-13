@@ -3,7 +3,8 @@
 This branch is part of **Outbreak VR**: Resident Evil Outbreak (PS2, Japanese File #1 / #2
 with the English patch) as a true-3D, first-person VR game for the Valve Steam Frame.
 
-**Start with `tools/outbreak-vr/STATUS.md`**: where things stand, how to test, what's next and what needs investigation.
+**Start with `tools/outbreak-vr/ROADMAP.md`** (the goal: Resident Evil Outbreak File #1 that feels like real, deliberate VR, and the
+road there), then **`tools/outbreak-vr/STATUS.md`** (where things stand, how to test, what's next).
 
 It is one of two builds that share the same VR ideas:
 

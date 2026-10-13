@@ -4,6 +4,74 @@ Read this first when you resume. It covers what happened after the PC shut off, 
 decisions, what the Mac found, and what to do next. Alex's Mac holds the full reports in
 `~/Documents/github/outbreak-vr/docs/reviews/` (not on GitHub). This file is the short form.
 
+## PC update 6 (Windows PC, 2026-10-12 night): Alex's first two headset sessions, the new direction
+
+**Read `ROADMAP.md`, then `STATUS.md`.** In short:
+
+**Session 1** (~18:45, build `e6dbd77`): Alex was "extremely impressed". It ran at 90/90 Hz and full game speed, and walk and
+shoot "pretty sweet". His asks:
+- the gun visible at the hip;
+- a reload;
+- no full-screen menus;
+- the game's own weapon models;
+- depth (things felt far away);
+- a pickup cue;
+- smoother menus.
+
+**Session 2** (~22:07, build `3eb2524`):
+- **Overall:** "it feels like a flat screen game with VR thrown on top; I want it to feel like actual VR, like it was
+  deliberate".
+- **Menus:** he hates the menu pull-away ("a hard fix; modifying how the game runs is OK").
+- **Close range:** zombies vanish up close.
+- **Melee:** the broom is the wrong size, and it is hard to tell when you're attacking.
+- **Doors:** his own doors drop out of first person, while following a teammate is seamless.
+
+**New direction (Alex):**
+- File #1 only until it feels right: no File #2 and no Steam Frame work for now.
+- Changing the game's code is fine where it makes the VR deliberate. The online rules still hold.
+
+**Merged into `headset1` tonight** (all CI green; branches pushed):
+- **Defaults:** full view on (FOV fitted to the headset, edge fill) and depth to 0.5 m.
+- **Logs:** the DISARMED line now names the failing guard.
+- **Menus:** they go flat on any game screen (File #1 `0x720AA0`, File #2 `0x767110`, both verified). This also fixes the
+  co-op slot+1 trap in `0x48BF7E`. The menu pointer works on take-it prompts.
+- **Rendering and timing:**
+  - opt-in dedicated XR queue (`xrqueue`);
+  - online-lock port-backs (`portback`);
+  - full-view fixes;
+  - menu re-press;
+  - VR self-tests in CI (`vrtests`).
+- **On the body:**
+  - holster and zone markers, with long guns over the shoulder;
+  - the reload gesture detector;
+  - the pickup cue (`itemreach`).
+- **Assets:**
+  - the game's weapon models decoded from the disc at VR start, in memory only (`gamemodels`; File #1 has 37 weapons);
+  - the CC0 hand mesh (`handmesh`);
+  - `session_report.py` (`sessiontool`).
+
+**Findings:**
+- **Reload:** L1 with the weapon lowered is the game's own reload on both Files.
+- **Delays:** the map and pickup delays are the game's own (about 0.64 s, flat and in VR alike).
+- **SteamVR stall:** SteamVR stalls `xrEndFrame` for 10-40 s after a dashboard visit, and the game then drops to 39-50 fps.
+  Research: `research/2026-10-12-steamvr-endframe-research.md`.
+
+**In progress:**
+- **Branches:**
+  - `pacer2`: stats, steady layers, opt-in pacer-owned copies;
+  - `reloadwire`: the gesture drives the native L1 reload;
+  - `meshraster`: the textured mesh renderer.
+- **Game-change research:**
+  - menus without the pull-away;
+  - the near-cull patch;
+  - seamless doors;
+  - true per-eye rendering.
+
+All of it is listed in `STATUS.md`, with research notes under `research/2026-10-12-*.md`.
+
+**Steam Frame (on hold):** ARMSX2 `outbreak-vr-frame` has M0 to M3. CI now runs a real OpenXR session against Monado's
+simulated headset: the probe's phases A-D, and ARMSX2 itself in VR with no game. It also has the VR-layer sync tool.
+
 ## PC update 5 (Windows PC, 2026-10-12 early morning): wave 8, full view, Steam Frame plan, end of the run
 
 **`STATUS.md` is now the one-page summary.** It covers where things are, the first-headset checklist, the ini switches that
