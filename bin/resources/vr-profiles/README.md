@@ -199,7 +199,7 @@ menuPointer:
 | `hand` | `right` or `either` (the default): the right hand points, and the left hand's aim stands in only while the right controller is not tracked, so the left controller (the Steam Frame's D-pad hand) never takes the pointer while the right one just points off the screen. `left`: the left hand points |
 | `coop` | `true` lets it steer online too, which happens only in private co-op. Default `false` |
 | `pressVsyncs`, `gapVsyncs` | each D-pad press is held this many vsyncs, then released at least this many (default `2` and `2`) |
-| `settleVsyncs` | how long to wait for the cursor to move after a press before giving up (default `10`). The second press in one opening of the menu that the cursor does not answer turns point-to-select off until the menu opens again |
+| `settleVsyncs` | how long to wait for the cursor to move after a press before pressing it once more (the game sometimes misses a press), and again before giving up (default `10`). The second move in one opening of the menu that stops because the cursor answers neither a press nor its re-press turns point-to-select off until the menu opens again |
 | `maxPresses` | the most presses for one move (default `6`) |
 | `dwellMs` | how long you must point at a cell before the cursor goes there (default `60`; the Outbreak profiles use `150`, since a real hand drifts across a cell's edge) |
 | `armDelayMs` | nothing moves for this long after the menu opens (default `300`) |
