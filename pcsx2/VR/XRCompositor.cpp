@@ -115,6 +115,12 @@ namespace VR::XRCompositor
 		constexpr int64_t kPresentWaitBudgetNs = 3000000;
 		int64_t s_present_wait_left_ns = kPresentWaitBudgetNs;
 
+		s64 SteadyNowNs()
+		{
+			return static_cast<s64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count());
+		}
+
 		// xrWaitSwapchainImage for at most max_ns and at most what is left of this present's budget (0: just poll).
 		XrResult BudgetedWaitSwapchainImage(XrSwapchain swapchain, int64_t max_ns)
 		{
@@ -248,6 +254,7 @@ namespace VR::XRCompositor
 			XrFrameState pending_frame_state{XR_TYPE_FRAME_STATE};
 			bool has_pending_frame = false;
 			s64 pending_wait_ns = 0; // legacy: steady ns when the parked frame's xrWaitFrame returned
+			s64 pending_wait_call_ns = 0; // legacy: how long that xrWaitFrame took, for the Frames line
 			bool initialized = false;
 
 			bool begin_owed = false;
@@ -613,16 +620,32 @@ namespace VR::XRCompositor
 			return xrBeginFrame(session, &bi);
 		}
 
+		// How one LockedEndFrame went, for the Frames line: the wait for the queue lock (another thread submitting on the
+		// session's queue) and the runtime's own xrEndFrame, which a runtime that paces in it holds for a display period.
+		struct EndFrameTiming
+		{
+			s64 lock_ns = 0;
+			s64 call_ns = 0;
+		};
+
 		XrResult LockedEndFrame(XrSession session, XrTime display_time, u32 layer_count,
-			const XrCompositionLayerBaseHeader* const* layers)
+			const XrCompositionLayerBaseHeader* const* layers, EndFrameTiming* timing = nullptr)
 		{
 			XrFrameEndInfo ei = {XR_TYPE_FRAME_END_INFO};
 			ei.displayTime = display_time;
 			ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
 			ei.layerCount = layer_count;
 			ei.layers = layer_count ? layers : nullptr;
+			const s64 lock_start_ns = timing ? SteadyNowNs() : 0;
 			const VR::ScopedXrQueueLock lock;
-			return xrEndFrame(session, &ei);
+			const s64 call_start_ns = timing ? SteadyNowNs() : 0;
+			const XrResult res = xrEndFrame(session, &ei);
+			if (timing)
+			{
+				timing->lock_ns = call_start_ns - lock_start_ns;
+				timing->call_ns = SteadyNowNs() - call_start_ns;
+			}
+			return res;
 		}
 
 		// Drops every published entry that shows this swapchain (publish_mutex held by the caller).
@@ -3404,12 +3427,6 @@ namespace VR::XRCompositor
 			}
 		}
 
-		s64 SteadyNowNs()
-		{
-			return static_cast<s64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-				std::chrono::steady_clock::now().time_since_epoch()).count());
-		}
-
 		// Now on the display clock: the steady clock moved by the lead the latest waited frame had from its wait's
 		// return to its predicted display time. 0 until the pacer has waited a frame.
 		XrTime DisplayClockNow()
@@ -5091,6 +5108,92 @@ namespace VR::XRCompositor
 		// Hands line (the image is drawn again from kRerasterDriftDeg on, so this means images are not keeping up).
 		constexpr float kHandDriftWarnDeg = 15.0f;
 
+		// One timing over a Frames window, in milliseconds: its mean, minimum and maximum.
+		struct WindowMs
+		{
+			double sum = 0.0;
+			u32 n = 0;
+			float min_ms = 0.0f;
+			float max_ms = 0.0f;
+
+			void Add(double ms)
+			{
+				const float f = static_cast<float>(ms);
+				min_ms = (n == 0) ? f : std::min(min_ms, f);
+				max_ms = (n == 0) ? f : std::max(max_ms, f);
+				sum += ms;
+				n++;
+			}
+
+			double Mean() const { return (n > 0) ? sum / static_cast<double>(n) : 0.0; }
+		};
+
+		// What SteamVR keys the textures it keeps for our layers by (research note 2026-10-12: it re-creates a layer
+		// position's shared texture when what sits there changes size): each submitted layer's type, swapchain and image
+		// size, in array order. Two consecutive submits whose signatures differ count as one layer change.
+		struct LayerSignature
+		{
+			struct Layer
+			{
+				XrStructureType type = XR_TYPE_UNKNOWN;
+				XrSwapchain swapchain = XR_NULL_HANDLE;
+				s32 width = 0;
+				s32 height = 0;
+			};
+			u32 count = 0;
+			bool projection = false; // one of the layers is a projection layer
+			Layer layer[kLayerCapacity + 1];
+		};
+
+		LayerSignature SignatureOf(const XrCompositionLayerBaseHeader* const* layers, u32 count)
+		{
+			LayerSignature sig;
+			sig.count = std::min<u32>(count, kLayerCapacity + 1);
+			for (u32 i = 0; i < sig.count; i++)
+			{
+				const XrCompositionLayerBaseHeader* const base = layers[i];
+				LayerSignature::Layer& l = sig.layer[i];
+				l.type = base->type;
+				const XrSwapchainSubImage* sub = nullptr;
+				if (base->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION)
+				{
+					const XrCompositionLayerProjection* const proj = reinterpret_cast<const XrCompositionLayerProjection*>(base);
+					sig.projection = true;
+					if (proj->viewCount > 0 && proj->views)
+						sub = &proj->views[0].subImage;
+				}
+				else if (base->type == XR_TYPE_COMPOSITION_LAYER_QUAD)
+				{
+					sub = &reinterpret_cast<const XrCompositionLayerQuad*>(base)->subImage;
+				}
+				else if (base->type == XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR)
+				{
+					sub = &reinterpret_cast<const XrCompositionLayerCylinderKHR*>(base)->subImage;
+				}
+				if (sub)
+				{
+					l.swapchain = sub->swapchain;
+					l.width = sub->imageRect.extent.width;
+					l.height = sub->imageRect.extent.height;
+				}
+			}
+			return sig;
+		}
+
+		bool SameLayers(const LayerSignature& a, const LayerSignature& b)
+		{
+			if (a.count != b.count)
+				return false;
+			for (u32 i = 0; i < a.count; i++)
+			{
+				const LayerSignature::Layer& la = a.layer[i];
+				const LayerSignature::Layer& lb = b.layer[i];
+				if (la.type != lb.type || la.swapchain != lb.swapchain || la.width != lb.width || la.height != lb.height)
+					return false;
+			}
+			return true;
+		}
+
 		// The Frames line: what reached the runtime over the last 5 s, kept by the thread that ends the frames (the
 		// pacer, or the GS thread in legacy mode).
 		struct FrameStats
@@ -5103,9 +5206,24 @@ namespace VR::XRCompositor
 			double wait_begin_sum_ms = 0.0;
 			u32 wait_begin_n = 0;
 			float wait_begin_max_ms = 0.0f;
-			float end_max_ms = 0.0f;
-			double end_sum_ms = 0.0;
-			u32 end_n = 0;
+			// xrWaitFrame and xrBeginFrame, each from its call to its return (a runtime may pace in either), and xrEndFrame
+			// with its two parts: the wait for the queue lock and the runtime's own call.
+			WindowMs wait;
+			WindowMs begin;
+			WindowMs end;
+			WindowMs end_lock;
+			WindowMs end_call;
+			// Each frame's predictedDisplayTime minus the steady clock as its xrWaitFrame returned, against the first
+			// frame's (lead_base_ns): a runtime that starts predicting one frame further out moves it by a display period.
+			WindowMs lead;
+			bool lead_base_valid = false;
+			s64 lead_base_ns = 0;
+			// Submits whose layer array differs from the one before (LayerSignature), and submits with layers but no
+			// projection layer among them.
+			u32 layer_changes = 0;
+			u32 no_projection = 0;
+			bool sig_valid = false;
+			LayerSignature last_sig;
 			u32 layers = 0;
 			u64 last_serial = 0;
 			// The Hands line (the pacer, headset rate only): layers riding on a controller placed, and how many of them
@@ -5135,6 +5253,45 @@ namespace VR::XRCompositor
 			st.wait_begin_max_ms = std::max(st.wait_begin_max_ms, ms);
 		}
 
+		// One frame's xrWaitFrame and xrBeginFrame calls and its display lead (predictedDisplayTime minus the steady clock
+		// at the wait's return). The first lead of this pacer run (or of legacy submission) is the baseline the Frames line
+		// measures against, logged once: the runtime's clock and the steady clock need not share an epoch.
+		void NoteFrameCalls(FrameStats& st, s64 wait_call_ns, s64 begin_call_ns, s64 lead_ns)
+		{
+			st.wait.Add(static_cast<double>(wait_call_ns) / 1.0e6);
+			st.begin.Add(static_cast<double>(begin_call_ns) / 1.0e6);
+			if (!st.lead_base_valid)
+			{
+				st.lead_base_valid = true;
+				st.lead_base_ns = lead_ns;
+				Console.WriteLn("(VR) Frames: display lead baseline %.3f ms (the first frame's predictedDisplayTime minus the "
+								"steady clock at its xrWaitFrame's return; the Frames line's lead is measured against it).",
+					static_cast<double>(lead_ns) / 1.0e6);
+			}
+			st.lead.Add(static_cast<double>(lead_ns - st.lead_base_ns) / 1.0e6);
+		}
+
+		// One xrEndFrame: how long it took and its two parts (EndFrameTiming).
+		void NoteEndFrame(FrameStats& st, float end_ms, const EndFrameTiming& timing)
+		{
+			st.end.Add(end_ms);
+			st.end_lock.Add(static_cast<double>(timing.lock_ns) / 1.0e6);
+			st.end_call.Add(static_cast<double>(timing.call_ns) / 1.0e6);
+		}
+
+		// The layer array one accepted xrEndFrame carried: a change against the one before, and layers with no projection
+		// layer under them.
+		void NoteSubmittedLayers(FrameStats& st, const XrCompositionLayerBaseHeader* const* layers, u32 count)
+		{
+			const LayerSignature sig = SignatureOf(layers, count);
+			if (st.sig_valid && !SameLayers(sig, st.last_sig))
+				st.layer_changes++;
+			if (sig.count > 0 && !sig.projection)
+				st.no_projection++;
+			st.last_sig = sig;
+			st.sig_valid = true;
+		}
+
 		void MaybeLogFrameStats(FrameStats& st)
 		{
 			const u64 now = CameraDriver::SteadyNowMs();
@@ -5157,16 +5314,28 @@ namespace VR::XRCompositor
 			const double lock_total_ms = static_cast<double>(VR::TakeXrQueueLockTotalWaitUs()) / 1000.0 / secs;
 			const double lock_gs_thread_ms = static_cast<double>(VR::TakeXrQueueLockGsThreadWaitUs()) / 1000.0 / secs;
 			const double lock_gs_submit_ms = static_cast<double>(VR::TakeXrQueueLockGsSubmitWaitUs()) / 1000.0 / secs;
+			// Legacy only: how long a waited frame sat parked until the GS present began it. The pacer begins its frames
+			// straight after the wait, so there it would always read 0.
+			char parked[64] = "";
+			if (!s.headset_rate)
+			{
+				std::snprintf(parked, sizeof(parked), ", wait->begin %.1f/%.1f",
+					(st.wait_begin_n > 0) ? (st.wait_begin_sum_ms / st.wait_begin_n) : 0.0,
+					static_cast<double>(st.wait_begin_max_ms));
+			}
 			Console.WriteLn("(VR) Frames: submitted %.1f/s (display %.1f Hz), new GS frames %.1f/s, re-sent %.1f/s, stale %u, "
-							"shouldRender=false %u, wait->begin mean %.1f max %.1f ms, xrEndFrame mean %.1f max %.1f ms, queue-lock "
-							"wait max %u us total %.1f ms/s (GS thread %.1f, GS submits %.1f), copies skipped %u timed out %u, "
-							"publishes deferred %u, layers %u, mode %s, XR queue %s",
-				st.submitted / secs, hz, gs_frames / secs, st.resent / secs, st.stale, st.no_render,
-				(st.wait_begin_n > 0) ? (st.wait_begin_sum_ms / st.wait_begin_n) : 0.0, st.wait_begin_max_ms,
-				(st.end_n > 0) ? (st.end_sum_ms / st.end_n) : 0.0, st.end_max_ms,
-				lock_max_us, lock_total_ms, lock_gs_thread_ms, lock_gs_submit_ms, skipped, timed_out,
-				s.stat_publish_deferred.exchange(0, std::memory_order_relaxed), st.layers,
-				s.headset_rate ? "headset rate (VR pacer)" : "legacy (one per GS present)",
+							"shouldRender=false %u, mean/max ms: xrWaitFrame %.1f/%.1f, xrBeginFrame %.2f/%.1f%s, xrEndFrame "
+							"%.1f/%.1f (queue lock %.2f/%.1f, runtime %.1f/%.1f), display lead vs first min/mean/max "
+							"%+.1f/%+.1f/%+.1f ms, queue-lock wait max %u us total %.1f ms/s (GS thread %.1f, GS submits %.1f), "
+							"copies skipped %u timed out %u, publishes deferred %u, layers %u, layer changes %u, no projection %u, "
+							"mode %s, XR queue %s",
+				st.submitted / secs, hz, gs_frames / secs, st.resent / secs, st.stale, st.no_render, st.wait.Mean(),
+				static_cast<double>(st.wait.max_ms), st.begin.Mean(), static_cast<double>(st.begin.max_ms), parked, st.end.Mean(),
+				static_cast<double>(st.end.max_ms), st.end_lock.Mean(), static_cast<double>(st.end_lock.max_ms), st.end_call.Mean(),
+				static_cast<double>(st.end_call.max_ms), static_cast<double>(st.lead.min_ms), st.lead.Mean(),
+				static_cast<double>(st.lead.max_ms), lock_max_us, lock_total_ms, lock_gs_thread_ms, lock_gs_submit_ms, skipped,
+				timed_out, s.stat_publish_deferred.exchange(0, std::memory_order_relaxed), st.layers, st.layer_changes,
+				st.no_projection, s.headset_rate ? "headset rate (VR pacer)" : "legacy (one per GS present)",
 				VR::XrQueueDedicated() ? "dedicated" : "shared");
 			// Only the pacer places hands (legacy submits each frame for the display time it located the hands for).
 			const u32 hand_new = s.stat_hand_new.exchange(0, std::memory_order_relaxed);
@@ -5185,10 +5354,20 @@ namespace VR::XRCompositor
 					static_cast<double>(kHandDriftWarnDeg), hand_new / secs, hand_kept / secs,
 					s.hands_display_rate ? "display rate (VR pacer)" : "GS present (HandsDisplayRate off)");
 			}
+			// What carries over from one window to the next: the last serial and layer array (each compared with the next
+			// submit's) and the lead's baseline.
 			const u64 last_serial = st.last_serial;
+			const bool sig_valid = st.sig_valid;
+			const LayerSignature last_sig = st.last_sig;
+			const bool lead_base_valid = st.lead_base_valid;
+			const s64 lead_base_ns = st.lead_base_ns;
 			st = FrameStats();
 			st.window_ms = now;
 			st.last_serial = last_serial;
+			st.sig_valid = sig_valid;
+			st.last_sig = last_sig;
+			st.lead_base_valid = lead_base_valid;
+			st.lead_base_ns = lead_base_ns;
 		}
 
 		// PCSX2_VR_SYNCLOG: how evenly the first-person screen turns through a smooth stick turn, from the Screen
@@ -5988,6 +6167,7 @@ namespace VR::XRCompositor
 				}
 
 				XrFrameState fs = {XR_TYPE_FRAME_STATE};
+				const s64 wait_start_ns = SteadyNowNs();
 				const XrResult wres = xrWaitFrame(session, nullptr, &fs);
 				const s64 wait_ns = SteadyNowNs();
 				if (PacerShouldStop(gen))
@@ -6021,12 +6201,14 @@ namespace VR::XRCompositor
 					std::lock_guard<std::mutex> lock(s.frame_mutex);
 					s.pending_frame_state = fs;
 					s.pending_wait_ns = wait_ns;
+					s.pending_wait_call_ns = wait_ns - wait_start_ns;
 					s.has_pending_frame = true;
 					continue;
 				}
 
 				const s64 begin_ns = SteadyNowNs();
 				const XrResult bres = BeginFrameWithFaults(session);
+				const s64 begin_done_ns = SteadyNowNs();
 				if (PacerDetached(gen))
 					return;
 				NoteFrameCallResult(bres, "xrBeginFrame");
@@ -6047,6 +6229,8 @@ namespace VR::XRCompositor
 					continue;
 				}
 				NoteWaitToBegin(stats, wait_ns, begin_ns);
+				NoteFrameCalls(stats, wait_ns - wait_start_ns, begin_done_ns - begin_ns,
+					static_cast<s64>(fs.predictedDisplayTime) - wait_ns);
 
 				// Shutdown asked the pacer to leave: this frame is still ended (with nothing in it), then it goes.
 				const bool exiting = s.pacer_exit.load(std::memory_order_acquire);
@@ -6103,6 +6287,7 @@ namespace VR::XRCompositor
 				int pointer_now = kPointerNowNone;
 				XrResult eres = XR_SUCCESS;
 				float end_ms = 0.0f;
+				EndFrameTiming end_timing;
 				{
 					std::unique_lock<std::timed_mutex> submit_lock(s.submit_mutex);
 					if (!exiting)
@@ -6131,7 +6316,8 @@ namespace VR::XRCompositor
 						submit_count = BuildSubmitArray(set, views_ok ? &bg : nullptr, stale, turn, submit);
 					}
 					const s64 end_start_ns = SteadyNowNs();
-					eres = LockedEndFrame(session, fs.predictedDisplayTime, fs.shouldRender ? submit_count : 0, submit);
+					eres = LockedEndFrame(session, fs.predictedDisplayTime, fs.shouldRender ? submit_count : 0, submit,
+						&end_timing);
 					end_ms = static_cast<float>(static_cast<double>(SteadyNowNs() - end_start_ns) / 1.0e6);
 				}
 				if (PacerDetached(gen))
@@ -6154,10 +6340,10 @@ namespace VR::XRCompositor
 					stats.stale++;
 				if (!fs.shouldRender)
 					stats.no_render++;
-				stats.end_max_ms = std::max(stats.end_max_ms, end_ms);
-				stats.end_sum_ms += end_ms;
-				stats.end_n++;
+				NoteEndFrame(stats, end_ms, end_timing);
 				stats.layers = fs.shouldRender ? submit_count : 0;
+				if (XR_SUCCEEDED(eres))
+					NoteSubmittedLayers(stats, submit, stats.layers);
 				if (fs.shouldRender && XR_SUCCEEDED(eres))
 				{
 					NoteScreenYaw(set, fs.predictedDisplayTime);
@@ -6469,6 +6655,7 @@ namespace VR::XRCompositor
 			std::lock_guard<std::mutex> lock(s.frame_mutex);
 			s.has_pending_frame = false;
 			s.pending_wait_ns = 0;
+			s.pending_wait_call_ns = 0;
 		}
 		s.latest_display_time.store(0, std::memory_order_release);
 		s.display_period_ns.store(0, std::memory_order_release);
@@ -6611,12 +6798,14 @@ namespace VR::XRCompositor
 			}
 
 			s64 wait_ns = 0;
+			s64 wait_call_ns = 0;
 			{
 				std::lock_guard<std::mutex> lock(s.frame_mutex);
 				if (!s.has_pending_frame)
 					return;
 				fs = s.pending_frame_state;
 				wait_ns = s.pending_wait_ns;
+				wait_call_ns = s.pending_wait_call_ns;
 				s.has_pending_frame = false;
 			}
 
@@ -6626,6 +6815,7 @@ namespace VR::XRCompositor
 			session = XRSession::GetSession();
 			const s64 begin_ns = SteadyNowNs();
 			const XrResult bres = BeginFrameWithFaults(session);
+			const s64 begin_done_ns = SteadyNowNs();
 			NoteFrameCallResult(bres, "xrBeginFrame");
 			if (XR_FAILED(bres))
 			{
@@ -6642,6 +6832,8 @@ namespace VR::XRCompositor
 				return;
 			}
 			NoteWaitToBegin(s_legacy_stats, wait_ns, begin_ns);
+			NoteFrameCalls(s_legacy_stats, wait_call_ns, begin_done_ns - begin_ns,
+				static_cast<s64>(fs.predictedDisplayTime) - wait_ns);
 
 			XRInput::Update(fs.predictedDisplayTime);
 
@@ -7306,8 +7498,9 @@ namespace VR::XRCompositor
 		const XrCompositionLayerBaseHeader* submit[kLayerCapacity + 1] = {};
 		const u32 submit_count = BuildSubmitArray(set, eye_views_ok ? &bg : nullptr, false, 0.0f, submit);
 
+		EndFrameTiming end_timing;
 		const s64 end_start_ns = SteadyNowNs();
-		const XrResult eres = LockedEndFrame(session, fs.predictedDisplayTime, submit_count, submit);
+		const XrResult eres = LockedEndFrame(session, fs.predictedDisplayTime, submit_count, submit, &end_timing);
 		const float end_ms = static_cast<float>(static_cast<double>(SteadyNowNs() - end_start_ns) / 1.0e6);
 		NoteFrameCallResult(eres, "xrEndFrame");
 		if (XR_FAILED(eres) && !s.warned_endframe)
@@ -7321,12 +7514,13 @@ namespace VR::XRCompositor
 			s_legacy_stats.submitted++;
 		if (!should_render)
 			s_legacy_stats.no_render++;
-		s_legacy_stats.end_max_ms = std::max(s_legacy_stats.end_max_ms, end_ms);
-		s_legacy_stats.end_sum_ms += end_ms;
-		s_legacy_stats.end_n++;
+		NoteEndFrame(s_legacy_stats, end_ms, end_timing);
 		s_legacy_stats.layers = submit_count;
 		if (XR_SUCCEEDED(eres))
+		{
+			NoteSubmittedLayers(s_legacy_stats, submit, submit_count);
 			NoteScreenYaw(set, fs.predictedDisplayTime);
+		}
 		MaybeLogFrameStats(s_legacy_stats);
 	}
 

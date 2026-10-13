@@ -72,6 +72,19 @@ with the GS (<why>).` The `(VR) Frames:` line splits its queue-lock waits as `to
 work is submitted first and `(VR) XR queue: the GS had work not yet submitted ... (N so far)` is logged (the first time
 and every 600th); it should not show in normal play.
 
+The `(VR) Frames:` line (every 5 s, from the thread that ends the frames: the VR pacer, or the GS in legacy mode):
+frames submitted per second against the display rate, new and re-sent GS frames, stale and `shouldRender=false`
+frames, then `mean/max ms:` for `xrWaitFrame` and `xrBeginFrame` (each from its call to its return: SteamVR may pace in
+either, or in `xrEndFrame`; legacy adds `wait->begin`, how long a waited frame sat until the GS present began it) and
+`xrEndFrame` split into `queue lock` (waiting for the session's queue) and `runtime` (the call itself). `display lead vs
+first min/mean/max` is each frame's `predictedDisplayTime` minus the steady clock at its `xrWaitFrame`'s return,
+against the first frame's (logged once as `(VR) Frames: display lead baseline N ms`): a runtime that starts predicting
+one frame further out shows as a jump of one display period (11.1 ms at 90 Hz). Then the queue-lock waits, copies and
+deferrals as before, the last frame's `layers`, `layer changes` (submits whose layer array, each layer's type,
+swapchain and image size in order, differs from the one before; SteamVR re-creates a layer position's texture when
+what sits there changes size, about 150 times in 11 minutes in the first headset session) and `no projection`
+(submits with layers but no projection layer under them).
+
 Weapons in hand (both Files, profile `feedback.weapon`): while the weapon is raised in first person the right hand
 holds what the local character has equipped, by the item's kind (`VR/ItemData`, Outbreak-Research's item ids): a
 handgun, the stun gun, nail gun or ampoule shooter as the pistol (recoil, slide, muzzle flash, as before); a long gun
