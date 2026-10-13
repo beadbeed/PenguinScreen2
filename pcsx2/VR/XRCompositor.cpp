@@ -4129,8 +4129,10 @@ namespace VR::XRCompositor
 					half_w_deg, half_h_deg, d, width_m, height_m, fov_text, px_deg_h, px_deg_v, w_px, h_px);
 				return;
 			}
+			// The sideways reach is from the head's forward: views turned outward (canted displays) reach their angle plus
+			// the cant, the same as the FOV fit counts it (CameraDriver::AutoFirstPersonFovDeg).
 			const float union_h = std::max(std::max(-eyes.fov_deg[0][0], -eyes.fov_deg[1][0]),
-				std::max(eyes.fov_deg[0][1], eyes.fov_deg[1][1]));
+				std::max(eyes.fov_deg[0][1], eyes.fov_deg[1][1])) + std::max(eyes.cant_deg, 0.0f);
 			const float union_up = std::max(eyes.fov_deg[0][2], eyes.fov_deg[1][2]);
 			const float union_down = std::max(-eyes.fov_deg[0][3], -eyes.fov_deg[1][3]);
 			// The headset at its recommended size: width / (tan right + tan -left) pixels per radian at the centre.
