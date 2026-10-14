@@ -1167,6 +1167,15 @@ namespace VR::CameraDriver
 		// are ever restored, except for a one-shot repair of guarded entries after a savestate load.
 		// An entry with activeWhen (checks on the base record) or offlineOnly is only patched while those
 		// hold; otherwise the word is put back at once (e.g. the aim servo runs again when the gun is lowered).
+		// whenSetting entries ([VR] SeamlessDoors): the switch on, and strictly offline (no network adapter at all, so not
+		// private co-op either, and not online-safe). Entries without whenSetting always pass.
+		bool SilenceSettingGateOpen(const ProfileDB::CameraSilence& sil)
+		{
+			if (sil.when_setting.empty())
+				return true;
+			return ProfileDB::SilenceSettingOn(sil.when_setting) && !EmuConfig.DEV9.EthEnable && !EmuConfig.VR.OnlineSafe;
+		}
+
 		void ApplySilence(const ProfileDB::CameraProfile& cam, u32 crc, const std::optional<u32>& base)
 		{
 			if (s_silence_crc != crc || s_silence_patched.size() != cam.silence.size())
@@ -1176,6 +1185,8 @@ namespace VR::CameraDriver
 			for (size_t i = 0; i < cam.silence.size(); i++)
 			{
 				const ProfileDB::CameraSilence& sil = cam.silence[i];
+				if (sil.keep_through_disarm)
+					continue; // ApplyKeptSilence owns it
 				if (!sil.when.empty() && !GuardListPass(sil.when))
 				{
 					s_silence_patched[i] = 0; // the code holding it is gone; a reload brings the original back
@@ -1184,7 +1195,7 @@ namespace VR::CameraDriver
 				if (sil.value_on == sil.value_off)
 					continue;
 				const u32 cur = static_cast<u32>(memRead32(sil.ee_address));
-				const bool active = !(sil.offline_only && OnlineSafeNow()) &&
+				const bool active = SilenceSettingGateOpen(sil) && !(sil.offline_only && OnlineSafeNow()) &&
 				                    !(sil.coop_only && s_net_mode != NetMode::PrivateCoop) &&
 				                    (sil.active_when.empty() || (base.has_value() && RecordChecksPass(sil.active_when, base.value())));
 				if (!active)
@@ -1224,6 +1235,8 @@ namespace VR::CameraDriver
 			for (size_t i = 0; i < cam.silence.size(); i++)
 			{
 				const ProfileDB::CameraSilence& sil = cam.silence[i];
+				if (sil.keep_through_disarm)
+					continue; // kept through the disarm; ApplyKeptSilence puts it back
 				const bool repair = s_silence_repair && !sil.when.empty();
 				if (!s_silence_patched[i] && !repair)
 					continue;
@@ -1246,6 +1259,63 @@ namespace VR::CameraDriver
 			s_silence_applied = false;
 			s_silence_crc = crc;
 			s_silence_repair = repair_pending;
+		}
+
+		// camera.silence entries with keepThroughDisarm ([VR] SeamlessDoors' arrival shot, which runs during the room load
+		// while first person is off). Run every vsync the VM runs, armed or not.
+		u32 s_kept_crc = 0;
+		std::vector<u8> s_kept_patched; // per entry: the word holds value_on because of us
+		bool s_kept_repair = false;     // one-shot after a savestate load: undo a kept patch saved in the state
+
+		void ApplyKeptSilence(const ProfileDB::CameraProfile& cam, u32 crc, bool first_person_on)
+		{
+			if (s_kept_crc != crc || s_kept_patched.size() != cam.silence.size())
+			{
+				s_kept_patched.assign(cam.silence.size(), 0);
+				s_kept_crc = crc;
+			}
+			size_t patched = 0;
+			size_t restored = 0;
+			bool repair_pending = false;
+			for (size_t i = 0; i < cam.silence.size(); i++)
+			{
+				const ProfileDB::CameraSilence& sil = cam.silence[i];
+				if (!sil.keep_through_disarm || sil.value_on == sil.value_off)
+					continue;
+				if (!GuardListPass(sil.when))
+				{
+					// The code holding it is gone (a reload brings the original back); a repair waits for it.
+					s_kept_patched[i] = 0;
+					repair_pending = repair_pending || s_kept_repair;
+					continue;
+				}
+				const u32 cur = static_cast<u32>(memRead32(sil.ee_address));
+				const bool active = first_person_on && SilenceSettingGateOpen(sil) && !(sil.offline_only && OnlineSafeNow()) &&
+				                    !(sil.coop_only && s_net_mode != NetMode::PrivateCoop);
+				if (!active)
+				{
+					if (cur == sil.value_on && (s_kept_patched[i] || s_kept_repair))
+					{
+						memWrite32(sil.ee_address, sil.value_off);
+						restored++;
+					}
+					s_kept_patched[i] = 0;
+					continue;
+				}
+				if (cur == sil.value_off)
+				{
+					memWrite32(sil.ee_address, sil.value_on);
+					s_kept_patched[i] = 1;
+					patched++;
+				}
+				else if (cur == sil.value_on)
+					s_kept_patched[i] = 1;
+			}
+			if (patched > 0)
+				Console.WriteLn("(VR) CameraDriver: kept patch(es) applied (%zu, whenSetting, through disarm).", patched);
+			if (restored > 0)
+				Console.WriteLn("(VR) CameraDriver: kept patch(es) restored (%zu): switch off, online or first person off.", restored);
+			s_kept_repair = repair_pending;
 		}
 
 		bool s_hooks_installed = false;
@@ -3115,6 +3185,7 @@ namespace VR::CameraDriver
 		if (!vm_live)
 		{
 			s_disarm_reason = DisarmReason::NoVM;
+			s_kept_patched.assign(s_kept_patched.size(), 0); // no VM: its memory (and our kept patches) are gone
 			SetLookAtActive(false);
 			SpatialControls::SetMoveStickSuppressed(-1);
 			SpatialControls::SetSprintBlocked(false);
@@ -3169,6 +3240,8 @@ namespace VR::CameraDriver
 			return;
 		}
 		const ProfileDB::CameraProfile& cam = profile->camera.value();
+		if (vm_state == VMState::Running)
+			ApplyKeptSilence(cam, crc, switched_on);
 
 		// The env fake head first, then a scripted head from PINE test input, then the headset. The test
 		// head also reaches the input snapshot, so the zones and SpatialControls::HeadAnchor see it too.
@@ -3616,6 +3689,7 @@ namespace VR::CameraDriver
 	{
 		ResetDeltaState();
 		s_silence_repair = true;
+		s_kept_repair = true;
 		s_fov_saved = false;
 		// The loaded memory has its own values: holds save them afresh, and no frame matches old writes.
 		RestoreHolds(nullptr, false);

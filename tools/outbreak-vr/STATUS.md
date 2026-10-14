@@ -28,7 +28,8 @@ checked offline or on SteamVR's null headset only.
 
 **2026-10-14 playtest build:** branch `playtest` = `menupanel` + `reloadwire` (the reload gesture) + `meshraster` (the mesh
 renderer, not drawn with yet), built locally with LTO like CI (25 of 25 self-tests). Launch with
-`D:\Games\PS2\Launch-Playtest-SteamVR.cmd`. It runs `D:\dev\PenguinScreen2-buildun-playtest`, a separate portable
+`D:\Games\PS2\Launch-Playtest-SteamVR.cmd`. It runs `D:\dev\PenguinScreen2-build
+un-playtest`, a separate portable
 install with its own settings (`HandTargeting`, `MenuPanel` and `ReloadGesture` on, `DepthLayer` off), memory cards and copies
 of the File #1 savestates. Headset-free speed in slot 5 matches the CI build.
 `D:\Games\PS2\Launch-Playtest-Models-SteamVR.cmd` runs the same with `handmodels` on top (the game's own weapon models in
@@ -46,7 +47,8 @@ the hand, holster and sling, and the CC0 hand model; `GameWeaponModels`, on), fr
 | Near cull | Branch `nearcull` (from `handtarget`): zombies and partners stay drawn up close, your body stays hidden. A File #1 profile change only; checked offline, headset-free, 2026-10-13 (below). Not in the headset yet. |
 | Depth layer | Branch `depthproj` (from `nearcull`): the shown frame's depth exported beside its colour, in metres, and (`[VR] DepthLayer`, off) sent to SteamVR with the first-person frame as a projection layer with depth. Road step 5's foundation. Checked offline and on the null headset, 2026-10-13 (below). Not in the headset yet. |
 | Menu panel | Branch `menupanel` (from `depthproj`): with `[VR] MenuPanel` (off) a game screen keeps first person, the room keeps rendering around you, and the screen's own draws are split off the frame onto a flat panel in front of you, where the menu pointer aims. Road step 1, stage 1. Item screen, map, take-it prompt and pause checked offline headset-free and on the null headset, 2026-10-13 (below). Not in the headset yet. |
-| Dev installs (local builds, portable, own settings) | `D:\dev\PenguinScreen2-buildun-dev`: `nearcull` with `HandTargeting = true`. `run-depth`: `depthproj`. `run-menu`: `menupanel` (set `MenuPanel` / `DepthLayer` in its `inis\PenguinScreen2.ini`). `D:\Games\PS2\PenguinScreen2` is unchanged (CI build `3eb2524`). |
+| Dev installs (local builds, portable, own settings) | `D:\dev\PenguinScreen2-build
+un-dev`: `nearcull` with `HandTargeting = true`. `run-depth`: `depthproj`. `run-menu`: `menupanel` (set `MenuPanel` / `DepthLayer` in its `inis\PenguinScreen2.ini`). `D:\Games\PS2\PenguinScreen2` is unchanged (CI build `3eb2524`). |
 | Steam Frame standalone | **On hold** (Alex: File #1 first). ARMSX2 branch `outbreak-vr-frame` has M0 to M3, CI green, with a Monado headless OpenXR test and the sync tool: `STEAM-FRAME.md`. |
 
 **Local builds (2026-10-13)** are the everyday loop; CI is for checkpoints. All in `D:\dev\PenguinScreen2-build`, nothing in
@@ -210,6 +212,7 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 | `DedicatedXrQueue` | false | true: the OpenXR session gets its own Vulkan queue. The emulog says `(VR) XR queue: dedicated` or `shared with the GS (why)`. |
 | `PacerCopies` | false | true (with `DedicatedXrQueue` in effect): the VR pacer copies the frame, hands and cards into the headset's swapchains itself, so the GS thread never calls into the runtime or waits for its queue lock; the frame shows about one GS frame later (`PCSX2_VR_PACER_COPIES_FLUSH=1` takes that back with one more GS submit); the emulog says `(VR) Pacer copies: on` or why it stays off |
 | `MenuPanel` | false | true: a game screen (the profile's `camera.lookAt.pauseWhen`, File #1's u32 `0x720AA0`: item screen, map, pause, take-it prompts) keeps first person: the camera alone follows the head (no stick turn, aim or body-follow; the sticks and buttons are the menu's as before), the room keeps rendering in stereo, and the screen's own draws go on a flat panel 1.0 m ahead (0.80 m tall, placed where you look as it comes up), where the menu pointer aims. The screens' full-frame tint is left out. While a screen is up the desktop window shows the room without it, and the depth layer sends quads. Needs `PacerCopies` off (else screens pull away as before). The emulog says `(VR) Menu panel: on`, `shown ...` / `hidden`, or why not |
+| `SeamlessDoors` | false | true: File #1, strictly offline (no network adapter, so not private co-op either): a door you open yourself plays no door shot and no arrival shot (camera mode `0x3AEF75` stays 0), so first person holds while your character opens the door, drops only for the black fade and load, and comes back as soon as you are in the next room. The door, locks, keys, door state, the load and partners are unchanged. Profile `camera.silence` entries with `whenSetting: SeamlessDoors` (the arrival ones `keepThroughDisarm`); branch `doors`; `research/2026-10-14-doors.md` |
 | `DepthLayer` | false | true: in first person the frame goes to SteamVR as one projection layer at its render pose with its depth (`XR_KHR_composition_layer_depth`, a D32 depth swapchain per eye), for the runtime's own reprojection; false = the two screen quads, and no depth swapchain or copy at all. Needs `PacerCopies` off. The emulog says `(VR) Depth layer: on` or why it stays off; `PCSX2_VR_DEPTHLAYER_NODEPTH=1` sends the projection layer without the depth (an A/B) |
 
 ## In progress

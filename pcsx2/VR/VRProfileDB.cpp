@@ -1370,7 +1370,7 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 		{
 			if (!sn.is_map())
 				continue;
-			warnUnknownKeys(serial, sn, "camera.silence", {"address", "on", "off", "when", "activeWhen", "offlineOnly", "coopOnly", "notes"});
+			warnUnknownKeys(serial, sn, "camera.silence", {"address", "on", "off", "when", "activeWhen", "offlineOnly", "coopOnly", "whenSetting", "keepThroughDisarm", "notes"});
 			const std::optional<u32> addr = sn.has_child("address") ? parseAddress(nodeVal(sn["address"])) : std::nullopt;
 			const std::optional<u32> von = sn.has_child("on") ? parseHexU32(nodeVal(sn["on"])) : std::nullopt;
 			const std::optional<u32> voff = sn.has_child("off") ? parseHexU32(nodeVal(sn["off"])) : std::nullopt;
@@ -1407,6 +1407,26 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 				sil.offline_only = StringUtil::compareNoCase(nodeVal(sn["offlineOnly"]), "true");
 			if (sn.has_child("coopOnly"))
 				sil.coop_only = StringUtil::compareNoCase(nodeVal(sn["coopOnly"]), "true");
+			// whenSetting: gated on a VR switch. An unknown name drops the entry (never patched) rather than patching
+			// it all the time.
+			if (sn.has_child("whenSetting"))
+			{
+				sil.when_setting = std::string(nodeVal(sn["whenSetting"]));
+				if (!IsSilenceSettingName(sil.when_setting))
+				{
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera silence {:#x} has an unknown whenSetting '{}'; skipping the entry.",
+						serial, addr.value(), sil.when_setting);
+					continue;
+				}
+			}
+			if (sn.has_child("keepThroughDisarm"))
+				sil.keep_through_disarm = StringUtil::compareNoCase(nodeVal(sn["keepThroughDisarm"]), "true");
+			if (sil.keep_through_disarm && (sil.when_setting.empty() || sil.when.empty()))
+			{
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera silence {:#x} has keepThroughDisarm without whenSetting and "
+								   "when; skipping the entry.", serial, addr.value());
+				continue;
+			}
 			cam.silence.push_back(std::move(sil));
 		}
 	}
@@ -4522,6 +4542,18 @@ static int CountMultibandResolveMismatches(bool log)
 	check(m.map == StereoMap::Log, "over-budget log stays Log");
 
 	return fail;
+}
+
+bool VR::ProfileDB::IsSilenceSettingName(std::string_view name)
+{
+	return name == "SeamlessDoors";
+}
+
+bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
+{
+	if (name == "SeamlessDoors")
+		return EmuConfig.VR.SeamlessDoors;
+	return false;
 }
 
 bool VR::ProfileDB::SelfTestMultibandResolve()

@@ -266,6 +266,35 @@ int main(int argc, char* argv[])
 		       f.hold_muzzle_offset == 0x34 && f.hold_items == 0x716980 && f.hold_item_stride == 0x18 &&
 		       f.hold_item_id == 0x12 && f.hold_item_type == 0x0F;
 	});
+	// [VR] SeamlessDoors: File #1's camera.silence entries gated on the switch (whenSetting), the arrival ones kept
+	// through disarm; each NOPs one jal 0x590B40 (tools/outbreak-vr/research/2026-10-14-doors.md).
+	RunSilent("Seamless doors (File #1 profile, camera.silence whenSetting)", +[]() {
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		if (!p || !p->camera.has_value() || !VR::ProfileDB::IsSilenceSettingName("SeamlessDoors") ||
+			VR::ProfileDB::IsSilenceSettingName("NoSuchSwitch"))
+			return false;
+		int gated = 0, kept = 0;
+		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
+		{
+			if (sil.when_setting.empty())
+			{
+				if (sil.keep_through_disarm)
+					return false;
+				continue;
+			}
+			if (sil.when_setting != "SeamlessDoors" || !sil.offline_only || sil.value_off != 0x0C1642D0u ||
+				sil.value_on != 0 || sil.when.empty())
+				return false;
+			gated++;
+			if (sil.keep_through_disarm)
+			{
+				kept++;
+				if (sil.ee_address != 0x550494u && sil.ee_address != 0x5504E0u && sil.ee_address != 0x55052Cu)
+					return false;
+			}
+		}
+		return gated == 15 && kept == 3;
+	});
 	RunGamepad();
 	RunSilent("CameraDriver::SelfTestAssembler (hook)", VR::CameraDriver::SelfTestAssembler);
 	RunSilent("CameraDriver::SelfTestMath (math, predict, comfort, FOV)", VR::CameraDriver::SelfTestMath);
