@@ -27,6 +27,8 @@
 #include "VR/ItemReach.h"
 #include "VR/MenuPanel.h"
 #include "VR/MenuPointer.h"
+#include "VR/MeshRaster.h"
+#include "VR/ReloadGesture.h"
 #include "VR/SpatialControls.h"
 #include "VR/StereoAuto.h"
 #include "VR/VRProfileDB.h"
@@ -242,6 +244,14 @@ int main(int argc, char* argv[])
 	RunLogged("Hands", VR::HandModel::SelfTest, "(VR) Hands self-test: ");
 	RunLogged("Pickup cue and hand targeting", VR::ItemReach::SelfTest, "(VR) Pickup cue self-test");
 	RunLogged("Zone markers", VR::ZoneMarkers::SelfTest, "(VR) Zone markers self-test");
+	RunLogged("MeshRaster", +[]() { return VR::MeshRaster::SelfTest() == 0; }, "(VR) MeshRaster self-test");
+	{
+		Begin("Reload gesture (ReloadGesture::SelfTest)");
+		const std::vector<std::string> failed = VR::ReloadGesture::SelfTest();
+		Record("Reload gesture", failed.empty(),
+			failed.empty() ? std::string("passed (it names the failed checks only, no check count)") :
+							 "FAIL: " + std::to_string(failed.size()) + " check(s), first: " + failed.front());
+	}
 	RunLogged("Depth export", VR::DepthExport::SelfTest, "(VR) Depth export self-test");
 	RunLogged("Menu panel", VR::MenuPanel::SelfTest, "(VR) Menu panel self-test");
 	RunGamepad();

@@ -7,6 +7,7 @@
 #include "VR/SplitState.h"
 #include "VR/ControlQuads.h"
 #include "VR/HandModel.h"
+#include "VR/MeshRaster.h"
 #include "VR/GameFeedback.h"
 #include "VR/HudCards.h"
 #include "VR/MenuPanel.h"
@@ -8869,6 +8870,9 @@ namespace VR::XRCompositor
 							"reach; they take only the layers left free (the rings go first, then the bag, then the weapon).");
 		else
 			Console.WriteLn("(VR) Zone markers: off ([VR] ZoneMarkers).");
+		// The rasteriser that draws the hands' and weapons' impostor images; also pure maths, and it needs no session.
+		if (std::getenv("PCSX2_VR_HANDS_SELFTEST") != nullptr || std::getenv("PCSX2_VR_SELFTEST") != nullptr)
+			MeshRaster::SelfTest();
 		// The pacer's menu pointer placement, with the other menu pointer self-tests, and the edge fill's plan.
 		if (std::getenv("PCSX2_VR_SELFTEST") != nullptr)
 		{

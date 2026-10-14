@@ -1083,6 +1083,7 @@ set(pcsx2VRSources
 	VR/DepthHistogram.cpp
 	VR/HeadPose.cpp
 	VR/MemWatch.cpp
+	VR/MeshRaster.cpp
 	VR/PadLook.cpp
 	VR/ReloadDriver.cpp
 	VR/ReloadGesture.cpp
@@ -1121,6 +1122,7 @@ set(pcsx2VRHeaders
 	VR/DepthHistogram.h
 	VR/HeadPose.h
 	VR/MemWatch.h
+	VR/MeshRaster.h
 	VR/PadLook.h
 	VR/ReloadDriver.h
 	VR/ReloadGesture.h
