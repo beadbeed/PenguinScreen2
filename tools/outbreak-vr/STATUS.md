@@ -20,9 +20,24 @@ Updated by the Windows PC session on 2026-10-12 at night, after Alex's first two
 | Working branch | `headset1` (all of tonight's work, merged and pushed). `pc-firstperson` and `coop-firstperson` are still at the 10-12 morning build and get `headset1` once Alex is happy with it. CI builds of `headset1` go through `wave4-integration`, the branch with the CI cache. |
 | Installed on the PC | `D:\Games\PS2\PenguinScreen2`, CI build of `3eb2524` (the second headset session ran on it). `headset1` has more since: the menu re-press and the CI self-tests. |
 | Headset sessions | **1:** 2026-10-12 ~18:45, build `e6dbd77`. **2:** ~22:07, build `3eb2524`. Both were File #1. Logs: `D:\Games\PS2\sessions\<time>` and `logs\emulog-headset-20261012.txt`. Summary: `tools\outbreak-vr\session_report.py --session`. |
+| Hand targeting | Branch `handtarget` (from `headset1` 43de18c): the read-only prototype, `reach.hand` in the profile, the pickup cue and zone marker self-tests in CI (21 suites, run 38488998201 green at 8dbff61). Checked offline, headset-free, 2026-10-13 (below). Not in the headset yet. |
 | Steam Frame standalone | **On hold** (Alex: File #1 first). ARMSX2 branch `outbreak-vr-frame` has M0 to M3, CI green, with a Monado headless OpenXR test and the sync tool: `STEAM-FRAME.md`. |
 
-**Builds** come from GitHub Actions only:
+**Local builds (2026-10-13)** are the everyday loop; CI is for checkpoints. All in `D:\dev\PenguinScreen2-build`, nothing in
+`D:\Games\PS2\PenguinScreen2`:
+- **Toolchain, matching CI:** VS 2026 Build Tools 18.10.4 (MSVC 14.51.36231, the same compiler as CI's VS 18.10.2), Windows
+  SDK 10.0.26100, CMake 4.4.3, Ninja 1.13.2, 7-Zip 26.03.
+- **`run-deps.bat`:** the repo's `build-dependencies.bat`, unmodified, into `deps\` (13 min 38 s clean). It is built without
+  FFmpeg (that stage needs GNU make); FFmpeg is only video capture, and dev runs take its DLLs from a CI build.
+- **`build.bat <tree> <LTO ON|OFF> [target]`:** CI's configure line. `build-dev` (LTO off) is the iteration tree: clean
+  4 min 01 s, a one-file change (`ItemReach.cpp`) 27 s, about 30 s with the compiler setup. `build-release` (LTO on, exactly
+  CI) is for performance checks. `vr_selftests` builds there too: 21 of 21 pass locally.
+- **`deploy-dev.sh build-dev run-dev`:** a portable install in `run-dev\` with its own settings, memory cards and savestates.
+  Its `resources` is a junction to the worktree's `binesources`, so a profile edit applies on an emulator restart.
+- **Machine quirks the wrappers handle:** a stray quote in the user PATH (a Tailscale entry) breaks vcvars; Git's GNU tar
+  comes before Windows' tar; vswhere ignores Build Tools without `-products *`.
+
+**CI builds** (GitHub Actions):
 - **Cached branch:** `gh workflow run build-windows.yml -R beadbeed/PenguinScreen2 --ref wave4-integration`, about 25 min. It
   now includes a "Run VR Self-Tests" step: 19 suites, and a failure stops the upload.
 - **New branch:** about 52-70 min.
@@ -145,14 +160,21 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 | `DedicatedXrQueue` | false | true: the OpenXR session gets its own Vulkan queue. The emulog says `(VR) XR queue: dedicated` or `shared with the GS (why)`. |
 | `PacerCopies` | false | true (with `DedicatedXrQueue` in effect): the VR pacer copies the frame, hands and cards into the headset's swapchains itself, so the GS thread never calls into the runtime or waits for its queue lock; the frame shows about one GS frame later (`PCSX2_VR_PACER_COPIES_FLUSH=1` takes that back with one more GS submit); the emulog says `(VR) Pacer copies: on` or why it stays off |
 
-## In progress (agents, 2026-10-12 night)
+## In progress
 
-**Game changes (Opus):**
-- **Menus without the pull-away:** design. `research/2026-10-12-menus-in-vr-design.md`.
-- **Near-cull patch:** live tests on the grab save. `research/2026-10-12-near-cull-research.md`.
-- **Seamless doors:** `research/2026-10-12-seamless-doors-research.md`.
-- **True per-eye rendering:** depth reprojection, and replaying the game's VU1 draw program per eye.
-  `research/2026-10-12-true-vr-rendering-research.md`.
+**Hand targeting (`handtarget`), checked offline headset-free on 2026-10-13** with `handtest.py` on a local build (slot 7):
+- the target is the J's Bar counter pistol: node `0x3B6158`, item 0, volume centre (8493.5, 140, 12922.5) cm, from
+  `reach.hand`; the game's own forward search agrees;
+- mapping: the eye check is 0.000 mm and the round trip 0.008 mm; a hand placed at the reported centre maps back to within
+  0.1 cm of it and is inside; 45 cm to the side maps 45 cm away in the game (outside, still the target);
+- the projection check agrees to 0.00 deg, but with a still scripted head it proves only that the game's view matrix and
+  the map agree, not the timing;
+- the hand gone: the target is lost and the reason logged;
+- **not checked yet:** the marker and the tick (they need an XR session), the menu and disarm paths live (reviewed only),
+  and whether the box sits on the pistol in the headset. That last one needs Alex in the headset.
+
+**The 2026-10-12 research agents (menus without the pull-away, the near-cull patch, seamless doors, true per-eye rendering)
+stopped at the usage limit and wrote no notes.** Those four are still open; the ROADMAP has the plan.
 
 **Merged since session 2:** `pacer2` (frame stats, a steady layer array with parked layers, a projection layer always
 sent, opt-in `PacerCopies`; targets the SteamVR stalls, `research/2026-10-12-steamvr-endframe-research.md`); the menu
@@ -221,7 +243,9 @@ re-press; the VR self-tests in CI.
 - **`grabtest.py`:** shake to break free.
 - **`session_report.py`:** a session's logs as a summary.
 - **`gamemodels_check.py`:** decodes the disc's weapon models read-only and prints the same summary as the emulator.
-- **Scripted controllers:** `PCSX2_VR_TEST_INPUT=1` plus `pine.py`'s `FakeController`. PINE serves one client at a time.
+- **`handtest.py <dev install>`:** hand targeting from slot 7 (above).
+- **Scripted controllers:** `PCSX2_VR_TEST_INPUT=1` plus `pine.py`'s `FakeController`. PINE serves one client at a time. While
+  scripted input is live, the pickup cue and hand targeting run without an OpenXR session too (rumble stays session-only).
 - **No OpenXR runtime:** set `XR_RUNTIME_JSON` to a missing file, plus `PCSX2_VR_FAKE_HEADPOSE`. The scratchpad helper
   `wave4_tests.launch()` does it.
 

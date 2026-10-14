@@ -646,7 +646,21 @@ namespace VR::GameFeedback
 		const float strength = HapticStrength();
 		s_strength.store(strength, std::memory_order_relaxed);
 		UpdateRumbleTarget(profile, fb);
-		PollPickupCue(profile, strength, is_file1);
+
+		// The pickup cue and hand targeting also run under the headset-free scripted test input (PINE, PCSX2_VR_TEST_INPUT,
+		// never online), so the test kit can reach them; rumble and the other cues stay session-only.
+		const ProfileDB::Profile* cue_profile = profile;
+		bool cue_file1 = is_file1;
+		if (!session && XRInput::TestInputActive())
+		{
+			const std::string serial = VMManager::GetDiscSerial();
+			if (!serial.empty())
+			{
+				cue_profile = ProfileDB::Lookup(serial, VMManager::GetDiscCRC());
+				cue_file1 = (serial == "SLPM-65428");
+			}
+		}
+		PollPickupCue(cue_profile, strength, cue_file1);
 
 		// The cues use the camera's guards and its record: no cues on the title screen or in cutscenes. They
 		// keep going while grabbed, down or dead (LocalRecordAny ignores releaseWhen), so a bite still pulses.

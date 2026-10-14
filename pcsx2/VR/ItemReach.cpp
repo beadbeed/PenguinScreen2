@@ -707,6 +707,22 @@ namespace VR::ItemReach
 			Announce(u, haptic_strength);
 	}
 
+	namespace
+	{
+		// Why hand targeting is not evaluating, said once each time the reason changes (nullptr: it is evaluating), so a
+		// session's log shows which gate held it back.
+		const char* s_hand_wait = nullptr;
+
+		void HandWait(const char* why)
+		{
+			if (why == s_hand_wait)
+				return;
+			s_hand_wait = why;
+			if (why)
+				Console.WriteLn("(VR) Hand targeting: waiting: %s", why);
+		}
+	}
+
 	void PollHandTarget(const ProfileDB::Profile* profile, const Live& live, u64 now_ms, float haptic_strength)
 	{
 		const ProfileDB::ReachParams* params =
@@ -717,14 +733,28 @@ namespace VR::ItemReach
 			// Off, or not first person offline in File #1: nothing is shown, and the next arm says its lines afresh.
 			HandStop(true);
 			s_hand.logged_arm = false;
+			if (!EmuConfig.VR.HandTargeting)
+				HandWait(nullptr);
+			else if (!live.armed || !VMManager::HasValidVM())
+				HandWait("first person is not armed");
+			else if (!live.hand_game)
+				HandWait("not File #1");
+			else if (!live.net_offline)
+				HandWait("not offline");
+			else
+				HandWait("this game's profile has no reach.hand");
 			return;
 		}
 		// The camera guards' flicker: the same scene, so this vsync is sat out and everything stays as it was.
 		if (!live.guards_now)
+		{
+			HandWait("the camera guards are down (a cut or transition)");
 			return;
+		}
 		if (live.screen_up)
 		{
 			HandStop(true);
+			HandWait("a game screen is up");
 			return;
 		}
 		// The mapping exists only while the camera is being driven (CameraDriver::GetMapping), the hand only while it is tracked.
@@ -734,13 +764,18 @@ namespace VR::ItemReach
 		if (!CameraDriver::GetMapping(&map) || snap.generation == 0 || !snap.actions_active || !grip.valid)
 		{
 			HandStop(true);
+			HandWait(!CameraDriver::GetMapping(&map) ? "no camera mapping (the camera is not being driven)" :
+					 (snap.generation == 0 || !snap.actions_active) ? "no controller input" : "the right hand is not tracked");
 			return;
 		}
 
 		if (!s_hand.logged_arm)
 		{
 			// Once each time first person arms: what this is, and whether the mapping agrees with the code that places the eye.
-			const HeadPose::Snapshot head = HeadPose::Get();
+			HeadPose::Snapshot head = HeadPose::Get();
+			// Headset-free, the scripted PINE head is the one the camera used (CameraDriver::Apply takes it the same way).
+			if (!(head.valid && head.position_valid))
+				XRInput::TestHeadPose(&head);
 			const float head_vr[3] = {head.position_x, head.position_y, head.position_z};
 			double eye_err_mm = 0.0;
 			double round_trip_mm = 0.0;
@@ -766,6 +801,7 @@ namespace VR::ItemReach
 		if (!CameraDriver::GameFromVr(map, grip.position_xyz.data(), hand_game))
 		{
 			HandStop(true);
+			HandWait("the hand does not map into the game");
 			return;
 		}
 		const double hand[3] = {hand_game[0], hand_game[1], hand_game[2]};
@@ -777,8 +813,11 @@ namespace VR::ItemReach
 		if (!t.found || to_centre > (s_hand.has_target ? params->hand_keep : params->hand_range))
 		{
 			HandStop(true);
+			HandWait(!t.found ? "the reach.hand trigger is not in the trigger list (another room, or taken)" :
+								"the hand is out of range of the trigger");
 			return;
 		}
+		HandWait(nullptr);
 
 		// The volume centre and the box's corners in the headset's space.
 		const float centre_game[3] = {static_cast<float>(t.centre[0]), static_cast<float>(t.centre[1]),

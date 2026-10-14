@@ -1555,6 +1555,13 @@ namespace VR
 			}
 		}
 
+		bool TestInputActive()
+		{
+			const std::uint64_t now = NowMs();
+			std::lock_guard lock{s_test_mutex};
+			return s_test_expiry_ms != 0 && now < s_test_expiry_ms;
+		}
+
 		void SetTestScreenHit(int hand, float u, float v, u32 ttl_ms)
 		{
 			const std::uint64_t now = NowMs();

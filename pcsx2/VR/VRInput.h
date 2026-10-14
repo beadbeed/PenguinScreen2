@@ -172,6 +172,9 @@ namespace VR
 
 		void SetTestInput(const TestInput& input);
 
+		// True while scripted test input (SetTestInput) is live, i.e. has not lapsed or been dropped. Any thread.
+		bool TestInputActive();
+
 		// A scripted menu-pointer hit for the headset-free tests (PINE MsgVRMenuPointer op 1, only with PCSX2_VR_TEST_INPUT
 		// set and never online): GetInputSnapshot() reports a screen hit at (u, v) (fractions of the game picture) for
 		// `hand` (0 left, 1 right) over the aim rays' until it lapses after ttl_ms (capped at 1000 ms). With a screen
