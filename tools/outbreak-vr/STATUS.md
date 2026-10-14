@@ -11,7 +11,20 @@ Details live elsewhere:
 - `research/`: game memory facts and design research;
 - `STEAM-FRAME.md`: the Steam Frame standalone port (on hold).
 
-Updated by the Windows PC session on 2026-10-12 at night, after Alex's first two headset sessions.
+Updated by the Windows PC session on 2026-10-13 at night: no headset session that day; everything below dated 10-13 is
+checked offline or on SteamVR's null headset only.
+
+**2026-10-13 in short:**
+- **Direction:** Alex chose PenguinScreen2 as the foundation. The native-port option (REO) was assessed and parked:
+  `research/2026-10-13-reo-assessment.md`.
+- **Local builds:** they are the everyday loop now (see Local builds below).
+- **New work, on a chain of pushed branches, each built on the one before:**
+  1. `handtarget`: hand targeting;
+  2. `nearcull`: nothing vanishes up close;
+  3. `depthproj`: the shown frame's depth, and `DepthLayer`;
+  4. `menupanel`: `MenuPanel`, menus on a panel without the pull-away.
+- **Merging:** none of these are merged into `headset1` yet. `menupanel` contains all of them, so after Alex's headset
+  check, merge `menupanel` into `headset1`.
 
 ## Where things are
 
@@ -24,6 +37,7 @@ Updated by the Windows PC session on 2026-10-12 at night, after Alex's first two
 | Near cull | Branch `nearcull` (from `handtarget`): zombies and partners stay drawn up close, your body stays hidden. A File #1 profile change only; checked offline, headset-free, 2026-10-13 (below). Not in the headset yet. |
 | Depth layer | Branch `depthproj` (from `nearcull`): the shown frame's depth exported beside its colour, in metres, and (`[VR] DepthLayer`, off) sent to SteamVR with the first-person frame as a projection layer with depth. Road step 5's foundation. Checked offline and on the null headset, 2026-10-13 (below). Not in the headset yet. |
 | Menu panel | Branch `menupanel` (from `depthproj`): with `[VR] MenuPanel` (off) a game screen keeps first person, the room keeps rendering around you, and the screen's own draws are split off the frame onto a flat panel in front of you, where the menu pointer aims. Road step 1, stage 1. Item screen, map, take-it prompt and pause checked offline headset-free and on the null headset, 2026-10-13 (below). Not in the headset yet. |
+| Dev installs (local builds, portable, own settings) | `D:\dev\PenguinScreen2-buildun-dev`: `nearcull` with `HandTargeting = true`. `run-depth`: `depthproj`. `run-menu`: `menupanel` (set `MenuPanel` / `DepthLayer` in its `inis\PenguinScreen2.ini`). `D:\Games\PS2\PenguinScreen2` is unchanged (CI build `3eb2524`). |
 | Steam Frame standalone | **On hold** (Alex: File #1 first). ARMSX2 branch `outbreak-vr-frame` has M0 to M3, CI green, with a Monado headless OpenXR test and the sync tool: `STEAM-FRAME.md`. |
 
 **Local builds (2026-10-13)** are the everyday loop; CI is for checkpoints. All in `D:\dev\PenguinScreen2-build`, nothing in
@@ -140,7 +154,12 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
    s. If it happens, note when.
 2. **A/B the smoothness fixes** once they're in: first `DedicatedXrQueue = true`, then that plus `PacerCopies = true`. Run
    `session_report.py --session` after each.
-3. **Near-cull patch** (`nearcull`): do zombies stay visible up close, even at arm's length, while your own body
+3. **Hand targeting** (`HandTargeting = true`, slot 7, at the counter): does the wireframe box sit on the pistol, and do you
+   get one tick when your right hand enters it?
+3b. **Depth layer** (`DepthLayer = true`): lean toward the counter, then again with `PCSX2_VR_DEPTHLAYER_NODEPTH=1` set.
+   If near things move against far ones only with depth, SteamVR is using it; if not, the next step is our own per-eye
+   warp in the pacer.
+3c. **Near-cull patch** (`nearcull`): do zombies stay visible up close, even at arm's length, while your own body
    stays hidden when you lean or look straight down?
 4. **Seamless doors** (when in): open a door yourself. Do you just arrive in the next room?
 5. **Menus without the pull-away** (`menupanel`, `[VR] MenuPanel = true`): open the item screen, the map, pause and a
