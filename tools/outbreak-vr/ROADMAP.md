@@ -32,6 +32,10 @@ until Alex says File #1 is there. Both stay where they are: File #2 has the shar
 ### 1. Menus without the pull-away (a game change; Alex approved changing how the game runs)
 - **Stage 1:** first person keeps running while a screen is up. The game's 2D menu draws go to a separate layer, shown as a
   panel in front of you (or on a wrist or chest tablet). The menu pointer still works.
+  - Done on branch `menupanel` (2026-10-13), behind `[VR] MenuPanel` (off): the item screen, map, take-it prompt and
+    pause keep first person; the GS splits each screen's draws off the frame at its first draw and the compositor shows
+    them on a panel 1.0 m ahead, where the pointer aims. Checked offline and on the null headset; next, the headset.
+    Research: `research/2026-10-13-menu-panel.md`.
 - **Stage 2:** a VR-native inventory, our own 3D UI on the body that reads the item records and drives the game's menu logic
   underneath.
 - Design research: `research/2026-10-12-menus-in-vr-design.md` (in progress).

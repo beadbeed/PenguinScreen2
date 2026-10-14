@@ -9,6 +9,7 @@
 #include "VR/HandModel.h"
 #include "VR/GameFeedback.h"
 #include "VR/HudCards.h"
+#include "VR/MenuPanel.h"
 #include "VR/MenuPointer.h"
 #include "VR/SpatialControls.h"
 #include "VR/VRManager.h"
@@ -177,6 +178,7 @@ namespace VR::XRCompositor
 		constexpr u8 kRoleHudWrist = 4;
 		constexpr u8 kRoleHudView = 5; // view-locked cards: toast, blink, vignette
 		constexpr u8 kRoleZone = 6;    // a body-zone marker: placed in the base space at each present, never moved by the pacer
+		constexpr u8 kRolePanel = 7;   // [VR] MenuPanel: a game screen's panel, world-placed, kept while the GS is idle
 		constexpr u8 kKindQuad = 0;
 		constexpr u8 kKindCylinder = 1;
 
@@ -186,7 +188,9 @@ namespace VR::XRCompositor
 		// blink on top. It is the order the builders already draw in (BuildZoneLayers' insert, HudCards::PlaceCardLayer),
 		// so nothing seen changes; what it adds is that a position always holds the same layer.
 		constexpr u8 kSlotScreen = 0;
-		constexpr u8 kSlotLever = static_cast<u8>(kSlotScreen + 5);
+		// [VR] MenuPanel: a game screen's panel, over the first-person screen and under everything else.
+		constexpr u8 kSlotPanel = static_cast<u8>(kSlotScreen + 5);
+		constexpr u8 kSlotLever = static_cast<u8>(kSlotPanel + 1);
 		constexpr u8 kSlotZone = static_cast<u8>(kSlotLever + ControlQuads::kSlots);
 		constexpr u8 kSlotLaser = static_cast<u8>(kSlotZone + kZoneSlots);
 		constexpr u8 kSlotPointer = static_cast<u8>(kSlotLaser + 1);
@@ -219,8 +223,10 @@ namespace VR::XRCompositor
 		// The role of what sits in a slot (HudRole for the HUD cards').
 		u8 RoleOfSlot(u8 slot)
 		{
-			if (slot < kSlotLever)
+			if (slot < kSlotPanel)
 				return kRoleScreen;
+			if (slot == kSlotPanel)
+				return kRolePanel;
 			if (slot < kSlotZone)
 				return kRoleLever;
 			if (slot < kSlotLaser)
@@ -626,6 +632,32 @@ namespace VR::XRCompositor
 			bool zone_disabled = false;
 			// What each zone swapchain's last released image shows (GS thread only).
 			ZoneMarkers::Drawn zone_drawn[kZoneSlots];
+
+			// [VR] MenuPanel: a game screen's own pixels (MenuPanel::Latest, split off the frame in the GS) on a flat panel in
+			// front of the player while first person carries on around it. One swapchain the size of the panel image, its own
+			// command buffer and fence; each image is released as soon as it is copied, like the HUD cards (the panel is
+			// world-placed, so an image shown one display frame late is never seen). Created the first time a panel shows;
+			// any failure turns the panel off for the session (game screens then pull away as before).
+			struct PanelChain
+			{
+				XrSwapchain swapchain = XR_NULL_HANDLE;
+				std::vector<XrSwapchainImageVulkan2KHR> images;
+				bool ever_released = false;
+				bool wait_pending = false;
+				uint32_t pending_index = 0;
+				u32 width = 0;
+				u32 height = 0;
+				u64 shown_serial = 0; // the MenuPanel export its last released image holds
+			};
+			PanelChain panel;
+			VkCommandBuffer panel_cmd = VK_NULL_HANDLE;
+			VkFence panel_fence = VK_NULL_HANDLE;
+			bool panel_fence_submitted = false;
+			bool panel_disabled = false;
+			// Where the panel stands: placed in front of the head as it appears, held there while the screen stays up.
+			bool panel_shown = false;
+			XrPosef panel_pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+			u64 panel_copies = 0;
 
 			XrSpace view_space = XR_NULL_HANDLE;
 
@@ -2676,7 +2708,7 @@ namespace VR::XRCompositor
 		// is not in use, this present published a flat screen quad and a hand's aim (or a PINE test hit) meets it.
 		bool PlaceMenuPointer(MenuPointerPlacement* out)
 		{
-			if (!HudCards::MenuPointerEnabled() || !SpatialControls::MenuMode() || s_fp_screen_was_active ||
+			if (!HudCards::MenuPointerEnabled() || !SpatialControls::MenuMode() || (s_fp_screen_was_active && !s.panel_shown) ||
 				!s.head_pose_valid)
 				return false;
 			const VRScreenTransform screen = GetScreenTransform();
@@ -2793,6 +2825,199 @@ namespace VR::XRCompositor
 			s.hud_cmd = VK_NULL_HANDLE;
 			for (HudRaster& r : s_hud_raster)
 				r.valid = false;
+		}
+
+		// --- [VR] MenuPanel -------------------------------------------------------------------------------------------
+		// The panel: 1.0 m ahead of the eyes, 0.12 m below them, 0.80 m tall (about 44 deg; 1.07 m wide at 4:3), tilted to
+		// face the eyes, placed where the head looks as the screen comes up. Large enough to point at a cell, near enough to
+		// read, and inside the first-person screen's 1.5 m so it sits in front of the room.
+		constexpr float kPanelDistanceM = 1.0f;
+		constexpr float kPanelHeightM = 0.80f;
+		constexpr float kPanelDropM = 0.12f;
+
+		void DestroyPanelResources()
+		{
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			if (h.IsValid() && s.panel_fence != VK_NULL_HANDLE && s.panel_fence_submitted)
+			{
+				if (vkWaitForFences(h.device, 1, &s.panel_fence, VK_TRUE, kTeardownFenceNs) == VK_TIMEOUT)
+					Console.Warning("(VR) Menu panel: copy fence still busy after 250 ms during teardown.");
+				vkResetFences(h.device, 1, &s.panel_fence);
+			}
+			s.panel_fence_submitted = false;
+			if (s.panel.swapchain != XR_NULL_HANDLE)
+			{
+				DestroySwapchainSynced(s.panel.swapchain);
+				s.panel.swapchain = XR_NULL_HANDLE;
+			}
+			s.panel = {};
+			if (h.IsValid())
+			{
+				if (s.panel_fence != VK_NULL_HANDLE)
+					vkDestroyFence(h.device, s.panel_fence, nullptr);
+				if (s.panel_cmd != VK_NULL_HANDLE && s.cmd_pool != VK_NULL_HANDLE)
+					vkFreeCommandBuffers(h.device, s.cmd_pool, 1, &s.panel_cmd);
+			}
+			s.panel_fence = VK_NULL_HANDLE;
+			s.panel_cmd = VK_NULL_HANDLE;
+			s.panel_shown = false;
+		}
+
+		bool EnsurePanelResources(u32 w, u32 h_px)
+		{
+			if (s.panel_disabled || w == 0 || h_px == 0)
+				return false;
+			if (s.panel.swapchain != XR_NULL_HANDLE && (s.panel.width != w || s.panel.height != h_px))
+			{
+				// Another size (the internal resolution changed): a new swapchain.
+				if (s.panel_fence_submitted)
+				{
+					const Internal::VulkanHandles& hh = Internal::GetVulkanHandles();
+					vkWaitForFences(hh.device, 1, &s.panel_fence, VK_TRUE, ONE_SECOND_NS);
+					vkResetFences(hh.device, 1, &s.panel_fence);
+					s.panel_fence_submitted = false;
+				}
+				DestroySwapchainSynced(s.panel.swapchain);
+				s.panel = {};
+			}
+			if (s.panel.swapchain != XR_NULL_HANDLE && s.panel_cmd != VK_NULL_HANDLE && s.panel_fence != VK_NULL_HANDLE)
+				return true;
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			if (!h.IsValid() || s.cmd_pool == VK_NULL_HANDLE)
+				return false;
+			const auto fail = [&](const char* what, int code) {
+				s.panel_disabled = true;
+				Console.Error("(VR) Menu panel: %s failed (%d); game screens pull away as before for this session.", what, code);
+				DestroyPanelResources();
+				MenuPanel::SetCompositorRefusal("the panel's swapchain could not be made");
+				return false;
+			};
+			if (s.panel_cmd == VK_NULL_HANDLE)
+			{
+				VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+				cai.commandPool = s.cmd_pool;
+				cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+				cai.commandBufferCount = 1;
+				const VkResult vr = vkAllocateCommandBuffers(h.device, &cai, &s.panel_cmd);
+				if (vr != VK_SUCCESS)
+				{
+					s.panel_cmd = VK_NULL_HANDLE;
+					return fail("vkAllocateCommandBuffers", static_cast<int>(vr));
+				}
+			}
+			if (s.panel_fence == VK_NULL_HANDLE)
+			{
+				VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+				const VkResult vr = vkCreateFence(h.device, &fci, nullptr, &s.panel_fence);
+				if (vr != VK_SUCCESS)
+				{
+					s.panel_fence = VK_NULL_HANDLE;
+					return fail("vkCreateFence", static_cast<int>(vr));
+				}
+				s.panel_fence_submitted = false;
+			}
+			if (s.panel.swapchain == XR_NULL_HANDLE)
+			{
+				XrSwapchainCreateInfo ci = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
+				ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+				ci.format = static_cast<int64_t>(s.swapchain_format);
+				ci.sampleCount = 1;
+				ci.width = w;
+				ci.height = h_px;
+				ci.faceCount = 1;
+				ci.arraySize = 1;
+				ci.mipCount = 1;
+				XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &s.panel.swapchain);
+				if (XR_FAILED(res))
+				{
+					s.panel.swapchain = XR_NULL_HANDLE;
+					return fail("xrCreateSwapchain", static_cast<int>(res));
+				}
+				uint32_t count = 0;
+				res = xrEnumerateSwapchainImages(s.panel.swapchain, 0, &count, nullptr);
+				if (XR_FAILED(res) || count == 0)
+					return fail("xrEnumerateSwapchainImages", static_cast<int>(res));
+				s.panel.images.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+				res = xrEnumerateSwapchainImages(s.panel.swapchain, count, &count,
+					reinterpret_cast<XrSwapchainImageBaseHeader*>(s.panel.images.data()));
+				if (XR_FAILED(res))
+					return fail("xrEnumerateSwapchainImages", static_cast<int>(res));
+				s.panel.width = w;
+				s.panel.height = h_px;
+				Console.WriteLn("(VR) Menu panel: swapchain created (%ux%u, %u images).", w, h_px, count);
+			}
+			return true;
+		}
+
+		// This present's panel image into the panel's swapchain: acquired and waited within the present's budget (an image
+		// not ready keeps the last one showing), copied in its own submit after the GS work that made it, released at once.
+		void CopyPanel(const MenuPanel::PanelInfo& info)
+		{
+			if (!info.valid || !info.image || s.panel.shown_serial == info.serial || !EnsurePanelResources(info.width, info.height))
+				return;
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			auto& pc_chain = s.panel;
+			uint32_t index = 0;
+			if (pc_chain.wait_pending)
+			{
+				index = pc_chain.pending_index;
+			}
+			else
+			{
+				if (XR_FAILED(LockedAcquire(pc_chain.swapchain, &index)))
+					return;
+				pc_chain.pending_index = index;
+				pc_chain.wait_pending = true;
+			}
+			const XrResult wr = BudgetedWaitSwapchainImage(pc_chain.swapchain, kSwapchainWaitNs);
+			if (wr == XR_TIMEOUT_EXPIRED || XR_FAILED(wr))
+				return;
+			pc_chain.wait_pending = false;
+			bool submitted = false;
+			if (s.panel_fence_submitted)
+			{
+				if (vkWaitForFences(h.device, 1, &s.panel_fence, VK_TRUE, ONE_SECOND_NS) != VK_SUCCESS)
+				{
+					LockedRelease(pc_chain.swapchain);
+					return;
+				}
+				vkResetFences(h.device, 1, &s.panel_fence);
+				s.panel_fence_submitted = false;
+			}
+			SubmitPendingGsWork();
+			VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+			bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+			if (vkBeginCommandBuffer(s.panel_cmd, &bi) == VK_SUCCESS)
+			{
+				const VkImage dst = pc_chain.images[index].image;
+				ImageBarrier(s.panel_cmd, dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+					VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+				VkImageCopy region = {};
+				region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+				region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+				region.extent = {info.width, info.height, 1};
+				// The panel image was left in TRANSFER_SRC_OPTIMAL by the GS command buffer that wrote it (MenuPanel).
+				vkCmdCopyImage(s.panel_cmd, reinterpret_cast<VkImage>(info.image), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst,
+					VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+				ImageBarrier(s.panel_cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+					VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+					VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+				if (vkEndCommandBuffer(s.panel_cmd) == VK_SUCCESS)
+				{
+					VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+					si.commandBufferCount = 1;
+					si.pCommandBuffers = &s.panel_cmd;
+					submitted = (LockedQueueSubmitReadingGs(h.queue, si, s.panel_fence) == VK_SUCCESS);
+					s.panel_fence_submitted = submitted;
+				}
+			}
+			if (XR_SUCCEEDED(LockedRelease(pc_chain.swapchain)) && submitted)
+			{
+				pc_chain.ever_released = true;
+				pc_chain.shown_serial = info.serial;
+				s.panel_copies++;
+			}
 		}
 
 		bool EnsureHudResources()
@@ -5845,6 +6070,8 @@ namespace VR::XRCompositor
 			const u64* hand_serial = nullptr;
 			const u64* zone_serial = nullptr;
 			const u64* hud_key = nullptr;
+			// [VR] MenuPanel: the panel's quad (null: none).
+			const XrCompositionLayerQuad* panel_quad = nullptr;
 		};
 
 		// Copies each pointed-to layer by value, in order, with its role and, for a hand or a HUD card that rides on a
@@ -5884,6 +6111,14 @@ namespace VR::XRCompositor
 					}
 					if (known)
 						e.pc_chain = static_cast<u8>(src.screen_chain ? kPcEyeChain + src.screen_chain[k] : kPcEyeChain);
+				}
+				if (!known && src.panel_quad && p == static_cast<const void*>(src.panel_quad))
+				{
+					e.kind = kKindQuad;
+					e.role = kRolePanel;
+					e.slot = kSlotPanel;
+					e.quad = *src.panel_quad;
+					known = true;
 				}
 				for (int k = 0; k < ControlQuads::kSlots && !known; k++)
 				{
@@ -5944,7 +6179,7 @@ namespace VR::XRCompositor
 						known = true;
 					}
 				}
-				if (known && e.role != kRoleScreen)
+				if (known && e.role != kRoleScreen && e.role != kRolePanel)
 					e.pc_chain = static_cast<u8>(PcChainOfSlot(e.slot));
 				if (known)
 					out->count++;
@@ -6021,6 +6256,7 @@ namespace VR::XRCompositor
 			}
 			else
 			{
+				park(kSlotPanel, kRolePanel, s.panel.swapchain, s.panel.ever_released, s.panel.width, s.panel.height);
 				for (int k = 0; k < ControlQuads::kSlots; k++)
 				{
 					park(static_cast<u8>(kSlotLever + k), kRoleLever, s.levers[k].swapchain, s.levers[k].ever_released,
@@ -6451,7 +6687,7 @@ namespace VR::XRCompositor
 			for (u32 i = 0; i < set.count && n < kLayerCapacity + 1; i++)
 			{
 				PublishedSet::Entry& e = set.e[i];
-				if (stale && e.role != kRoleScreen && e.role != kRoleLever && !e.parked)
+				if (stale && e.role != kRoleScreen && e.role != kRoleLever && e.role != kRolePanel && !e.parked)
 				{
 					if (s.no_parked_layers || e.kind != kKindQuad)
 						continue;
@@ -8880,6 +9116,19 @@ namespace VR::XRCompositor
 			}
 		}
 		DepthExport::SetCompositorWants(s.depth_layer);
+		// [VR] MenuPanel: the panel is copied by the GS thread (as the HUD cards are without PacerCopies); with PacerCopies
+		// on a game screen pulls away as before (CameraDriver reads the refusal).
+		s.panel_disabled = false;
+		MenuPanel::SetCompositorRefusal(pc.on ? "it needs [VR] PacerCopies off" : nullptr);
+		if (EmuConfig.VR.MenuPanel)
+		{
+			if (pc.on)
+				Console.Warning("(VR) Menu panel: off: it needs [VR] PacerCopies off (game screens pull away as before).");
+			else
+				Console.WriteLn("(VR) Menu panel: on ([VR] MenuPanel): a game screen keeps first person; its own draws go on a "
+								"panel %.2f m ahead, %.2f m tall.",
+					kPanelDistanceM, kPanelHeightM);
+		}
 
 		s.warned_pacer = false;
 		s.warned_beginframe = false;
@@ -9257,6 +9506,8 @@ namespace VR::XRCompositor
 		XrCompositionLayerQuad hand_quads[kHandSlots] = {
 			{XR_TYPE_COMPOSITION_LAYER_QUAD}, {XR_TYPE_COMPOSITION_LAYER_QUAD}};
 		XrCompositionLayerQuad hud_quads[HudCards::kCardCount] = {};
+		// [VR] MenuPanel: the panel's quad, when one is shown this present.
+		XrCompositionLayerQuad panel_quad = {XR_TYPE_COMPOSITION_LAYER_QUAD};
 		// The body-zone markers' quads: they only take layers the rest leave free (BuildZoneLayers).
 		XrCompositionLayerQuad zone_quads[kZoneSlots] = {};
 		// The controller pose each hand and HUD card was placed for (not attached unless it rides on a controller).
@@ -9706,6 +9957,73 @@ namespace VR::XRCompositor
 				make_layer(l0 ? 0 : 1, XR_EYE_VISIBILITY_BOTH);
 				publish_quad();
 			}
+			// [VR] MenuPanel: while a game screen is up in first person and the GS split it off this frame, the screen's own
+			// pixels on a flat panel in front of the player, over the first-person screen; the menu pointer aims at it.
+			{
+				const MenuPanel::PanelInfo& pinfo = MenuPanel::Latest();
+				const bool panel_want = EmuConfig.VR.MenuPanel && !pc.on && !s.panel_disabled && fp_screen &&
+				                        MenuPanel::ScreenUp() && s.head_pose_valid && pinfo.valid;
+				if (panel_want)
+					CopyPanel(pinfo);
+				const bool panel_on = panel_want && s.panel.ever_released && s.panel.width > 0 && layer_count < kLayerCapacity;
+				if (panel_on && !s.panel_shown)
+				{
+					// Placed in front of the head as it appears: anchor + R(yaw) * (0, -drop, -distance), turned to face the
+					// eyes (Rx(-tilt), the menu tablet's convention).
+					const XrQuaternionf& q = s.head_pose.orientation;
+					const float fx = -2.0f * (q.w * q.y + q.z * q.x);
+					const float fz = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
+					const float yaw = ((fx * fx + fz * fz) > 1.0e-4f) ? std::atan2(-fx, -fz) : 0.0f;
+					const XrVector3f eye = s.head_position_valid ? s.head_pose.position : XrVector3f{0.0f, 0.0f, 0.0f};
+					const float tilt = std::atan2(kPanelDropM, kPanelDistanceM);
+					const float th = -0.5f * tilt, ts = std::sin(th), tc = std::cos(th);
+					const float ys = std::sin(yaw * 0.5f), yc = std::cos(yaw * 0.5f);
+					s.panel_pose.orientation = {yc * ts, ys * tc, -ys * ts, yc * tc};
+					s.panel_pose.position = {eye.x - kPanelDistanceM * std::sin(yaw), eye.y - kPanelDropM,
+						eye.z - kPanelDistanceM * std::cos(yaw)};
+					s.panel_shown = true;
+					Console.WriteLn("(VR) Menu panel: shown %.2f m ahead, %.2f m below the eyes, %.2f x %.2f m, at (%.2f, %.2f, %.2f).",
+						kPanelDistanceM, kPanelDropM, kPanelHeightM * ComputeAspect(), kPanelHeightM, s.panel_pose.position.x,
+						s.panel_pose.position.y, s.panel_pose.position.z);
+				}
+				else if (!panel_on && s.panel_shown)
+				{
+					s.panel_shown = false;
+					Console.WriteLn("(VR) Menu panel: hidden (%llu images copied).", static_cast<unsigned long long>(s.panel_copies));
+				}
+				if (panel_on)
+				{
+					XrCompositionLayerQuad& quad = panel_quad;
+					quad = XrCompositionLayerQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+					// Premultiplied: the split pass writes rgb 0 where alpha is 0.
+					quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+					quad.space = XRSession::GetSpace();
+					quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+					quad.subImage = {s.panel.swapchain,
+						{{0, 0}, {static_cast<s32>(s.panel.width), static_cast<s32>(s.panel.height)}}, 0};
+					quad.pose = s.panel_pose;
+					// The panel image is the shown picture (its displayed rectangle, 1:1), shown at the picture's display aspect
+					// like the screens (4:3; the 512x448 buffer is not square-pixelled).
+					quad.size = {kPanelHeightM * ComputeAspect(), kPanelHeightM};
+					layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+					// The menu pointer aims at the panel (its u, v are the shown picture's: the panel covers it all).
+					pub = VRScreenTransform{};
+					pub.center.orientation_xyzw = {quad.pose.orientation.x, quad.pose.orientation.y, quad.pose.orientation.z,
+						quad.pose.orientation.w};
+					pub.center.position_xyz = {quad.pose.position.x, quad.pose.position.y, quad.pose.position.z};
+					pub.center.valid = true;
+					pub.half_width = 0.5f * quad.size.width;
+					pub.half_height = 0.5f * quad.size.height;
+					pub.tablet = false;
+					pub.valid = true;
+					if (s_pub_logged != 3)
+					{
+						s_pub_logged = 3;
+						Console.WriteLn("(VR) Screen transform (menu pointer): menu panel centred at (%.2f, %.2f, %.2f), %.2f x %.2f m.",
+							quad.pose.position.x, quad.pose.position.y, quad.pose.position.z, quad.size.width, quad.size.height);
+					}
+				}
+			}
 			if (!pub.valid)
 				s_pub_logged = 0;
 		}
@@ -9781,7 +10099,7 @@ namespace VR::XRCompositor
 		}
 
 		const LayerSources sources = {quads, cyls, 5, lever_quads, hand_quads, hud_quads, hand_att, hud_att, &s_pointer_pub,
-			zone_quads, screen_chain, hand_serial, zone_serial, hud_key};
+			zone_quads, screen_chain, hand_serial, zone_serial, hud_key, &panel_quad};
 
 		if (s.headset_rate && pc.on)
 		{
@@ -9849,6 +10167,7 @@ namespace VR::XRCompositor
 		if (!s.initialized)
 			return;
 		DepthExport::SetCompositorWants(false);
+		MenuPanel::SetCompositorRefusal(nullptr);
 
 		s.pacer_exit.store(true, std::memory_order_release);
 
@@ -9911,6 +10230,7 @@ namespace VR::XRCompositor
 		DestroyLeverResources();
 		DestroyHandResources();
 		DestroyHudResources();
+		DestroyPanelResources();
 		DestroyZoneResources();
 		DestroyBackground();
 		DestroyFillResources();

@@ -1319,6 +1319,12 @@ struct Pcsx2Config
 		// First person, while a menu is up: the menu on a small screen tilted up in front of the chest, like a tablet,
 		// instead of the world screen. Shown in the headset only.
 		bool MenuTablet = false;
+		// First person, File #1 (profiles with camera.lookAt.pauseWhen): a game screen (the item screen, the map, pause, a
+		// take-it prompt) no longer hands the camera back. First person keeps driving the camera, so the room keeps
+		// rendering around you in stereo, and the screen's own 2D draws are split off the frame onto a flat panel in
+		// front of you, where the menu pointer aims. The game reads the pad for its menu as before; nothing is confirmed
+		// for you. false = the pull-away to the world screen (or the Menu Tablet) as before. Ini only for now.
+		bool MenuPanel = false;
 		// First person, for profiles with a reach block: a light tick in the right hand and a short toast naming the item
 		// (and the button, "Kevin's 45 Auto  (A)") when something on the floor comes within reach of the character's own
 		// Circle press. Only reads the game's memory; shown in the headset only. Ini only for now.

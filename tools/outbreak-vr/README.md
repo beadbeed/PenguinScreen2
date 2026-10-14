@@ -23,6 +23,7 @@ and test the first-person camera. They talk to a running PenguinScreen2 through 
 | `hmdshot.py`, `input_log.py`, `record_play.py` | Headset Window screenshot; pad input + screenshots while someone plays; memory snapshots + screenshots while someone plays. |
 | `menutest.py` | Headset-free menu pointer tests for File #1's item screen (offline only): pointer hit maths, steering to each cell, fast click, the pause after a confirm, the command submenu (nothing pressed while its flag is up, no steering after it closes until the dot moves), overrides, closing mid-steer, the map and pause after an item-screen visit (`map-after-items`: point-to-select must stay off and press nothing; pause goes in as Select through `drive.py`), the menu tablet, and the cell rects checked against captures; and the belt pouches on File #1 or File #2 (`pouches`, `pouch-open`, `pouch-submenu`: the reach ticks against the item bytes, the equipped box's against the special item's, each squeeze bringing the cursor to its cell within 1 s, opening the item screen from a pouch, a squeeze refused with a command submenu open, never a confirm). `--slot` loads a savestate first, `--report` saves captures, `--test-uv` points with PINE test hits instead of aiming (works with no OpenXR runtime). |
 | `nearcull_test.py` | Headset-free near-cull check on a portable dev install (offline only): `before` runs the File #1 profile as committed at HEAD (from the install's own override folder, removed after), `after` the checkout's. Slot 5 faces the approaching zombie and logs, about 50 times a second, its distance by the cull's measure and whether it was drawn (`+0x198`); slot 6 `down` looks at the body. Captures and a JSON log go to `<install>/logs/nearcull/`. |
+| `menupanel_test.py` | Headset-free (or `--xr`, on SteamVR's null headset) checks of `[VR] MenuPanel` on File #1, offline only, on a portable dev install it starts and stops itself: per screen (`items` and `map` from slot 6, `takeit` at the bathroom sink from slot 8, `pause` through Select as Backspace), the share of samples with first person on, the camera's and the game's view matrix's turn against a 40 deg scripted head turn, the game counter, the emulog's menu panel lines, and on the item screen the menu pointer steering cells 1, 3 and 0 (PINE test hits; with `--xr` a ray at the published screen, whose centre, size and hits are printed). Writes the panel dumps, a stereo dump and the emulog into the out dir. Nothing is confirmed: screens close with their own button or Cross. |
 | `grabtest.py` | Headset-free shake-to-break-free tests for File #1 (offline only, `PCSX2_VR_TEST_INPUT=1`): `idle-shake` (no grab: shaking moves nothing and presses nothing), `baseline` (a grab with no input, about 10 s) and `shake` (shaking the scripted right controller from the load: the grab must end well before the baseline, and nothing more is pressed once it has). Loads `--grab-slot` (default 5, a zombie grabs Kevin) and `--calm-slot` (default 6). |
 
 HUD cards on the null headset: `PCSX2_VR_HUD_TEST=1` shows a test toast every 3 s (it cycles through the
@@ -439,6 +440,27 @@ of the snapshot, to show what the hand-off would give without it. Example, slot 
 `handtest.py` launches it: `PCSX2_VR_DEPTHPROBE=2 PCSX2_VR_DEPTHPROBE_AT="0.063,-0.349,-1.040"` reads the counter top
 under the Handgun's trigger volume, 1.045 m ahead. `PCSX2_VR_SELFTEST` / `vr_selftests` run `(VR) Depth export
 self-test: N checks passed.` (the conversion, the runtime's reading of the range, the projection views, the tracker).
+
+Menu panel (`VR/MenuPanel`, research note `research/2026-10-13-menu-panel.md`). `[VR] MenuPanel` (off by default, ini
+only, read live; File #1, any profile with `camera.lookAt.pauseWhen`): a game screen no longer hands the camera back.
+CameraDriver keeps writing the eye and target from the head under it ("camera only": no stick turn, aim, walk-and-shoot
+or body-follow; menu mode gives the sticks and buttons to the menu as before; the sprint latch lets go), so the room
+keeps rendering in stereo. In the GS each draw is classed (room: depth-tested perspective; clear: a depth write over the
+whole buffer; overlay: flat; backdrop: a blended overlay over the whole frame) and the colour target is snapshotted
+just before the screen's first draw (its depth clear or backdrop after the room, else any overlay after it with a
+screen up); Merge shows the snapshot, so the first-person screen has the room alone, a compute pass writes what the
+screen's draws changed (left eye, opaque, the rest clear) into the panel image, and the screen's backdrop draws are
+skipped while it is up. The compositor shows that image on a world-placed quad 1.0 m ahead of the eyes and 0.12 m
+below them, 0.80 m tall at 4:3, placed where the head looks as the screen comes up, and publishes it as the menu
+pointer's screen. Logs: `(VR) CameraDriver: a game screen is up; first person keeps the camera ...`, `(VR) Menu panel:
+the screen's draws split off the shown frame ...` (or `no panel (<why>)`), `(VR) Menu panel: swapchain created ...`,
+`shown ...` / `hidden ...`, `(VR) Screen transform (menu pointer): menu panel centred at ...`; at VR start `(VR) Menu
+panel: on ...` or why it is off (`PacerCopies` on: screens pull away as before). While a screen is up the desktop window
+shows the room without it and the depth export declines (the screen's depth clear covers the room's). Debug, offline
+only: `PCSX2_VR_MENUTRACE=<vsyncs>` logs every GS draw of that many vsyncs as `(VR) MTRACE` lines when a screen comes
+up, 1.5 s later and when it goes (`SNAP` the snapshot point, `SKIP` a backdrop left out);
+`PCSX2_VR_MENUPANEL_DUMP=<dir>[,everyN]` writes `menupanel_<n>_panel.png`, `_room.png` and `_frame.png` (never commit
+them) with a coverage line. `PCSX2_VR_SELFTEST` / `vr_selftests` run `(VR) Menu panel self-test: N checks, 0 failed`.
 
 Rules when testing: never change emulation speed; never pause, savestate or dump RAM while online
 (obsrv drops clients after ~30 s without packets and bans speed changes); do not run the virtual pad

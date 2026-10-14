@@ -25,6 +25,7 @@
 #include "VR/HandModel.h"
 #include "VR/HudCards.h"
 #include "VR/ItemReach.h"
+#include "VR/MenuPanel.h"
 #include "VR/MenuPointer.h"
 #include "VR/SpatialControls.h"
 #include "VR/StereoAuto.h"
@@ -242,6 +243,7 @@ int main(int argc, char* argv[])
 	RunLogged("Pickup cue and hand targeting", VR::ItemReach::SelfTest, "(VR) Pickup cue self-test");
 	RunLogged("Zone markers", VR::ZoneMarkers::SelfTest, "(VR) Zone markers self-test");
 	RunLogged("Depth export", VR::DepthExport::SelfTest, "(VR) Depth export self-test");
+	RunLogged("Menu panel", VR::MenuPanel::SelfTest, "(VR) Menu panel self-test");
 	RunGamepad();
 	RunSilent("CameraDriver::SelfTestAssembler (hook)", VR::CameraDriver::SelfTestAssembler);
 	RunSilent("CameraDriver::SelfTestMath (math, predict, comfort, FOV)", VR::CameraDriver::SelfTestMath);

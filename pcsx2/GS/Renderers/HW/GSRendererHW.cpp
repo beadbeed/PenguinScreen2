@@ -14,6 +14,7 @@
 #ifdef ENABLE_VR
 #include "VR/DepthHistogram.h"
 #include "VR/DepthExport.h"
+#include "VR/MenuPanel.h"
 #include "VR/StereoState.h"
 #include <algorithm>
 #include <cmath>
@@ -248,6 +249,7 @@ void GSRendererHW::Destroy()
 {
 #ifdef ENABLE_VR
 	VR::DepthExport::Destroy();
+	VR::MenuPanel::Destroy();
 #endif
 	g_texture_cache->RemoveAll(true, true, true);
 	GSRenderer::Destroy();
@@ -300,6 +302,7 @@ void GSRendererHW::VSync(u32 field, bool registers_written, bool idle_frame)
 #ifdef ENABLE_VR
 	VRZQDepthFitEndOfFrame();
 	m_vr_shown = VRShownFrame{};
+	VR::MenuPanel::OnVSync();
 #endif
 
 	if (GSConfig.LoadTextureReplacements)
@@ -372,6 +375,16 @@ GSTexture* GSRendererHW::GetOutput(int i, float& scale, int& y_offset)
 		rt->Update();
 		t = rt->m_texture;
 		scale = rt->m_scale;
+#ifdef ENABLE_VR
+		// [VR] MenuPanel: with a game screen split off this frame, the first-person screen shows its room alone (the
+		// snapshot taken before the screen's first draw); the screen's own pixels go to the panel (VRBeforeEndOfFrame).
+		if (EmuConfig.VR.MenuPanel)
+		{
+			if (GSTexture* const room = VR::MenuPanel::RoomFor(rt->m_TEX0.TBP0, t))
+				t = room;
+			VR::MenuPanel::NoteShown(rt->m_TEX0.TBP0);
+		}
+#endif
 
 		const int delta = bp_adj - rt->m_TEX0.TBP0;
 		if (delta > 0 && curFramebuffer.FBW != 0)
@@ -417,6 +430,43 @@ GSTexture* GSRendererHW::GetOutput(int i, float& scale, int& y_offset)
 // before the shown one is presented, so it is the snapshot there (research/2026-10-13-depth-export.md).
 void GSRendererHW::VRBeforeEndOfFrame(GSTexture* current)
 {
+	// [VR] MenuPanel: a game screen's own pixels of this present (the shown target against its room snapshot) into the
+	// panel image, in the GS command buffer, so the present's submit takes it to the GPU before VR::EndOfFrame copies it.
+	if (EmuConfig.VR.MenuPanel && VR::MenuPanel::SplitOn())
+	{
+		GSTextureCache::Target* const rt =
+			(current && m_vr_shown.outputs > 0) ? g_texture_cache->VRFindColorTarget(m_vr_shown.tbp) : nullptr;
+		const float sc = m_vr_shown.scale;
+		const GSVector4i& fb = m_vr_shown.fb_rect;
+		const GSVector4i& dr = m_vr_shown.display_rect;
+		const int sx = static_cast<int>(static_cast<float>(fb.x) * sc);
+		const int sy = static_cast<int>(static_cast<float>(fb.y + m_vr_shown.y_offset) * sc);
+		const int sw = static_cast<int>(static_cast<float>(fb.width()) * sc);
+		const int sh = static_cast<int>(static_cast<float>(fb.height()) * sc);
+		const int dx = static_cast<int>(static_cast<float>(dr.x) * sc);
+		const int dy = static_cast<int>(static_cast<float>(dr.y) * sc);
+		const int dw = static_cast<int>(static_cast<float>(dr.width()) * sc);
+		const int dh = static_cast<int>(static_cast<float>(dr.height()) * sc);
+		if (!current || m_vr_shown.outputs == 0)
+			VR::MenuPanel::NoPanel("no frame shown");
+		else if (m_vr_shown.mixed)
+			VR::MenuPanel::NoPanel("the picture is merged from two colour targets");
+		else if (!rt)
+			VR::MenuPanel::NoPanel("the shown colour target is gone");
+		else if (sw != dw || sh != dh || sx < 0 || sy < 0 || dx < 0 || dy < 0 || dx + dw > current->GetWidth() ||
+				 dy + dh > current->GetHeight())
+			VR::MenuPanel::NoPanel("the display stretches or offsets the frame (not a 1:1 copy)");
+		else
+		{
+			const float cw = static_cast<float>(current->GetWidth());
+			const float ch = static_cast<float>(current->GetHeight());
+			VR::MenuPanel::ExportPanel(m_vr_shown.tbp, rt->m_texture, static_cast<u32>(sx), static_cast<u32>(sy),
+				static_cast<u32>(sw), static_cast<u32>(sh), dx / cw, dy / ch, (dx + dw) / cw, (dy + dh) / ch);
+		}
+	}
+	else if (EmuConfig.VR.MenuPanel)
+		VR::MenuPanel::NoPanel(nullptr);
+
 	if (!VR::DepthExport::Wanted())
 		return;
 	if (!current || m_vr_shown.outputs == 0)
@@ -427,6 +477,13 @@ void GSRendererHW::VRBeforeEndOfFrame(GSTexture* current)
 	if (m_vr_shown.mixed)
 	{
 		VR::DepthExport::NoExport("the picture is merged from two colour targets");
+		return;
+	}
+	// [VR] MenuPanel: a game screen clears the depth again before its own draws, so the frame's depth is no longer the
+	// room's under it; that present goes as quads.
+	if (EmuConfig.VR.MenuPanel && VR::MenuPanel::SplitOn())
+	{
+		VR::DepthExport::NoExport("a game screen is up (its own depth clear covers the room's)");
 		return;
 	}
 	const VR::StereoState::Params st = VR::StereoState::Get();
@@ -2881,6 +2938,52 @@ void GSRendererHW::Draw()
 			GSTextureCache::Target* const finished = g_texture_cache->VRFindDepthTarget(tracker.live_zbp);
 			tracker.SnapshotTaken(finished && VR::DepthExport::TakeSnapshot(finished->m_texture));
 		}
+	}
+	// [VR] MenuPanel: the frame's room and a game screen's draws over it are split here, before anything of the draw is
+	// rendered: the colour target is snapshotted just before the screen's first draw (VR::MenuPanel::SplitTracker).
+	if (EmuConfig.VR.MenuPanel)
+	{
+		VR::MenuPanel::DrawNote note;
+		note.fbp = m_cached_ctx.FRAME.Block();
+		note.zbp = m_cached_ctx.ZBUF.Block();
+		note.z_test = m_cached_ctx.TEST.ZTE && m_cached_ctx.TEST.ZTST > ZTST_ALWAYS;
+		note.z_write = !m_cached_ctx.ZBUF.ZMSK;
+		note.tme = PRIM->TME;
+		note.fst = PRIM->FST;
+		note.q_const = m_vt.m_eq.q;
+		note.z_const = m_vt.m_eq.z;
+		note.sprite = (m_vt.m_primclass == GS_SPRITE_CLASS);
+		note.blend = PRIM->ABE;
+		const GSVector4i sc = context->scissor.in;
+		const GSVector4i rc = GSVector4i((m_vt.m_min.p.upld(m_vt.m_max.p) + GSVector4::cxpr(0.4f)).round<Round_NearestInt>())
+		                          .rintersect(sc);
+		const double sc_area = static_cast<double>(std::max(sc.width(), 0)) * static_cast<double>(std::max(sc.height(), 0));
+		const double rc_area = rc.rempty() ? 0.0 : static_cast<double>(rc.width()) * static_cast<double>(rc.height());
+		note.covers = sc.width() >= 256 && sc_area > 0.0 && rc_area >= 0.9 * sc_area;
+		std::string extra;
+		if (VR::MenuPanel::Tracing())
+		{
+			extra = fmt::format("prim={} abe={} abcd={}{}{}{} fix={} ztst={} ate={} atst={} fbmsk=0x{:x} fbw={} psm=0x{:x} "
+								"tbp=0x{:x} tpsm=0x{:x} r={},{}-{},{} sc={},{}-{},{} z={:.0f}-{:.0f} q={:.5f}-{:.5f} nv={}",
+				static_cast<int>(m_vt.m_primclass), PRIM->ABE ? 1 : 0, static_cast<u32>(context->ALPHA.A),
+				static_cast<u32>(context->ALPHA.B), static_cast<u32>(context->ALPHA.C), static_cast<u32>(context->ALPHA.D),
+				static_cast<u32>(context->ALPHA.FIX), static_cast<u32>(m_cached_ctx.TEST.ZTST),
+				static_cast<u32>(m_cached_ctx.TEST.ATE), static_cast<u32>(m_cached_ctx.TEST.ATST),
+				static_cast<u32>(m_cached_ctx.FRAME.FBMSK), static_cast<u32>(m_cached_ctx.FRAME.FBW),
+				static_cast<u32>(m_cached_ctx.FRAME.PSM), PRIM->TME ? static_cast<u32>(m_cached_ctx.TEX0.TBP0) : 0u,
+				PRIM->TME ? static_cast<u32>(m_cached_ctx.TEX0.PSM) : 0u, rc.x, rc.y, rc.z, rc.w, sc.x, sc.y, sc.z, sc.w,
+				m_vt.m_min.p.z, m_vt.m_max.p.z, m_vt.m_min.t.z, m_vt.m_max.t.z, m_vertex->next);
+		}
+		if (VR::MenuPanel::NoteDraw(note, static_cast<u64>(s_n), extra.empty() ? nullptr : extra.c_str()) ==
+			VR::MenuPanel::SplitAction::Snapshot)
+		{
+			GSTextureCache::Target* const rt = g_texture_cache->VRFindColorTarget(note.fbp);
+			VR::MenuPanel::TakeSnapshot(rt ? rt->m_texture : nullptr);
+		}
+		// A game screen's backdrop tint over the whole frame: left out while the split is on (the room is shown
+		// untinted around the panel, and on the panel the tint would cover every pixel).
+		if (VR::MenuPanel::SkipDraw())
+			return;
 	}
 #endif
 

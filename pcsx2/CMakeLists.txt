@@ -1079,6 +1079,7 @@ set(pcsx2VRSources
 	VR/SeatSession.cpp
 	VR/SpatialControls.cpp
 	VR/DepthExport.cpp
+	VR/MenuPanel.cpp
 	VR/DepthHistogram.cpp
 	VR/HeadPose.cpp
 	VR/MemWatch.cpp
@@ -1115,6 +1116,7 @@ set(pcsx2VRHeaders
 	VR/SeatSession.h
 	VR/SpatialControls.h
 	VR/DepthExport.h
+	VR/MenuPanel.h
 	VR/DepthHistogram.h
 	VR/HeadPose.h
 	VR/MemWatch.h

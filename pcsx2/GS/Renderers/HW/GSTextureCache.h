@@ -527,6 +527,16 @@ public:
 		}
 		return nullptr;
 	}
+	// The colour target based at bp, without touching the lookup order (VR::MenuPanel's room snapshot).
+	Target* VRFindColorTarget(u32 bp) const
+	{
+		for (auto it = m_dst[RenderTarget].begin(); it != m_dst[RenderTarget].end(); ++it)
+		{
+			if ((*it)->m_TEX0.TBP0 == bp && (*it)->m_texture)
+				return *it;
+		}
+		return nullptr;
+	}
 	__fi void NoteDisplayChainBP(u32 bp) { m_vr_display_bps.insert(bp); }
 
 private:

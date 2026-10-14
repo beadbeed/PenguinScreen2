@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/CameraDriver.h"
+#include "VR/MenuPanel.h"
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
 #include "VR/HudCards.h"
@@ -1781,8 +1782,11 @@ namespace VR::CameraDriver
 		// units). The base yaw is the character's heading, or with yawAnchor the camera's own yaw.
 		// e is the true head (recenter-relative) and drives gameplay; e_cam is the head the camera is written
 		// from (ahead of e with lookAt.predict, else the same).
+		// camera_only ([VR] MenuPanel, a game screen up): the camera alone is written from the head. No stick turn (the
+		// right stick is the menu's D-pad), no aim, no walk-and-shoot, no body-follow heading, no walking for the
+		// vignette; the hands hold nothing. The yaw anchor stays where it was, so the view is the same when the screen goes.
 		bool ApplyLookAt(const ProfileDB::CameraLookAt& la, const std::optional<u32>& base, const EulerAngles& e,
-			const EulerAngles& e_cam, const HeadPose::Snapshot& pose, LookAtWrite* out)
+			const EulerAngles& e_cam, const HeadPose::Snapshot& pose, LookAtWrite* out, bool camera_only = false)
 		{
 			s_aim_moving = false;
 			s_screen_turn_rate.store(0.0f, std::memory_order_release);
@@ -1816,7 +1820,7 @@ namespace VR::CameraDriver
 			const bool smooth = la.smooth_turn_deg_s > 0.0f && !EmuConfig.VR.SnapTurn;
 			const bool snap = !smooth && (la.snap_turn_deg > 0.0f || la.smooth_turn_deg_s > 0.0f);
 			const float snap_deg = (la.snap_turn_deg > 0.0f) ? la.snap_turn_deg : 30.0f;
-			const bool want_input = la.yaw_anchor && (((smooth || snap) && la.snap_stick_hand >= 0) || la.has_aim);
+			const bool want_input = !camera_only && la.yaw_anchor && (((smooth || snap) && la.snap_stick_hand >= 0) || la.has_aim);
 			if (want_input)
 				input = GetInputSnapshot();
 			const float turn_dt = TurnDt();
@@ -1918,7 +1922,7 @@ namespace VR::CameraDriver
 			// Point-to-aim: while the stance says the weapon is raised, face where the aim hand points
 			// (recenter-relative, around the camera anchor), so the camera itself does not turn.
 			bool weapon_raised = false;
-			if (la.has_aim && heading_addr != 0 && input.actions_active && la.aim_hand >= 0)
+			if (!camera_only && la.has_aim && heading_addr != 0 && input.actions_active && la.aim_hand >= 0)
 			{
 				const s64 sa = static_cast<s64>(base.value()) + la.aim_stance_offset;
 				if (sa >= 0 && sa + la.aim_stance_width <= static_cast<s64>(Ps2MemSize::MainRam))
@@ -1991,7 +1995,7 @@ namespace VR::CameraDriver
 			// push or the character's own speed, whichever is more. The move stick is the left one (the right when
 			// the left one turns), or walk-and-shoot's; with the weapon raised and no walk-and-shoot the game aims
 			// with that stick instead of walking, so then only the character's own movement counts.
-			if (EmuConfig.VR.ComfortVignette)
+			if (EmuConfig.VR.ComfortVignette && !camera_only)
 			{
 				VRInputSnapshot walk_snap;
 				if (!want_input)
@@ -2012,7 +2016,7 @@ namespace VR::CameraDriver
 
 			// Body follows view: standing idle with the stick centred, the character turns to face where the
 			// camera looks, so picking up, checking and opening things work on what the player looks at.
-			if (!la.body_follow.empty() && heading_addr != 0 && RecordChecksPass(la.body_follow, base.value()))
+			if (!camera_only && !la.body_follow.empty() && heading_addr != 0 && RecordChecksPass(la.body_follow, base.value()))
 				memWrite16(heading_addr, ToBinaryAngle(yaw_true));
 
 			const float target[3] = {eye[0] + la.distance * sy * cp, eye[1] + la.distance * sp,
@@ -2909,6 +2913,8 @@ namespace VR::CameraDriver
 
 		// Menu mode as published to SpatialControls: s_pause_hit held through the guard flicker's disarm grace.
 		bool s_menu_hold = false;
+		// [VR] MenuPanel: the "screen up, first person kept" line logged for this screen.
+		bool s_menu_panel_logged = false;
 
 		HeadPose::Snapshot FreshHeadPose()
 		{
@@ -3071,6 +3077,9 @@ namespace VR::CameraDriver
 				else if (!(s_armed_logged && s_guard_fail_vsyncs != 0))
 					s_menu_hold = false;
 				SpatialControls::SetMenuMode(s_menu_hold);
+				// [VR] MenuPanel: first person kept through the screen (lookAt still active under it).
+				MenuPanel::PublishScreenUp(EmuConfig.VR.MenuPanel && s_menu_hold && s_armed_logged &&
+										   s_lookat_active.load(std::memory_order_relaxed));
 			}
 		};
 		PublishOnExit publish_on_exit;
@@ -3495,18 +3504,9 @@ namespace VR::CameraDriver
 				ApplyHolds(la, crc);
 			else
 				RestoreHolds(&la, true);
-			if (!la.pause_when.empty() && GuardListPass(la.pause_when))
-			{
-				// A menu, the map or pause: the camera keeps its last view (its writers stay silenced) and the
-				// world screen shows the menu in front of the player.
-				s_aim_moving = false;
-				s_weapon_raised = false;
-				s_pause_hit = true;
-				ResetRenderSync();
-				SetLookAtActive(false);
-			}
-			else
-			{
+			// The camera from the head, this vsync. camera_only ([VR] MenuPanel, a game screen up): nothing but the camera
+			// is written; the sticks, the aim and the body stay the menu's.
+			const auto drive_camera = [&](bool camera_only) {
 				// lookAt recenters yaw only, so pitch and roll stay level with gravity whatever the head was
 				// doing at the recenter.
 				const EulerAngles head = QuaternionToEulerYXZ(pose.orientation_x, pose.orientation_y,
@@ -3521,7 +3521,7 @@ namespace VR::CameraDriver
 				const EulerAngles look_cam{WrapPi(head_cam.yaw - s_ref_yaw), head_cam.pitch, head_cam.roll};
 				TrackRenderPose(la);
 				LookAtWrite w;
-				const bool wrote = ApplyLookAt(la, base, look, look_cam, pose, &w);
+				const bool wrote = ApplyLookAt(la, base, look, look_cam, pose, &w, camera_only);
 				if (wrote)
 				{
 					w.fov_deg = fov_sizes_screen ? fov_now : 0.0f;
@@ -3530,6 +3530,37 @@ namespace VR::CameraDriver
 					PublishMatchedPose(la);
 				}
 				SetLookAtActive(wrote);
+			};
+			if (!la.pause_when.empty() && GuardListPass(la.pause_when))
+			{
+				s_aim_moving = false;
+				s_weapon_raised = false;
+				s_pause_hit = true;
+				if (MenuPanel::Usable() && !SplitState::Active())
+				{
+					// [VR] MenuPanel: a game screen keeps first person. The camera follows the head as usual, so the room
+					// keeps rendering around the player; the GS splits the screen's draws off onto a panel (MenuPanel).
+					// Menu mode (published as Apply leaves) gives the sticks to the menu.
+					if (!s_menu_panel_logged)
+					{
+						s_menu_panel_logged = true;
+						Console.WriteLn("(VR) CameraDriver: a game screen is up; first person keeps the camera ([VR] MenuPanel): "
+										"camera only, the sticks and buttons are the menu's.");
+					}
+					drive_camera(true);
+				}
+				else
+				{
+					// A menu, the map or pause: the camera keeps its last view (its writers stay silenced) and the
+					// world screen shows the menu in front of the player.
+					ResetRenderSync();
+					SetLookAtActive(false);
+				}
+			}
+			else
+			{
+				s_menu_panel_logged = false;
+				drive_camera(false);
 			}
 		}
 		else if (s_lookat_active.load(std::memory_order_relaxed))
@@ -3544,8 +3575,10 @@ namespace VR::CameraDriver
 		// screen or a cutscene takes over (lookAt inactive), so Cross is never left held in them, and when the
 		// weapon is raised (walk-and-shoot moves the character itself; online-safe the game aims with the stick).
 		// Same grace as above: lookAt keeps its flag while the guard byte flickers, so the run isn't dropped then.
+		// [VR] MenuPanel keeps lookAt active under a game screen: the latch lets go there too (s_menu_hold covers the grace).
 		SpatialControls::SetSprintBlocked(cam.look_at.has_value() &&
-			(!s_lookat_active.load(std::memory_order_relaxed) || s_aim_moving || s_weapon_raised));
+			(!s_lookat_active.load(std::memory_order_relaxed) || s_aim_moving || s_weapon_raised ||
+				(EmuConfig.VR.MenuPanel && (s_pause_hit || s_menu_hold))));
 
 		WriteCodeHookScratch(cam, euler, pose);
 

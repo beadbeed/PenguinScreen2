@@ -23,6 +23,7 @@ Updated by the Windows PC session on 2026-10-12 at night, after Alex's first two
 | Hand targeting | Branch `handtarget` (from `headset1` 43de18c): the read-only prototype, `reach.hand` in the profile, the pickup cue and zone marker self-tests in CI (21 suites, run 38488998201 green at 8dbff61). Checked offline, headset-free, 2026-10-13 (below). Not in the headset yet. |
 | Near cull | Branch `nearcull` (from `handtarget`): zombies and partners stay drawn up close, your body stays hidden. A File #1 profile change only; checked offline, headset-free, 2026-10-13 (below). Not in the headset yet. |
 | Depth layer | Branch `depthproj` (from `nearcull`): the shown frame's depth exported beside its colour, in metres, and (`[VR] DepthLayer`, off) sent to SteamVR with the first-person frame as a projection layer with depth. Road step 5's foundation. Checked offline and on the null headset, 2026-10-13 (below). Not in the headset yet. |
+| Menu panel | Branch `menupanel` (from `depthproj`): with `[VR] MenuPanel` (off) a game screen keeps first person, the room keeps rendering around you, and the screen's own draws are split off the frame onto a flat panel in front of you, where the menu pointer aims. Road step 1, stage 1. Item screen, map, take-it prompt and pause checked offline headset-free and on the null headset, 2026-10-13 (below). Not in the headset yet. |
 | Steam Frame standalone | **On hold** (Alex: File #1 first). ARMSX2 branch `outbreak-vr-frame` has M0 to M3, CI green, with a Monado headless OpenXR test and the sync tool: `STEAM-FRAME.md`. |
 
 **Local builds (2026-10-13)** are the everyday loop; CI is for checkpoints. All in `D:\dev\PenguinScreen2-build`, nothing in
@@ -109,7 +110,9 @@ The plan from all this is in `ROADMAP.md`.
   pause, and also the "Will you take it?" prompt and partner hand-overs.
 - **The pointer:** it steers the game's own cursor. Only your trigger confirms. It also works on the take-it prompt's
   squares, but a pull on a full square swaps that item out (it drops to the floor).
-- **Going:** the pull-away to a flat screen is next to go (`ROADMAP.md` step 1).
+- **Going:** the pull-away to a flat screen is next to go (`ROADMAP.md` step 1). With `[VR] MenuPanel = true`
+  (branch `menupanel`, off by default) it is gone: first person carries on under the screen, the room stays around
+  you, and the screen shows on a panel 1.0 m in front of you, where the pointer works as before.
 
 **Grabbed:** shake a controller to break free.
 
@@ -140,7 +143,10 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 3. **Near-cull patch** (`nearcull`): do zombies stay visible up close, even at arm's length, while your own body
    stays hidden when you lean or look straight down?
 4. **Seamless doors** (when in): open a door yourself. Do you just arrive in the next room?
-5. **Menus without the pull-away** (when in): does the room stay around you with the menu on a panel?
+5. **Menus without the pull-away** (`menupanel`, `[VR] MenuPanel = true`): open the item screen, the map, pause and a
+   take-it prompt. Does the room stay around you with the screen on a panel? Is the panel (1.0 m ahead, 0.80 m tall,
+   a little below the eyes) comfortable and readable? Does pointing at your item cells still steer the cursor, and do
+   the translucent windows (they show a flat copy of the room behind them) bother you?
 6. **Game weapon models** (when in): do the size, the grip and the holster look right?
 7. **Reload gesture** (when in): grab at the left hip, bring it to the gun.
 
@@ -162,6 +168,7 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 | `HandTargeting` | false | true: File #1 offline only, a read-only prototype: the right hand against the J's Bar Handgun's trigger volume (a wireframe box, one tick on entering it, `Hand targeting:` lines in the emulog); nothing is written to the game. Its trigger and distances are the File #1 profile's `reach.hand` |
 | `DedicatedXrQueue` | false | true: the OpenXR session gets its own Vulkan queue. The emulog says `(VR) XR queue: dedicated` or `shared with the GS (why)`. |
 | `PacerCopies` | false | true (with `DedicatedXrQueue` in effect): the VR pacer copies the frame, hands and cards into the headset's swapchains itself, so the GS thread never calls into the runtime or waits for its queue lock; the frame shows about one GS frame later (`PCSX2_VR_PACER_COPIES_FLUSH=1` takes that back with one more GS submit); the emulog says `(VR) Pacer copies: on` or why it stays off |
+| `MenuPanel` | false | true: a game screen (the profile's `camera.lookAt.pauseWhen`, File #1's u32 `0x720AA0`: item screen, map, pause, take-it prompts) keeps first person: the camera alone follows the head (no stick turn, aim or body-follow; the sticks and buttons are the menu's as before), the room keeps rendering in stereo, and the screen's own draws go on a flat panel 1.0 m ahead (0.80 m tall, placed where you look as it comes up), where the menu pointer aims. The screens' full-frame tint is left out. While a screen is up the desktop window shows the room without it, and the depth layer sends quads. Needs `PacerCopies` off (else screens pull away as before). The emulog says `(VR) Menu panel: on`, `shown ...` / `hidden`, or why not |
 | `DepthLayer` | false | true: in first person the frame goes to SteamVR as one projection layer at its render pose with its depth (`XR_KHR_composition_layer_depth`, a D32 depth swapchain per eye), for the runtime's own reprojection; false = the two screen quads, and no depth swapchain or copy at all. Needs `PacerCopies` off. The emulog says `(VR) Depth layer: on` or why it stays off; `PCSX2_VR_DEPTHLAYER_NODEPTH=1` sends the projection layer without the depth (an A/B) |
 
 ## In progress
@@ -211,6 +218,25 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 - **Null headset:** SteamVR offers the extension and takes the layer with no error; the picture matches the quads to
   0 px. Restored to the real settings afterwards (byte-identical).
 - **Not checked:** whether SteamVR's reprojection uses the depth (leaning), and the headset.
+
+**Menu panel (`menupanel`), checked offline headset-free and on the null headset on 2026-10-13**
+(`research/2026-10-13-menu-panel.md`, `menupanel_test.py`):
+- **The room under a screen:** the item screen, the map, the take-it prompt (bathroom Green Herb, slot 8) and pause all
+  draw the room every frame first and the screen over it in the same buffer. With first person kept, the game's own
+  view matrix turned 40.0 deg with a 40 deg head turn under each of them; with the switch off the camera held still,
+  as before.
+- **Running:** the game counter ran at 255/s under the item screen, map and take-it prompt, as with no screen; pause
+  stops it (0/s) but the room is still drawn and still follows the head.
+- **The split:** the colour target is snapshotted just before the screen's first draw (its depth clear or its backdrop
+  after the room); the first-person screen shows the snapshot, and what the screen's draws changed goes on the panel.
+  Panel share of the picture: item screen 43.9%, map 27.0%, take-it 38.3%, pause 51.4%. The room images carry no
+  screen pixels. The screens' full-frame tint is left out (with it the panel covered 95%).
+- **Null headset:** the panel layer 1.0 m ahead, 1.07 x 0.80 m, published as the pointer's screen; the ray hit cells 1,
+  3 and 0 within 0.001 of their centres and the cursor got there in 0.16-0.25 s, 1-2 D-pad presses, no confirm. No
+  pull-away, 60 frames/s (the null headset's), no xrEndFrame error. SteamVR restored afterwards (byte-identical).
+- **Self-tests:** 23 of 23 (the new Menu panel suite, 43 checks).
+- **Not checked:** the headset; partner hand-overs (same overlay, not seen: starting one needs a menu confirm);
+  co-op. Translucent windows show opaque with a flat copy of the room behind them; the panel's place is fixed.
 
 **The 2026-10-12 research agents (menus without the pull-away, seamless doors, true per-eye rendering) stopped at the
 usage limit and wrote no notes.** Those three are still open; the ROADMAP has the plan.
@@ -285,6 +311,10 @@ re-press; the VR self-tests in CI.
 - **`handtest.py <dev install>`:** hand targeting from slot 7 (above).
 - **`nearcull_test.py <dev install> <before|after> <slot> <seconds> [zombie|down]`:** the near-cull patch against
   the committed profile; slot 5 faces the approaching zombie, slot 6 looks down at the body (above).
+- **`menupanel_test.py <dev install> <out dir> [items] [map] [takeit] [pause] [--xr]`:** `[VR] MenuPanel`: per
+  screen, whether first person keeps the camera (the game's view matrix against a 40 deg head turn), the game
+  counter, the panel's split (dumps of the panel, the room and the frame), and on the item screen the pointer steering
+  cells 1, 3 and 0 (PINE test hits, or with `--xr` on the null headset a ray at the published screen). Slots 6 and 8.
 - **Scripted controllers:** `PCSX2_VR_TEST_INPUT=1` plus `pine.py`'s `FakeController`. PINE serves one client at a time. While
   scripted input is live, the pickup cue and hand targeting run without an OpenXR session too (rumble stays session-only).
 - **No OpenXR runtime:** set `XR_RUNTIME_JSON` to a missing file, plus `PCSX2_VR_FAKE_HEADPOSE`. The scratchpad helper

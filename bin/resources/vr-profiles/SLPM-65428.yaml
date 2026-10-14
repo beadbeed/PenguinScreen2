@@ -310,6 +310,9 @@ SLPM-65428:
       # 0x48BF7E; on the item screen and the map it rises 0.55-0.65 s after 0x48BF7E, as the screen is drawn. The camera
       # then holds still and the screen goes on the world screen in front of you.
       # (tools/outbreak-vr/research/2026-10-12-ui-flags-research.md)
+      # With VR MenuPanel on (off by default) first person keeps the camera instead (camera only, the sticks stay the
+      # menu's): every screen still draws the room first, and the GS splits the screen's own draws onto a panel in front
+      # of you (tools/outbreak-vr/research/2026-10-13-menu-panel.md).
       pauseWhen: [{ address: 0x720AA0, equals: 1 }]
       # Standing idle (stance 1, action 0) with the stick centred, the character turns to face where you
       # look, so picking things up and examining them works on what you're looking at.
