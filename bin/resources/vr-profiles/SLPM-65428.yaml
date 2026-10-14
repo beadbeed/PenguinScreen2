@@ -72,6 +72,12 @@ SLPM-65428:
     items: { table: 0x3967D0, stride: 0x3C, id: 0x06 }
     probe: { position: 0x38, heading: 0x92, reach: 0x1B4, ahead: 46, radius: 50, above: 200 }
     maxNodes: 0x100
+    # hand: the hand-targeting prototype ([VR] HandTargeting, off by default, offline File #1, read-only). The one trigger it
+    # targets, the Handgun on J's Bar counter at the start of the first scenario: item 0, its volume a 40 cm square turned
+    # about 25 deg, corners (8503, 12896), (8467, 12913), (8484, 12949), (8520, 12932), y 120-160 (RAM dump, 2026-10-12).
+    # A Handgun trigger whose centre is more than tolerance from centre is ignored. range / keep: a target appears with the
+    # hand this near the volume's centre and stays until keep; near: the marker brightens this near the volume. Decimal cm.
+    hand: { item: 0, centre: [8493.5, 140, 12922.5], tolerance: 10, range: 300, keep: 320, near: 30 }
   # Wrist card (VR only, first person): turn the left wrist to the face to read the character's condition
   # (FINE / CAUTION below 60% of max HP / DANGER below 20% / BLEED), an HP bar and the virus gauge. Reads
   # only. Local record offsets: HP u16 +0x544 of max +0x546; virus counter u32 +0xBAC over the u32 maximum

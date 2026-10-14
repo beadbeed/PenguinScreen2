@@ -23,10 +23,12 @@
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
 #include "VR/HudCards.h"
+#include "VR/ItemReach.h"
 #include "VR/MenuPointer.h"
 #include "VR/SpatialControls.h"
 #include "VR/StereoAuto.h"
 #include "VR/VRProfileDB.h"
+#include "VR/ZoneMarkers.h"
 #include "VR/XRCompositor.h"
 
 #include "Config.h"
@@ -236,6 +238,8 @@ int main(int argc, char* argv[])
 	RunLogged("HUD", VR::HudCards::SelfTest, "(VR) HUD self-test: ");
 	RunLogged("Feedback", VR::GameFeedback::SelfTest, "(VR) Feedback self-test: ");
 	RunLogged("Hands", VR::HandModel::SelfTest, "(VR) Hands self-test: ");
+	RunLogged("Pickup cue and hand targeting", VR::ItemReach::SelfTest, "(VR) Pickup cue self-test");
+	RunLogged("Zone markers", VR::ZoneMarkers::SelfTest, "(VR) Zone markers self-test");
 	RunGamepad();
 	RunSilent("CameraDriver::SelfTestAssembler (hook)", VR::CameraDriver::SelfTestAssembler);
 	RunSilent("CameraDriver::SelfTestMath (math, predict, comfort, FOV)", VR::CameraDriver::SelfTestMath);

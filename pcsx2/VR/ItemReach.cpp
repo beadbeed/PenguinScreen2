@@ -305,9 +305,6 @@ namespace VR::ItemReach
 
 	namespace
 	{
-		// The only item the hand prototype is about: the Handgun (J's Bar's pistol on the counter).
-		constexpr u16 kHandTargetItemId = 0;
-
 		// The list walk Evaluate does (the same head, node range check, loop check and cap), calling visit(node) for each node
 		// it reaches; visit returns false when something it needed did not read (the walk stops there, as Evaluate's does).
 		// *walked counts the nodes visited. Returns why it stopped early, or Fault::None at the end of the list.
@@ -378,7 +375,7 @@ namespace VR::ItemReach
 			if (!peek(static_cast<u64>(node) + p.item_offset, 4, &index) ||
 				!peek(static_cast<u64>(p.item_table) + static_cast<u64>(index) * p.item_stride + p.item_id_offset, 2, &id))
 				return true;
-			if (id != kHandTargetItemId)
+			if (id != p.hand_item)
 				return true;
 			double y_min = 0.0;
 			double y_max = 0.0;
@@ -584,17 +581,10 @@ namespace VR::ItemReach
 
 		// --- Hand targeting (the CPU thread's, except the published mark) ---
 
-		// A target exists while the nearest Handgun volume's middle is within kTargetRangeCm of the hand (kTargetKeepCm once it
-		// has one, so the edge of the range does not flicker it); farther, the volume is in another room or part of the level
-		// and drawing it would only confuse. kNearCm is the marker's "brighter within".
-		constexpr double kTargetRangeCm = 300.0;
-		// The one trigger this prototype targets: the Handgun lying on J's Bar counter at the start of File #1's first scenario.
-		// Its volume, read from a RAM dump in J's Bar (2026-10-12; node 0x3B6158 then): corners (8503, 12896), (8467, 12913),
-		// (8484, 12949), (8520, 12932) cm, a 40 cm square turned about 25 deg, y 120-160. Any other Handgun trigger is ignored.
-		constexpr double kJsBarPistolCentre[3] = {8493.5, 140.0, 12922.5};
-		constexpr double kJsBarPistolTolCm = 10.0;
-		constexpr double kTargetKeepCm = 320.0;
-		constexpr double kNearCm = 30.0;
+		// The one trigger and its distances come from the profile's reach.hand (File #1: the Handgun on J's Bar counter). A target
+		// exists while that volume's middle is within hand_range of the hand (hand_keep once it has one, so the edge of the range
+		// does not flicker it); farther, the volume is in another room or part of the level and drawing it would only confuse.
+		// hand_near is the marker's "brighter within".
 		constexpr u32 kHandEvalEveryVsyncs = 2;
 		constexpr u64 kHandLogMs = 1000;
 		constexpr u64 kMarkStaleMs = 250;
@@ -720,7 +710,7 @@ namespace VR::ItemReach
 	void PollHandTarget(const ProfileDB::Profile* profile, const Live& live, u64 now_ms, float haptic_strength)
 	{
 		const ProfileDB::ReachParams* params =
-			(profile && profile->reach.has_value()) ? &profile->reach.value() : nullptr;
+			(profile && profile->reach.has_value() && profile->reach->has_hand) ? &profile->reach.value() : nullptr;
 		if (!params || !EmuConfig.VR.HandTargeting || !live.hand_game || !live.net_offline || !live.armed ||
 			!VMManager::HasValidVM())
 		{
@@ -758,7 +748,12 @@ namespace VR::ItemReach
 				CameraDriver::MappingCheck(head_vr, grip.position_xyz.data(), &eye_err_mm, &round_trip_mm))
 			{
 				s_hand.logged_arm = true;
-				Console.WriteLn("(VR) Hand targeting: on (offline File #1, right hand, the J's Bar counter pistol's trigger only; read-only)");
+				Console.WriteLn("(VR) Hand targeting: on (offline File #1, right hand, read-only): the item %u trigger centred within %.0f cm "
+								"of (%.1f, %.1f, %.1f), range %.0f/%.0f cm, brighter within %.0f cm (profile reach.hand)",
+					static_cast<u32>(params->hand_item), static_cast<double>(params->hand_tolerance),
+					static_cast<double>(params->hand_centre[0]), static_cast<double>(params->hand_centre[1]),
+					static_cast<double>(params->hand_centre[2]), static_cast<double>(params->hand_range),
+					static_cast<double>(params->hand_keep), static_cast<double>(params->hand_near));
 				Console.WriteLn("(VR) Hand targeting: mapping check: eye->head error %.3f mm, round trip %.3f mm", eye_err_mm,
 					round_trip_mm);
 			}
@@ -774,11 +769,12 @@ namespace VR::ItemReach
 			return;
 		}
 		const double hand[3] = {hand_game[0], hand_game[1], hand_game[2]};
-		const HandTarget t = EvaluateHandTarget(*params, live.record, hand, nullptr, kJsBarPistolCentre, kJsBarPistolTolCm);
+		const double only_centre[3] = {params->hand_centre[0], params->hand_centre[1], params->hand_centre[2]};
+		const HandTarget t = EvaluateHandTarget(*params, live.record, hand, nullptr, only_centre, params->hand_tolerance);
 		const double to_centre = std::sqrt((t.hand[0] - t.centre[0]) * (t.hand[0] - t.centre[0]) +
 		                                   (t.hand[1] - t.centre[1]) * (t.hand[1] - t.centre[1]) +
 		                                   (t.hand[2] - t.centre[2]) * (t.hand[2] - t.centre[2]));
-		if (!t.found || to_centre > (s_hand.has_target ? kTargetKeepCm : kTargetRangeCm))
+		if (!t.found || to_centre > (s_hand.has_target ? params->hand_keep : params->hand_range))
 		{
 			HandStop(true);
 			return;
@@ -823,10 +819,10 @@ namespace VR::ItemReach
 				static_cast<double>(centre_vr[0]), static_cast<double>(centre_vr[1]), static_cast<double>(centre_vr[2]));
 		}
 
-		// The marker: dim while the hand is far, brighter within kNearCm of the volume, brightest inside it.
+		// The marker: dim while the hand is far, brighter within hand_near of the volume, brightest inside it.
 		const double volume_cm = std::sqrt(t.horizontal_cm * t.horizontal_cm + t.vertical_cm * t.vertical_cm);
 		mark.node = t.node;
-		mark.glow = t.inside ? 2 : (volume_cm <= kNearCm ? 1 : 0);
+		mark.glow = t.inside ? 2 : (volume_cm <= params->hand_near ? 1 : 0);
 		PublishMark(&mark);
 
 		// One light tick when the hand enters the volume, not again until it has left.
@@ -1515,6 +1511,10 @@ namespace VR::ItemReach
 				check(r.position_offset == 0x38 && r.heading_offset == 0x92 && r.reach_offset == 0x1B4 && r.ahead == 46.0f &&
 						  r.radius == 50.0f && r.above == 200.0f && r.max_nodes >= 64,
 					"profile: File #1's probe (+0x38, +0x92, +0x1B4, 46 ahead, radius 50, 200 above)");
+				check(r.has_hand && r.hand_item == 0 && r.hand_centre[0] == 8493.5f && r.hand_centre[1] == 140.0f &&
+						  r.hand_centre[2] == 12922.5f && r.hand_tolerance == 10.0f && r.hand_range == 300.0f &&
+						  r.hand_keep == 320.0f && r.hand_near == 30.0f,
+					"profile: File #1's reach.hand is the J's Bar Handgun (item 0 at (8493.5, 140, 12922.5), 10 cm, 300/320, 30)");
 			}
 		}
 

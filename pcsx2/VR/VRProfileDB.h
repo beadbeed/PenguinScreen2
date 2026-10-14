@@ -610,6 +610,15 @@ namespace VR::ProfileDB
 		float radius = 50.0f;
 		float above = 200.0f;
 		u32 max_nodes = 256; // the walk stops here (and at the first repeated node)
+		// reach.hand: the hand-targeting prototype's one trigger and distances ([VR] HandTargeting), game cm. Optional:
+		// without it (or with a bad one) hand targeting finds nothing in this game, and the pickup cue is unaffected.
+		bool has_hand = false;
+		u16 hand_item = 0;                // the item id the trigger must hold
+		float hand_centre[3] = {};        // the trigger volume's centre (x, y, z), as found in a RAM dump
+		float hand_tolerance = 10.0f;     // a volume whose centre is farther than this from hand_centre is another trigger
+		float hand_range = 300.0f;        // a target appears while the hand is within this of the volume's centre
+		float hand_keep = 320.0f;         // and stays until this (no flicker at the edge)
+		float hand_near = 30.0f;          // the marker brightens within this of the volume
 	};
 
 	// hud.wrist: a card on the back of the left wrist while first person is active (VR only), with the

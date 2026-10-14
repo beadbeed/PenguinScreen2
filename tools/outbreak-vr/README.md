@@ -197,6 +197,7 @@ character, eye height, the true base yaw, the recenter) so `GameFromVr` / `VrFro
 game centimetres and back (the eye_forward offset is not part of the map). `ItemReach::EvaluateHandTarget` walks the
 pickup cue's trigger list (same filters and node cap) for nodes whose item is id 0 AND whose volume centre lies within
 10 cm of the J's Bar counter pistol's (8493.5, 140, 12922.5 game cm, from a RAM dump), so no other Handgun is ever a target
+(the item, centre, tolerance and the range / keep / near distances are the profile's `reach.hand`: edit the YAML in the build's `resources/vr-profiles` and restart the emulator, no rebuild)
 and reports the hand's distance to its floor quad (0 inside) and height range, whether it is `inside` (no margin) and
 whether the game's own forward search would pick the same node. A dim wireframe box (a fourth zone-marker layer, the first
 dropped when layers are short) shows the volume, brighter within 30 cm and brightest inside; the right hand gets one

@@ -145,7 +145,7 @@ namespace VR::ItemReach
 
 	// Overlap and height rules, ties and the walk's safety on synthetic trigger lists in scripted RAM (the bathroom Green
 	// Herb's measured numbers among them), the once-per-approach rules, the toast text and the shipped File #1 block;
-	// logs "(VR) Pickup cue self-test: passed (N checks ...)" or "... FAIL: <first check>". Runs once from Poll when
-	// PCSX2_VR_SELFTEST is set.
+	// logs "(VR) Pickup cue self-test: passed (N checks ...)" or "... FAIL: <first check>". Run by tests/vr's vr_selftests
+	// (CI); nothing in the emulator calls it.
 	bool SelfTest();
 }

@@ -2663,7 +2663,7 @@ static std::optional<VR::ProfileDB::ReachParams> parseReach(const std::string_vi
 		Console.WarningFmt("(VR) ProfileDB: Serial '{}' reach {}.", serial, why);
 		ok = false;
 	};
-	warnUnknownKeys(serial, rnode, "reach", {"list", "node", "accept", "items", "probe", "maxNodes"});
+	warnUnknownKeys(serial, rnode, "reach", {"list", "node", "accept", "items", "probe", "maxNodes", "hand"});
 
 	// A hex number under key; absent keeps the default, present but not a number makes the block bad.
 	const auto hex = [&](const ryml::ConstNodeRef& map, const char* key, const std::string& what, u32& dst) {
@@ -2810,6 +2810,62 @@ static std::optional<VR::ProfileDB::ReachParams> parseReach(const std::string_vi
 	hex(rnode, "maxNodes", "reach.maxNodes", rp.max_nodes);
 	if (rp.max_nodes == 0 || rp.max_nodes > 0x1000)
 		bad("maxNodes must be from 1 to 0x1000");
+
+	// hand: the hand-targeting prototype's tuning (decimal game cm, item id decimal). Only hand targeting reads it, so a bad
+	// entry drops just this part with a warning and the pickup cue keeps the rest.
+	if (rnode.has_child("hand"))
+	{
+		const ryml::ConstNodeRef h = rnode["hand"];
+		bool hand_ok = h.is_map();
+		const auto hand_bad = [&](const std::string& why) {
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' reach.hand {}, so hand targeting finds nothing in this game.", serial, why);
+			hand_ok = false;
+		};
+		if (!hand_ok)
+			hand_bad("is not a map");
+		else
+		{
+			warnUnknownKeys(serial, h, "reach.hand", {"item", "centre", "tolerance", "range", "keep", "near"});
+			const auto num = [&](const char* key, float lo, float hi, float& dst) {
+				if (!h.has_child(key))
+					return;
+				const std::string_view raw = nodeVal(h[key]);
+				const std::optional<float> v = StringUtil::FromChars<float>(raw);
+				if (!v.has_value() || !std::isfinite(v.value()) || v.value() < lo || v.value() > hi)
+					hand_bad(fmt::format("{} '{}' must be a number from {} to {}", key, raw, lo, hi));
+				else
+					dst = v.value();
+			};
+			const std::optional<u32> item = h.has_child("item") ? StringUtil::FromChars<u32>(nodeVal(h["item"])) : std::nullopt;
+			if (!item.has_value() || item.value() > 0xFFFF)
+				hand_bad("needs item (the decimal item id the trigger holds, 0-65535)");
+			else
+				rp.hand_item = static_cast<u16>(item.value());
+			if (!h.has_child("centre") || !h["centre"].is_seq() || h["centre"].num_children() != 3)
+				hand_bad("needs centre: [x, y, z] (the trigger volume's centre, game cm)");
+			else
+			{
+				int k = 0;
+				for (const ryml::ConstNodeRef& c : h["centre"].children())
+				{
+					const std::string_view raw = nodeVal(c);
+					const std::optional<float> v = StringUtil::FromChars<float>(raw);
+					if (!v.has_value() || !std::isfinite(v.value()) || std::fabs(v.value()) > 1.0e6f)
+						hand_bad(fmt::format("centre '{}' is not a coordinate", raw));
+					else
+						rp.hand_centre[k] = v.value();
+					k++;
+				}
+			}
+			num("tolerance", 0.0f, 500.0f, rp.hand_tolerance);
+			num("range", 1.0f, 2000.0f, rp.hand_range);
+			num("keep", 1.0f, 2000.0f, rp.hand_keep);
+			num("near", 0.0f, 500.0f, rp.hand_near);
+			if (hand_ok && rp.hand_keep < rp.hand_range)
+				hand_bad("keep must be at least range");
+		}
+		rp.has_hand = hand_ok;
+	}
 
 	if (!ok)
 	{
