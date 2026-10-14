@@ -26,6 +26,12 @@ checked offline or on SteamVR's null headset only.
 - **Merging:** none of these are merged into `headset1` yet. `menupanel` contains all of them, so after Alex's headset
   check, merge `menupanel` into `headset1`.
 
+**2026-10-14 playtest build:** branch `playtest` = `menupanel` + `reloadwire` (the reload gesture) + `meshraster` (the mesh
+renderer, not drawn with yet), built locally with LTO like CI (25 of 25 self-tests). Launch with
+`D:\Games\PS2\Launch-Playtest-SteamVR.cmd`. It runs `D:\dev\PenguinScreen2-buildun-playtest`, a separate portable
+install with its own settings (`HandTargeting`, `MenuPanel` and `ReloadGesture` on, `DepthLayer` off), memory cards and copies
+of the File #1 savestates. Headset-free speed in slot 5 matches the CI build.
+
 ## Where things are
 
 | | |
