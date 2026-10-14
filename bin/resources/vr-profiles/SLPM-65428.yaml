@@ -255,6 +255,33 @@ SLPM-65428:
       - { address: 0x5A9340, on: 0x00000000, off: 0x0C0D013C, when: [{ address: 0x540004, equals: 3 }] }   # door follow camera eye write
       - { address: 0x5A9410, on: 0x00000000, off: 0x0C0D013C, when: [{ address: 0x540004, equals: 3 }] }   # door follow camera eye write
       - { address: 0x630B00, on: 0x00000000, off: 0xA2220FAA, when: [{ address: 0x540004, equals: 3 }] }   # stick latch on camera-cut lines (would freeze gaze steering)
+      # Seamless doors (VR setting SeamlessDoors, off by default; tools/outbreak-vr/research/2026-10-14-doors.md). A door
+      # you open yourself starts two scripted camera shots, only for the local player: the door shot (camera mode
+      # 0x3AEF75 = 1, set by `jal 0x590B40` with a0 = 1 in the door callbacks FUN_00591160 / FUN_005929E0) and the
+      # arrival shot in the next room (mode 2, FUN_00550220). Both fail the 0x3AEF75 guard, so first person dropped out.
+      # These NOP only those calls (the delay slot, a0 = 1 or the door kind store, still runs): the door motion, its
+      # timer, the door-opened bits, the network notify, the room change and the load are untouched (checked offline:
+      # the same timeline, camera mode 0 throughout). Each is written only over its own original word 0x0C1642D0 while
+      # the GAME overlay is resident, only with the switch on and the game strictly offline (no network adapter, so not
+      # private co-op either). The door shots are ordinary silence entries: patched while first person is armed, put
+      # back on disarm. The arrival shot runs during the room load, while first person is off (status 3), so a silence
+      # entry would already be put back by then: keepThroughDisarm keeps it patched, armed or not, and puts it back as
+      # soon as the switch goes off, the network adapter comes on, first person is turned off, or the overlay changes.
+      - { address: 0x5914FC, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_00591160, local player
+      - { address: 0x5916F0, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_00591160, local player
+      - { address: 0x591804, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_00591160, local player
+      - { address: 0x5918C0, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_00591160, local player
+      - { address: 0x5919F8, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_00591160, local player
+      - { address: 0x591B0C, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_00591160, local player
+      - { address: 0x592D78, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_005929E0, local player
+      - { address: 0x592F34, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_005929E0, local player
+      - { address: 0x59302C, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_005929E0, local player
+      - { address: 0x5930E8, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_005929E0, local player
+      - { address: 0x5931FC, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_005929E0, local player
+      - { address: 0x5932EC, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_005929E0, local player
+      - { address: 0x550494, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors, keepThroughDisarm: true }   # arrival shot: FUN_00550220
+      - { address: 0x5504E0, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors, keepThroughDisarm: true }   # arrival shot: FUN_00550220
+      - { address: 0x55052C, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors, keepThroughDisarm: true }   # arrival shot: FUN_00550220
       # Nothing vanishes up close, and your own body stays hidden (the full story is at lookAt.hold below). The
       # near-camera cull FUN_005902F0 opens with `lb v0, 0x48BF88; beq v0, zero, <the distance test>`: without the
       # beq it always takes the exit under it (`beq zero, zero, <return>; daddu v0, zero, zero`), never culled, for

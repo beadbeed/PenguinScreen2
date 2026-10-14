@@ -1330,6 +1330,12 @@ struct Pcsx2Config
 		// front of you, where the menu pointer aims. The game reads the pad for its menu as before; nothing is confirmed
 		// for you. false = the pull-away to the world screen (or the Menu Tablet) as before. Ini only for now.
 		bool MenuPanel = false;
+		// First person, File #1 offline only (profiles with camera.silence entries marked whenSetting: SeamlessDoors): a
+		// door you open yourself no longer plays the game's door shot or arrival shot, so first person holds while your
+		// character opens the door and comes back as soon as the next room is loaded, as when you follow a partner.
+		// The door, its locks and keys, the load and partners are unchanged. Never online (not even private co-op).
+		// Ini only for now.
+		bool SeamlessDoors = false;
 		// First person, for profiles with a reach block: a light tick in the right hand and a short toast naming the item
 		// (and the button, "Kevin's 45 Auto  (A)") when something on the floor comes within reach of the character's own
 		// Circle press. Only reads the game's memory; shown in the headset only. Ini only for now.

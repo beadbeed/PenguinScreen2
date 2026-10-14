@@ -281,6 +281,14 @@ namespace VR::ProfileDB
 		// Only while first person runs in private co-op (CameraDriver's NetMode::PrivateCoop), e.g. patches that
 		// change what the game sends to partners.
 		bool coop_only = false;
+		// Optional (whenSetting: <name>): only patched while that VR switch is on, and only offline (no network adapter,
+		// not online-safe; private co-op excluded too). Known names: SeamlessDoors. Off: a word we patched is put back.
+		std::string when_setting;
+		// Optional (keepThroughDisarm: true, needs whenSetting): patched while the switch is on, the profile's `when`
+		// guard passes and the game is offline, whether first person is armed or not (e.g. code that runs during a room
+		// load, when first person is off). Put back when the switch goes off, the network comes on or `when` fails
+		// (the code is gone then); never written over a word holding neither value.
+		bool keep_through_disarm = false;
 	};
 
 	struct CameraCodeHook
@@ -862,4 +870,7 @@ namespace VR::ProfileDB
 	void Reset();
 
 	bool SelfTestMultibandResolve();
+	// camera.silence whenSetting: the VR switch names an entry may be gated on, and whether that switch is on now.
+	bool IsSilenceSettingName(std::string_view name);
+	bool SilenceSettingOn(std::string_view name);
 }
