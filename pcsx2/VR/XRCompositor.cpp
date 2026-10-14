@@ -1105,6 +1105,21 @@ namespace VR::XRCompositor
 			xrDestroySwapchain(swapchain);
 		}
 
+		// SteamVR gives a session 16 swapchains (a 17th xrCreateSwapchain returns XR_ERROR_LIMIT_REACHED). With
+		// everything on (background, edge fill, two eyes, four zone markers, six HUD cards, two hands) that is all 16, so
+		// the menu panel (or the hands, when a game screen opens before they are first drawn) would find none left. Then
+		// the edge fill gives its swapchain up for the session (the background stays black) and the creation is retried
+		// once. GS thread. Defined after the edge fill's state.
+		bool YieldEdgeFillSwapchain(const char* who);
+
+		XrResult CreateSwapchainYielding(const XrSwapchainCreateInfo& ci, XrSwapchain* out, const char* who)
+		{
+			XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, out);
+			if (res == XR_ERROR_LIMIT_REACHED && YieldEdgeFillSwapchain(who))
+				res = xrCreateSwapchain(XRSession::GetSession(), &ci, out);
+			return res;
+		}
+
 		void WaitAllFences()
 		{
 			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
@@ -2206,7 +2221,7 @@ namespace VR::XRCompositor
 				ci.faceCount = 1;
 				ci.arraySize = 1;
 				ci.mipCount = 1;
-				XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &hc.swapchain);
+				XrResult res = CreateSwapchainYielding(ci, &hc.swapchain, "the hands");
 				if (XR_FAILED(res))
 				{
 					hc.swapchain = XR_NULL_HANDLE;
@@ -2928,7 +2943,7 @@ namespace VR::XRCompositor
 				ci.faceCount = 1;
 				ci.arraySize = 1;
 				ci.mipCount = 1;
-				XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &s.panel.swapchain);
+				XrResult res = CreateSwapchainYielding(ci, &s.panel.swapchain, "the menu panel");
 				if (XR_FAILED(res))
 				{
 					s.panel.swapchain = XR_NULL_HANDLE;
@@ -5058,6 +5073,33 @@ namespace VR::XRCompositor
 			s_fill.disabled = true;
 			s_fill.live.store(false, std::memory_order_release);
 			Console.Warning("(VR) Edge fill: %s failed (%d); the background stays black for this session.", what, code);
+		}
+
+		// CreateSwapchainYielding: the fill off for the session and its swapchain destroyed, so `who` can have one. The
+		// pacer reads the fill's swapchain only under submit_mutex and only while the fill is live, so the live flag goes
+		// first and DestroySwapchainSynced (which takes submit_mutex) then waits out a frame being built with it.
+		bool YieldEdgeFillSwapchain(const char* who)
+		{
+			if (s_fill.swapchain == XR_NULL_HANDLE || s.abandoned.load(std::memory_order_acquire))
+				return false;
+			s_fill.disabled = true;
+			s_fill.live.store(false, std::memory_order_release);
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			if (h.IsValid() && s_fill.fence != VK_NULL_HANDLE && s_fill.fence_submitted)
+			{
+				vkWaitForFences(h.device, 1, &s_fill.fence, VK_TRUE, kTeardownFenceNs);
+				vkResetFences(h.device, 1, &s_fill.fence);
+				s_fill.fence_submitted = false;
+			}
+			const XrSwapchain fill = s_fill.swapchain;
+			DestroySwapchainSynced(fill);
+			s_fill.swapchain = XR_NULL_HANDLE;
+			s_fill.images.clear();
+			s_fill.wait_pending = false;
+			s_fill.pending_index = 0;
+			Console.Warning("(VR) Edge fill: off for this session, its swapchain given to %s (the runtime's swapchain limit "
+							"was reached); the background stays black.", who);
+			return true;
 		}
 
 		bool CreateFillImage(const Internal::VulkanHandles& h, u32 width, u32 height, u32 levels, FillImage* img)
