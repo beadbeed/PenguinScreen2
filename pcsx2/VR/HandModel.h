@@ -7,6 +7,11 @@
 
 #include <vector>
 
+namespace VR::GameModels
+{
+	struct Model;
+}
+
 // First-person hands: a procedural low-poly glove holding the controller, or in the right hand the weapon the
 // character has raised, shaped by the equipped item's kind (a pistol, a long gun, a melee weapon, something to throw
 // or a spray can), drawn on the CPU from the head's position into a small image that the compositor shows as a quad
@@ -36,9 +41,36 @@ namespace VR::HandModel
 		Spray,   // a spray can in the closed hand
 	};
 
+	// How the game itself attaches a weapon's model to the character's right hand: one entry of its weapon-type table
+	// (the profile's feedback.weapon.hold; File #1: 0x6E5944, 0x44 bytes an entry), read by GameFeedback. The game draws
+	// the held weapon with the matrix (vertex * R + grip) * hand, in its row-vector convention: vertex is a point of the
+	// model (game units, 1 cm), R = Rx(rot[0]) * Ry(rot[1]) * Rz(rot[2]) (X applied first), grip a point in the hand bone's
+	// own frame and hand the bone's matrix (node 19/28 of the character's skeleton; its scale, Kevin's 1.05, applies to
+	// grip, not to the weapon). The bone's frame, in the bind pose: -X from the wrist toward the fingers, -Y the palm,
+	// +Z the thumb's side.
+	struct GameAttach
+	{
+		bool valid = false;
+		u16 type = 0; // the game's weapon type (the table index), 0 = none
+		float grip_cm[3] = {0.0f, 0.0f, 0.0f};
+		float rot_rad[3] = {0.0f, 0.0f, 0.0f};
+		bool has_muzzle = false;
+		float muzzle_cm[3] = {0.0f, 0.0f, 0.0f}; // a gun's muzzle in the model's own space
+	};
+
+	// Decodes one weapon-type table entry (bytes as in guest memory, little-endian) into out: false, with out left
+	// invalid, when the entry is short, its byte +2 does not name type, type is 0, or a value is not finite or is
+	// further than a metre (grip) or two (muzzle) out. Pure.
+	bool DecodeGameAttach(const u8* entry, size_t size, u16 type, u32 grip_offset, u32 rotation_offset, u32 muzzle_offset,
+		GameAttach* out);
+
 	struct HandState
 	{
 		bool valid = false;
+		// [VR] GameWeaponModels: drawn with the hand model (HandMesh) and, in the right hand, the game's own weapon model
+		// (GameModels) placed by attach; false, or a weapon whose model or attach is missing, is today's procedural look.
+		bool mesh = false;
+		GameAttach attach;
 		// In the XR base space. pos is the controller's grip position (inside the handle); quat (xyzw)
 		// is the controller's pointing frame: -Z forward along the barrel, +Y up, +X right.
 		float pos[3] = {0.0f, 0.0f, 0.0f};
@@ -81,7 +113,11 @@ namespace VR::HandModel
 	// down, kHolsterCantDeg back from straight down, its top to the front and its right side out; something to throw or a
 	// spray can stands upright on the belt (its handle axis vertical). False, with nothing written, for a centre or yaw
 	// that is not finite. Pure: any thread.
-	bool HolsterPose(Held held, const float centre[3], float yaw, float out_pos[3], float out_quat[4]);
+	// model: the weapon is drawn with its game model ([VR] GameWeaponModels, DrawsMesh); a melee weapon then hangs with
+	// its shaft down (the game holds a shaft through the fist, along the hand's +Y, not along -Z as the placeholder),
+	// kHolsterCantDeg back from straight down, its hold point at centre. Guns, cans and things to throw are posed alike
+	// either way.
+	bool HolsterPose(Held held, const float centre[3], float yaw, float out_pos[3], float out_quat[4], bool model = false);
 
 	// A long gun slung over the right shoulder leans its barrel this far back from straight up and this far out, away
 	// from the head.
@@ -141,6 +177,42 @@ namespace VR::HandModel
 	// wrong way is worse than none). Pure: any thread.
 	bool LaserFrom(Held held, u16 item_id, const float pos[3], const float quat[4], float gap_m, float out_origin[3],
 		float out_dir[3]);
+
+	// LaserFrom for the game model the right hand draws with [VR] GameWeaponModels: from gap_m past that model's muzzle
+	// (its weapon-type entry's muzzle, placed as the hand draws it), along -Z. False, with nothing written, when the hand
+	// would draw the placeholder for it (no model, no attach, or no muzzle in its entry): use LaserFrom then.
+	bool ModelLaserFrom(const HandState& gun_hand, float gap_m, float out_origin[3], float out_dir[3]);
+
+	// Whether this hand image is drawn with the hand model and the game's weapon model ([VR] GameWeaponModels): h.mesh,
+	// and for a weapon in the right hand its model decoded and its attach known. A weapon that falls back to the
+	// placeholder is logged once per item. Any thread.
+	bool DrawsMesh(int hand, const HandState& h);
+
+	// Test aid: where the weapon models come from (GameModels::Find by default; a self-test passes its own). Not
+	// thread-safe: set it before any drawing and put the default back (nullptr) after.
+	using ModelLookup = const GameModels::Model* (*)(u16 item_id);
+	void SetModelLookupForTest(ModelLookup lookup);
+
+	// What the mesh drawing costs: hand images drawn with MeshRaster since the last call, their total and longest time
+	// in microseconds. Any thread.
+	struct MeshDrawStats
+	{
+		u32 images = 0;
+		u64 total_us = 0;
+		u32 max_us = 0;
+	};
+	MeshDrawStats TakeMeshDrawStats();
+
+	// PCSX2_VR_DUMP_HANDS=<folder> (the CPU thread, once in game): draws each weapon of items (with its attach) as the right
+	// hand holds it and as it hangs in the holster, from a fixed eye, into PNG files there, and logs what each took. For
+	// checking the placement offline; the images show the game's own models, so they stay on this PC (never commit or
+	// share them). Returns how many images were written.
+	struct DumpItem
+	{
+		u16 item_id = 0;
+		GameAttach attach;
+	};
+	int DumpImages(const char* folder, const DumpItem* items, int count);
 
 	// Where a hand's impostor quad goes: on the plane through the middle of the hand (with a pistol, can or thrown item
 	// in it), so the hand keeps its true depth in stereo, its +Z turned to the eye from the middle of the hand and all it

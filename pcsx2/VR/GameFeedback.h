@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "VR/HandModel.h"
+
 #include "common/Pcsx2Defs.h"
 
 #include <string>
@@ -54,8 +56,16 @@ namespace VR::GameFeedback
 		u64 shot_ms = 0;
 		u64 dry_ms = 0;
 		u64 reload_ms = 0;
+		// With feedback.weapon.hold: how the game attaches this weapon's model to the hand (the local record's weapon
+		// type and its entry in the game's weapon-type table); invalid without the key or when the entry fails its checks.
+		HandModel::GameAttach attach;
 	};
 	WeaponView GetWeapon();
+
+	// With feedback.weapon.hold's items: how the game attaches item_id's model to the hand, from the scenario's item
+	// table (refreshed about once a second while a scenario runs, for items that are not equipped: the test hands, the
+	// image dump). False when the item is not in it or its entry fails its checks. Any thread.
+	bool AttachFor(u16 item_id, HandModel::GameAttach* out);
 
 	// Feeds synthetic HP, shot-counter and weapon sequences through the cue rules and checks the queued pulses.
 	// Runs once from Poll when PCSX2_VR_FEEDBACK_SELFTEST is set.

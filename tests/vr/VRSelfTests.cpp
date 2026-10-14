@@ -254,6 +254,18 @@ int main(int argc, char* argv[])
 	}
 	RunLogged("Depth export", VR::DepthExport::SelfTest, "(VR) Depth export self-test");
 	RunLogged("Menu panel", VR::MenuPanel::SelfTest, "(VR) Menu panel self-test");
+	// [VR] GameWeaponModels: File #1's profile names the game's weapon-type table and the scenario's item table, with the
+	// layout the weapon models are placed by (tools/outbreak-vr/research/2026-10-14-weapon-models-in-hand.md).
+	RunSilent("Weapon hold (File #1 profile, feedback.weapon.hold)", +[]() {
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		if (!p || !p->feedback.has_value())
+			return false;
+		const VR::ProfileDB::FeedbackParams& f = p->feedback.value();
+		return f.has_weapon_hold && f.has_hold_items && f.hold_type_offset == 0xCA8 && f.hold_table == 0x6E5944 &&
+		       f.hold_stride == 0x44 && f.hold_grip_offset == 0x0C && f.hold_rotation_offset == 0x24 &&
+		       f.hold_muzzle_offset == 0x34 && f.hold_items == 0x716980 && f.hold_item_stride == 0x18 &&
+		       f.hold_item_id == 0x12 && f.hold_item_type == 0x0F;
+	});
 	RunGamepad();
 	RunSilent("CameraDriver::SelfTestAssembler (hook)", VR::CameraDriver::SelfTestAssembler);
 	RunSilent("CameraDriver::SelfTestMath (math, predict, comfort, FOV)", VR::CameraDriver::SelfTestMath);

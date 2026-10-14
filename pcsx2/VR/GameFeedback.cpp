@@ -3,6 +3,7 @@
 
 #include "VR/GameFeedback.h"
 #include "VR/CameraDriver.h"
+#include "VR/GameModels.h"
 #include "VR/HandModel.h"
 #include "VR/ItemData.h"
 #include "VR/ItemReach.h"
@@ -25,6 +26,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace VR::GameFeedback
 {
@@ -623,6 +625,146 @@ namespace VR::GameFeedback
 		}
 	}
 
+	namespace
+	{
+		// One weapon-type table entry (feedback.weapon.hold) into a GameAttach.
+		bool ReadAttach(const ProfileDB::FeedbackParams& fb, u32 type, HandModel::GameAttach* out)
+		{
+			*out = HandModel::GameAttach{};
+			if (type == 0 || type >= fb.hold_types || fb.hold_stride > 0x400)
+				return false;
+			u8 entry[0x400];
+			const u64 at = static_cast<u64>(fb.hold_table) + static_cast<u64>(type) * fb.hold_stride;
+			for (u32 i = 0; i < fb.hold_stride; i++)
+			{
+				u32 v = 0;
+				if (!ReadAt(at + i, 1, &v))
+					return false;
+				entry[i] = static_cast<u8>(v);
+			}
+			return HandModel::DecodeGameAttach(entry, fb.hold_stride, static_cast<u16>(type), fb.hold_grip_offset,
+				fb.hold_rotation_offset, fb.hold_muzzle_offset, out);
+		}
+
+		struct ItemAttach
+		{
+			u16 item_id = 0;
+			HandModel::GameAttach attach;
+		};
+		std::mutex s_attach_mutex;
+		std::vector<ItemAttach> s_item_attach;
+		u32 s_attach_poll = 0;
+		bool s_dumped = false;
+
+		bool AttachForLocked(const std::vector<ItemAttach>& list, u16 item_id, HandModel::GameAttach* out)
+		{
+			for (const ItemAttach& f : list)
+			{
+				if (f.item_id == item_id)
+				{
+					*out = f.attach;
+					return true;
+				}
+			}
+			return false;
+		}
+
+		// The scenario's weapons and how the game attaches each (feedback.weapon.hold.items), about once a second while a
+		// scenario runs; and PCSX2_VR_DUMP_HANDS's images, once, when the models are there. Reads only.
+		void PollHolds(const ProfileDB::Profile* profile)
+		{
+			const ProfileDB::FeedbackParams* fb =
+				(profile && profile->feedback.has_value()) ? &profile->feedback.value() : nullptr;
+			u32 record = 0;
+			if (!fb || !fb->has_weapon_hold || !fb->has_hold_items || VMManager::GetState() != VMState::Running ||
+				!CameraDriver::LocalRecordAny(&record))
+			{
+				return;
+			}
+			if ((s_attach_poll++ % 60) != 0)
+				return;
+			std::vector<ItemAttach> found;
+			for (u32 k = 0; k < fb->hold_item_count; k++)
+			{
+				const u64 rec = static_cast<u64>(fb->hold_items) + static_cast<u64>(k) * fb->hold_item_stride;
+				u32 id = 0, type = 0;
+				if (!ReadAt(rec + fb->hold_item_id, 2, &id) || !ReadAt(rec + fb->hold_item_type, 1, &type) || type == 0)
+					continue;
+				if (!ItemData::IsWeapon(ItemData::KindOf(static_cast<u16>(id))))
+					continue;
+				bool seen = false;
+				for (const ItemAttach& f : found)
+					seen = seen || f.item_id == id;
+				ItemAttach ia;
+				ia.item_id = static_cast<u16>(id);
+				if (!seen && ReadAttach(*fb, type, &ia.attach))
+					found.push_back(ia);
+			}
+			{
+				std::lock_guard<std::mutex> lock(s_attach_mutex);
+				s_item_attach = found;
+			}
+			// The equipped weapon's type as the game set it (the local record's), against the item table's, logged when
+			// it changes: the hands use the record's.
+			static u32 s_logged_key = 0xFFFFFFFFu;
+			u32 type = 0, eq = 0, id = 0;
+			if (ReadAt(static_cast<u64>(record) + fb->hold_type_offset, 2, &type) &&
+				ReadAt(static_cast<u64>(record) + fb->weapon_equipped_offset, 1, &eq) && eq != 0 &&
+				ReadAt(static_cast<u64>(fb->weapon_table) + static_cast<u64>(eq) * fb->weapon_stride + fb->weapon_id_offset, 2, &id))
+			{
+				const u32 key = (type << 16) ^ id;
+				if (key != s_logged_key)
+				{
+					s_logged_key = key;
+					HandModel::GameAttach a;
+					const bool ok = ReadAttach(*fb, type, &a);
+					HandModel::GameAttach listed;
+					const bool in_table = AttachForLocked(found, static_cast<u16>(id), &listed);
+					Console.WriteLn("(VR) Weapon hold: the equipped item %u (%s) is weapon type %u (the item table says %s); "
+									"%s grip (%.2f, %.2f, %.2f), turn (%.1f, %.1f, %.1f) deg%s.",
+						id, ItemData::Name(static_cast<u16>(id)), type,
+						in_table ? std::to_string(listed.type).c_str() : "nothing", ok ? "its entry:" : "no usable entry;",
+						a.grip_cm[0], a.grip_cm[1], a.grip_cm[2], a.rot_rad[0] * 57.29578f, a.rot_rad[1] * 57.29578f,
+						a.rot_rad[2] * 57.29578f, a.has_muzzle ? ", with a muzzle" : "");
+				}
+			}
+			static const char* s_dump = std::getenv("PCSX2_VR_DUMP_HANDS");
+			if (s_dump && s_dump[0] && !s_dumped && !found.empty())
+			{
+				// Normally the VR session starts the load; a headset-free run has none. Started once (a start resets the
+				// state to loading until its worker sees the same disc).
+				if (GameModels::LoadState() == GameModels::State::Idle)
+					GameModels::StartLoad();
+				static bool s_waiting_logged = false;
+				if (!s_waiting_logged)
+				{
+					s_waiting_logged = true;
+					Console.WriteLn("(VR) Hand image dump: %zu weapon(s) in the item table; waiting for the models (%s).", found.size(),
+						GameModels::StateName(GameModels::LoadState()));
+				}
+				if (GameModels::LoadState() == GameModels::State::Loaded)
+				{
+					s_dumped = true;
+					std::vector<HandModel::DumpItem> items;
+					for (const ItemAttach& f : found)
+						items.push_back(HandModel::DumpItem{f.item_id, f.attach});
+					HandModel::DumpImages(s_dump, items.data(), static_cast<int>(items.size()));
+				}
+			}
+		}
+	}
+
+	bool AttachFor(u16 item_id, HandModel::GameAttach* out)
+	{
+		std::lock_guard<std::mutex> lock(s_attach_mutex);
+		HandModel::GameAttach a;
+		if (!AttachForLocked(s_item_attach, item_id, &a))
+			return false;
+		if (out)
+			*out = a;
+		return true;
+	}
+
 	void Poll()
 	{
 		MaybeRunSelfTest();
@@ -661,6 +803,7 @@ namespace VR::GameFeedback
 			}
 		}
 		PollPickupCue(cue_profile, strength, cue_file1);
+		PollHolds(cue_profile);
 
 		// The cues use the camera's guards and its record: no cues on the title screen or in cutscenes. They
 		// keep going while grabbed, down or dead (LocalRecordAny ignores releaseWhen), so a bite still pulses.
@@ -745,6 +888,14 @@ namespace VR::GameFeedback
 				w.support = LeftOnForeEnd(snap, w.item_id);
 			}
 			WeaponStep(w, s_weapon);
+			// How the game attaches the equipped weapon's model to the hand: the local record's weapon type, its entry.
+			s_weapon.view.attach = HandModel::GameAttach{};
+			u32 type = 0;
+			if (fb->has_weapon_hold && s_weapon.view.valid &&
+				ReadAt(static_cast<u64>(record) + fb->hold_type_offset, 2, &type) && type != 0)
+			{
+				ReadAttach(*fb, type, &s_weapon.view.attach);
+			}
 		}
 		else
 		{

@@ -572,6 +572,28 @@ namespace VR::ProfileDB
 		// reloadButton: the DualShock 2 button the game reloads with while the weapon is lowered (Outbreak: L1). The reload
 		// gesture (VR::ReloadDriver) holds it on the VR Gamepad control bound to it; empty: no reload gesture.
 		std::string weapon_reload_button;
+		// weapon.hold: how the game attaches a weapon's model to the character's hand ([VR] GameWeaponModels). The u16 at
+		// camera.base + hold_type_offset is the equipped weapon's type, an index into the game's weapon-type table at
+		// hold_table (hold_stride bytes an entry; an entry's byte +2 is its own index). An entry holds the model's origin
+		// in the hand bone's frame (three f32 at hold_grip_offset, game units), its turn into that frame (three s16 Euler
+		// angles X, Y, Z at hold_rotation_offset, 0x10000 = 360 degrees, X applied first) and a gun's muzzle in the model's
+		// own space (three f32 at hold_muzzle_offset; all zero: none). With hold_items, the scenario's item table names
+		// each item's type (hold_item_count records of hold_item_stride bytes: u16 item id at hold_item_id, u8 type at
+		// hold_item_type), for items that are not equipped (the test hands, the image dump).
+		bool has_weapon_hold = false;
+		u32 hold_type_offset = 0;
+		u32 hold_table = 0;
+		u32 hold_stride = 0x44;
+		u32 hold_types = 0x80;
+		u32 hold_grip_offset = 0x0C;
+		u32 hold_rotation_offset = 0x24;
+		u32 hold_muzzle_offset = 0x34;
+		bool has_hold_items = false;
+		u32 hold_items = 0;
+		u32 hold_item_stride = 0x18;
+		u32 hold_item_id = 0x12;
+		u32 hold_item_type = 0x0F;
+		u32 hold_item_count = 0x80;
 		// Heartbeat in the left hand while HP is below danger_below * max (needs hurt).
 		bool has_danger = false;
 		float danger_below = 0.25f;

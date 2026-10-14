@@ -2432,6 +2432,74 @@ static std::vector<VR::ProfileDB::SpatialControlSpec> parseControls(const std::s
 
 // feedback: controller haptics. Everything is read, nothing is written, so a bad entry only loses that
 // cue: it is dropped with a warning and the rest of the block still loads.
+// feedback.weapon.hold: the game's weapon-type table ([VR] GameWeaponModels). Numbers are hex like every other offset.
+// Only sets fp.has_weapon_hold (and has_hold_items) when everything checks out; a bad value is warned about and leaves the
+// placeholder shapes.
+static void parseWeaponHold(const std::string_view serial, const ryml::ConstNodeRef& h, VR::ProfileDB::FeedbackParams& fp)
+{
+	if (!h.is_map())
+	{
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.weapon.hold is not a map; ignoring it.", serial);
+		return;
+	}
+	warnUnknownKeys(serial, h, "feedback.weapon.hold",
+		{"type", "table", "stride", "types", "grip", "rotation", "muzzle", "items", "itemStride", "itemId", "itemType",
+			"itemCount"});
+	const auto read = [serial, &h](const char* key, u32& dst) {
+		if (!h.has_child(key))
+			return true;
+		const std::string_view raw = nodeVal(h[key]);
+		const std::optional<u32> v = parseHexU32(raw);
+		if (!v.has_value())
+		{
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.weapon.hold.{} '{}' is not a number; ignoring the hold.",
+				serial, key, raw);
+			return false;
+		}
+		warnHexTrap(serial, raw, v.value(), "feedback.weapon.hold");
+		dst = v.value();
+		return true;
+	};
+	VR::ProfileDB::FeedbackParams t = fp;
+	const bool has_type = h.has_child("type");
+	const bool has_table = h.has_child("table");
+	bool ok = has_type && has_table && read("type", t.hold_type_offset) && read("table", t.hold_table) &&
+	          read("stride", t.hold_stride) && read("types", t.hold_types) && read("grip", t.hold_grip_offset) &&
+	          read("rotation", t.hold_rotation_offset) && read("muzzle", t.hold_muzzle_offset);
+	if (ok && (t.hold_type_offset >= 0x100000 || t.hold_stride < 3 || t.hold_stride > 0x400 || t.hold_types == 0 ||
+				  t.hold_types > 0x400 || t.hold_grip_offset + 12 > t.hold_stride || t.hold_rotation_offset + 6 > t.hold_stride ||
+				  t.hold_muzzle_offset + 12 > t.hold_stride ||
+				  !inMainRam(t.hold_table, t.hold_stride * t.hold_types)))
+	{
+		ok = false;
+	}
+	if (!ok)
+	{
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.weapon.hold needs type (a camera.base offset) and table (an "
+						   "address in main RAM), and a stride of 3-0x400 holding grip, rotation and muzzle; ignoring it.",
+			serial);
+		return;
+	}
+	t.has_weapon_hold = true;
+	if (h.has_child("items"))
+	{
+		bool items_ok = read("items", t.hold_items) && read("itemStride", t.hold_item_stride) &&
+		                read("itemId", t.hold_item_id) && read("itemType", t.hold_item_type) &&
+		                read("itemCount", t.hold_item_count);
+		items_ok = items_ok && t.hold_item_stride >= 2 && t.hold_item_stride <= 0x400 && t.hold_item_count > 0 &&
+		           t.hold_item_count <= 0x400 && t.hold_item_id + 2 <= t.hold_item_stride &&
+		           t.hold_item_type + 1 <= t.hold_item_stride &&
+		           inMainRam(t.hold_items, t.hold_item_stride * t.hold_item_count);
+		if (items_ok)
+			t.has_hold_items = true;
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' feedback.weapon.hold.items needs an address in main RAM with "
+							   "itemId and itemType inside itemStride; the hold stays, without the item table.",
+				serial);
+	}
+	fp = t;
+}
+
 static VR::ProfileDB::FeedbackParams parseFeedback(const std::string_view serial, const ryml::ConstNodeRef& fnode)
 {
 	VR::ProfileDB::FeedbackParams fp;
@@ -2536,7 +2604,8 @@ static VR::ProfileDB::FeedbackParams parseFeedback(const std::string_view serial
 		else
 		{
 			warnUnknownKeys(serial, w, "feedback.weapon",
-				{"equipped", "table", "stride", "id", "count", "owner", "stance", "raised", "action", "reload", "reloadButton"});
+				{"equipped", "table", "stride", "id", "count", "owner", "stance", "raised", "action", "reload", "reloadButton",
+					"hold"});
 			bool ok = true;
 			// A plain hex value (with the decimal-looking trap warned about); false when present but not a number.
 			const auto read_value = [serial, &w](const char* key, const char* what, u32& dst) {
@@ -2641,6 +2710,10 @@ static VR::ProfileDB::FeedbackParams parseFeedback(const std::string_view serial
 				else
 					fp.weapon_reload_button.assign(button);
 			}
+			// hold: the game's weapon-type table, for placing the game's weapon models in the hand ([VR] GameWeaponModels).
+			// A bad value loses only the hold (the placeholder shapes stay); the weapon reads above stay.
+			if (fp.has_weapon && w.has_child("hold"))
+				parseWeaponHold(serial, w["hold"], fp);
 		}
 	}
 

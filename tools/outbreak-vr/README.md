@@ -160,6 +160,25 @@ left hand on the fore-end too.`. Test aid on the null headset: `PCSX2_VR_FAKE_WE
 a long gun also holds the fake left hand just under its fore-end), e.g. 11 the shotgun, 106 the long pole, 114 a
 molotov, 28 the pesticide spray.
 
+Game weapon models (VR setting `GameWeaponModels`, on by default, ini only, read every frame): both hands are the CC0
+hand model (`VR/HandMesh`: its pistol pose round a gun or the controller, the index curling in with the trigger, its fist
+round anything else and round a long gun's fore-end), and the right hand's weapon, the holstered one and the slung long
+gun are the game's own model of the item (`VR/GameModels`, decoded from the disc at VR start, memory only) at its real
+size, drawn with `VR/MeshRaster` (2 x 2 samples) into the same impostor images. The weapon sits where the game itself
+attaches it to the character's hand: the profile's `feedback.weapon.hold` (File #1: the local record's u16 `+0xCA8` is
+the weapon type, an entry of the 0x44-byte table at `0x6E5944` gives the model's origin in the hand bone's frame and its
+turn), mapped onto the hand model's wrist; a gun's barrel is then turned onto the controller's aim, so melee weapons
+now run through the fist along the handle, as the game holds them. In the holster a melee weapon hangs shaft down from
+the belt. A weapon whose model did not decode or whose entry is not known keeps the placeholder look, logged once
+(`(VR) Hands: item 3 (Magnum Handgun) keeps the placeholder shape: ...`); `false` is today's look throughout. The
+equipped weapon's entry is logged when it changes (`(VR) Weapon hold: the equipped item 400 (Kevin's 45 Auto) is weapon
+type 7 (the item table says 7); its entry: grip (...), turn (...) deg, with a muzzle.`), and in a session the 5 s
+`(VR) Hands:` line adds `mesh images N/s mean X max Y ms` (GS thread). Test aids: `PCSX2_VR_DUMP_HANDS=<folder>` draws
+every weapon of the scenario's item table once in game (a session or the headset-free scripted input), in the hand from
+the eye and the side, in the holster or sling and from 1.8 m, into PNG files there and logs each image's time (the
+images show the game's models: they stay on the PC, never in the repo); `PCSX2_VR_MESH_SAMPLES=1` or `4` changes the
+sample grid. The finding and costs: `research/2026-10-14-weapon-models-in-hand.md`.
+
 Zone markers (VR setting `ZoneMarkers`, on by default, checkbox under Laser Sight; read live): while first person
 drives the camera with no menu up, the body zones show where a squeeze works. The equipped weapon (`feedback.weapon`,
 an ItemData weapon kind; nothing for bare hands, a non-weapon item or an id the table lacks) hangs in the right-hip

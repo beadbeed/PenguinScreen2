@@ -2024,6 +2024,22 @@ namespace VR::XRCompositor
 			return h;
 		}
 
+		// [VR] GameWeaponModels: the hand model's look, and for the weapon in the right hand (or in the holster) how the
+		// game attaches its model: the equipped weapon's own entry (GameFeedback's weapon read), else the scenario's item
+		// table's (the test hands).
+		void ApplyModelLook(HandModel::HandState& h, bool weapon)
+		{
+			h.mesh = EmuConfig.VR.GameWeaponModels;
+			h.attach = HandModel::GameAttach{};
+			if (!h.mesh || !weapon)
+				return;
+			const GameFeedback::WeaponView wv = GameFeedback::GetWeapon();
+			if (wv.valid && wv.item_id == h.item_id && wv.attach.valid)
+				h.attach = wv.attach;
+			else
+				GameFeedback::AttachFor(h.item_id, &h.attach);
+		}
+
 		// Records in att[slot] that a layer was placed for this hand pose (pos: the grip position; quat: the
 		// orientation it was placed by), drawn from eye, located for display time t.
 		void AttachToHand(HandAttach* att, int slot, int hand, const float pos[3], const float quat[4], const float eye[3],
@@ -2360,6 +2376,8 @@ namespace VR::XRCompositor
 			static bool s_left_supporting = false;
 			s_left_supporting = HandModel::OffHandSupports(hs[HandModel::kRight], hs[HandModel::kLeft], s_left_supporting);
 			hs[HandModel::kLeft].support = s_left_supporting;
+			for (int i = 0; i < kHandSlots; i++)
+				ApplyModelLook(hs[i], i == HandModel::kRight && hs[i].gun);
 			if (!hs[0].valid && !hs[1].valid)
 				return 0;
 			// With PacerCopies the hands draw into staging rings and the pacer owns the swapchains (PcStageBegin).
@@ -3391,9 +3409,21 @@ namespace VR::XRCompositor
 				// pistol this is HudCards::PlaceLaser's beam.
 				float beam_from[3] = {0.0f, 0.0f, 0.0f};
 				float beam_dir[3] = {0.0f, 0.0f, -1.0f};
+				// [VR] GameWeaponModels: from the muzzle of the game model the hand draws, where it has one.
+				HandModel::HandState model_gun;
+				model_gun.valid = laser_hand;
+				model_gun.gun = true;
+				model_gun.held = laser_weapon.held;
+				model_gun.item_id = laser_weapon.item_id;
+				for (int k = 0; k < 3; k++)
+					model_gun.pos[k] = hand_pos[k];
+				for (int k = 0; k < 4; k++)
+					model_gun.quat[k] = hand_quat[k];
+				ApplyModelLook(model_gun, true);
 				laser_placed = laser_hand &&
-				               HandModel::LaserFrom(laser_weapon.held, laser_weapon.item_id, hand_pos, hand_quat,
-				                   HudCards::kLaserMuzzleGapM, beam_from, beam_dir) &&
+				               (HandModel::ModelLaserFrom(model_gun, HudCards::kLaserMuzzleGapM, beam_from, beam_dir) ||
+				                   HandModel::LaserFrom(laser_weapon.held, laser_weapon.item_id, hand_pos, hand_quat,
+				                       HudCards::kLaserMuzzleGapM, beam_from, beam_dir)) &&
 				               HudCards::PlaceBeam(beam_from, beam_dir, HudCards::kLaserLengthM, eye, laser_pos, laser_quat);
 				// Only the gun's beam rides on the hand: anything else shown in the laser's slot stays unattached.
 				if (laser_placed)
@@ -3991,8 +4021,10 @@ namespace VR::XRCompositor
 					weapon.held = shape.held;
 					weapon.item_id = wv.item_id;
 					weapon.lit = view.inside[0] || view.inside[1];
+					ApplyModelLook(weapon, true);
 					const bool posed = long_gun ? HandModel::SlingPose(centre, yaw, weapon.pos, weapon.quat) :
-					                              HandModel::HolsterPose(shape.held, centre, yaw, weapon.pos, weapon.quat);
+					                              HandModel::HolsterPose(shape.held, centre, yaw, weapon.pos, weapon.quat,
+					                                  HandModel::DrawsMesh(HandModel::kRight, weapon));
 					if (posed)
 					{
 						want[ZoneMarkers::kHolster] = true;
@@ -4002,7 +4034,8 @@ namespace VR::XRCompositor
 							frame_quat[ZoneMarkers::kHolster][k] = weapon.quat[k];
 						key[ZoneMarkers::kHolster] = static_cast<u64>(wv.item_id) | (static_cast<u64>(shape.held) << 16) |
 						                             (static_cast<u64>(long_gun ? 1 : 0) << 24) |
-						                             (static_cast<u64>(weapon.lit ? 1 : 0) << 32);
+						                             (static_cast<u64>(weapon.lit ? 1 : 0) << 32) |
+						                             (static_cast<u64>(HandModel::DrawsMesh(HandModel::kRight, weapon) ? 1 : 0) << 25);
 					}
 				}
 			}
@@ -7008,18 +7041,27 @@ namespace VR::XRCompositor
 			// Only the pacer places hands (legacy submits each frame for the display time it located the hands for).
 			const u32 hand_new = s.stat_hand_new.exchange(0, std::memory_order_relaxed);
 			const u32 hand_kept = s.stat_hand_kept.exchange(0, std::memory_order_relaxed);
+			// [VR] GameWeaponModels: what drawing the hand and weapon images with MeshRaster cost (GS thread).
+			const HandModel::MeshDrawStats mesh_draw = HandModel::TakeMeshDrawStats();
+			char mesh_cost[128] = "";
+			if (mesh_draw.images > 0)
+			{
+				std::snprintf(mesh_cost, sizeof(mesh_cost), ", mesh images %.1f/s mean %.2f max %.2f ms",
+					mesh_draw.images / secs, static_cast<double>(mesh_draw.total_us) / 1000.0 / mesh_draw.images,
+					static_cast<double>(mesh_draw.max_us) / 1000.0);
+			}
 			if (st.hand_placements > 0)
 			{
 				Console.WriteLn("(VR) Hands: placements %u, re-posed %u, age mean %.1f max %.1f ms, moved since the GS pose mean "
 								"%.1f max %.1f mm / mean %.1f max %.1f deg, image drift max %.1f deg (%u over %.0f), GS images "
-								"new %.1f/s kept %.1f/s, mode %s",
+								"new %.1f/s kept %.1f/s%s, mode %s",
 					st.hand_placements, st.hand_reposed,
 					(st.hand_age_n > 0) ? (st.hand_age_sum_ms / st.hand_age_n) : 0.0, static_cast<double>(st.hand_age_max_ms),
 					(st.hand_moved_n > 0) ? (st.hand_moved_sum_mm / st.hand_moved_n) : 0.0,
 					static_cast<double>(st.hand_moved_max_mm),
 					(st.hand_moved_n > 0) ? (st.hand_moved_sum_deg / st.hand_moved_n) : 0.0,
 					static_cast<double>(st.hand_moved_max_deg), static_cast<double>(st.hand_drift_max_deg), st.hand_drift_over,
-					static_cast<double>(kHandDriftWarnDeg), hand_new / secs, hand_kept / secs,
+					static_cast<double>(kHandDriftWarnDeg), hand_new / secs, hand_kept / secs, mesh_cost,
 					s.hands_display_rate ? "display rate (VR pacer)" : "GS present (HandsDisplayRate off)");
 			}
 			// What carries over from one window to the next: the last serial and layer array (each compared with the next

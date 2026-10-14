@@ -49,7 +49,14 @@ SLPM-65428:
   # shows the weapon's name and rounds ("45 AUTO 7"), and the belt pouches name their items from the same table.
   # reloadButton: the game reloads with L1 held while the weapon is lowered (one round per 0.33 s); the reload gesture
   # (VR ReloadGesture setting: take a magazine at the left hip, bring it to the gun, let go) holds it for you.
-  feedback: { padRumble: true, hurt: { offset: 0x544, max: 0x546, width: 2 }, danger: { below: 0.20 }, weapon: { equipped: 0xC7C, table: 0x3967D0, action: 0x54F, reload: 0x1C, reloadButton: L1 } }
+  # hold (VR GameWeaponModels): how the game attaches a weapon's model to the hand. The u16 at local record +0xCA8 is the
+  # equipped weapon's type (written from the item's entry in the scenario's 24-byte item table at 0x716980: u16 item id
+  # +0x12, u8 type +0x0F; read by 0x5C1240 -> 0x584800), an index into the 0x44-byte weapon-type table at 0x6E5944 (GAME
+  # overlay data; an entry's byte +2 is its own index): +0x0C three f32, the model's origin in the right hand bone's frame;
+  # +0x24 three s16, its turn into that frame (X, Y, Z, 0x10000 = 360 degrees, X first); +0x34 three f32, a gun's muzzle
+  # in the model. Checked 2026-10-14 in twelve savestates and live with the weapon raised: the held object's matrix is
+  # that turn and offset on the hand bone (node 19/28) to 0.01 cm. tools/outbreak-vr/research/2026-10-14-weapon-models-in-hand.md.
+  feedback: { padRumble: true, hurt: { offset: 0x544, max: 0x546, width: 2 }, danger: { below: 0.20 }, weapon: { equipped: 0xC7C, table: 0x3967D0, action: 0x54F, reload: 0x1C, reloadButton: L1, hold: { type: 0xCA8, table: 0x6E5944, stride: 0x44, types: 0x80, grip: 0x0C, rotation: 0x24, muzzle: 0x34, items: 0x716980, itemStride: 0x18, itemId: 0x12, itemType: 0x0F, itemCount: 0x80 } } }
   # Pickup cue (VR only, first person; VR setting PickupCue, on by default): when something on the floor comes within reach
   # of the character's own Circle press, the right hand gets a light tick and a short toast names the item and the button
   # ("Kevin's 45 Auto  (A)"), once per approach (not again while it stays in reach; re-armed after half a second out of it).

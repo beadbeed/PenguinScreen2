@@ -2,9 +2,18 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/HandModel.h"
+#include "VR/GameModels.h"
+#include "VR/HandMesh.h"
 #include "VR/ItemData.h"
+#include "VR/MeshRaster.h"
 
 #include "common/Console.h"
+#include "common/FileSystem.h"
+#include "common/Image.h"
+#include "common/Path.h"
+#include "common/Timer.h"
+
+#include "fmt/format.h"
 
 #include <algorithm>
 #include <atomic>
@@ -12,8 +21,12 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <initializer_list>
 #include <iterator>
 #include <limits>
+#include <mutex>
+#include <string>
 #include <utility>
 
 namespace VR::HandModel
@@ -1154,6 +1167,607 @@ namespace VR::HandModel
 		}
 	}
 
+	// ---- [VR] GameWeaponModels: the hand model and the game's own weapon models, drawn with MeshRaster ----
+	//
+	// The hand is HandMesh's (already in the pointing frame, metres). The weapon is the GameModels model of the item,
+	// placed the way the game attaches it to the character's hand (GameAttach): the game's hand bone frame is mapped onto
+	// the hand model, its wrist joint on HandMesh's wrist anchor and its axes onto the pointing frame (the bone's -X, wrist
+	// to fingers, along -Z; its +Z, the thumb's side, along +Y; its -Y, the palm, along -X: the hand model's own layout).
+	// A gun's barrel is then turned onto -Z (the controller's aim, where the laser and the game's shot go): for the
+	// pistols the game's turn is none and nothing moves; a long gun the game holds a few degrees off its hand bone is
+	// turned that much about the grip position. Melee weapons, things to throw and spray cans keep the game's turn.
+	namespace
+	{
+		// The game's hand bone frame is in Kevin's units: his skeleton is drawn 1.05 times its size (the node matrices'
+		// scale), which scales the grip offset but not the weapon. His hand, wrist to knuckles, is then 9.9 cm, as the hand
+		// model's is.
+		constexpr float kGameHandScale = 1.05f;
+		// A long gun or a melee weapon drawn with its game model may need a bigger quad than the placeholder's: the game
+		// holds a shaft across the fist, so a pole is seen side on (the scrub brush is 1.4 m long). 1.6 m at the hand's
+		// distance covers the headset's view round it; what reaches past that is cut at the image's edge, out of sight.
+		constexpr float kQuadSizeModelLongM = 1.60f;
+		// A melee weapon alone in the hip holster hangs from the belt like a sword in a frog: moved down its shaft until its
+		// top end is at most this far above the holster's middle (a 1.4 m broom held at its grip would reach the head).
+		constexpr float kHolsterTopCm = 12.0f;
+		// 2 x 2 samples a pixel; PCSX2_VR_MESH_SAMPLES=1 or 4 (read once) for a cost or quality comparison.
+		u32 MeshSamples()
+		{
+			static const u32 s_n = [] {
+				const char* v = std::getenv("PCSX2_VR_MESH_SAMPLES");
+				const int n = v ? std::atoi(v) : 2;
+				return static_cast<u32>((n == 1 || n == 4) ? n : 2);
+			}();
+			return s_n;
+		}
+
+		std::atomic<ModelLookup> s_model_lookup{nullptr};
+
+		const GameModels::Model* LookupModel(u16 item_id)
+		{
+			const ModelLookup f = s_model_lookup.load(std::memory_order_acquire);
+			return f ? f(item_id) : GameModels::Find(item_id);
+		}
+
+		// Items whose weapon fell back to the placeholder, logged once each (bit set: logged).
+		std::mutex s_fallback_mutex;
+		std::vector<u8> s_fallback_logged;
+
+		void LogFallbackOnce(u16 item_id, const char* why)
+		{
+			std::lock_guard<std::mutex> lock(s_fallback_mutex);
+			if (s_fallback_logged.empty())
+				s_fallback_logged.assign(65536 / 8, 0);
+			u8& bits = s_fallback_logged[item_id >> 3];
+			const u8 bit = static_cast<u8>(1u << (item_id & 7));
+			if (bits & bit)
+				return;
+			bits |= bit;
+			const char* name = ItemData::Name(item_id);
+			Console.WriteLn("(VR) Hands: item %u (%s) keeps the placeholder shape: %s.", static_cast<unsigned>(item_id),
+				name[0] ? name : "not in the item table", why);
+		}
+
+		std::atomic<u32> s_mesh_images{0};
+		std::atomic<u64> s_mesh_total_us{0};
+		std::atomic<u32> s_mesh_max_us{0};
+
+		// A 3 x 3 linear map by its columns.
+		struct M3
+		{
+			V3 c[3];
+			V3 Apply(const V3& v) const { return Add(Add(Mul(c[0], v.x), Mul(c[1], v.y)), Mul(c[2], v.z)); }
+		};
+
+		// The standard rotations of column vectors about X, Y, Z by a (radians): the transposes of the game's row-vector
+		// ones, so the game's v * Rx(x) * Ry(y) * Rz(z) is RotZ(z) * RotY(y) * RotX(x) * v here.
+		M3 RotX(float a)
+		{
+			const float c = std::cos(a), s = std::sin(a);
+			return M3{{V3{1.0f, 0.0f, 0.0f}, V3{0.0f, c, s}, V3{0.0f, -s, c}}};
+		}
+		M3 RotY(float a)
+		{
+			const float c = std::cos(a), s = std::sin(a);
+			return M3{{V3{c, 0.0f, -s}, V3{0.0f, 1.0f, 0.0f}, V3{s, 0.0f, c}}};
+		}
+		M3 RotZ(float a)
+		{
+			const float c = std::cos(a), s = std::sin(a);
+			return M3{{V3{c, s, 0.0f}, V3{-s, c, 0.0f}, V3{0.0f, 0.0f, 1.0f}}};
+		}
+		M3 MulM3(const M3& a, const M3& b)
+		{
+			return M3{{a.Apply(b.c[0]), a.Apply(b.c[1]), a.Apply(b.c[2])}};
+		}
+		// The game's hand bone frame to the pointing frame: (x, y, z) -> (y, z, x).
+		V3 BoneToPointing(const V3& g) { return V3{g.y, g.z, g.x}; }
+
+		bool IsGun(Held held) { return held == Held::Pistol || held == Held::LongGun; }
+
+		// The hand model's pose for a hand: a gun's grip (the index in the trigger guard), a fist round a shaft, a can or
+		// a fore-end, or round the controller (the pistol pose, its index curling in as the trigger is pulled).
+		void HandPoses(int hand, const HandState& h, HandMesh::Pose* a, HandMesh::Pose* b, float* t)
+		{
+			const bool weapon = h.gun && hand == kRight;
+			*t = 0.0f;
+			if (weapon)
+			{
+				*a = *b = IsGun(h.held) ? HandMesh::Pose::Pistol : HandMesh::Pose::Grip;
+				return;
+			}
+			if (h.support && hand == kLeft)
+			{
+				*a = *b = HandMesh::Pose::Grip;
+				return;
+			}
+			*a = HandMesh::Pose::Pistol;
+			*b = HandMesh::Pose::Grip;
+			*t = std::isfinite(h.trigger) ? std::clamp(h.trigger, 0.0f, 1.0f) : 0.0f;
+		}
+
+		// Where the game model sits in the pointing frame: point_cm = L * model_cm + T.
+		struct Placement
+		{
+			M3 L;
+			V3 T;
+		};
+
+		Placement PlaceModel(const GameAttach& at, Held held)
+		{
+			const M3 A = MulM3(RotZ(at.rot_rad[2]), MulM3(RotY(at.rot_rad[1]), RotX(at.rot_rad[0])));
+			const HandMesh::Pose pose = IsGun(held) ? HandMesh::Pose::Pistol : HandMesh::Pose::Grip;
+			const HandMesh::Anchors an = HandMesh::GetAnchors(kRight, pose);
+			const V3 wrist_cm = Mul(Load(an.wrist), 100.0f);
+			Placement p;
+			for (int k = 0; k < 3; k++)
+				p.L.c[k] = BoneToPointing(A.c[k]);
+			p.T = Add(BoneToPointing(Mul(Load(at.grip_cm), kGameHandScale)), wrist_cm);
+			if (IsGun(held))
+			{
+				// The barrel (the model's -X) onto -Z, turned about the grip position.
+				const V3 b = Normalize(Mul(p.L.c[0], -1.0f));
+				const V3 want = V3{0.0f, 0.0f, -1.0f};
+				const float d = std::clamp(Dot(b, want), -1.0f, 1.0f);
+				const V3 axis = Cross(b, want);
+				const float s = Length(axis);
+				if (s > 1.0e-5f && d < 0.999999f)
+				{
+					const V3 k = Mul(axis, 1.0f / s);
+					const float angle = std::atan2(s, d);
+					for (int c = 0; c < 3; c++)
+						p.L.c[c] = RotateAxis(p.L.c[c], k, angle);
+					p.T = RotateAxis(p.T, k, angle);
+				}
+			}
+			return p;
+		}
+
+		// PlaceModel for what h draws: in the holster, a melee weapon is moved down its shaft (the pointing frame's +Y,
+		// which HolsterPose hangs down) until its top end is within kHolsterTopCm of the hold point.
+		Placement PlaceFor(const HandState& h, const GameModels::Model& m)
+		{
+			Placement p = PlaceModel(h.attach, h.held);
+			if (h.holstered && h.held == Held::Melee)
+			{
+				float top = 1.0e9f;
+				for (int c = 0; c < 8; c++)
+				{
+					const V3 v = V3{(c & 1) ? m.bounds_max[0] : m.bounds_min[0], (c & 2) ? m.bounds_max[1] : m.bounds_min[1],
+						(c & 4) ? m.bounds_max[2] : m.bounds_min[2]};
+					top = std::min(top, Add(p.L.Apply(v), p.T).y);
+				}
+				if (top < -kHolsterTopCm)
+					p.T.y += -kHolsterTopCm - top;
+			}
+			return p;
+		}
+
+		// A pistol's slide (its part in skin slot 2) runs back along the barrel as it cycles; not a revolver's cylinder.
+		bool HasSlide(u16 item_id) { return item_id != 4 && item_id != 6 && item_id != 7; }
+
+		// Kick (recoil) in the pointing frame, cm: pitched up about the grip and moved back, as BuildWorld does.
+		struct Kick
+		{
+			float c = 1.0f, s = 0.0f, back_cm = 0.0f;
+			V3 Apply(const V3& v) const { return V3{v.x, v.y * c - v.z * s, v.y * s + v.z * c + back_cm}; }
+		};
+
+		Kick KickOf(int hand, const HandState& h)
+		{
+			Kick k;
+			const bool weapon = h.gun && hand == kRight && !h.holstered;
+			if (!weapon || !IsGun(h.held))
+				return k;
+			const float kick = std::isfinite(h.kick) ? std::clamp(h.kick, 0.0f, 1.0f) : 0.0f;
+			const bool long_gun = (h.held == Held::LongGun);
+			const float a = (long_gun ? kLongRecoilDeg : kRecoilDeg) * kick * kDegToRad;
+			k.c = std::cos(a);
+			k.s = std::sin(a);
+			k.back_cm = (long_gun ? kLongRecoilBackCm : kRecoilBackCm) * kick;
+			return k;
+		}
+
+		float SlideCm(const HandState& h)
+		{
+			if (h.holstered || h.held != Held::Pistol || !HasSlide(h.item_id))
+				return 0.0f;
+			const float slide = std::isfinite(h.slide) ? std::clamp(h.slide, 0.0f, 1.0f) : 0.0f;
+			return kSlideTravelCm * std::max(slide, h.slide_locked ? 1.0f : 0.0f);
+		}
+
+		// The hand model's bounds per side and pose, cm.
+		struct PoseBounds
+		{
+			V3 lo[2][HandMesh::kPoseCount];
+			V3 hi[2][HandMesh::kPoseCount];
+		};
+
+		const PoseBounds& GetPoseBounds()
+		{
+			static const PoseBounds s_b = [] {
+				PoseBounds b;
+				for (int side = 0; side < 2; side++)
+				{
+					for (int p = 0; p < HandMesh::kPoseCount; p++)
+					{
+						const HandMesh::Mesh& m = HandMesh::Get(side, static_cast<HandMesh::Pose>(p));
+						V3 lo = V3{1.0e9f, 1.0e9f, 1.0e9f};
+						V3 hi = V3{-1.0e9f, -1.0e9f, -1.0e9f};
+						for (u32 i = 0; i < m.vertex_count; i++)
+						{
+							const V3 v = Mul(Load(m.position + i * 3), 100.0f);
+							lo = V3{std::min(lo.x, v.x), std::min(lo.y, v.y), std::min(lo.z, v.z)};
+							hi = V3{std::max(hi.x, v.x), std::max(hi.y, v.y), std::max(hi.z, v.z)};
+						}
+						if (m.vertex_count == 0)
+							lo = hi = V3{0.0f, 0.0f, 0.0f};
+						b.lo[side][p] = lo;
+						b.hi[side][p] = hi;
+					}
+				}
+				return b;
+			}();
+			return s_b;
+		}
+
+		void Grow(V3& lo, V3& hi, const V3& v)
+		{
+			lo = V3{std::min(lo.x, v.x), std::min(lo.y, v.y), std::min(lo.z, v.z)};
+			hi = V3{std::max(hi.x, v.x), std::max(hi.y, v.y), std::max(hi.z, v.z)};
+		}
+
+		// The muzzle of the game model in the pointing frame (cm, before any kick), from its weapon-type entry.
+		bool ModelMuzzleCm(const HandState& h, V3* out)
+		{
+			if (!h.attach.valid || !h.attach.has_muzzle || !IsGun(h.held))
+				return false;
+			const Placement p = PlaceModel(h.attach, h.held);
+			*out = Add(p.L.Apply(Load(h.attach.muzzle_cm)), p.T);
+			return true;
+		}
+
+		// PlaceImpostor's bounds for the mesh look, as BuildWorld gives them for the placeholder: everything drawn, and the
+		// part the eye must stay out of, in the pointing frame (cm, kicked).
+		bool MeshBounds(int hand, const HandState& h, V3* lmin, V3* lmax, V3* cmin, V3* cmax)
+		{
+			const bool weapon = h.gun && hand == kRight;
+			const Kick kick = KickOf(hand, h);
+			V3 lo = V3{1.0e9f, 1.0e9f, 1.0e9f};
+			V3 hi = V3{-1.0e9f, -1.0e9f, -1.0e9f};
+			V3 clo = lo;
+			V3 chi = hi;
+			const int side = (hand == kLeft) ? kLeft : kRight;
+			if (!(weapon && h.holstered))
+			{
+				HandMesh::Pose pa, pb;
+				float t;
+				HandPoses(hand, h, &pa, &pb, &t);
+				const PoseBounds& pbnd = GetPoseBounds();
+				for (const HandMesh::Pose p : {pa, pb})
+				{
+					const V3 a = pbnd.lo[side][static_cast<int>(p)];
+					const V3 b = pbnd.hi[side][static_cast<int>(p)];
+					for (int c = 0; c < 8; c++)
+					{
+						const V3 v = kick.Apply(V3{(c & 1) ? b.x : a.x, (c & 2) ? b.y : a.y, (c & 4) ? b.z : a.z});
+						Grow(lo, hi, v);
+						Grow(clo, chi, v);
+					}
+				}
+			}
+			if (weapon)
+			{
+				const GameModels::Model* m = LookupModel(h.item_id);
+				if (!m)
+					return false;
+				const Placement p = PlaceFor(h, *m);
+				const bool reach = (h.held == Held::LongGun || h.held == Held::Melee);
+				// Alone in the holster or the sling, a weapon that reaches far (a long gun, a pole) has no hand round it:
+				// what the eye must stay out of is its hold point, as the placeholder's grip is.
+				if (reach && h.holstered)
+				{
+					Grow(clo, chi, V3{-3.0f, -3.0f, -3.0f});
+					Grow(clo, chi, V3{3.0f, 3.0f, 3.0f});
+				}
+				const float slide = SlideCm(h);
+				for (int c = 0; c < 8; c++)
+				{
+					V3 v = V3{(c & 1) ? m->bounds_max[0] : m->bounds_min[0], (c & 2) ? m->bounds_max[1] : m->bounds_min[1],
+						(c & 4) ? m->bounds_max[2] : m->bounds_min[2]};
+					if (c & 1)
+						v.x += slide;
+					const V3 w = kick.Apply(Add(p.L.Apply(v), p.T));
+					Grow(lo, hi, w);
+					if (!reach)
+						Grow(clo, chi, w);
+				}
+				V3 muzzle;
+				if (h.flash && !h.holstered && ModelMuzzleCm(h, &muzzle))
+				{
+					for (int c = 0; c < 2; c++)
+						Grow(lo, hi, kick.Apply(Add(muzzle, V3{0.0f, 0.0f, c ? -2.5f : 0.0f})));
+				}
+			}
+			if (!(hi.x >= lo.x) || !(chi.x >= clo.x))
+				return false;
+			*lmin = lo;
+			*lmax = hi;
+			*cmin = clo;
+			*cmax = chi;
+			return true;
+		}
+
+		MeshRaster::Mat4 MatFromBasis(const V3& x, const V3& y, const V3& z, const V3& t)
+		{
+			MeshRaster::Mat4 m;
+			const V3 cols[4] = {x, y, z, t};
+			for (int c = 0; c < 4; c++)
+			{
+				m.m[c * 4 + 0] = cols[c].x;
+				m.m[c * 4 + 1] = cols[c].y;
+				m.m[c * 4 + 2] = cols[c].z;
+				m.m[c * 4 + 3] = (c == 3) ? 1.0f : 0.0f;
+			}
+			return m;
+		}
+
+		// The pointing frame (metres) to the base space: the hand's pose, after the kick.
+		MeshRaster::Mat4 HandWorld(const HandState& h, const Kick& kick)
+		{
+			float q[4];
+			NormalizedQuat(h, q);
+			const V3 x = Rotate(q, V3{1.0f, 0.0f, 0.0f});
+			const V3 y = Rotate(q, V3{0.0f, kick.c, kick.s});
+			const V3 z = Rotate(q, V3{0.0f, -kick.s, kick.c});
+			const V3 t = Add(Load(h.pos), Rotate(q, V3{0.0f, 0.0f, kick.back_cm * 0.01f}));
+			return MatFromBasis(x, y, z, t);
+		}
+
+		void SetLighting(MeshRaster::Lighting& l, bool lit)
+		{
+			l.enabled = true;
+			l.light_in_view_space = true;
+			l.light_dir[0] = 0.35f;
+			l.light_dir[1] = 0.8f;
+			l.light_dir[2] = 0.5f;
+			l.ambient = lit ? 0.55f : 0.30f;
+			l.key = 0.62f;
+			l.headlight = lit ? 0.45f : 0.22f;
+			l.rim = 0.30f;
+			l.rim_power = 3;
+			l.rim_colour[0] = 0.80f;
+			l.rim_colour[1] = 0.92f;
+			l.rim_colour[2] = 0.88f;
+			l.linear_light = true;
+		}
+
+		struct MeshScratch
+		{
+			MeshRaster::Target target{kImageSize, kImageSize, MeshSamples()};
+			HandMesh::Blend blend;
+			std::vector<float> flash;
+			std::vector<Tri> flash_tris;
+		};
+
+		MeshScratch& Scratch()
+		{
+			thread_local MeshScratch s;
+			return s;
+		}
+
+		void RenderMesh(int hand, const HandState& h, const float eye[3], const float quad_center[3],
+			const float quad_right[3], const float quad_up[3], float quad_size_m, std::vector<u32>& out_rgba)
+		{
+			Common::Timer timer;
+			MeshScratch& sc = Scratch();
+			MeshRaster::Camera cam;
+			if (!MeshRaster::Camera::Impostor(eye, quad_center, quad_right, quad_up, quad_size_m, kNearM, 100.0f, &cam))
+				return;
+			sc.target.Clear();
+			const bool weapon = h.gun && hand == kRight;
+			const bool lit = weapon && h.holstered && h.lit;
+			const Kick kick = KickOf(hand, h);
+			const MeshRaster::Mat4 world = HandWorld(h, kick);
+			const int side = (hand == kLeft) ? kLeft : kRight;
+
+			if (!(weapon && h.holstered))
+			{
+				HandMesh::Pose pa, pb;
+				float t;
+				HandPoses(hand, h, &pa, &pb, &t);
+				const HandMesh::Mesh& hm = HandMesh::Lerp(side, pa, pb, t, sc.blend);
+				MeshRaster::Mesh mesh;
+				mesh.positions = hm.position;
+				mesh.normals = hm.normal;
+				mesh.vertex_count = hm.vertex_count;
+				mesh.indices16 = hm.index;
+				mesh.index_count = hm.triangle_count * 3;
+				MeshRaster::Material mat;
+				// A light skin tone (the characters' bare hands), lit as the placeholder glove is.
+				mat.base_colour[0] = 0.72f;
+				mat.base_colour[1] = 0.53f;
+				mat.base_colour[2] = 0.43f;
+				SetLighting(mat.lighting, false);
+				mat.lighting.rim = 0.38f;
+				MeshRaster::Draw(sc.target, cam, mesh, world, mat);
+			}
+
+			if (weapon)
+			{
+				const GameModels::Model* m = LookupModel(h.item_id);
+				if (m)
+				{
+					const Placement p = PlaceFor(h, *m);
+					const float slide_cm = SlideCm(h);
+					for (const GameModels::Part& part : m->parts)
+					{
+						if (part.vertices.empty() || part.indices.empty())
+							continue;
+						// cm in the model -> m in the pointing frame (the slide moved back along the model's +X first).
+						const V3 shift = (part.slot == 2) ? V3{slide_cm, 0.0f, 0.0f} : V3{0.0f, 0.0f, 0.0f};
+						const MeshRaster::Mat4 local = MatFromBasis(Mul(p.L.c[0], 0.01f), Mul(p.L.c[1], 0.01f),
+							Mul(p.L.c[2], 0.01f), Mul(Add(p.L.Apply(shift), p.T), 0.01f));
+						MeshRaster::Mesh mesh;
+						mesh.positions = part.vertices[0].pos;
+						mesh.normals = part.vertices[0].normal;
+						mesh.uvs = part.vertices[0].uv;
+						mesh.position_stride = mesh.normal_stride = mesh.uv_stride = sizeof(GameModels::Vertex);
+						mesh.vertex_count = static_cast<u32>(part.vertices.size());
+						mesh.indices16 = part.indices.data();
+						mesh.index_count = static_cast<u32>(part.indices.size());
+						MeshRaster::Texture tex;
+						MeshRaster::Material mat;
+						if (part.texture && !part.texture->rgba.empty())
+						{
+							tex.texels = part.texture->rgba.data();
+							tex.width = part.texture->width;
+							tex.height = part.texture->height;
+							tex.filter = MeshRaster::Texture::Filter::Nearest;
+							mat.texture = &tex;
+							mat.alpha_cutoff = 0.5f;
+						}
+						else
+						{
+							mat.base_colour[0] = mat.base_colour[1] = mat.base_colour[2] = 0.45f;
+						}
+						SetLighting(mat.lighting, lit);
+						MeshRaster::Draw(sc.target, cam, mesh, MeshRaster::Multiply(world, local), mat);
+					}
+					V3 muzzle;
+					if (h.flash && !h.holstered && ModelMuzzleCm(h, &muzzle))
+					{
+						// The placeholder's four-point star, just past the model's muzzle.
+						sc.flash_tris.clear();
+						const V3 c = Add(muzzle, V3{0.0f, 0.0f, -0.6f});
+						const float r = (h.held == Held::LongGun) ? 2.2f : 1.5f;
+						AddBoxAA(sc.flash_tris, c.x, c.y, c.z, r, 0.25f, 0.25f, kMatFlash);
+						AddBoxAA(sc.flash_tris, c.x, c.y, c.z, 0.25f, r, 0.25f, kMatFlash);
+						sc.flash.clear();
+						for (const Tri& tr : sc.flash_tris)
+						{
+							for (int k = 0; k < 3; k++)
+							{
+								sc.flash.push_back(tr.p[k].x * 0.01f);
+								sc.flash.push_back(tr.p[k].y * 0.01f);
+								sc.flash.push_back(tr.p[k].z * 0.01f);
+							}
+						}
+						MeshRaster::Mesh mesh;
+						mesh.positions = sc.flash.data();
+						mesh.vertex_count = static_cast<u32>(sc.flash.size() / 3);
+						MeshRaster::Material mat;
+						mat.lighting.enabled = false;
+						mat.cull_back = false;
+						mat.base_colour[0] = 1.0f;
+						mat.base_colour[1] = 0.91f;
+						mat.base_colour[2] = 0.69f;
+						MeshRaster::Draw(sc.target, cam, mesh, world, mat);
+					}
+				}
+			}
+			sc.target.Resolve();
+			sc.target.CopyUnpremultiplied(out_rgba.data());
+			const double us = timer.GetTimeNanoseconds() / 1000.0;
+			const u32 us32 = static_cast<u32>(std::min(us, 4.0e9));
+			s_mesh_images.fetch_add(1, std::memory_order_relaxed);
+			s_mesh_total_us.fetch_add(us32, std::memory_order_relaxed);
+			u32 prev = s_mesh_max_us.load(std::memory_order_relaxed);
+			while (us32 > prev && !s_mesh_max_us.compare_exchange_weak(prev, us32, std::memory_order_relaxed))
+			{
+			}
+		}
+	}
+
+	bool DecodeGameAttach(const u8* entry, size_t size, u16 type, u32 grip_offset, u32 rotation_offset, u32 muzzle_offset,
+		GameAttach* out)
+	{
+		if (!out)
+			return false;
+		*out = GameAttach{};
+		if (!entry || type == 0 || size < 3 || entry[2] != static_cast<u8>(type) || grip_offset + 12 > size ||
+			rotation_offset + 6 > size || muzzle_offset + 12 > size)
+		{
+			return false;
+		}
+		GameAttach a;
+		a.type = type;
+		float muzzle[3];
+		for (int k = 0; k < 3; k++)
+		{
+			std::memcpy(&a.grip_cm[k], entry + grip_offset + 4 * k, 4);
+			s16 r;
+			std::memcpy(&r, entry + rotation_offset + 2 * k, 2);
+			a.rot_rad[k] = static_cast<float>(r) * (2.0f * kPi / 65536.0f);
+			std::memcpy(&muzzle[k], entry + muzzle_offset + 4 * k, 4);
+		}
+		if (!Finite(a.grip_cm, 3) || !Finite(muzzle, 3) || Length(Load(a.grip_cm)) > 100.0f || Length(Load(muzzle)) > 200.0f)
+			return false;
+		a.has_muzzle = Length(Load(muzzle)) > 0.01f;
+		for (int k = 0; k < 3; k++)
+			a.muzzle_cm[k] = a.has_muzzle ? muzzle[k] : 0.0f;
+		a.valid = true;
+		*out = a;
+		return true;
+	}
+
+	bool DrawsMesh(int hand, const HandState& h)
+	{
+		if (!h.mesh)
+			return false;
+		if (!(h.gun && hand == kRight))
+			return true;
+		if (!LookupModel(h.item_id))
+		{
+			LogFallbackOnce(h.item_id, "its model is not on this disc or did not decode (or the models are still loading)");
+			return false;
+		}
+		if (!h.attach.valid)
+		{
+			LogFallbackOnce(h.item_id, "the game's grip for it is not known (no weapon-type entry read)");
+			return false;
+		}
+		return true;
+	}
+
+	void SetModelLookupForTest(ModelLookup lookup)
+	{
+		s_model_lookup.store(lookup, std::memory_order_release);
+		std::lock_guard<std::mutex> lock(s_fallback_mutex);
+		s_fallback_logged.clear();
+	}
+
+	MeshDrawStats TakeMeshDrawStats()
+	{
+		MeshDrawStats st;
+		st.images = s_mesh_images.exchange(0, std::memory_order_relaxed);
+		st.total_us = s_mesh_total_us.exchange(0, std::memory_order_relaxed);
+		st.max_us = s_mesh_max_us.exchange(0, std::memory_order_relaxed);
+		return st;
+	}
+
+	bool ModelLaserFrom(const HandState& gun_hand, float gap_m, float out_origin[3], float out_dir[3])
+	{
+		if (!gun_hand.valid || !gun_hand.gun || !Finite(gun_hand.pos, 3) || !Finite(gun_hand.quat, 4) ||
+			!std::isfinite(gap_m) || !DrawsMesh(kRight, gun_hand))
+		{
+			return false;
+		}
+		V3 muzzle;
+		if (!ModelMuzzleCm(gun_hand, &muzzle))
+			return false;
+		const float n2 = gun_hand.quat[0] * gun_hand.quat[0] + gun_hand.quat[1] * gun_hand.quat[1] +
+		                 gun_hand.quat[2] * gun_hand.quat[2] + gun_hand.quat[3] * gun_hand.quat[3];
+		if (!std::isfinite(n2) || n2 < 1.0e-6f)
+			return false;
+		float q[4];
+		NormalizedQuat(gun_hand, q);
+		const V3 dir = Rotate(q, V3{0.0f, 0.0f, -1.0f});
+		const V3 from = Add(Load(gun_hand.pos), Rotate(q, Mul(muzzle, 0.01f)));
+		Store(Add(from, Mul(dir, gap_m)), out_origin);
+		Store(dir, out_dir);
+		return true;
+	}
+
 	WeaponHeld HeldFor(bool raised, bool item_known, u16 item_id)
 	{
 		WeaponHeld w;
@@ -1266,7 +1880,7 @@ namespace VR::HandModel
 		return true;
 	}
 
-	bool HolsterPose(Held held, const float centre[3], float yaw, float out_pos[3], float out_quat[4])
+	bool HolsterPose(Held held, const float centre[3], float yaw, float out_pos[3], float out_quat[4], bool model)
 	{
 		if (!Finite(centre, 3) || !std::isfinite(yaw))
 			return false;
@@ -1275,7 +1889,11 @@ namespace VR::HandModel
 		// fist (a can, a molotov) is built round the handle, whose top leans kHandleTiltDeg forward in the pointing frame:
 		// tipped back that far, the handle stands upright on the belt.
 		const bool upright = (held == Held::Thrown || held == Held::Spray);
-		const float pitch = (upright ? kHandleTiltDeg : -(90.0f + kHolsterCantDeg)) * kDegToRad;
+		// A game model's shaft runs along +Y: turned 180 deg less the cant about the body's right, it hangs down and a
+		// little back, its hold point up and forward toward the hand.
+		const bool shaft_down = model && held == Held::Melee;
+		const float pitch =
+			(shaft_down ? (180.0f - kHolsterCantDeg) : upright ? kHandleTiltDeg : -(90.0f + kHolsterCantDeg)) * kDegToRad;
 		const float q_yaw[4] = {0.0f, std::sin(0.5f * yaw), 0.0f, std::cos(0.5f * yaw)};
 		const float q_pitch[4] = {std::sin(0.5f * pitch), 0.0f, 0.0f, std::cos(0.5f * pitch)};
 		QuatMul(q_yaw, q_pitch, out_quat);
@@ -1310,7 +1928,16 @@ namespace VR::HandModel
 			return false;
 
 		V3 lmin, lmax, cmin, cmax;
-		BuildWorld(hand, h, &lmin, &lmax, &cmin, &cmax);
+		const bool mesh = DrawsMesh(hand, h);
+		if (mesh)
+		{
+			if (!MeshBounds(hand, h, &lmin, &lmax, &cmin, &cmax))
+				return false;
+		}
+		else
+		{
+			BuildWorld(hand, h, &lmin, &lmax, &cmin, &cmax);
+		}
 		float q[4];
 		NormalizedQuat(h, q);
 		const V3 pos = Load(h.pos);
@@ -1325,7 +1952,8 @@ namespace VR::HandModel
 
 		const bool weapon = h.gun && hand == kRight;
 		const float base = (weapon && h.holstered) ? kQuadSizeHolsterM : weapon ? kQuadSizeGunM : kQuadSizeM;
-		const float max_size = (weapon && (h.held == Held::LongGun || h.held == Held::Melee)) ? kQuadSizeLongM : base * 2.0f;
+		const float long_max = mesh ? kQuadSizeModelLongM : kQuadSizeLongM;
+		const float max_size = (weapon && (h.held == Held::LongGun || h.held == Held::Melee)) ? long_max : base * 2.0f;
 
 		// The quad faces the eye from the middle of everything drawn, so as much of a long gun or a pole as can be lies in
 		// front of the eye, and lies on the plane through the middle of the hand (with a pistol, can or thrown item in it),
@@ -1368,7 +1996,17 @@ namespace VR::HandModel
 		float size = fitted ? std::max(x1 - x0, y1 - y0) * kFitMargin : 0.0f;
 		if (fitted && std::isfinite(size))
 		{
-			centre = Add(centre, Add(Mul(right, 0.5f * (x0 + x1)), Mul(up, 0.5f * (y0 + y1))));
+			float cx = 0.5f * (x0 + x1);
+			float cy = 0.5f * (y0 + y1);
+			// A game model too big for the largest quad (a pole seen side on): the quad keeps the hand (the core, at 0, 0
+			// on this plane) in it and holds as much of the weapon as fits; what is cut is the far end.
+			if (mesh && size > max_size)
+			{
+				const float room = std::max(0.0f, 0.5f * max_size - 1.1f * core_radius);
+				cx = std::clamp(cx, -room, room);
+				cy = std::clamp(cy, -room, room);
+			}
+			centre = Add(centre, Add(Mul(right, cx), Mul(up, cy)));
 		}
 		else
 		{
@@ -1410,6 +2048,12 @@ namespace VR::HandModel
 		const float ec_u = Dot(ec, u);
 		const float px_per_m = static_cast<float>(kImageSize) / quad_size_m;
 		const float half = 0.5f * static_cast<float>(kImageSize);
+
+		if (DrawsMesh(hand, h))
+		{
+			RenderMesh(hand, h, eye, quad_center, quad_right, quad_up, quad_size_m, out_rgba);
+			return;
+		}
 
 		BuildWorld(hand, h, nullptr, nullptr, nullptr, nullptr);
 		s_depth.assign(kPixels, 0.0f);
@@ -1636,7 +2280,8 @@ namespace VR::HandModel
 		if (!ref.valid || !now.valid)
 			return true;
 		if (ref.gun != now.gun || ref.held != now.held || ref.item_id != now.item_id || ref.support != now.support ||
-			ref.slide_locked != now.slide_locked || ref.holstered != now.holstered || ref.lit != now.lit)
+			ref.slide_locked != now.slide_locked || ref.holstered != now.holstered || ref.lit != now.lit ||
+			ref.mesh != now.mesh || ref.attach.valid != now.attach.valid || ref.attach.type != now.attach.type)
 		{
 			return true;
 		}
@@ -2144,10 +2789,412 @@ namespace VR::HandModel
 			check(left_placed && left_differ >= 200, what);
 		}
 
+		// [VR] GameWeaponModels: the game's attach entry, the placement, the fallback and the mesh images, with a synthetic
+		// weapon model (no disc data): a 22 x 2.6 x 14 cm "pistol" lying as the game's do (barrel toward -X, top toward +Z),
+		// its origin in the middle, a frame part and a slide part (skin slot 2), a 16 x 16 checker texture.
+		{
+			static GameModels::Texture s_tex;
+			static GameModels::Model s_gun;
+			static GameModels::Model s_pole;
+			if (s_gun.parts.empty())
+			{
+				s_tex.width = s_tex.height = 16;
+				s_tex.rgba.resize(256);
+				for (int i = 0; i < 256; i++)
+					s_tex.rgba[i] = (((i & 1) ^ ((i >> 4) & 1)) != 0) ? 0xFF505050u : 0xFF9A9A9Au;
+				s_gun.item_id = 0;
+				const float lo[3] = {-10.9f, -1.3f, -6.6f};
+				const float hi[3] = {11.1f, 1.3f, 7.3f};
+				for (int k = 0; k < 3; k++)
+				{
+					s_gun.bounds_min[k] = lo[k];
+					s_gun.bounds_max[k] = hi[k];
+				}
+				// Two boxes: the grip and frame (slot 0) below z = 4, the slide (slot 2) above.
+				const auto box = [](GameModels::Part& part, const float b0[3], const float b1[3]) {
+					static const int kFace[6][4] = {{0, 2, 6, 4}, {1, 5, 7, 3}, {0, 4, 5, 1}, {2, 3, 7, 6}, {0, 1, 3, 2}, {4, 6, 7, 5}};
+					static const float kNormal[6][3] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
+					for (int f = 0; f < 6; f++)
+					{
+						const u16 base = static_cast<u16>(part.vertices.size());
+						for (int c = 0; c < 4; c++)
+						{
+							const int corner = kFace[f][c];
+							GameModels::Vertex v;
+							v.pos[0] = (corner & 1) ? b1[0] : b0[0];
+							v.pos[1] = (corner & 2) ? b1[1] : b0[1];
+							v.pos[2] = (corner & 4) ? b1[2] : b0[2];
+							for (int k = 0; k < 3; k++)
+								v.normal[k] = kNormal[f][k];
+							v.uv[0] = (c == 1 || c == 2) ? 1.0f : 0.0f;
+							v.uv[1] = (c >= 2) ? 1.0f : 0.0f;
+							part.vertices.push_back(v);
+						}
+						// Wound counter-clockwise seen from outside (along the face's normal).
+						const float* n = kNormal[f];
+						const GameModels::Vertex& a = part.vertices[base];
+						const GameModels::Vertex& b = part.vertices[base + 1];
+						const GameModels::Vertex& c2 = part.vertices[base + 2];
+						const V3 e1 = Sub(Load(b.pos), Load(a.pos));
+						const V3 e2 = Sub(Load(c2.pos), Load(a.pos));
+						const bool ccw = Dot(Cross(e1, e2), V3{n[0], n[1], n[2]}) > 0.0f;
+						const u16 q[6] = {base, static_cast<u16>(base + (ccw ? 1 : 2)), static_cast<u16>(base + (ccw ? 2 : 1)),
+							base, static_cast<u16>(base + (ccw ? 2 : 3)), static_cast<u16>(base + (ccw ? 3 : 2))};
+						part.indices.insert(part.indices.end(), q, q + 6);
+					}
+				};
+				GameModels::Part frame;
+				frame.slot = 0;
+				frame.texture = &s_tex;
+				const float f0[3] = {-10.9f, -1.3f, -6.6f}, f1[3] = {11.1f, 1.3f, 4.0f};
+				box(frame, f0, f1);
+				GameModels::Part slide;
+				slide.slot = 2;
+				slide.texture = &s_tex;
+				const float s0[3] = {-10.9f, -1.0f, 4.0f}, s1[3] = {11.1f, 1.0f, 7.3f};
+				box(slide, s0, s1);
+				s_gun.parts.push_back(std::move(frame));
+				s_gun.parts.push_back(std::move(slide));
+				s_gun.triangles = 24;
+				// A 1.3 m pole (as item 106), along X and centred, as the game's melee models lie.
+				s_pole.item_id = 106;
+				const float p0[3] = {-65.0f, -1.4f, -1.4f}, p1[3] = {65.0f, 1.4f, 1.4f};
+				for (int k = 0; k < 3; k++)
+				{
+					s_pole.bounds_min[k] = p0[k];
+					s_pole.bounds_max[k] = p1[k];
+				}
+				GameModels::Part shaft;
+				shaft.texture = &s_tex;
+				box(shaft, p0, p1);
+				s_pole.parts.push_back(std::move(shaft));
+				s_pole.triangles = 12;
+			}
+			SetModelLookupForTest(+[](u16 id) -> const GameModels::Model* {
+				return (id == 0) ? &s_gun : (id == 106) ? &s_pole : nullptr;
+			});
+
+			// DecodeGameAttach: an entry as File #1's weapon-type table lays it out (0x44 bytes).
+			u8 entry[0x44] = {};
+			entry[2] = 7;
+			const float grip[3] = {-13.45f, -1.598f, 2.135f};
+			const float muzzle[3] = {-9.5f, 0.0f, 5.09f};
+			std::memcpy(entry + 0x0C, grip, 12);
+			std::memcpy(entry + 0x34, muzzle, 12);
+			GameAttach at;
+			check(DecodeGameAttach(entry, sizeof(entry), 7, 0x0C, 0x24, 0x34, &at) && at.valid && at.type == 7 &&
+					  near3(at.grip_cm, grip, 0.0f) && at.has_muzzle && near3(at.muzzle_cm, muzzle, 0.0f) && at.rot_rad[0] == 0.0f,
+				"DecodeGameAttach: the grip, no turn and the muzzle of an entry");
+			GameAttach bad;
+			check(!DecodeGameAttach(entry, sizeof(entry), 8, 0x0C, 0x24, 0x34, &bad) && !bad.valid,
+				"DecodeGameAttach: an entry whose byte +2 names another type is refused");
+			check(!DecodeGameAttach(entry, 0x30, 7, 0x0C, 0x24, 0x34, &bad) && !DecodeGameAttach(entry, sizeof(entry), 0, 0x0C, 0x24, 0x34, &bad),
+				"DecodeGameAttach: a short entry or type 0 is refused");
+			u8 broken[0x44];
+			std::memcpy(broken, entry, sizeof(broken));
+			const float nan = std::numeric_limits<float>::quiet_NaN();
+			std::memcpy(broken + 0x10, &nan, 4);
+			check(!DecodeGameAttach(broken, sizeof(broken), 7, 0x0C, 0x24, 0x34, &bad), "DecodeGameAttach: a grip that is not finite is refused");
+			// A spray can's entry turn, (101.8, -23.6, -77.7) degrees as s16: the model's +Y (the can's axis) then lies along
+			// (-0.283, 0.339, 0.897) in the hand bone's frame, as the savestates show for the game's own matrix.
+			u8 spray[0x44];
+			std::memcpy(spray, entry, sizeof(spray));
+			spray[2] = 27;
+			const s16 turn[3] = {static_cast<s16>(0x4864), static_cast<s16>(0xEF39), static_cast<s16>(0xC8C2)};
+			std::memcpy(spray + 0x24, turn, 6);
+			GameAttach sp;
+			const bool sp_ok = DecodeGameAttach(spray, sizeof(spray), 27, 0x0C, 0x24, 0x34, &sp);
+			const M3 A = MulM3(RotZ(sp.rot_rad[2]), MulM3(RotY(sp.rot_rad[1]), RotX(sp.rot_rad[0])));
+			const V3 can_axis = A.Apply(V3{0.0f, 1.0f, 0.0f});
+			check(sp_ok && std::fabs(can_axis.x + 0.283f) < 0.01f && std::fabs(can_axis.y - 0.339f) < 0.01f &&
+					  std::fabs(can_axis.z - 0.897f) < 0.01f,
+				"GameAttach: the turn is X, then Y, then Z, as the game's own matrix (a spray can's axis)");
+
+			// PlaceModel: the pistol's origin lands at the wrist anchor plus the grip (Kevin's scale), its barrel along -Z.
+			const Placement pl = PlaceModel(at, Held::Pistol);
+			const HandMesh::Anchors an = HandMesh::GetAnchors(kRight, HandMesh::Pose::Pistol);
+			const V3 want_origin = Add(Mul(Load(an.wrist), 100.0f), V3{grip[1] * kGameHandScale, grip[2] * kGameHandScale,
+				grip[0] * kGameHandScale});
+			const V3 barrel = Normalize(pl.L.Apply(V3{-1.0f, 0.0f, 0.0f}));
+			check(Length(Sub(pl.T, want_origin)) < 1.0e-4f && barrel.z < -0.99999f && pl.L.Apply(V3{0.0f, 0.0f, 1.0f}).y > 0.99999f,
+				"PlaceModel: the pistol's origin at the wrist + the game's grip, its barrel along -Z, its top up");
+			// The origin then sits close to where the placeholder pistol has its trigger (0, 2, -4.6) cm.
+			char what2[160];
+			std::snprintf(what2, sizeof(what2), "PlaceModel: Kevin's 45 Auto's origin (%.1f, %.1f, %.1f) cm is within 3 cm of the "
+				"placeholder's trigger", static_cast<double>(pl.T.x), static_cast<double>(pl.T.y), static_cast<double>(pl.T.z));
+			check(Length(Sub(pl.T, V3{0.0f, 2.0f, -4.6f})) < 3.0f, what2);
+			GameAttach yawed = at;
+			yawed.rot_rad[1] = 10.6f * kDegToRad;
+			const Placement plg = PlaceModel(yawed, Held::LongGun);
+			const Placement plm = PlaceModel(yawed, Held::Melee);
+			check(Normalize(plg.L.Apply(V3{-1.0f, 0.0f, 0.0f})).z < -0.99999f && Normalize(plm.L.Apply(V3{-1.0f, 0.0f, 0.0f})).z > -0.99,
+				"PlaceModel: a gun the game holds 10.6 deg off is turned onto -Z; a melee weapon keeps the game's turn");
+
+			// DrawsMesh and the fallback.
+			HandState hs;
+			hs.valid = true;
+			hs.pos[0] = 0.20f;
+			hs.pos[1] = 0.90f;
+			hs.pos[2] = -0.40f;
+			hs.grip = 1.0f;
+			hs.gun = true;
+			hs.held = Held::Pistol;
+			hs.item_id = 0;
+			hs.attach = at;
+			check(!DrawsMesh(kRight, hs), "DrawsMesh: without [VR] GameWeaponModels, today's look");
+			hs.mesh = true;
+			check(DrawsMesh(kRight, hs), "DrawsMesh: a weapon with its model and the game's grip is drawn as a mesh");
+			HandState no_model = hs;
+			no_model.item_id = 3;
+			HandState no_attach = hs;
+			no_attach.attach = GameAttach{};
+			check(!DrawsMesh(kRight, no_model) && !DrawsMesh(kRight, no_attach),
+				"DrawsMesh: no model or no grip for the weapon keeps the placeholder");
+			HandState bare = hs;
+			bare.gun = false;
+			check(DrawsMesh(kRight, bare) && DrawsMesh(kLeft, bare), "DrawsMesh: bare hands are the hand model");
+
+			const float view_eye[3] = {0.0f, 1.2f, 0.0f};
+			const auto coverage = [](const std::vector<u32>& img, bool* touches_edge) {
+				u32 n = 0;
+				bool edge = false;
+				for (int y = 0; y < kSize; y++)
+				{
+					for (int x = 0; x < kSize; x++)
+					{
+						if ((img[static_cast<size_t>(y) * kImageSize + x] >> 24) == 0)
+							continue;
+						n++;
+						edge = edge || x == 0 || y == 0 || x == kSize - 1 || y == kSize - 1;
+					}
+				}
+				if (touches_edge)
+					*touches_edge = edge;
+				return n;
+			};
+			std::vector<u32> img_mesh, img_old, img_fb_old, img_fb_mesh;
+			ImpostorQuad q;
+			bool edge = true;
+			u32 cov = 0;
+			if (PlaceImpostor(kRight, hs, view_eye, &q))
+			{
+				RenderImpostor(kRight, hs, view_eye, q.centre, q.right, q.up, q.size_m, img_mesh);
+				cov = coverage(img_mesh, &edge);
+				HandState old_look = hs;
+				old_look.mesh = false;
+				RenderImpostor(kRight, old_look, view_eye, q.centre, q.right, q.up, q.size_m, img_old);
+			}
+			std::snprintf(what2, sizeof(what2), "mesh: the hand and the model pistol fill their own quad (%u px, %.2f m) and stay "
+				"off its edge", cov, static_cast<double>(q.size_m));
+			check(cov >= 1500 && !edge, what2);
+			u32 differ = 0;
+			for (size_t p = 0; p < img_mesh.size() && p < img_old.size(); p++)
+				differ += (((img_mesh[p] >> 24) != 0) != ((img_old[p] >> 24) != 0)) ? 1u : 0u;
+			check(img_old.size() == kPixels && differ >= 200, "mesh: the mesh image differs from the placeholder's");
+
+			// The fallback is exactly today's image.
+			HandState fb_old = no_model;
+			fb_old.mesh = false;
+			ImpostorQuad qf;
+			bool same = PlaceImpostor(kRight, no_model, view_eye, &qf);
+			ImpostorQuad qo;
+			same = same && PlaceImpostor(kRight, fb_old, view_eye, &qo) && qf.size_m == qo.size_m;
+			if (same)
+			{
+				RenderImpostor(kRight, no_model, view_eye, qf.centre, qf.right, qf.up, qf.size_m, img_fb_mesh);
+				RenderImpostor(kRight, fb_old, view_eye, qo.centre, qo.right, qo.up, qo.size_m, img_fb_old);
+				same = img_fb_mesh == img_fb_old;
+			}
+			check(same, "mesh: a weapon without a model is drawn exactly as today (quad and image)");
+
+			// In the holster: the weapon alone, smaller than with the hand round it.
+			HandState hol = hs;
+			hol.holstered = true;
+			const float hip[3] = {0.22f, 0.78f, -0.05f};
+			HolsterPose(Held::Pistol, hip, 0.0f, hol.pos, hol.quat);
+			ImpostorQuad qh;
+			u32 cov_h = 0;
+			bool edge_h = true;
+			if (PlaceImpostor(kRight, hol, view_eye, &qh))
+			{
+				std::vector<u32> img;
+				RenderImpostor(kRight, hol, view_eye, qh.centre, qh.right, qh.up, qh.size_m, img);
+				cov_h = coverage(img, &edge_h);
+			}
+			std::snprintf(what2, sizeof(what2), "mesh: the holstered model pistol is drawn in its own quad (%u px)", cov_h);
+			check(cov_h >= 300 && !edge_h, what2);
+
+			// The laser from the model's muzzle.
+			HandState aim = hs;
+			aim.pos[0] = aim.pos[1] = aim.pos[2] = 0.0f;
+			for (int k = 0; k < 4; k++)
+				aim.quat[k] = identity[k];
+			float from[3], dir[3];
+			const V3 want_muzzle = Add(pl.L.Apply(Load(muzzle)), pl.T);
+			check(ModelLaserFrom(aim, 0.02f, from, dir) && std::fabs(from[0] - want_muzzle.x * 0.01f) < 1.0e-5f &&
+					  std::fabs(from[1] - want_muzzle.y * 0.01f) < 1.0e-5f &&
+					  std::fabs(from[2] - (want_muzzle.z * 0.01f - 0.02f)) < 1.0e-5f && dir[2] < -0.99999f,
+				"ModelLaserFrom: the beam starts 2 cm past the model's muzzle, along -Z");
+			check(!ModelLaserFrom(no_model, 0.02f, from, dir), "ModelLaserFrom: none for a weapon drawn as the placeholder");
+
+			// NeedsReraster sees the look and the grip change.
+			HandState mesh_off = hs;
+			mesh_off.mesh = false;
+			HandState other_type = hs;
+			other_type.attach.type = 8;
+			check(NeedsReraster(hs, view_eye, q.centre, mesh_off, view_eye, 0) && NeedsReraster(hs, view_eye, q.centre, other_type, view_eye, 0) &&
+					  !NeedsReraster(hs, view_eye, q.centre, hs, view_eye, 0),
+				"NeedsReraster: the look or the weapon type changing draws it again");
+
+			// What a hand-and-pistol image costs here (a lit, textured mesh at 2 x 2 samples).
+			if (cov > 0)
+			{
+				TakeMeshDrawStats();
+				constexpr int kRuns = 40;
+				for (int r = 0; r < kRuns; r++)
+					RenderImpostor(kRight, hs, view_eye, q.centre, q.right, q.up, q.size_m, img_mesh);
+				const MeshDrawStats st = TakeMeshDrawStats();
+				Common::Timer t_old;
+				HandState old_look = hs;
+				old_look.mesh = false;
+				for (int r = 0; r < kRuns; r++)
+					RenderImpostor(kRight, old_look, view_eye, q.centre, q.right, q.up, q.size_m, img_old);
+				const double old_ms = t_old.GetTimeMilliseconds() / kRuns;
+				HandState bare_hand = hs;
+				bare_hand.gun = false;
+				TakeMeshDrawStats();
+				for (int r = 0; r < kRuns; r++)
+					RenderImpostor(kRight, bare_hand, view_eye, q.centre, q.right, q.up, q.size_m, img_fb_mesh);
+				const MeshDrawStats st_bare = TakeMeshDrawStats();
+				Console.WriteLn("(VR) Hands mesh timing: a hand and model pistol image takes %.3f ms (max %.3f) with MeshRaster at "
+								"%u x %u samples, the hand alone %.3f ms, the placeholder's %.3f ms (%u px)",
+					st.images ? static_cast<double>(st.total_us) / 1000.0 / st.images : 0.0, static_cast<double>(st.max_us) / 1000.0,
+					MeshSamples(), MeshSamples(),
+					st_bare.images ? static_cast<double>(st_bare.total_us) / 1000.0 / st_bare.images : 0.0, old_ms, cov);
+				check(st.images == static_cast<u32>(kRuns), "mesh: every mesh image is counted in the draw stats");
+			}
+			// A pole held side on, too long for the largest quad: the quad still holds the hand (the pixel the grip
+			// position lands on is drawn), and the pole hangs from the holster with its top end near the belt.
+			{
+				HandState pole = hs;
+				pole.held = Held::Melee;
+				pole.item_id = 106;
+				pole.attach.rot_rad[0] = pole.attach.rot_rad[2] = 0.0f;
+				pole.attach.rot_rad[1] = 0.5f * kPi;
+				pole.attach.grip_cm[0] = -8.0f;
+				pole.attach.grip_cm[1] = -2.5f;
+				pole.attach.grip_cm[2] = 0.0f;
+				pole.attach.has_muzzle = false;
+				const float near_eye[3] = {0.2f, 1.25f, -0.15f};
+				ImpostorQuad qp;
+				bool hand_in = false;
+				float qp_size = 0.0f;
+				if (PlaceImpostor(kRight, pole, near_eye, &qp))
+				{
+					std::vector<u32> img;
+					RenderImpostor(kRight, pole, near_eye, qp.centre, qp.right, qp.up, qp.size_m, img);
+					MeshRaster::Camera cam;
+					float px[2];
+					if (MeshRaster::Camera::Impostor(near_eye, qp.centre, qp.right, qp.up, qp.size_m, kNearM, 100.0f, &cam) &&
+						MeshRaster::ProjectPoint(cam, kImageSize, kImageSize, pole.pos, px) && px[0] >= 0.0f && px[1] >= 0.0f &&
+						px[0] < kImageSize && px[1] < kImageSize)
+					{
+						hand_in = (img[static_cast<size_t>(px[1]) * kImageSize + static_cast<size_t>(px[0])] >> 24) != 0;
+					}
+					qp_size = qp.size_m;
+				}
+				std::snprintf(what2, sizeof(what2), "mesh: a 1.3 m pole seen side on keeps the hand in its quad (%.2f m)",
+					static_cast<double>(qp_size));
+				check(hand_in && qp_size <= kQuadSizeModelLongM + 1.0e-4f, what2);
+				HandState hung = pole;
+				hung.holstered = true;
+				HolsterPose(Held::Melee, hip, 0.0f, hung.pos, hung.quat, true);
+				const Placement ph = PlaceFor(hung, s_pole);
+				float top = 1.0e9f, bottom = -1.0e9f;
+				for (int c = 0; c < 2; c++)
+				{
+					const float y = Add(ph.L.Apply(V3{c ? 65.0f : -65.0f, 0.0f, 0.0f}), ph.T).y;
+					top = std::min(top, y);
+					bottom = std::max(bottom, y);
+				}
+				check(std::fabs(top + kHolsterTopCm) < 0.2f && bottom > 100.0f,
+					"mesh: in the holster a pole hangs from the belt, its top end 12 cm over the hold point");
+			}
+			SetModelLookupForTest(nullptr);
+		}
+
 		if (failed == 0)
 			Console.WriteLn(Color_StrongGreen, "(VR) Hands self-test: %d checks passed", checks);
 		else
 			Console.WriteLn(Color_StrongRed, "(VR) Hands self-test: %d of %d failed", failed, checks);
 		return failed == 0;
+	}
+
+	int DumpImages(const char* folder, const DumpItem* items, int count)
+	{
+		if (!folder || !folder[0] || !items || count <= 0)
+			return 0;
+		FileSystem::CreateDirectoryPath(folder, true);
+		// A seated head; the right hand 40 cm ahead, 30 cm below and 20 cm to the right, pointing ahead; and a second eye
+		// 45 cm to the right of the hand, looking at it from the side, where the grip in the fist shows best.
+		const float eye[3] = {0.0f, 1.20f, 0.0f};
+		const float side_eye[3] = {0.65f, 0.92f, -0.40f};
+		const float hip[3] = {0.22f, 0.78f, -0.05f};
+		const float shoulder[3] = {0.18f, 1.12f, 0.12f};
+		int written = 0;
+		std::vector<u32> px;
+		for (int i = 0; i < count; i++)
+		{
+			const WeaponHeld w = HeldFor(true, true, items[i].item_id);
+			if (!w.raised)
+				continue;
+			HandState h;
+			h.valid = true;
+			h.mesh = true;
+			h.gun = true;
+			h.held = w.held;
+			h.item_id = items[i].item_id;
+			h.attach = items[i].attach;
+			h.grip = 1.0f;
+			h.pos[0] = 0.20f;
+			h.pos[1] = 0.90f;
+			h.pos[2] = -0.40f;
+			if (!DrawsMesh(kRight, h))
+				continue;
+			HandState hol = h;
+			hol.holstered = true;
+			if (w.held == Held::LongGun)
+				SlingPose(shoulder, 0.0f, hol.pos, hol.quat);
+			else
+				HolsterPose(w.held, hip, 0.0f, hol.pos, hol.quat, true);
+			struct View
+			{
+				const char* name;
+				const HandState* hs;
+				const float* eye;
+			};
+			const float far_eye[3] = {1.80f, 0.95f, -0.40f};
+			const View views[] = {{"hand", &h, eye}, {"side", &h, side_eye}, {"holster", &hol, eye}, {"far", &h, far_eye}};
+			double ms[4] = {0.0, 0.0, 0.0, 0.0};
+			for (int v = 0; v < 4; v++)
+			{
+				ImpostorQuad q;
+				if (!PlaceImpostor(kRight, *views[v].hs, views[v].eye, &q))
+					continue;
+				Common::Timer t;
+				RenderImpostor(kRight, *views[v].hs, views[v].eye, q.centre, q.right, q.up, q.size_m, px);
+				ms[v] = t.GetTimeMilliseconds();
+				const std::string path = Path::Combine(folder, fmt::format("{}_{:05}.png", views[v].name, h.item_id));
+				if (px.size() == kPixels && RGBA8Image(kImageSize, kImageSize, px.data()).SaveToFile(path.c_str()))
+					written++;
+			}
+			const char* name = ItemData::Name(h.item_id);
+			Console.WriteLn("(VR) Hand image dump: item %u (%s, a %s, type %u): in the hand %.2f ms, from the side %.2f ms, %s "
+							"%.2f ms.",
+				static_cast<unsigned>(h.item_id), name[0] ? name : "?", HeldName(w.held), static_cast<unsigned>(h.attach.type),
+				ms[0], ms[1], (w.held == Held::LongGun) ? "slung" : "holstered", ms[2]);
+		}
+		Console.WriteLn("(VR) Hand image dump: %d image(s) in %s (the game's own models: keep them on this PC).", written, folder);
+		return written;
 	}
 }

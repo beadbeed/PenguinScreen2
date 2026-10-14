@@ -54,8 +54,10 @@ until Alex says File #1 is there. Both stay where they are: File #2 has the shar
 
 ### 4. Physical weapons
 - **Models:** the game's own weapon models in the hand and the holster. They are decoded from the disc at VR start (done,
-  `GameModels`) and will be drawn with the new mesh renderer (`MeshRaster`, in progress), so sizes come out right.
-- **Hand:** a proper hand model (the CC0 Godot XR Tools hand, converted, done: `HandMesh`).
+  `GameModels`) and drawn with the mesh renderer (`MeshRaster`) at their real size, placed where the game attaches them
+  to the hand (done on branch `handmodels`, `[VR] GameWeaponModels`, checked offline; next, the headset;
+  `research/2026-10-14-weapon-models-in-hand.md`).
+- **Hand:** a proper hand model (the CC0 Godot XR Tools hand, converted: `HandMesh`; drawn on `handmodels`).
 - **Melee:**
   - a physical swing attacks (swing speed and direction trigger the game's attack);
   - a buzz on contact, and a clear cue when an attack is live.

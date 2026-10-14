@@ -1340,6 +1340,12 @@ struct Pcsx2Config
 		// that brightens as the hand nears, and gives one light tick in the right hand on entering it. It writes nothing
 		// to the game and presses nothing; what it measures is in the emulog ("Hand targeting:" lines). Ini only.
 		bool HandTargeting = false;
+		// First person: the hands are the CC0 hand model (VR::HandMesh) and the weapon in the right hand, in the hip
+		// holster and slung over the shoulder is the game's own model read from the disc (VR::GameModels), at its real
+		// size and placed in the hand the way the game attaches it (its weapon table's grip offset and turn), drawn with
+		// VR::MeshRaster into the same impostor images. A weapon whose model or grip is not known keeps the placeholder
+		// shape (logged once). false = the procedural glove and placeholder shapes as before. Ini only for now.
+		bool GameWeaponModels = true;
 		// First person: darkens the edges of the headset view while the view turns or walks without the head
 		// (smooth stick turns, walking), the more the faster it moves; snap turns keep the blink instead.
 		// Drawn in the headset only, so only what this player sees.

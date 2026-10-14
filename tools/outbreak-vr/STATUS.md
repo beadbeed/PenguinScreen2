@@ -134,11 +134,14 @@ lowers), holds L1 until the rounds stop going in, and gives R1 back. Nothing is 
 
 **Grabbed:** shake a controller to break free.
 
-**Game models:**
-- The game's own weapon meshes and textures are decoded from the disc at VR start, in memory only: 37 weapons in 153 ms on
-  File #1.
-- They are not drawn yet; the mesh renderer is in progress.
-- The CC0 hand model is converted (`HandMesh`) but not drawn yet either.
+**Game models** (branch `handmodels`, `[VR] GameWeaponModels`, on):
+- The game's own weapon meshes and textures are decoded from the disc at VR start, in memory only: 37 weapons in 130-153 ms
+  on File #1.
+- They are drawn in the right hand, the hip holster and the shoulder sling at their real size, placed where the game
+  itself attaches them to the character's hand (its weapon-type table, `feedback.weapon.hold`), and both hands are the
+  CC0 hand model (`HandMesh`), all through `MeshRaster`.
+- Melee weapons now run through the fist along the controller's handle, as the game holds them (the placeholder pointed
+  them along the aim); the scrub brush is its real 1.4 m.
 
 **Online safety:**
 - With the network adapter on: no pause, frame advance, state load or save, or speed change.
@@ -170,7 +173,11 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
    take-it prompt. Does the room stay around you with the screen on a panel? Is the panel (1.0 m ahead, 0.80 m tall,
    a little below the eyes) comfortable and readable? Does pointing at your item cells still steer the cursor, and do
    the translucent windows (they show a flat copy of the room behind them) bother you?
-6. **Game weapon models** (when in): do the size, the grip and the holster look right?
+6. **Game weapon models** (`handmodels`, `GameWeaponModels = true`, the default there): does the 45 Auto sit in the
+   hand as it should (grip in the fist, barrel along the aim, laser from its muzzle)? Do melee weapons through the fist
+   along the handle feel right, or should they point along the aim? Is the hand model fine (skin tone, the trigger
+   curl)? Does a melee weapon hanging from the belt, or the slung shotgun, look right? Any hitch when the hands move?
+   The 5 s `(VR) Hands:` line now has `mesh images N/s mean X max Y ms`.
 7. **Reload gesture** (when in): grab at the left hip, bring it to the gun.
 
 **Switches**, in `inis\PenguinScreen2.ini` under `[VR]`: each one undoes one change.
@@ -187,6 +194,7 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 | `RollParallax` | true | false: parallax not turned with head roll |
 | `MenuPointer` | true | false: no beam, dot or point-to-select |
 | `ZoneMarkers` | true | false: no holstered weapon or zone markers |
+| `GameWeaponModels` | true | false: the procedural glove and placeholder weapon shapes as before. True: both hands are the CC0 hand model and the weapon in the hand, holster and sling is the game's own model, at its real size, placed where the game attaches it to the hand (`feedback.weapon.hold`); a weapon without a model or a known grip keeps the placeholder (logged once). Branch `handmodels`; `research/2026-10-14-weapon-models-in-hand.md` |
 | `PickupCue` | true | false: no pickup tick or name |
 | `ReloadGesture` | true | false: no reload gesture (the hip squeeze opens the item screen even with the gun raised; L1 by hand still reloads) |
 | `HandTargeting` | false | true: File #1 offline only, a read-only prototype: the right hand against the J's Bar Handgun's trigger volume (a wireframe box, one tick on entering it, `Hand targeting:` lines in the emulog); nothing is written to the game. Its trigger and distances are the File #1 profile's `reach.hand` |
@@ -196,6 +204,21 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 | `DepthLayer` | false | true: in first person the frame goes to SteamVR as one projection layer at its render pose with its depth (`XR_KHR_composition_layer_depth`, a D32 depth swapchain per eye), for the runtime's own reprojection; false = the two screen quads, and no depth swapchain or copy at all. Needs `PacerCopies` off. The emulog says `(VR) Depth layer: on` or why it stays off; `PCSX2_VR_DEPTHLAYER_NODEPTH=1` sends the projection layer without the depth (an A/B) |
 
 ## In progress
+
+**Game weapon models in the hand (`handmodels`, from `playtest`), checked offline headset-free on 2026-10-14**
+(`research/2026-10-14-weapon-models-in-hand.md`):
+- **How the game attaches a weapon:** the local record's u16 `+0xCA8` is the weapon type, an entry of the 0x44-byte
+  table at `0x6E5944` holds the model's origin in the right hand bone's frame and its turn. Twelve savestates (lowered)
+  and a live raised 45 Auto (23 samples) match it to 0.05 cm; the spray's turn fixes the Euler order.
+- **Placement:** the bone frame on the hand model's wrist; a gun's barrel onto the aim (0 deg for the pistols, up to
+  31.6 deg for the grenade launchers). The 45's origin lands 2 cm from the placeholder's trigger.
+- **Checked:** the 21 weapons of J's Bar's item table drawn in the hand, from the side, in the holster or sling (image
+  dump, kept on the PC); the equipped 45 read as type 7 in slots 6 and 9; the hands self-test (98 checks) and a profile check of
+  `feedback.weapon.hold`: 26 of 26 suites.
+- **Cost:** a hand and real pistol image 0.5-0.7 ms (2 x 2 samples), a long gun 0.9-1.0 ms, against the placeholder's
+  0.14 ms; drawn only when an image has to be redrawn, on the GS thread, never the pacer.
+- **Not checked:** the headset and any XR session (null headset off limits); other weapons equipped live (a menu
+  confirm); the left hand's fore-end on the long-gun models is still the placeholder's point.
 
 **Hand targeting (`handtarget`), checked offline headset-free on 2026-10-13** with `handtest.py` on a local build (slot 7):
 - the target is the J's Bar counter pistol: node `0x3B6158`, item 0, volume centre (8493.5, 140, 12922.5) cm, from
@@ -296,7 +319,8 @@ re-press; the VR self-tests in CI.
   - The old build showed the same, so these are not regressions.
 - **The map's ~0.64 s open delay** is the game's own disc read. The "Fast CDVD" emulator option might shorten it; that is
   Alex's setting to try.
-- **Game models:** mirroring against our axes; the ids with no mesh (6, 16-18, 26); the grip and muzzle points per weapon.
+- **Game models:** the ids with no mesh on File #1 (2, 5-7, 12, 13, 15-18, 24, 26, 30, 107, 109; they keep the placeholder);
+  what the weapon-type table's second grip and turn (variant B) are for; the long guns' fore-end point for the left hand.
 
 ## Important to know
 
@@ -332,6 +356,8 @@ re-press; the VR self-tests in CI.
 - **`grabtest.py`:** shake to break free.
 - **`session_report.py`:** a session's logs as a summary.
 - **`gamemodels_check.py`:** decodes the disc's weapon models read-only and prints the same summary as the emulator.
+- **`PCSX2_VR_DUMP_HANDS=<folder>`:** once in game, draws every weapon of the scenario as held, holstered and from afar
+  into PNGs there (the game's models: keep them on the PC).
 - **`handtest.py <dev install>`:** hand targeting from slot 7 (above).
 - **`nearcull_test.py <dev install> <before|after> <slot> <seconds> [zombie|down]`:** the near-cull patch against
   the committed profile; slot 5 faces the approaching zombie, slot 6 looks down at the body (above).
