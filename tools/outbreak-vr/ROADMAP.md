@@ -40,7 +40,8 @@ until Alex says File #1 is there. Both stay where they are: File #2 has the shar
 - Patch the game's near-camera cull so zombies and partners always draw.
 - Hide only the player's own body, directly.
 - Check the camera's near plane.
-- Research: `research/2026-10-12-near-cull-research.md` (in progress, with live tests).
+- Done on branch `nearcull` (2026-10-13): the cull never culls in first person; your own draws are skipped. The near
+  plane is 1 cm. Checked offline; next, the headset. Research: `research/2026-10-13-near-cull.md`.
 
 ### 3. Your own doors feel like following a teammate (a game patch)
 - Send the player's own door opening down the follower path, or cut the door sequence to a short fade.

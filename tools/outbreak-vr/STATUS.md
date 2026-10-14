@@ -21,6 +21,7 @@ Updated by the Windows PC session on 2026-10-12 at night, after Alex's first two
 | Installed on the PC | `D:\Games\PS2\PenguinScreen2`, CI build of `3eb2524` (the second headset session ran on it). `headset1` has more since: the menu re-press and the CI self-tests. |
 | Headset sessions | **1:** 2026-10-12 ~18:45, build `e6dbd77`. **2:** ~22:07, build `3eb2524`. Both were File #1. Logs: `D:\Games\PS2\sessions\<time>` and `logs\emulog-headset-20261012.txt`. Summary: `tools\outbreak-vr\session_report.py --session`. |
 | Hand targeting | Branch `handtarget` (from `headset1` 43de18c): the read-only prototype, `reach.hand` in the profile, the pickup cue and zone marker self-tests in CI (21 suites, run 38488998201 green at 8dbff61). Checked offline, headset-free, 2026-10-13 (below). Not in the headset yet. |
+| Near cull | Branch `nearcull` (from `handtarget`): zombies and partners stay drawn up close, your body stays hidden. A File #1 profile change only; checked offline, headset-free, 2026-10-13 (below). Not in the headset yet. |
 | Steam Frame standalone | **On hold** (Alex: File #1 first). ARMSX2 branch `outbreak-vr-frame` has M0 to M3, CI green, with a Monado headless OpenXR test and the sync tool: `STEAM-FRAME.md`. |
 
 **Local builds (2026-10-13)** are the everyday loop; CI is for checkpoints. All in `D:\dev\PenguinScreen2-build`, nothing in
@@ -135,7 +136,8 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
    s. If it happens, note when.
 2. **A/B the smoothness fixes** once they're in: first `DedicatedXrQueue = true`, then that plus `PacerCopies = true`. Run
    `session_report.py --session` after each.
-3. **Near-cull patch** (when in): do zombies stay visible up close while your own body stays hidden?
+3. **Near-cull patch** (`nearcull`): do zombies stay visible up close, even at arm's length, while your own body
+   stays hidden when you lean or look straight down?
 4. **Seamless doors** (when in): open a door yourself. Do you just arrive in the next room?
 5. **Menus without the pull-away** (when in): does the room stay around you with the menu on a panel?
 6. **Game weapon models** (when in): do the size, the grip and the holster look right?
@@ -173,8 +175,30 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 - **not checked yet:** the marker and the tick (they need an XR session), the menu and disarm paths live (reviewed only),
   and whether the box sits on the pistol in the headset. That last one needs Alex in the headset.
 
-**The 2026-10-12 research agents (menus without the pull-away, the near-cull patch, seamless doors, true per-eye rendering)
-stopped at the usage limit and wrote no notes.** Those four are still open; the ROADMAP has the plan.
+**Near-cull patch (`nearcull`), checked offline headset-free on 2026-10-13** with `nearcull_test.py` on the dev install
+(`research/2026-10-13-near-cull.md`):
+- **What changed:** File #1 profile only, four `camera.silence` words, all draw-only and put back on disarm:
+  - the game's near-camera cull (`0x590304`) never culls;
+  - the camera's focus character, which is you, skips its body draw, its first draw pass and what it holds
+    (`0x3452E0`, `0x3450F8`, `0x560C74`).
+- **Gone:** the old focus-slot holds and the 75 radius. One hold remains, a repair for savestates made under the old
+  focus hold (slot 3).
+- **No switch:** it is part of first person.
+- **Checked, slot 5** (a zombie walks up):
+  - before, the zombie was not drawn in 356 of 514 samples where it was nearer than the cull radius;
+  - after, it was drawn in all 460, down to 35 cm across the floor;
+  - the body was not drawn, the partners were;
+  - all four words came back when the grab released first person.
+- **Checked, slot 6 and slot 3:** looking down shows no body, as before. Slot 3's body is hidden only thanks to the
+  repair.
+- **Also checked:** `vrtest.py --check-profile` and the self-tests (21 of 21) pass.
+- **Not checked:** co-op (reviewed: nothing in a character record is written), rooms whose camera shots hide
+  characters, and the headset.
+- **Found on the way:** offline, the local slot byte `0x48BF7D` reads 1 or 2 for a moment every frame while the game
+  runs the AI partners. Anything reading it at vsync, `camera.base` included, can catch a partner's slot.
+
+**The 2026-10-12 research agents (menus without the pull-away, seamless doors, true per-eye rendering) stopped at the
+usage limit and wrote no notes.** Those three are still open; the ROADMAP has the plan.
 
 **Merged since session 2:** `pacer2` (frame stats, a steady layer array with parked layers, a projection layer always
 sent, opt-in `PacerCopies`; targets the SteamVR stalls, `research/2026-10-12-steamvr-endframe-research.md`); the menu
@@ -244,6 +268,8 @@ re-press; the VR self-tests in CI.
 - **`session_report.py`:** a session's logs as a summary.
 - **`gamemodels_check.py`:** decodes the disc's weapon models read-only and prints the same summary as the emulator.
 - **`handtest.py <dev install>`:** hand targeting from slot 7 (above).
+- **`nearcull_test.py <dev install> <before|after> <slot> <seconds> [zombie|down]`:** the near-cull patch against
+  the committed profile; slot 5 faces the approaching zombie, slot 6 looks down at the body (above).
 - **Scripted controllers:** `PCSX2_VR_TEST_INPUT=1` plus `pine.py`'s `FakeController`. PINE serves one client at a time. While
   scripted input is live, the pickup cue and hand targeting run without an OpenXR session too (rumble stays session-only).
 - **No OpenXR runtime:** set `XR_RUNTIME_JSON` to a missing file, plus `PCSX2_VR_FAKE_HEADPOSE`. The scratchpad helper

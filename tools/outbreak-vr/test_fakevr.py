@@ -21,8 +21,9 @@ import drive
 import padd
 from pine import Pine, PineError, require_offline
 
-SILENCE = [0x58EAEC, 0x58EAFC, 0x58EB0C, 0x5A91E0, 0x5A9340, 0x5A9410, 0x630B00]
-ORIGINAL = [0x0C163B1C, 0x0C163C8C, 0x0C163B60, 0x0C0D013C, 0x0C0D013C, 0x0C0D013C, 0xA2220FAA]
+SILENCE = [0x58EAEC, 0x58EAFC, 0x58EB0C, 0x5A91E0, 0x5A9340, 0x5A9410, 0x630B00, 0x590304, 0x3452E0, 0x3450F8, 0x560C74]
+ORIGINAL = [0x0C163B1C, 0x0C163C8C, 0x0C163B60, 0x0C0D013C, 0x0C0D013C, 0x0C0D013C, 0xA2220FAA, 0x10400003, 0x1060000B,
+            0x10600014, 0x10620008]
 
 
 def u2f(u):
@@ -98,7 +99,8 @@ def sample(fn, secs, dt=0.05):
 
 def features(p):
     base = 0x476DD0 + p.read8(0x48BF7D) * 0x10E0
-    print("holds: focus slot %d (expect 3), near-cull radius %.1f (expect 75)" % (p.read8(0x3AEF74), u2f(p.read32(0x6D6CF4))))
+    print("armed: focus slot %d (expect the local slot %d), near-cull branch 0x%08X (expect 0), body draw 0x%08X (expect 0)" % (
+        p.read8(0x3AEF74), p.read8(0x48BF7D), p.read32(0x590304), p.read32(0x3452E0)))
 
     def pair():
         head = struct.unpack("<h", struct.pack("<H", p.read16(base + 0x92)))[0] * 360 / 65536
@@ -128,7 +130,7 @@ def flat(p):
     words = [p.read32(a) for a in SILENCE]
     ok = [w == o for w, o in zip(words, ORIGINAL)]
     print("after loading the armed savestate in flat mode, original code words back:", sum(ok), "/", len(ok))
-    print("holds put back: focus slot %d (expect 0), near-cull radius %.1f (expect 80)" % (p.read8(0x3AEF74), u2f(p.read32(0x6D6CF4))))
+    print("focus slot %d (slot 3 was saved under the old focus hold: 3 until first person arms or the next room)" % p.read8(0x3AEF74))
     for a, w, o in zip(SILENCE, words, ORIGINAL):
         if w != o:
             print("  0x%06X = 0x%08X (original 0x%08X)" % (a, w, o))

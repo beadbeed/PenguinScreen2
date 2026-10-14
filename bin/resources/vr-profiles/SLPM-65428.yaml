@@ -246,6 +246,19 @@ SLPM-65428:
       - { address: 0x5A9340, on: 0x00000000, off: 0x0C0D013C, when: [{ address: 0x540004, equals: 3 }] }   # door follow camera eye write
       - { address: 0x5A9410, on: 0x00000000, off: 0x0C0D013C, when: [{ address: 0x540004, equals: 3 }] }   # door follow camera eye write
       - { address: 0x630B00, on: 0x00000000, off: 0xA2220FAA, when: [{ address: 0x540004, equals: 3 }] }   # stick latch on camera-cut lines (would freeze gaze steering)
+      # Nothing vanishes up close, and your own body stays hidden (the full story is at lookAt.hold below). The
+      # near-camera cull FUN_005902F0 opens with `lb v0, 0x48BF88; beq v0, zero, <the distance test>`: without the
+      # beq it always takes the exit under it (`beq zero, zero, <return>; daddu v0, zero, zero`), never culled, for
+      # every class. The draw passes then show the camera's focus character (the local one) with no test at all,
+      # so three branches that pick "draw the focus" are turned to "skip it": its body (0x345210), its first pass
+      # (0x345020, likely the shadow) and what it holds (0x560B60: owner == focus jumps to the next object instead
+      # of the draw). The first two are main-program code, always resident: their guard is their own function's
+      # first word, so they are never left patched when the overlay changes, yet still put back after a savestate
+      # load (only guarded entries are). Draw-only: no character record is written, so they apply online too.
+      - { address: 0x590304, on: 0x00000000, off: 0x10400003, when: [{ address: 0x540004, equals: 3 }] }   # near-camera cull: always "not culled"
+      - { address: 0x3452E0, on: 0x00000000, off: 0x1060000B, when: [{ address: 0x345210, equals: 0x27BDFFE0 }] }   # body pass: the focus character returns before its draw
+      - { address: 0x3450F8, on: 0x00000000, off: 0x10600014, when: [{ address: 0x345020, equals: 0x27BDFFE0 }] }   # first pass: the focus character returns before its draw
+      - { address: 0x560C74, on: 0x10620030, off: 0x10620008, when: [{ address: 0x540004, equals: 3 }] }   # held objects: owner == focus -> next object
       # Co-op (private server only, coopOnly): the game sends your heading to partners in a type-2 heartbeat
       # (FUN_00633530 -> FUN_0064C620(p, 2): position, status, heading) only every 30 game frames (about once a
       # second) and only in free stance, so partners saw your first-person turns late and never saw where you
@@ -272,8 +285,8 @@ SLPM-65428:
       position: 0x38      # f32 x, y (up), z
       heading: 0x92       # s16, 0x10000 = 360 deg, 0 faces +Z
       eyeHeight: 155
-      eyeForward: 10      # about where the eyes are; the body is hidden (see hold) while your head stays within about
-                          # 19 cm above / 50 cm around where you recentered: recenter if it ever shows
+      eyeForward: 10      # about where the eyes are; the body is hidden (camera.silence: the focus character's
+                          # draws are skipped), wherever your head goes
       distance: 100
       roll: 0x30638C         # camera roll (s32 holding a 16-bit angle): written level (rollSign 0) so a cut's
       rollSign: 0          # roll can't stay latched; the first-person screen itself stays roll-level
@@ -304,13 +317,22 @@ SLPM-65428:
         - { offset: 0x08, equals: 1, width: 1 }     # stance: normal (2 = weapon raised)
         - { offset: 0x54F, equals: 0, width: 1 }    # action: idle (1 walk, 3 run, 128 aiming)
         - { offset: 0xF98, equals: 0, width: 2 }    # stick magnitude: centred
-      # Hide your own body: the room's near-camera cull (models whose feet + 100 up are nearer the eye
-      # than their class radius) spares only the camera's focus character. Point the focus at an empty
-      # slot and the cull hides the local character; it is put back from the local slot byte. Never at a
-      # partner online: slot 3 when it is empty (max HP +0x546 is 0 in an unused record; offline it always
-      # is), else slot 2 when you are slot 3 and it is empty. In a full 4-player room no slot is free, so
-      # nothing is held and your body may show. The class-1 radius goes from 80 to 75 so zombies and partners
-      # stay visible down to about 0.5 m away.
+      # Hide your own body, and nothing else (tools/outbreak-vr/research/2026-10-13-near-cull.md). The game hides
+      # what comes near its camera: FUN_005902F0 (GAME overlay) says "culled" when a model's feet + 100 up are
+      # nearer the eye (0x306338) than its class radius (f32 table 0x6D6CF0: 20, 80, 180, 300). Its only callers
+      # are draw passes: characters (0x345210, and a first pass 0x345020), enemies (0x688010, 0x345170), NPCs
+      # (0x651720) and what a character holds (0x560B60); each skips the draw, so a zombie at your face vanished.
+      # The camera's focus character (u8 0x3AEF74) is never tested. The old way hid your body by pointing the focus
+      # at an empty slot so the cull caught you; with the cull off that cannot work, so the silence entries above
+      # skip the focus character's draws instead. The game's own hide flags (u8 0x48AEA0-3: the focus, the others,
+      # enemies, NPCs) are no use for this: the room camera rewrites them every frame from the current shot's
+      # flags (0x58EAAC), so a vsync hold never reaches the draw.
+      # The focus is left alone: the room camera's init sets it to the local slot (0x58DED8) and nothing else writes
+      # it. The one entry here only repairs a savestate made under the old focus hold (focus 3 while you are slot
+      # 0, e.g. File #1 slot 3); it writes once and never gives 3 back. Nothing here picks a value from the local
+      # slot byte 0x48BF7D: offline the game sets it to 1 and 2 for a moment every frame while it runs the AI
+      # partners (0x588C30), so a vsync can see it mid-change. The camera's near plane is 1 cm (f32 0x30637C,
+      # set by 0x345480): it clips nothing.
       # Grabbed by a zombie (stance 5, checked on File #1: bites follow until Kevin breaks free), or down / dead /
       # turned (File #1 status 0xBA0, from the tracker decoder: 0x18-0x1C down, 0x1D-0x7F dead, 0x80 and above
       # zombie; normal play stays below 0x18): the game's own
@@ -319,9 +341,7 @@ SLPM-65428:
         - { offset: 0x08, equals: 5, width: 1 }
         - { offset: 0xBA0, min: 0x18, max: 0xFF, width: 1 }
       hold:
-        - { address: 0x3AEF74, value: 3, width: 1, restoreFrom: 0x48BF7D, when: [{ address: 0x48BF7D, notEquals: 3, width: 1 }, { address: 0x47A5B6, equals: 0, width: 2 }], notes: "camera focus slot: 3 while that record is empty" }
-        - { address: 0x3AEF74, value: 2, width: 1, restoreFrom: 0x48BF7D, when: [{ address: 0x48BF7D, equals: 3, width: 1 }, { address: 0x4794D6, equals: 0, width: 2 }], notes: "camera focus slot: 2 while empty (you are slot 3)" }
-        - { address: 0x6D6CF4, f32: 75.0, restoreF32: 80.0, when: [{ address: 0x540004, equals: 3 }], notes: "near-cull radius, characters" }
+        - { address: 0x3AEF74, value: 0, width: 1, when: [{ address: 0x3AEF74, equals: 3, width: 1 }, { address: 0x48BF7D, equals: 0, width: 1 }], notes: "repair: a savestate from the old focus hold (focus 3, you slot 0)" }
       # The view matrix the game builds from eye/target (row vectors). Matching it against what was
       # written says which head pose each displayed frame came from, so the first-person screen is
       # placed exactly there (no judder). The frame on screen is two view updates behind the newest one

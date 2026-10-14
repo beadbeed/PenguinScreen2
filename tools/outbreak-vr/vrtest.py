@@ -65,6 +65,11 @@ PROFILES_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__f
 #   eye/target                    the game camera's eye and target vectors (f32 x, y, z)
 #   cut_handler                   the fixed-cut handler call the profile NOPs while first person is armed
 #   focus_slot/near_cull          the camera focus slot byte and the characters' near-cull radius (f32) the profile holds
+#                                 (near_cull None: the profile turns the cull off with cull_patch instead)
+#   cull_patch/focus_skip         (address, the game's word) of the near-cull branch the profile NOPs while armed, and
+#                                 (address, the game's word, the armed word) of the branches that skip the focus
+#                                 character's draws; None where the profile still hides the body through the cull
+#                                 (File #2)
 #   max_hp                        u16 max HP record offset (an empty record reads 0; the focus hold tests it)
 #   aim_pitch                     s16 aim pitch (0x10000 = 360 deg, positive up)
 #   pitch_servo                   the gun-elevation servo words the profile NOPs while the weapon is raised offline:
@@ -77,8 +82,9 @@ PROFILES_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__f
 #   raise_settle                  seconds to wait after the stance reads 2 before measuring a walk (File #2's raise step)
 #   raise_step                    units the raise itself may move the character (none on File #1, ~20 on File #2)
 #   default_slot/scenario_slots   the usual test saves for --slot auto
-#   focus_rule                    "legacy": the rule vrtest has always checked on File #1 (focus 0 when you are slot 3,
-#                                 else 3); "hold": the profile's hold (3 while record 3 is empty and you are not slot 3,
+#   focus_rule                    "local": the game keeps its focus on the local slot and the profile only repairs a
+#                                 savestate from the old hold (focus 3 while slot 0 -> 0; File #1 since 2026-10-13);
+#                                 "hold": the profile's hold (3 while record 3 is empty and you are not slot 3,
 #                                 2 while record 2 is empty and you are; a full room holds nothing and is not checked)
 #   skip                          scenario name -> reason, for a scenario that needs something the game lacks
 GAMES = {
@@ -87,7 +93,9 @@ GAMES = {
         records=0x476DD0, stride=0x10E0, local_slot=0x48BF7D,
         menu_open=0x48BF7E, screen_up=0x720AA0,
         eye=0x306338, target=0x306344,
-        cut_handler=0x58EAEC, focus_slot=0x3AEF74, near_cull=0x6D6CF4,
+        cut_handler=0x58EAEC, focus_slot=0x3AEF74, near_cull=None,
+        cull_patch=(0x590304, 0x10400003),
+        focus_skip=((0x3452E0, 0x1060000B, 0), (0x3450F8, 0x10600014, 0), (0x560C74, 0x10620008, 0x10620030)),
         max_hp=0x546,
         aim_pitch=0xBC8,
         pitch_servo=((0x556968, 0x0C0D1AEC), (0x556980, 0x0C0D1AEC), (0x556998, 0x0C0D1AEC), (0x5569CC, 0xA6200BC8),
@@ -98,7 +106,7 @@ GAMES = {
         input_held=0xF80,
         raise_settle=0.2, raise_step=0.0,
         default_slot=4, scenario_slots={"pitch": 3},
-        focus_rule="legacy",
+        focus_rule="local",
         skip={},
     ),
     "SLPM-65692": dict(
@@ -107,6 +115,7 @@ GAMES = {
         menu_open=0x4912BE, screen_up=0x767110,
         eye=0x313548, target=0x313554,
         cut_handler=0x595248, focus_slot=0x3B31F4, near_cull=0x718DB4,
+        cull_patch=None, focus_skip=None,
         max_hp=0x542,
         aim_pitch=0xBE0,
         pitch_servo=((0x557D70, 0x0C0D278C), (0x557D88, 0x0C0D278C), (0x557DA0, 0x0C0D278C), (0x557DD0, 0xA6400BE0),
@@ -382,9 +391,9 @@ class Runner:
 
 def expected_focus(r, slot):
     """The camera focus slot the profile's hold should show for local slot `slot`, or None when it holds nothing
-    (a full room: the game keeps its own focus). focus_rule 'legacy' keeps File #1's check as it always was."""
-    if GAME["focus_rule"] == "legacy":
-        return 0 if slot == 3 else 3
+    (a full room: the game keeps its own focus). focus_rule 'local': the local slot itself."""
+    if GAME["focus_rule"] == "local":
+        return slot
 
     def empty(k):
         return r.p.read16(RECORDS + k * RECORD_STRIDE + MAX_HP) == 0
@@ -402,16 +411,26 @@ def sc_arm(r):
         cut = r.p.read32(CUT_HANDLER)
         slot = r.p.read8(LOCAL_SLOT)
         focus = r.p.read8(FOCUS_SLOT)
-        cull = u2f(r.p.read32(NEAR_CULL))
+        patch = GAME["cull_patch"]
+        cull = u2f(r.p.read32(NEAR_CULL)) if NEAR_CULL is not None else None
+        cull_word = r.p.read32(patch[0]) if patch else None
+        skips = [(a, r.p.read32(a), on) for a, _, on in GAME["focus_skip"] or ()]
         want_focus = expected_focus(r, slot)
         r.shot("armed")
     check(cut == 0, "cut handler 0x%06X = 0x%08X, expected 0 (silenced)" % (CUT_HANDLER, cut))
     if want_focus is not None:
         check(focus == want_focus, "camera focus slot %d, expected %d (local slot %d)" % (focus, want_focus, slot))
-    check(abs(cull - NEAR_CULL_ARMED) < 1e-3, "near-cull radius %.2f, expected %.1f" % (cull, NEAR_CULL_ARMED))
+    if patch:
+        check(cull_word == 0, "near-cull branch 0x%06X = 0x%08X, expected 0 (cull off)" % (patch[0], cull_word))
+        for a, w, on in skips:
+            check(w == on, "focus draw skip 0x%06X = 0x%08X, expected 0x%08X" % (a, w, on))
+        culled = "near-cull off, %d focus draw skips" % len(skips)
+    else:
+        check(abs(cull - NEAR_CULL_ARMED) < 1e-3, "near-cull radius %.2f, expected %.1f" % (cull, NEAR_CULL_ARMED))
+        culled = "near-cull %.1f" % cull
     held = ("focus slot %d" % focus) if want_focus is not None else (
         "focus slot %d (not checked: a full room holds nothing)" % focus)
-    return "armed, cut handler NOP, %s, near-cull %.1f" % (held, cull)
+    return "armed, cut handler NOP, %s, %s" % (held, culled)
 
 
 def sc_smooth_turn(r):
@@ -1020,23 +1039,45 @@ def profile_problems(serial, prof):
             # A store to the pitch: sh rt, <aim pitch>(base) carries the offset in its low half.
             want("servo store 0x%X offset" % a, _silence_off(e) & 0xFFFF, g["aim_pitch"])
 
-    # Holds: the camera focus slot (3 / 2 while that record's max HP is 0) and the near-cull radius.
+    # Holds: the camera focus slot and how the near cull is handled. focus_rule 'local' (File #1): the game's own
+    # focus, one repair entry (focus 3 while you are slot 0 -> 0), the cull's branch and the focus draws silenced;
+    # 'hold' (File #2): the focus on an empty record (3 / 2 while its max HP is 0) and the near-cull radius.
     hold = look.get("hold") or []
     focus = [h for h in hold if h.get("address") == g["focus_slot"]]
     values = sorted(h.get("value") for h in focus)
-    want("camera.lookAt.hold focus slot 0x%X values" % g["focus_slot"], values, [2, 3])
+    local_rule = g["focus_rule"] == "local"
+    want("camera.lookAt.hold focus slot 0x%X values" % g["focus_slot"], values, [0] if local_rule else [2, 3])
     for h in focus:
-        want("camera.lookAt.hold focus %s restoreFrom" % h.get("value"), h.get("restoreFrom"), g["local_slot"])
         k = h.get("value")
+        if local_rule:
+            conds = sorted((c.get("address"), c.get("equals")) for c in h.get("when") or [])
+            want("camera.lookAt.hold focus repair when", conds, sorted([(g["focus_slot"], 3), (g["local_slot"], 0)]))
+            want("camera.lookAt.hold focus repair restoreFrom", h.get("restoreFrom"), None)
+            continue
+        want("camera.lookAt.hold focus %s restoreFrom" % h.get("value"), h.get("restoreFrom"), g["local_slot"])
         if k in (2, 3):
             empty = g["records"] + k * g["stride"] + g["max_hp"]
             addrs = [c.get("address") for c in h.get("when") or []]
             has("camera.lookAt.hold focus %d when" % k, empty in addrs, "no test of record %d's max HP 0x%X (has %s)" % (
                 k, empty, ", ".join(_fmt(a) for a in addrs)))
-    cull = [h for h in hold if h.get("address") == g["near_cull"]]
-    has("camera.lookAt.hold near-cull 0x%X" % g["near_cull"], bool(cull), "no entry")
-    if cull:
-        want("camera.lookAt.hold near-cull f32", cull[0].get("f32"), NEAR_CULL_ARMED)
+    if g["cull_patch"]:
+        a, own = g["cull_patch"]
+        e = by_addr.get(a)
+        has("camera.silence near-cull 0x%X" % a, e is not None, "no entry")
+        if e is not None:
+            want("camera.silence near-cull 0x%X off (the game's word)" % a, _silence_off(e), own)
+            want("camera.silence near-cull 0x%X on" % a, _silence_on(e), 0)
+        for a, own, on in g["focus_skip"]:
+            e = by_addr.get(a)
+            has("camera.silence focus skip 0x%X" % a, e is not None, "no entry")
+            if e is not None:
+                want("camera.silence focus skip 0x%X off (the game's word)" % a, _silence_off(e), own)
+                want("camera.silence focus skip 0x%X on" % a, _silence_on(e), on)
+    else:
+        cull = [h for h in hold if h.get("address") == g["near_cull"]]
+        has("camera.lookAt.hold near-cull 0x%X" % g["near_cull"], bool(cull), "no entry")
+        if cull:
+            want("camera.lookAt.hold near-cull f32", cull[0].get("f32"), NEAR_CULL_ARMED)
 
     # Zones the scripted hands squeeze in.
     zones = dict((c.get("id"), c) for c in prof.get("controls") or [] if c.get("device") == "Zone")
