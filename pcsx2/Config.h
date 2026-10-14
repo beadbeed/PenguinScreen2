@@ -1311,6 +1311,11 @@ struct Pcsx2Config
 		// right shoulder), a small dim bag at the belt zone and faint rings on the belt pouches, each brighter while its
 		// hand is in reach, so a reach for the hip or a pouch has something to aim at. Drawn in the headset only.
 		bool ZoneMarkers = true;
+		// First person with a gun raised: reload with the hands. Squeeze the off hand's grip at the left hip (where the
+		// belt zone is) to take a magazine, bring it to the gun and let go (or pull that hand's trigger) there; the reload
+		// then runs on this player's own pad the way the game's own controls do it (R1 let go so the weapon lowers, the
+		// profile's reload button held until the rounds stop). Needs feedback.weapon.reloadButton in the profile.
+		bool ReloadGesture = true;
 		// First person, while a menu is up: a beam and a dot where the controller points at the menu screen, the hands
 		// drawn as empty pointing hands, and (for games whose profile maps the menu) the game's own cursor steered to
 		// the cell pointed at with D-pad presses from this player's own pad; the trigger stays the player's confirm,

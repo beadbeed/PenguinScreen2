@@ -9,6 +9,7 @@
 #include "VR/SpatialControls.h"
 #include "VR/HeadPose.h"
 #include "VR/PadLook.h"
+#include "VR/ReloadDriver.h"
 #include "VR/VRManager.h"
 #include "VR/SplitState.h"
 #include "VR/StereoState.h"
@@ -497,6 +498,8 @@ namespace VR::CameraDriver
 				Console.WriteLn("(VR) Gamepad self-test: passed (sprint latch, ad-lib flicks, unchanged without sprintLatch).");
 			else
 				Console.WriteLn("(VR) Gamepad self-test FAIL: %s", gamepad_fail ? gamepad_fail : "?");
+			// The reload gesture's detector and the driver that turns a request into the game's own reload.
+			ReloadDriver::LogSelfTests();
 		}
 
 		u32 s_delta_crc = 0;
@@ -1957,10 +1960,13 @@ namespace VR::CameraDriver
 			}
 			// The first-person hands show the raised weapon in the right hand, shaped by the equipped item's kind (a
 			// pistol, a long gun, a melee weapon, something to throw or a spray can; the laser sight only on a gun).
-			// A bare-handed raise (no weapon equipped) shows none; Unknown keeps the stance-only pistol.
+			// A bare-handed raise (no weapon equipped) shows none; Unknown keeps the stance-only pistol. While a reload
+			// gesture's reload runs the game holds the weapon lowered, but the hand keeps the gun the magazine is going into
+			// rather than it jumping to the holster for a second (ReloadDriver::Reloading).
 			const GameFeedback::Hold weapon_hold = GameFeedback::WeaponInHand();
 			const GameFeedback::WeaponView weapon_view = GameFeedback::GetWeapon();
-			HandModel::SetWeaponHeld(HandModel::HeldFor(weapon_raised && weapon_hold != GameFeedback::Hold::BareHands,
+			const bool weapon_shown = weapon_raised || ReloadDriver::Reloading();
+			HandModel::SetWeaponHeld(HandModel::HeldFor(weapon_shown && weapon_hold != GameFeedback::Hold::BareHands,
 				weapon_hold == GameFeedback::Hold::Weapon && weapon_view.valid, weapon_view.item_id));
 			s_weapon_raised = weapon_raised;
 

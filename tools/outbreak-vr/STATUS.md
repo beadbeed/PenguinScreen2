@@ -111,6 +111,10 @@ The plan from all this is in `ROADMAP.md`.
 - **Belt and chest:** a faint bag marks the left-hip belt, and faint rings mark the chest pouches.
 - **Setting:** `[VR] ZoneMarkers`.
 
+**Reload gesture** (from `reloadwire`, merged on `playtest`): with a gun raised, squeeze the left grip at the left hip to
+take a magazine, carry it to the gun and open the hand (or pull the left trigger); the build lets go of R1 (the weapon
+lowers), holds L1 until the rounds stop going in, and gives R1 back. Nothing is confirmed in any menu.
+
 **Reload:** lower the gun, stand still, hold the left trigger. That is the game's own reload: File #1 loads a round every
 0.33 s while you hold it. A magazine-grab gesture is coming (`ReloadGesture`, wiring in progress).
 
@@ -184,6 +188,7 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 | `MenuPointer` | true | false: no beam, dot or point-to-select |
 | `ZoneMarkers` | true | false: no holstered weapon or zone markers |
 | `PickupCue` | true | false: no pickup tick or name |
+| `ReloadGesture` | true | false: no reload gesture (the hip squeeze opens the item screen even with the gun raised; L1 by hand still reloads) |
 | `HandTargeting` | false | true: File #1 offline only, a read-only prototype: the right hand against the J's Bar Handgun's trigger volume (a wireframe box, one tick on entering it, `Hand targeting:` lines in the emulog); nothing is written to the game. Its trigger and distances are the File #1 profile's `reach.hand` |
 | `DedicatedXrQueue` | false | true: the OpenXR session gets its own Vulkan queue. The emulog says `(VR) XR queue: dedicated` or `shared with the GS (why)`. |
 | `PacerCopies` | false | true (with `DedicatedXrQueue` in effect): the VR pacer copies the frame, hands and cards into the headset's swapchains itself, so the GS thread never calls into the runtime or waits for its queue lock; the frame shows about one GS frame later (`PCSX2_VR_PACER_COPIES_FLUSH=1` takes that back with one more GS submit); the emulog says `(VR) Pacer copies: on` or why it stays off |

@@ -1941,6 +1941,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(ComfortBlink);
 	SettingsWrapEntry(LaserSight);
 	SettingsWrapEntry(ZoneMarkers);
+	SettingsWrapEntry(ReloadGesture);
 	SettingsWrapEntry(MenuPointer);
 	SettingsWrapEntry(MenuTablet);
 	SettingsWrapEntry(MenuPanel);
@@ -1999,7 +2000,7 @@ bool Pcsx2Config::VROptions::operator==(const VROptions& right) const
 {
 	// SnapTurn, ComfortBlink, LaserSight, ZoneMarkers, MenuPointer, MenuTablet, MenuPanel, PickupCue, HandTargeting, ComfortVignette,
 	// VignetteStrength, OnlineSafe, FirstPersonAutoStereo, FirstPersonStereoStrength, FirstPersonFov,
-	// FirstPersonFovMarginDeg, Brightness, GameRumble and HapticStrength are read from EmuConfig every vsync (EdgeFill,
+	// FirstPersonFovMarginDeg, Brightness, GameRumble and HapticStrength are read from EmuConfig every vsync (ReloadGesture every input poll; EdgeFill,
 	// HeadsetRateSubmit, OpaqueBackground, HandsDisplayRate, PacerCopies and DepthLayer when VR starts, DedicatedXrQueue when the GS
 	// device is created); leaving them out keeps a settings tweak from rebuilding (and so re-announcing) every VR control.
 	return OpEqu(Enable) && OpEqu(ScreenDistance) && OpEqu(ScreenHeight) &&

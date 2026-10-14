@@ -103,12 +103,38 @@ and it does nothing without a running VR session.
 | `hurt` | `{ offset, max, width }`: where the character's HP (`offset`) and maximum HP (`max`) are, as offsets into the record `camera.base` finds, each `width` bytes (`1`, `2` or `4`, default `2`). Losing HP pulses both hands, harder and longer the bigger the hit |
 | `fire` | `{ address, width, hand }`: a counter the game raises by one per shot, at a fixed `address`. Each rise of 1 to 5 kicks `hand` (`left` or `right`; default the aiming hand of `camera.lookAt`, otherwise right). Bigger jumps are ignored |
 | `danger` | `{ below }`: while HP is above zero and below this fraction of maximum HP (default `0.25`), the left hand feels a heartbeat, faster below a tenth. Needs `hurt` |
-| `weapon` | `{ equipped, table }`: the byte at `equipped` in the record `camera.base` finds is the number of the equipped item's record (`0`: nothing equipped) in the item table at the fixed address `table`. A record counts only while its first byte is `1`, its third byte is its own number and its owner byte is the local player's slot plus one. Its count dropping while the weapon is raised kicks the aiming hand by the item's kind (a long gun harder and longer, and the left hand too while it holds the fore-end; something to throw or a spray can lightly; a melee weapon not at all), a rise ticks both hands. The first-person right hand holds that kind's shape (a pistol, a long gun, a melee weapon, something to throw or a spray can; the laser sight only on a gun), the wrist card names the weapon from it, and belt pouches name their items from the same table. The record layout defaults to Resident Evil Outbreak's (`stride`, `id`, `count`, `owner`, and `stance`, `raised`, `action`, `reload` for the raised and reload checks, all hex) |
+| `weapon` | `{ equipped, table }`: the byte at `equipped` in the record `camera.base` finds is the number of the equipped item's record (`0`: nothing equipped) in the item table at the fixed address `table`. A record counts only while its first byte is `1`, its third byte is its own number and its owner byte is the local player's slot plus one. Its count dropping while the weapon is raised kicks the aiming hand by the item's kind (a long gun harder and longer, and the left hand too while it holds the fore-end; something to throw or a spray can lightly; a melee weapon not at all), a rise ticks both hands. The first-person right hand holds that kind's shape (a pistol, a long gun, a melee weapon, something to throw or a spray can; the laser sight only on a gun), the wrist card names the weapon from it, and belt pouches name their items from the same table. The record layout defaults to Resident Evil Outbreak's (`stride`, `id`, `count`, `owner`, and `stance`, `raised`, `action`, `reload` for the raised and reload checks, all hex). Optionally `reloadButton`: the DualShock 2 button the game reloads with while the weapon is lowered (`L1` in both Outbreak profiles), which turns on the reload gesture described below |
 
 The `hurt`, `fire` and `danger` cues run only while the head-tracked
 first-person camera is active, so they stay quiet on title screens, in
 cutscenes and with first person off. The Haptic Strength setting scales all
 of this vibration, and `0` turns it off.
+
+### The reload gesture: `feedback.weapon.reloadButton`
+
+With `reloadButton` in `feedback.weapon`, a gun equipped and raised in first
+person, you can reload with your hands: squeeze the grip of your other hand
+(the left, with the gun in your right) at your left hip, carry that hand to
+the gun and open it there, or pull its trigger. The magazine sits 12 cm round
+the middle of the `Zone` control with the id `belt` (without one, 22 cm left,
+50 cm down and 12 cm ahead of your eyes). The emulator then does
+what the game's own reload needs, on your own controller: it holds back every
+control bound to `R1` (the bumper, the holster and backpack zones) until the
+weapon has lowered, holds the control your `Gamepad` binds to `reloadButton`
+until the rounds stop going in, then lets go of it and gives `R1` back, so a
+bumper or holster grip you still hold raises the weapon again. While the
+gesture holds that hand, the belt zone and the belt pouches do not see it, so
+the squeeze at the hip does not open the item screen. Nothing else is pressed
+and nothing is written to the game.
+
+`reloadButton` must be a digital DualShock 2 button other than `R1` (`Up`,
+`Down`, `Left`, `Right`, `Triangle`, `Circle`, `Cross`, `Square`, `Select`,
+`Start`, `L1`, `L2`, `R2`, `L3`, `R3`), and a `Gamepad` control on a controller
+port must bind it; otherwise the emulator logs a warning and the gesture stays
+off. With `action` and `reload` in the same block the emulator also reads the
+game's reload action, so a reload that cannot start (a full magazine, no
+ammo) is given up within about 0.35 s instead of 0.8 s. The Reload Gesture
+setting turns it off.
 
 ## `reach`: you can pick this up
 

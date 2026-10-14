@@ -327,6 +327,42 @@ grab of a run shows the toast `Shake to break free!` (logged as a HUD toast) whe
 shake, the alternation and rates, the press length, the buzz, held buttons kept, the stop on the grab's end, the
 reversal and runtime-velocity paths). `grabtest.py` checks it in the game, headset-free.
 
+Reload gesture (VR setting `ReloadGesture`, on by default, on the VR settings page; profile key
+`feedback.weapon.reloadButton: L1`, both Files; `VR/ReloadDriver.cpp` wires the pure detector `VR/ReloadGesture.cpp`
+into `VRInputSource::PollEvents`). The game's own reload (research `2026-10-12-reload-timing-research.md` 2a): L1 held
+with the weapon LOWERED and the character standing still; File #1 loads a round 0.31-0.36 s after the press and one
+every 0.33 s while held, File #2 the whole magazine at once; nothing with R1 held, while walking, without spare ammo or
+with a full magazine. The gesture, every input poll while first person is armed, a gun is equipped (ItemData `IsGun`)
+and no game screen is up: with the stance raised (local record +0x08 == 2 now or in the last 0.3 s), the left grip
+squeezed inside the magazine spot (12 cm round the belt zone's centre, placed exactly as that zone: from the head,
+turned with its yaw) takes a magazine (a short tick in the left hand); carried to within 15 cm of a point 4 cm under
+the gun hand's grip it is ready (a firmer tick); opening the grip there, or pulling the left trigger, is one reload
+request (timeouts: 1.5 s from the grab to the gun, 2 s held at the gun; tracking gaps up to 0.2 s waited out). From
+the grab until that grip opens again the belt zone and the belt pouches do not see the left hand (no Start, no pouch
+squeeze or name) and its L1 is held back (a trigger pull at the gun is the reload, not an L1 with the weapon raised).
+A request (not tried while walking, toast `Stand still to reload`, nor when every item cell is read and none holds ammo,
+toast `No spare ammo`) holds back every control on the player's pad bound to R1 (the right bumper, the holster's
+Pressed, the backpack's PressedLongGun) until the stance leaves 2 (at least 0.05 s, at most 0.3 s: if it stays raised,
+another pad holds R1 and nothing is pressed), then holds the Gamepad's control bound to L1 (LeftTriggerPress) until the
+rounds have not risen for 0.8 s (with File #1's action byte: also as soon as the reload action ends, or 0.35 s with no
+reload action at all), or after 4 s unless a round came in the last 0.45 s (a 15-round Handgun from empty takes 4.9 s),
+6 s at most; the left stick past 0.25, a game screen, or first person or the gun going away let go at once. Then L1 goes
+up, and 0.05 s later R1 comes back: a bumper or holster grip still held raises the weapon again by itself; a left
+trigger still held stays at 0 until it is let go once (release-first). While it runs the first-person hand keeps
+showing the gun (`ReloadDriver::Reloading`, read by CameraDriver for `HandModel::SetWeaponHeld`) although the game holds
+it lowered, so it does not jump to the holster for a second. Each round loaded is felt through the weapon reader's
+existing reload tick (both hands, per rise). A reload that loaded nothing toasts `No spare ammo` (no ammo in
+the cells, an empty gun, or a gun below the most rounds it has shown this session) or `Magazine full`, once per attempt.
+Only the player's own R1 is held back and their own L1 pressed, nothing is written, so it runs wherever first person
+arms (offline and private co-op; never on obsrv). The first time a gun is raised in a session the toasts `Reload: lower
+gun, hold left trigger` and, with the gesture on, `Or grab a magazine at your left hip` (3.5 s each) explain both ways.
+Logs: `(VR) Reload gesture: on (magazine at the left hip; L1 with the weapon lowered).` once per game (or `off (why)`),
+`(VR) Reload: 3 -> 7 rounds in 1.4 s (gesture).` per reload (or `nothing loaded in 0.4 s, the magazine is full (...)`,
+`not tried, ...`, `stopped, ...`), `(VR) Reload gesture: cancelled: too slow.` for a gesture dropped after a grab.
+`PCSX2_VR_SELFTEST` runs `(VR) Reload gesture self-test: passed.` (the detector on scripted hands) and `(VR) Reload
+driver self-test: passed.` (the lowering, L1 hold and stop rules and R1 coming back after L1, against a fake File #1
+and File #2, plus the stance hysteresis and the release-first latch).
+
 First-person stereo depth (VR settings `NearDepthMetres`, default 0 = the profile's `stereo.firstPerson.nearest`,
 below 0 off, 0.45-1.5 m overrides; `RollParallax`, on by default; ini only): true stereo depth now reaches in front of
 the screen plane down to `nearest` (1.0 m in both profiles, as you see it, at any strength; it was 0.75 m, and stays

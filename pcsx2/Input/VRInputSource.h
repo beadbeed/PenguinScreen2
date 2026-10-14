@@ -5,6 +5,7 @@
 
 #include "Input/InputSource.h"
 
+#include "VR/ReloadDriver.h"
 #include "VR/SpatialControls.h"
 #include "VR/VRProfileDB.h"
 #include "VR/ZoneMarkers.h"
@@ -109,6 +110,12 @@ private:
 		// opened, held at 0 until each reads released once (the Gamepad's confirm controls by the controller itself, which
 		// the menu pointer's confirm hold can hide). Not cleared by ResetState (a recenter mid-hold keeps it).
 		std::array<bool, VR::SpatialControls::kControlCount> held_through_gap{};
+		// The control each spec.bind entry names (kControlCount for none), so the reload (ApplyReload) finds the controls
+		// bound to R1 and to the reload button without a name lookup every poll.
+		std::vector<u32> bind_ids;
+		// The reload button's release-first latch per control (ReloadDriver::ReloadButton): a press of the player's own held
+		// when the reload let go of the button stays at 0 until it has been let go once.
+		std::array<bool, VR::SpatialControls::kControlCount> reload_latched{};
 
 		void ResetState();
 		void ReleaseFirst(VR::SpatialControls::ControlValues& values, const VR::VRInputSnapshot& snap, bool opened);
@@ -122,6 +129,7 @@ private:
 	void Emit(Instance& in, const VR::SpatialControls::ControlValues& values);
 	void Announce(Instance& in, bool present);
 	void QueueHapticCues(Instance& in, const std::array<int, 2>& hands_before, const std::array<bool, 2>& at_stop_before);
+	static void ApplyReload(Instance& in, VR::SpatialControls::ControlValues& values, const VR::ReloadDriver::Frame& reload);
 
 	std::mutex m_mutex;
 	std::vector<Instance> m_instances;

@@ -437,6 +437,13 @@
        </widget>
       </item>
       <item>
+       <widget class="QCheckBox" name="reloadGesture">
+        <property name="text">
+         <string>Reload Gesture (first person: take a magazine at your left hip, bring it to the gun)</string>
+        </property>
+       </widget>
+      </item>
+      <item>
        <widget class="QCheckBox" name="menuPointer">
         <property name="text">
          <string>Menu Pointer and Point-to-Select (beam and dot in menus)</string>
@@ -559,6 +566,7 @@
   <tabstop>vignetteStrength</tabstop>
   <tabstop>laserSight</tabstop>
   <tabstop>zoneMarkers</tabstop>
+  <tabstop>reloadGesture</tabstop>
   <tabstop>onlineSafe</tabstop>
   <tabstop>privateCoopFirstPerson</tabstop>
   <tabstop>gameRumble</tabstop>

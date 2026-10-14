@@ -53,6 +53,7 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.edgeFill, "VR", "EdgeFill", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.laserSight, "VR", "LaserSight", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.zoneMarkers, "VR", "ZoneMarkers", true);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.reloadGesture, "VR", "ReloadGesture", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.menuPointer, "VR", "MenuPointer", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.menuTablet, "VR", "MenuTablet", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.onlineSafe, "VR", "OnlineSafe", false);
@@ -159,6 +160,14 @@ VRSettingsWidget::VRSettingsWidget(SettingsWindow* settings_dialog, QWidget* par
 		   "and faint rings mark the belt pouches on your chest. Each brightens when your hand is close enough to squeeze "
 		   "there. Hidden in menus, and never in the middle of your view while you look ahead. Only changes what you see "
 		   "in the headset. Takes effect immediately."));
+
+	dialog()->registerWidgetHelp(m_ui.reloadGesture, tr("Reload Gesture"), tr("Checked"),
+		tr("In first-person profiles that support it (Resident Evil Outbreak), reload with your hands while a gun is "
+		   "raised: squeeze your left grip at your left hip to take a magazine, bring that hand to the gun and open it "
+		   "there (or pull its trigger). The emulator then does what the game's own reload needs on your own controller: "
+		   "it lets go of R1 so the weapon lowers, holds L1 until the rounds stop going in, and gives R1 back, so a "
+		   "weapon you still hold up comes back up. Stand still: the game does not reload while you walk. With it off, "
+		   "lower the weapon and hold the left trigger yourself. Takes effect immediately."));
 
 	dialog()->registerWidgetHelp(m_ui.menuPointer, tr("Menu Pointer and Point-to-Select"), tr("Checked"),
 		tr("In first-person profiles, while a menu such as the item screen is up, the controller casts a thin beam "
