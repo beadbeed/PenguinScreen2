@@ -517,6 +517,16 @@ public:
 	Target* LookupDisplayTarget(GIFRegTEX0 TEX0, const GSVector2i& size, float scale, bool is_feedback);
 
 	__fi bool IsDisplayChainBP(u32 bp) const { return m_vr_display_bps.find(bp) != m_vr_display_bps.end(); }
+	// The depth target based at bp, without touching the lookup order (VR::DepthExport's snapshot and export).
+	Target* VRFindDepthTarget(u32 bp) const
+	{
+		for (auto it = m_dst[DepthStencil].begin(); it != m_dst[DepthStencil].end(); ++it)
+		{
+			if ((*it)->m_TEX0.TBP0 == bp && (*it)->m_texture)
+				return *it;
+		}
+		return nullptr;
+	}
 	__fi void NoteDisplayChainBP(u32 bp) { m_vr_display_bps.insert(bp); }
 
 private:

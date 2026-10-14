@@ -8,6 +8,7 @@
 #include "VR/VRInput.h"
 #include "VR/VRManager.h"
 #include "VR/XRCompositor.h"
+#include "Config.h"
 
 #include "common/Assertions.h"
 #include "common/Console.h"
@@ -37,6 +38,9 @@ namespace VR::XRSession
 		// Set from the GS thread, the VR pacer and the Vulkan queue lock's timeout.
 		std::atomic_bool s_lost{false};
 		bool s_cylinder_supported = false;
+		// XR_KHR_composition_layer_depth: offered by the runtime, and enabled (offered and [VR] DepthLayer on).
+		bool s_depth_offered = false;
+		bool s_depth_enabled = false;
 		// PumpEvents runs on the VR pacer (headset-rate submission) or the GS thread, and the fault injection plays
 		// state changes from the pacer: one at a time.
 		std::mutex s_pump_mutex;
@@ -205,6 +209,8 @@ namespace VR::XRSession
 
 		s_cylinder_supported = false;
 		s_frame_controller_supported = false;
+		s_depth_offered = false;
+		s_depth_enabled = false;
 		{
 			u32 ext_count = 0;
 			if (XR_SUCCEEDED(xrEnumerateInstanceExtensionProperties(nullptr, 0, &ext_count, nullptr)) && ext_count > 0)
@@ -218,17 +224,27 @@ namespace VR::XRSession
 							s_cylinder_supported = true;
 						else if (std::strcmp(p.extensionName, kFrameControllerExtension) == 0)
 							s_frame_controller_supported = true;
+						else if (std::strcmp(p.extensionName, XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME) == 0)
+							s_depth_offered = true;
 					}
 				}
 			}
 		}
 #ifdef ENABLE_VULKAN
-		const char* enabled_extensions[3] = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, nullptr, nullptr};
+		const char* enabled_extensions[4] = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, nullptr, nullptr, nullptr};
 		u32 enabled_count = 1;
 		if (s_cylinder_supported)
 			enabled_extensions[enabled_count++] = XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME;
 		if (s_frame_controller_supported)
 			enabled_extensions[enabled_count++] = kFrameControllerExtension;
+		// [VR] DepthLayer: only then is the depth extension enabled, so with the switch off the instance is as before.
+		s_depth_enabled = s_depth_offered && EmuConfig.VR.DepthLayer;
+		if (s_depth_enabled)
+			enabled_extensions[enabled_count++] = XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME;
+		if (EmuConfig.VR.DepthLayer)
+			Console.WriteLn("(VR) Depth layer ([VR] DepthLayer): %s.",
+				s_depth_offered ? "XR_KHR_composition_layer_depth offered by the runtime, enabled" :
+				                  "the runtime does not offer XR_KHR_composition_layer_depth; it stays off");
 		ici.enabledExtensionCount = enabled_count;
 		ici.enabledExtensionNames = enabled_extensions;
 		Console.WriteLn("(VR) Cylinder composition layers: %s.",
@@ -604,6 +620,16 @@ namespace VR::XRSession
 	bool HasCylinderLayer()
 	{
 		return s_cylinder_supported;
+	}
+
+	bool HasDepthLayer()
+	{
+		return s_depth_enabled;
+	}
+
+	bool DepthLayerOffered()
+	{
+		return s_depth_offered;
 	}
 
 	bool HasFrameControllerInteraction()

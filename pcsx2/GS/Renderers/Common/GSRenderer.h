@@ -28,6 +28,11 @@ protected:
 
 	virtual GSTexture* GetOutput(int i, float& scale, int& y_offset) = 0;
 	virtual GSTexture* GetFeedbackOutput(float& scale) { return nullptr; }
+#ifdef ENABLE_VR
+	// Once Merge has made `current`, before the present's submit and VR::EndOfFrame's copies: the hardware renderer
+	// exports the shown frame's depth beside it (VR::DepthExport).
+	virtual void VRBeforeEndOfFrame(GSTexture* current) {}
+#endif
 
 public:
 	GSRenderer();

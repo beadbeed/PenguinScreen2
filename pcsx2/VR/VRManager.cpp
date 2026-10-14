@@ -820,6 +820,7 @@ namespace VR
 			stereo.fp_sep_target = s_fp_target.sep;
 			stereo.fp_ease = static_cast<float>(s_fp_step) / static_cast<float>(StereoAuto::kEaseVsyncs);
 			stereo.fp_ndc_ratio = s_fp_target.ndc_ratio;
+			stereo.fp_units_per_meter = fp_units;
 		}
 		else
 		{

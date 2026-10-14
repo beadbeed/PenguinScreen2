@@ -13,6 +13,7 @@
 #include "Host.h"
 #include "PerformanceMetrics.h"
 #ifdef ENABLE_VR
+#include "VR/DepthExport.h"
 #include "VR/StereoDump.h"
 #include "VR/VRManager.h"
 #endif
@@ -614,6 +615,11 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 	}
 
 	const bool blank_frame = !Merge(field);
+#ifdef ENABLE_VR
+	// The shown frame's depth goes into the GS command buffer here, so the present's submit (EndPresentFrame) takes it
+	// to the GPU before VR::EndOfFrame's copies read it.
+	VRBeforeEndOfFrame(blank_frame ? nullptr : g_gs_device->GetCurrent());
+#endif
 
 	m_last_draw_n = s_n;
 	m_last_transfer_n = s_transfer_n;
@@ -695,6 +701,7 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 
 #ifdef ENABLE_VR
 	VR::EndOfFrame(blank_frame ? nullptr : g_gs_device->GetCurrent());
+	VR::DepthExport::ProbeAfterPresent();
 	// After the XR copy: that submit has already put the frame in TransferSrc, so the dump's copy, recorded
 	// into the next GS command buffer, finds the image in the layout it is tracked in.
 	VR::StereoDump::MaybeCapture(blank_frame ? nullptr : g_gs_device->GetCurrent());
@@ -931,6 +938,9 @@ void GSRenderer::StopGSDump()
 
 void GSRenderer::PresentCurrentFrame()
 {
+#ifdef ENABLE_VR
+	VRBeforeEndOfFrame(g_gs_device->GetCurrent());
+#endif
 	if (BeginPresentFrame(false))
 	{
 		GSTexture* current = g_gs_device->GetCurrent();

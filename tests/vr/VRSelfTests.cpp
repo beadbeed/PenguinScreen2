@@ -19,6 +19,7 @@
 // Usage: vr_selftests [resources directory]   (default: this checkout's bin/resources, for the shipped profiles)
 
 #include "VR/BeltPouches.h"
+#include "VR/DepthExport.h"
 #include "VR/CameraDriver.h"
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
@@ -240,6 +241,7 @@ int main(int argc, char* argv[])
 	RunLogged("Hands", VR::HandModel::SelfTest, "(VR) Hands self-test: ");
 	RunLogged("Pickup cue and hand targeting", VR::ItemReach::SelfTest, "(VR) Pickup cue self-test");
 	RunLogged("Zone markers", VR::ZoneMarkers::SelfTest, "(VR) Zone markers self-test");
+	RunLogged("Depth export", VR::DepthExport::SelfTest, "(VR) Depth export self-test");
 	RunGamepad();
 	RunSilent("CameraDriver::SelfTestAssembler (hook)", VR::CameraDriver::SelfTestAssembler);
 	RunSilent("CameraDriver::SelfTestMath (math, predict, comfort, FOV)", VR::CameraDriver::SelfTestMath);

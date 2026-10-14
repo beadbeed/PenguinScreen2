@@ -1411,6 +1411,12 @@ struct Pcsx2Config
 		// the emulation at all; false = the GS thread acquires, copies and releases the swapchain images as before. Needs
 		// DedicatedXrQueue (in effect, not only asked for) and HeadsetRateSubmit. Read when VR starts.
 		bool PacerCopies = false;
+		// First person: the shown frame goes to the runtime as a projection layer at the pose it was rendered from, with
+		// its depth (XR_KHR_composition_layer_depth: the GS depth target exported beside the colour, in metres through
+		// the Z-driven depth fit), so the runtime's own reprojection can use it; false = the flat first-person screen
+		// quad as before, with no depth swapchain and no depth copy. Needs the runtime to offer the extension (else it
+		// stays off, logged once) and PacerCopies off. Read when VR starts. Render-only: nothing in the game changes.
+		bool DepthLayer = false;
 
 		VROptions();
 		void LoadSave(SettingsWrapper& wrap);

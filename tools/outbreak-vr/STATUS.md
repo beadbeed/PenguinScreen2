@@ -22,6 +22,7 @@ Updated by the Windows PC session on 2026-10-12 at night, after Alex's first two
 | Headset sessions | **1:** 2026-10-12 ~18:45, build `e6dbd77`. **2:** ~22:07, build `3eb2524`. Both were File #1. Logs: `D:\Games\PS2\sessions\<time>` and `logs\emulog-headset-20261012.txt`. Summary: `tools\outbreak-vr\session_report.py --session`. |
 | Hand targeting | Branch `handtarget` (from `headset1` 43de18c): the read-only prototype, `reach.hand` in the profile, the pickup cue and zone marker self-tests in CI (21 suites, run 38488998201 green at 8dbff61). Checked offline, headset-free, 2026-10-13 (below). Not in the headset yet. |
 | Near cull | Branch `nearcull` (from `handtarget`): zombies and partners stay drawn up close, your body stays hidden. A File #1 profile change only; checked offline, headset-free, 2026-10-13 (below). Not in the headset yet. |
+| Depth layer | Branch `depthproj` (from `nearcull`): the shown frame's depth exported beside its colour, in metres, and (`[VR] DepthLayer`, off) sent to SteamVR with the first-person frame as a projection layer with depth. Road step 5's foundation. Checked offline and on the null headset, 2026-10-13 (below). Not in the headset yet. |
 | Steam Frame standalone | **On hold** (Alex: File #1 first). ARMSX2 branch `outbreak-vr-frame` has M0 to M3, CI green, with a Monado headless OpenXR test and the sync tool: `STEAM-FRAME.md`. |
 
 **Local builds (2026-10-13)** are the everyday loop; CI is for checkpoints. All in `D:\dev\PenguinScreen2-build`, nothing in
@@ -161,6 +162,7 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 | `HandTargeting` | false | true: File #1 offline only, a read-only prototype: the right hand against the J's Bar Handgun's trigger volume (a wireframe box, one tick on entering it, `Hand targeting:` lines in the emulog); nothing is written to the game. Its trigger and distances are the File #1 profile's `reach.hand` |
 | `DedicatedXrQueue` | false | true: the OpenXR session gets its own Vulkan queue. The emulog says `(VR) XR queue: dedicated` or `shared with the GS (why)`. |
 | `PacerCopies` | false | true (with `DedicatedXrQueue` in effect): the VR pacer copies the frame, hands and cards into the headset's swapchains itself, so the GS thread never calls into the runtime or waits for its queue lock; the frame shows about one GS frame later (`PCSX2_VR_PACER_COPIES_FLUSH=1` takes that back with one more GS submit); the emulog says `(VR) Pacer copies: on` or why it stays off |
+| `DepthLayer` | false | true: in first person the frame goes to SteamVR as one projection layer at its render pose with its depth (`XR_KHR_composition_layer_depth`, a D32 depth swapchain per eye), for the runtime's own reprojection; false = the two screen quads, and no depth swapchain or copy at all. Needs `PacerCopies` off. The emulog says `(VR) Depth layer: on` or why it stays off; `PCSX2_VR_DEPTHLAYER_NODEPTH=1` sends the projection layer without the depth (an A/B) |
 
 ## In progress
 
@@ -196,6 +198,19 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
   characters, and the headset.
 - **Found on the way:** offline, the local slot byte `0x48BF7D` reads 1 or 2 for a moment every frame while the game
   runs the AI partners. Anything reading it at vsync, `camera.base` included, can catch a partner's slot.
+
+**Depth layer (`depthproj`), checked offline headset-free and on the null headset on 2026-10-13**
+(`research/2026-10-13-depth-export.md`):
+- **Where the depth is:** the GS depth target `0x1C00` (D32 z/2^32, both eyes' layers). File #1 draws the next frame
+  into the other buffer, clearing that depth, before the shown one is presented, so the depth is snapshotted when that
+  clear starts; at the hand-off the live target already holds the next frame.
+- **Metres:** `1 / (100 * beta * (z - a0))` from the Z-driven depth fit; unit-tested (33 checks, `vr_selftests` 22 of 22).
+- **Cross-check, slot 7:** the counter top under the Handgun's trigger volume reads 1.045 m ahead (expected 1.040 m);
+  the counter is flat at 35.1 cm below the eye, about 119.8 cm in the game, where the volume's floor is 120 cm.
+- **Same frame:** with a turning head the snapshot lines up with the shown colour to 0 px; the live target is 2 to 14 px off.
+- **Null headset:** SteamVR offers the extension and takes the layer with no error; the picture matches the quads to
+  0 px. Restored to the real settings afterwards (byte-identical).
+- **Not checked:** whether SteamVR's reprojection uses the depth (leaning), and the headset.
 
 **The 2026-10-12 research agents (menus without the pull-away, seamless doors, true per-eye rendering) stopped at the
 usage limit and wrote no notes.** Those three are still open; the ROADMAP has the plan.

@@ -63,6 +63,10 @@ until Alex says File #1 is there. Both stay where they are: File #2 has the shar
 ### 5. True per-eye rendering: the step that makes it real VR
 - **First:** depth-based reprojection. Each display frame, warp the last game frame per eye to the current eye pose using
   its depth buffer. That gives real parallax when you lean and correct stereo per pixel, with no screen.
+  - Foundation done on branch `depthproj` (2026-10-13): the shown frame's depth exported beside its colour in metres
+    (checked offline against the J's Bar counter), and `[VR] DepthLayer` hands it to SteamVR with the frame as a
+    projection layer (`research/2026-10-13-depth-export.md`). Next: lean in the headset with it on and off; then our
+    own per-eye warp if SteamVR does not use the depth.
 - **Then:** render the game's 3D world twice per frame, once per eye, with the headset's own projection, by replaying the
   game's own draw program (its VU1 display lists) per eye. Then re-render it at 90 Hz from the latest head pose, independent of
   the game's frame rate.

@@ -13,6 +13,7 @@
 #include <bit>
 #ifdef ENABLE_VR
 #include "VR/DepthHistogram.h"
+#include "VR/DepthExport.h"
 #include "VR/StereoState.h"
 #include <algorithm>
 #include <cmath>
@@ -245,6 +246,9 @@ GSRendererHW::~GSRendererHW()
 
 void GSRendererHW::Destroy()
 {
+#ifdef ENABLE_VR
+	VR::DepthExport::Destroy();
+#endif
 	g_texture_cache->RemoveAll(true, true, true);
 	GSRenderer::Destroy();
 }
@@ -295,6 +299,7 @@ void GSRendererHW::VSync(u32 field, bool registers_written, bool idle_frame)
 {
 #ifdef ENABLE_VR
 	VRZQDepthFitEndOfFrame();
+	m_vr_shown = VRShownFrame{};
 #endif
 
 	if (GSConfig.LoadTextureReplacements)
@@ -376,6 +381,16 @@ GSTexture* GSRendererHW::GetOutput(int i, float& scale, int& y_offset)
 			y_offset = y_pages * GSLocalMemory::m_psm[curFramebuffer.PSM].pgs.y;
 			GL_CACHE("HW: Frame y offset %d pixels, unit %d", y_offset, i);
 		}
+#ifdef ENABLE_VR
+		if (m_vr_shown.outputs > 0 && m_vr_shown.tbp != rt->m_TEX0.TBP0)
+			m_vr_shown.mixed = true;
+		m_vr_shown.outputs++;
+		m_vr_shown.tbp = rt->m_TEX0.TBP0;
+		m_vr_shown.scale = rt->m_scale;
+		m_vr_shown.fb_rect = curFramebuffer.framebufferRect;
+		m_vr_shown.y_offset = y_offset;
+		m_vr_shown.display_rect = curFramebuffer.displayRect;
+#endif
 
 		if (GSConfig.SaveFrame && GSConfig.ShouldDump(s_n, g_perfmon.GetFrame()))
 		{
@@ -394,6 +409,99 @@ GSTexture* GSRendererHW::GetOutput(int i, float& scale, int& y_offset)
 
 	return t;
 }
+
+#ifdef ENABLE_VR
+// The shown frame's depth, beside its colour (VR::DepthExport): the depth of the colour target this vsync's Merge read,
+// laid out as the merged image `current` is. Its source is the tracker's: the depth target itself while that frame is
+// still the latest drawn, else the snapshot taken when the next frame began to change it. File #1 draws the next frame
+// before the shown one is presented, so it is the snapshot there (research/2026-10-13-depth-export.md).
+void GSRendererHW::VRBeforeEndOfFrame(GSTexture* current)
+{
+	if (!VR::DepthExport::Wanted())
+		return;
+	if (!current || m_vr_shown.outputs == 0)
+	{
+		VR::DepthExport::NoExport("no frame shown");
+		return;
+	}
+	if (m_vr_shown.mixed)
+	{
+		VR::DepthExport::NoExport("the picture is merged from two colour targets");
+		return;
+	}
+	const VR::StereoState::Params st = VR::StereoState::Get();
+	if (!(st.fp_units_per_meter > 0.0f))
+	{
+		VR::DepthExport::NoExport("not in first person (no unitsPerMeter)");
+		return;
+	}
+	if (!s_vr_zqfit.valid)
+	{
+		VR::DepthExport::NoExport("the Z-driven depth fit is not valid");
+		return;
+	}
+	const VR::DepthExport::DepthTracker& tracker = VR::DepthExport::Tracker();
+	const VR::DepthExport::PresentSource source = VR::DepthExport::SourceForPresent(tracker, m_vr_shown.tbp, 0);
+	if (source == VR::DepthExport::PresentSource::None)
+	{
+		VR::DepthExport::NoExport("no depth-tested frame was drawn into the shown colour target");
+		return;
+	}
+	// PCSX2_VR_DEPTHPROBE_LIVE (probe only, a check of the hand-off): the depth target as it is at the present, whatever
+	// the tracker says, to see what the shown frame would get without the snapshot.
+	static const bool s_force_live = VR::DepthExport::ProbeEnabled() && std::getenv("PCSX2_VR_DEPTHPROBE_LIVE") != nullptr;
+	VR::DepthExport::PresentSource source_used = source;
+	if (s_force_live && tracker.live_zbp != 0 && g_texture_cache->VRFindDepthTarget(tracker.live_zbp))
+		source_used = VR::DepthExport::PresentSource::Live;
+	GSTextureCache::Target* live = nullptr;
+	if (source_used == VR::DepthExport::PresentSource::Live)
+	{
+		live = g_texture_cache->VRFindDepthTarget(tracker.live_zbp);
+		if (!live)
+		{
+			VR::DepthExport::NoExport("the depth target is gone");
+			return;
+		}
+	}
+	// Merge reads (framebufferRect + y_offset) * scale of the target into scale * displayRect of the merged image.
+	const float sc = m_vr_shown.scale;
+	const GSVector4i& fb = m_vr_shown.fb_rect;
+	const GSVector4i& dr = m_vr_shown.display_rect;
+	const int sx = static_cast<int>(static_cast<float>(fb.x) * sc);
+	const int sy = static_cast<int>(static_cast<float>(fb.y + m_vr_shown.y_offset) * sc);
+	const int sw = static_cast<int>(static_cast<float>(fb.width()) * sc);
+	const int sh = static_cast<int>(static_cast<float>(fb.height()) * sc);
+	const int dx = static_cast<int>(static_cast<float>(dr.x) * sc);
+	const int dy = static_cast<int>(static_cast<float>(dr.y) * sc);
+	const int dw = static_cast<int>(static_cast<float>(dr.width()) * sc);
+	const int dh = static_cast<int>(static_cast<float>(dr.height()) * sc);
+	if (sw != dw || sh != dh || sx < 0 || sy < 0 || dx < 0 || dy < 0)
+	{
+		VR::DepthExport::NoExport("the display stretches or offsets the frame (not a 1:1 copy)");
+		return;
+	}
+	VR::DepthExport::ExportRequest req;
+	req.use_snapshot = (source_used == VR::DepthExport::PresentSource::Snapshot);
+	req.colour = current;
+	req.depth = live ? live->m_texture : nullptr;
+	req.src_x = static_cast<u32>(sx);
+	req.src_y = static_cast<u32>(sy);
+	req.dst_x = static_cast<u32>(dx);
+	req.dst_y = static_cast<u32>(dy);
+	req.width = static_cast<u32>(current->GetWidth());
+	req.height = static_cast<u32>(current->GetHeight());
+	req.copy_w = static_cast<u32>(std::min(sw, current->GetWidth() - dx));
+	req.copy_h = static_cast<u32>(std::min(sh, current->GetHeight() - dy));
+	req.layers = static_cast<u32>(current->GetArrayLayers());
+	req.colour_bp = m_vr_shown.tbp;
+	req.src_bp = req.use_snapshot ? tracker.snap_zbp : tracker.live_zbp;
+	req.fit.valid = true;
+	req.fit.a0 = s_vr_zqfit.a0;
+	req.fit.beta = s_vr_zqfit.beta;
+	req.units_per_meter = st.fp_units_per_meter;
+	VR::DepthExport::Export(req);
+}
+#endif
 
 GSTexture* GSRendererHW::GetFeedbackOutput(float& scale)
 {
@@ -2757,6 +2865,24 @@ void GSRendererHW::Draw()
 	m_cached_ctx.TEST = context->TEST;
 	m_cached_ctx.FRAME = context->FRAME;
 	m_cached_ctx.ZBUF = context->ZBUF;
+#ifdef ENABLE_VR
+	// The shown frame's depth (VR::DepthExport): every draw, before anything of it is rendered, goes past the tracker,
+	// which asks for a snapshot of the depth target when this draw would change a finished frame's depth.
+	if (VR::DepthExport::Wanted())
+	{
+		VR::DepthExport::DrawNote note;
+		note.fbp = m_cached_ctx.FRAME.Block();
+		note.zbp = m_cached_ctx.ZBUF.Block();
+		note.z_test = m_cached_ctx.TEST.ZTE && m_cached_ctx.TEST.ZTST > ZTST_ALWAYS;
+		note.z_write = !m_cached_ctx.ZBUF.ZMSK;
+		VR::DepthExport::DepthTracker& tracker = VR::DepthExport::Tracker();
+		if (tracker.NoteDraw(note) == VR::DepthExport::TrackAction::Snapshot)
+		{
+			GSTextureCache::Target* const finished = g_texture_cache->VRFindDepthTarget(tracker.live_zbp);
+			tracker.SnapshotTaken(finished && VR::DepthExport::TakeSnapshot(finished->m_texture));
+		}
+	}
+#endif
 
 	if (IsBadFrame())
 	{

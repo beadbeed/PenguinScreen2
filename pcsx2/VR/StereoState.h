@@ -74,6 +74,9 @@ namespace VR::StereoState
 		float fp_sep_target = 0.0f;
 		float fp_ease = 1.0f;
 		float fp_ndc_ratio = 1.0f;
+		// First person: camera.lookAt.unitsPerMeter (game units a metre; 0 outside first person), which the convergence is
+		// in and which DepthExport turns the exported depth into metres with.
+		float fp_units_per_meter = 0.0f;
 	};
 
 	void Publish(const Params& params);

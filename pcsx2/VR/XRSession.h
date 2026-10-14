@@ -44,6 +44,11 @@ namespace VR::XRSession
 
 	bool HasCylinderLayer();
 
+	// XR_KHR_composition_layer_depth is enabled: the runtime offers it and [VR] DepthLayer was on when the instance was
+	// made. DepthLayerOffered: the runtime offers it (whatever the switch).
+	bool HasDepthLayer();
+	bool DepthLayerOffered();
+
 	// XR_VALVE_frame_controller_interaction is enabled (SteamVR: Steam Frame controller bindings).
 	bool HasFrameControllerInteraction();
 

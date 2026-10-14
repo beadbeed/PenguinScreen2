@@ -356,12 +356,31 @@ public:
 	GSVector2i GetValidSize(const GSTextureCache::Source* tex = nullptr, const bool is_shuffle = false);
 	GSVector2i GetTargetSize(const GSTextureCache::Source* tex = nullptr, const bool can_expand = true, const bool is_shuffle = false);
 
+#ifdef ENABLE_VR
+	// The colour target this vsync's Merge showed (GetOutput), for VR::DepthExport: its base, scale, the rectangle read
+	// from it and where that went in the merged image. outputs > 1 with different targets: not one frame.
+	struct VRShownFrame
+	{
+		u32 outputs = 0;
+		bool mixed = false;
+		u32 tbp = 0;
+		float scale = 1.0f;
+		GSVector4i fb_rect = GSVector4i::zero();
+		int y_offset = 0;
+		GSVector4i display_rect = GSVector4i::zero();
+	};
+	VRShownFrame m_vr_shown;
+#endif
+
 	void Reset(bool hardware_reset) override;
 	void UpdateSettings(const Pcsx2Config::GSOptions& old_config) override;
 	void VSync(u32 field, bool registers_written, bool idle_frame) override;
 
 	GSTexture* GetOutput(int i, float& scale, int& y_offset) override;
 	GSTexture* GetFeedbackOutput(float& scale) override;
+#ifdef ENABLE_VR
+	void VRBeforeEndOfFrame(GSTexture* current) override;
+#endif
 	void InvalidateVideoMem(const GIFRegBITBLTBUF& BITBLTBUF, const GSVector4i& r) override;
 	void InvalidateLocalMem(const GIFRegBITBLTBUF& BITBLTBUF, const GSVector4i& r, bool clut = false) override;
 	void Move() override;

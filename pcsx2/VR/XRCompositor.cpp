@@ -3,6 +3,7 @@
 
 #include "VR/XRCompositor.h"
 #include "VR/CameraDriver.h"
+#include "VR/DepthExport.h"
 #include "VR/SplitState.h"
 #include "VR/ControlQuads.h"
 #include "VR/HandModel.h"
@@ -313,6 +314,23 @@ namespace VR::XRCompositor
 			u64 key = 0;
 		};
 
+		// [VR] DepthLayer: the depth image copied beside the first-person frame this present, one depth swapchain per eye
+		// chain (colour[k] shows with depth[k]), how its raw values read in metres (DepthExport::RangeForRawDepth), and the
+		// IPD the eyes are placed apart with. Only ever valid with the first-person screen as flat quads.
+		struct FpDepth
+		{
+			bool valid = false;
+			XrSwapchain colour[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+			XrSwapchain depth[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+			DepthExport::XrDepthRange range;
+			float ipd_m = 0.0f;
+			u64 export_serial = 0;
+			// Each eye's offset from the head (fp_head) at the frame's render pose, world metres, its roll included
+			// (DepthExport::EyeOffset); set where the first-person screen is placed.
+			XrVector3f eye_offset[2] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+			bool eyes_placed = false;
+		};
+
 		// The layers the GS built at its last present, copied by value: the pacer submits them every display period
 		// until the next present replaces them (the runtime keeps showing each swapchain's last released image).
 		struct PublishedSet
@@ -351,6 +369,12 @@ namespace VR::XRCompositor
 			// publish (empty otherwise).
 			PcFrame pc_frame;
 			PcPost pc_post[kPcChainCount];
+			// [VR] DepthLayer: the depth that goes with the Screen entries' images (FpDepth), and the projection layer
+			// BuildSubmitArray makes of the first-person screen's quads with it, in this copy of the set.
+			FpDepth fp_depth;
+			XrCompositionLayerProjection fp_proj;
+			XrCompositionLayerProjectionView fp_views[2];
+			XrCompositionLayerDepthInfoKHR fp_depth_info[2];
 		};
 
 		struct
@@ -474,6 +498,13 @@ namespace VR::XRCompositor
 			EyeChain chains[2];
 			u32 swapchain_width = 0;
 			u32 swapchain_height = 0;
+			// [VR] DepthLayer (Initialize): on for this session (the extension enabled, a D32 depth swapchain format, not
+			// PacerCopies); the depth swapchains, one per eye chain and its size; this present's depth for the publish
+			// (GS thread). Off: none of them exist.
+			bool depth_layer = false;
+			EyeChain depth_chains[2];
+			FpDepth present_depth;
+			bool warned_depth = false;
 
 			struct LeverChain
 			{
@@ -982,6 +1013,14 @@ namespace VR::XRCompositor
 		void ForgetPublishedSwapchain(XrSwapchain swapchain, bool park = false)
 		{
 			PublishedSet& set = s.published;
+			if (set.fp_depth.valid)
+			{
+				for (int k = 0; k < 2; k++)
+				{
+					if (set.fp_depth.depth[k] == swapchain || set.fp_depth.colour[k] == swapchain)
+						set.fp_depth.valid = false;
+				}
+			}
 			u32 kept = 0;
 			for (u32 i = 0; i < set.count; i++)
 			{
@@ -1065,6 +1104,20 @@ namespace VR::XRCompositor
 				chain.waited = false;
 				chain.release_pending = false;
 			}
+			for (auto& chain : s.depth_chains)
+			{
+				if (chain.swapchain != XR_NULL_HANDLE)
+				{
+					DestroySwapchainSynced(chain.swapchain);
+					chain.swapchain = XR_NULL_HANDLE;
+				}
+				chain.images.clear();
+				chain.ever_released = false;
+				chain.wait_pending = false;
+				chain.waited = false;
+				chain.release_pending = false;
+			}
+			s.present_depth = FpDepth{};
 			s.swapchain_width = 0;
 			s.swapchain_height = 0;
 		}
@@ -1118,6 +1171,62 @@ namespace VR::XRCompositor
 			return true;
 		}
 
+		// [VR] DepthLayer: eye chain `eye`'s depth swapchain, the frame's size, D32_SFLOAT, written by a copy from the export
+		// buffer. A failure turns the depth layer off for the session (the frames go on as quads).
+		bool CreateDepthChain(u32 eye, u32 w, u32 h)
+		{
+			auto& chain = s.depth_chains[eye];
+			XrSwapchainCreateInfo ci = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
+			ci.usageFlags = XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+			ci.format = static_cast<int64_t>(VK_FORMAT_D32_SFLOAT);
+			ci.sampleCount = 1;
+			ci.width = w;
+			ci.height = h;
+			ci.faceCount = 1;
+			ci.arraySize = 1;
+			ci.mipCount = 1;
+			const XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &chain.swapchain);
+			uint32_t count = 0;
+			if (XR_FAILED(res) ||
+				!CheckXR(xrEnumerateSwapchainImages(chain.swapchain, 0, &count, nullptr), "xrEnumerateSwapchainImages (depth)") ||
+				count == 0)
+			{
+				Console.Error("(VR) Depth layer: the depth swapchain (eye %u, %ux%u, D32_SFLOAT) could not be made (%d); the depth "
+							  "layer is off for this session.",
+					eye, w, h, static_cast<int>(res));
+				if (XR_SUCCEEDED(res))
+					xrDestroySwapchain(chain.swapchain);
+				chain.swapchain = XR_NULL_HANDLE;
+				return false;
+			}
+			chain.images.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+			if (!CheckXR(xrEnumerateSwapchainImages(chain.swapchain, count, &count,
+							 reinterpret_cast<XrSwapchainImageBaseHeader*>(chain.images.data())),
+					"xrEnumerateSwapchainImages (depth)"))
+			{
+				xrDestroySwapchain(chain.swapchain);
+				chain.swapchain = XR_NULL_HANDLE;
+				chain.images.clear();
+				return false;
+			}
+			chain.ever_released = false;
+			chain.wait_pending = false;
+			chain.waited = false;
+			chain.release_pending = false;
+			Console.WriteLn("(VR) XR depth swapchain created (eye %u): %ux%u, %u images (VK_FORMAT_D32_SFLOAT).", eye, w, h, count);
+			return true;
+		}
+
+		void DepthLayerOff(const char* why)
+		{
+			if (!s.depth_layer)
+				return;
+			s.depth_layer = false;
+			s.present_depth = FpDepth{};
+			DepthExport::SetCompositorWants(false);
+			Console.Warning("(VR) Depth layer: off for this session: %s; the first-person screen goes as quads.", why);
+		}
+
 		bool EnsureSwapchains(u32 w, u32 h, bool stereo)
 		{
 			if (s.swapchain_width != 0 && (s.swapchain_width != w || s.swapchain_height != h))
@@ -1140,6 +1249,13 @@ namespace VR::XRCompositor
 				}
 			}
 
+			// [VR] DepthLayer: a depth swapchain beside each eye chain. Without them the colour goes on alone.
+			for (u32 eye = 0; eye < (stereo ? 2u : 1u) && s.depth_layer; eye++)
+			{
+				if (s.depth_chains[eye].swapchain == XR_NULL_HANDLE && !CreateDepthChain(eye, w, h))
+					DepthLayerOff("a depth swapchain could not be made");
+			}
+
 			s.swapchain_width = w;
 			s.swapchain_height = h;
 			s.warned_swapchain = false;
@@ -1148,7 +1264,10 @@ namespace VR::XRCompositor
 
 		// Copies layer src_layers[k] of src into swapchain image dsts[k], for each of the count (1 or 2) images, in one
 		// command buffer and one submit, so the copies go in together or not at all (both eyes in layered stereo).
-		bool RecordAndSubmitCopies(GSTextureVK* src, const u32* src_layers, const VkImage* dsts, u32 count)
+		// depth_dsts ([VR] DepthLayer; null: none): beside each colour copy, the depth image depth_dsts[k] gets the export
+		// buffer's plane src_layers[k] (DepthExport::LatestBuffer, written by the GS command buffer this present submitted).
+		bool RecordAndSubmitCopies(GSTextureVK* src, const u32* src_layers, const VkImage* dsts, u32 count,
+			const VkImage* depth_dsts = nullptr)
 		{
 			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
 
@@ -1205,6 +1324,50 @@ namespace VR::XRCompositor
 				ImageBarrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 					VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
 					VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+			}
+
+			// [VR] DepthLayer: the export buffer's planes into the depth images (raw z/2^32 floats, which the depth info's
+			// range describes; DepthExport). The buffer was written by the GS's command buffer, submitted before this one.
+			const VkBuffer depth_src = depth_dsts ? reinterpret_cast<VkBuffer>(DepthExport::LatestBuffer()) : VK_NULL_HANDLE;
+			if (depth_src != VK_NULL_HANDLE)
+			{
+				VkBufferMemoryBarrier bb = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+				bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+				bb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+				bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				bb.buffer = depth_src;
+				bb.offset = 0;
+				bb.size = VK_WHOLE_SIZE;
+				vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &bb, 0,
+					nullptr);
+				const VkDeviceSize plane = static_cast<VkDeviceSize>(s.swapchain_width) * s.swapchain_height * 4u;
+				for (u32 k = 0; k < count; k++)
+				{
+					VkImageMemoryBarrier ib = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+					ib.srcAccessMask = 0;
+					ib.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+					ib.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; // all of it is written
+					ib.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+					ib.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+					ib.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+					ib.image = depth_dsts[k];
+					ib.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+					vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+						nullptr, 1, &ib);
+					VkBufferImageCopy region = {};
+					region.bufferOffset = plane * src_layers[k];
+					region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+					region.imageExtent = {s.swapchain_width, s.swapchain_height, 1};
+					vkCmdCopyBufferToImage(cmd, depth_src, depth_dsts[k], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+					ib.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+					ib.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+					ib.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+					ib.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+					vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+						VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, 0, 0, nullptr, 0, nullptr,
+						1, &ib);
+				}
 			}
 
 			vr = vkEndCommandBuffer(cmd);
@@ -1294,6 +1457,32 @@ namespace VR::XRCompositor
 			return EyeWait::Ready;
 		}
 
+		// [VR] DepthLayer: whether this present's copy should take the depth: the layer on, this present's export valid and
+		// the size of the frame, and a depth chain beside each of the count eye chains.
+		bool DepthWanted(const u32* chain_ids, u32 count)
+		{
+			if (!s.depth_layer)
+				return false;
+			const DepthExport::ExportInfo& ex = DepthExport::Latest();
+			if (!ex.valid || !DepthExport::LatestBuffer() || ex.width != s.swapchain_width || ex.height != s.swapchain_height)
+				return false;
+			for (u32 k = 0; k < count; k++)
+			{
+				if (chain_ids[k] >= 2 || s.depth_chains[chain_ids[k]].swapchain == XR_NULL_HANDLE || ex.layers <= chain_ids[k])
+					return false;
+			}
+			return true;
+		}
+
+		void submitted_depth_failed()
+		{
+			if (!s.warned_depth)
+			{
+				s.warned_depth = true;
+				Console.Error("(VR) Depth layer: xrReleaseSwapchainImage failed for a depth image; that present goes without depth.");
+			}
+		}
+
 		// What an eye whose copy did not go in this present reports: a ready eye held back for its partner, Skipped.
 		CopyResult NotCopied(EyeWait w)
 		{
@@ -1306,16 +1495,65 @@ namespace VR::XRCompositor
 		// (ReleaseAndPublish), so the pacer can never show the new image at the previous present's pose. Copied then means
 		// "copied, release still to come"; a failed release turns it into Skipped there. A waited image goes back even
 		// when the copy was not submitted. Each chain's result goes in out[k].
-		void CopyEyes(GSTextureVK* src, const u32* src_layers, const u32* chain_ids, u32 count, CopyResult* out)
+		// with_depth ([VR] DepthLayer): each chain's depth chain was made Ready too, and gets this present's exported depth.
+		void CopyEyes(GSTextureVK* src, const u32* src_layers, const u32* chain_ids, u32 count, CopyResult* out,
+			bool with_depth = false)
 		{
 			VkImage dsts[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+			VkImage depth_dsts[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
 			count = std::min<u32>(count, 2);
 			for (u32 k = 0; k < count; k++)
 			{
 				const auto& chain = s.chains[chain_ids[k]];
 				dsts[k] = chain.images[chain.pending_index].image;
+				if (with_depth)
+				{
+					const auto& dchain = s.depth_chains[chain_ids[k]];
+					depth_dsts[k] = dchain.images[dchain.pending_index].image;
+				}
 			}
-			const bool submitted = RecordAndSubmitCopies(src, src_layers, dsts, count);
+			const bool submitted = RecordAndSubmitCopies(src, src_layers, dsts, count, with_depth ? depth_dsts : nullptr);
+			// The depth goes with this present's layers only when its copy went in with the colour, every eye of it.
+			s.present_depth = FpDepth{};
+			if (with_depth)
+			{
+				bool released = true;
+				for (u32 k = 0; k < count; k++)
+				{
+					auto& dchain = s.depth_chains[chain_ids[k]];
+					dchain.waited = false;
+					if (s.headset_rate)
+					{
+						// Released in ReleaseAndPublish, which drops the depth from this present if that fails.
+						dchain.release_pending = true;
+						continue;
+					}
+					if (XR_FAILED(LockedRelease(dchain.swapchain)))
+					{
+						submitted_depth_failed();
+						released = false;
+					}
+					else
+					{
+						dchain.ever_released = true;
+					}
+				}
+				if (submitted && released)
+				{
+					s.present_depth.valid = true;
+					for (u32 k = 0; k < count; k++)
+					{
+						s.present_depth.colour[k] = s.chains[chain_ids[k]].swapchain;
+						s.present_depth.depth[k] = s.depth_chains[chain_ids[k]].swapchain;
+					}
+					const DepthExport::ExportInfo& ex = DepthExport::Latest();
+					s.present_depth.range = DepthExport::RangeForRawDepth(ex.fit, ex.units_per_meter);
+					s.present_depth.export_serial = ex.serial;
+					s.present_depth.ipd_m = GetEyeInfo().valid ? GetEyeInfo().ipd_m : 0.0f;
+					if (!s.present_depth.range.valid)
+						s.present_depth.valid = false;
+				}
+			}
 
 			for (u32 k = 0; k < count; k++)
 			{
@@ -1348,8 +1586,11 @@ namespace VR::XRCompositor
 			const EyeWait w = WaitEye(s.chains[chain_id]);
 			if (w != EyeWait::Ready)
 				return NotCopied(w);
+			// The depth only when its image is ready too; else the colour goes alone (quads this present) and a waited depth
+			// image keeps for the next.
+			const bool with_depth = DepthWanted(&chain_id, 1) && WaitEye(s.depth_chains[chain_id]) == EyeWait::Ready;
 			CopyResult r = CopyResult::Skipped;
-			CopyEyes(src, &src_layer, &chain_id, 1, &r);
+			CopyEyes(src, &src_layer, &chain_id, 1, &r, with_depth);
 			return r;
 		}
 
@@ -1365,7 +1606,15 @@ namespace VR::XRCompositor
 			if (w0 == EyeWait::Ready && w1 == EyeWait::Ready)
 			{
 				static constexpr u32 kEyes[2] = {0, 1};
-				CopyEyes(src, kEyes, kEyes, 2, out);
+				// [VR] DepthLayer: both depth images ready as well, or the colour goes alone (quads this present).
+				bool with_depth = DepthWanted(kEyes, 2);
+				if (with_depth)
+				{
+					const EyeWait d0 = WaitEye(s.depth_chains[0]);
+					const EyeWait d1 = WaitEye(s.depth_chains[1]);
+					with_depth = (d0 == EyeWait::Ready && d1 == EyeWait::Ready);
+				}
+				CopyEyes(src, kEyes, kEyes, 2, out, with_depth);
 				return;
 			}
 			out[0] = NotCopied(w0);
@@ -5868,6 +6117,7 @@ namespace VR::XRCompositor
 				merged.fp_head = prev.fp_head;
 				merged.turn_rate = prev.fp_screen ? turn_rate : 0.0f;
 				merged.fp_image = prev.fp_image;
+				merged.fp_depth = prev.fp_depth;
 				merged.serial = prev.serial + 1;
 				// PacerCopies: the kept Screen entries show the frame they were published with.
 				merged.pc_frame = prev.pc_frame;
@@ -5876,6 +6126,7 @@ namespace VR::XRCompositor
 				return merged;
 			}
 			next.serial = prev.serial + 1;
+			next.fp_depth = fp_screen ? s.present_depth : FpDepth{};
 			next.pc_frame = pc.frame;
 			PcFinishSet(&next);
 			ParkFreeSlots(&next);
@@ -6026,6 +6277,21 @@ namespace VR::XRCompositor
 				if (!chain.ever_released)
 					dropped[dropped_count++] = chain.swapchain;
 			}
+			// [VR] DepthLayer: the depth images copied this present go back with their eyes; one that fails takes the depth out
+			// of this present's layers (its quads go alone).
+			for (auto& dchain : s.depth_chains)
+			{
+				if (!dchain.release_pending)
+					continue;
+				dchain.release_pending = false;
+				if (XR_SUCCEEDED(LockedRelease(dchain.swapchain)))
+				{
+					dchain.ever_released = true;
+					continue;
+				}
+				submitted_depth_failed();
+				s.present_depth.valid = false;
+			}
 			for (int i = 0; i < kHandSlots; i++)
 			{
 				auto& hc = s.hand_chains[i];
@@ -6099,12 +6365,89 @@ namespace VR::XRCompositor
 		// The submit array: the background first, then the set's entries (only Screen and Lever shown while the GS is
 		// idle: the rest parked in their positions, ParkFreeSlots, or left out with parking off), Screen entries turned by
 		// `turn`. Returns the layer count; the pointers point into `set`.
+		// [VR] DepthLayer: the set's first-person screen quads (one per eye, or one for both) as one projection layer with
+		// the depth chained to each view: each view sees exactly what its eye saw of the quad (DepthExport::QuadViewForEye:
+		// the eye half the IPD to its side of the head pose the frame was rendered at, the quad's orientation, the fov
+		// meeting the quad's edges), so nothing moves for a head at that pose, and the runtime can reproject with the
+		// depth from there. The depth is the render camera's view-axis depth, the views' own axis (they share the quad's
+		// orientation and sit beside the head). False (the quads go as they are): no usable quad for an eye.
+		bool BuildDepthProjection(PublishedSet& set, const XrCompositionLayerQuad* left, const XrCompositionLayerQuad* right,
+			float turn)
+		{
+			const XrCompositionLayerQuad* const eye_quad[2] = {left, right};
+			if (!set.fp_depth.eyes_placed)
+				return false;
+			// PCSX2_VR_DEPTHLAYER_NODEPTH (a headset A/B): the same projection layer with no depth chained to it.
+			static const bool s_no_depth = (std::getenv("PCSX2_VR_DEPTHLAYER_NODEPTH") != nullptr);
+			for (u32 v = 0; v < 2; v++)
+			{
+				const XrCompositionLayerQuad* const q = eye_quad[v];
+				if (!q)
+					return false;
+				XrSwapchain depth = XR_NULL_HANDLE;
+				for (int k = 0; k < 2; k++)
+				{
+					if (set.fp_depth.colour[k] != XR_NULL_HANDLE && set.fp_depth.colour[k] == q->subImage.swapchain)
+						depth = set.fp_depth.depth[k];
+				}
+				if (depth == XR_NULL_HANDLE)
+					return false;
+				XrCompositionLayerProjectionView& pv = set.fp_views[v];
+				pv = XrCompositionLayerProjectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+				// The eye turns with the screen during a smooth stick turn (ApplyTurn's yaw about the vertical through fp_head).
+				XrVector3f off = set.fp_depth.eye_offset[v];
+				if (turn != 0.0f)
+				{
+					const float sa = std::sin(turn), ca = std::cos(turn);
+					off = {ca * off.x + sa * off.z, off.y, -sa * off.x + ca * off.z};
+				}
+				if (!DepthExport::QuadViewForEye(q->pose, q->size.width, q->size.height, set.fp_head, off, &pv.pose, &pv.fov))
+					return false;
+				pv.subImage = q->subImage;
+				XrCompositionLayerDepthInfoKHR& di = set.fp_depth_info[v];
+				di = XrCompositionLayerDepthInfoKHR{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
+				di.subImage.swapchain = depth;
+				di.subImage.imageRect = q->subImage.imageRect;
+				di.subImage.imageArrayIndex = 0;
+				di.minDepth = set.fp_depth.range.min_depth;
+				di.maxDepth = set.fp_depth.range.max_depth;
+				di.nearZ = set.fp_depth.range.near_z;
+				di.farZ = set.fp_depth.range.far_z;
+				pv.next = s_no_depth ? nullptr : &di;
+			}
+			set.fp_proj = XrCompositionLayerProjection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+			set.fp_proj.layerFlags = 0;
+			set.fp_proj.space = left->space;
+			set.fp_proj.viewCount = 2;
+			set.fp_proj.views = set.fp_views;
+			static std::atomic_bool s_first_logged{false};
+			if (!s_first_logged.exchange(true))
+			{
+				constexpr float kDeg = 180.0f / 3.14159265f;
+				const XrCompositionLayerProjectionView& l = set.fp_views[0];
+				const XrCompositionLayerProjectionView& r = set.fp_views[1];
+				Console.WriteLn("(VR) Depth layer: first projection layer with depth: left view at (%.3f, %.3f, %.3f) fov "
+								"%.1f/%.1f/%.1f/%.1f deg, right at (%.3f, %.3f, %.3f) fov %.1f/%.1f/%.1f/%.1f deg (left/right/up/down), "
+								"%dx%d, depth %.9g..%.9g = %.3f..%.4f m.",
+					l.pose.position.x, l.pose.position.y, l.pose.position.z, l.fov.angleLeft * kDeg, l.fov.angleRight * kDeg,
+					l.fov.angleUp * kDeg, l.fov.angleDown * kDeg, r.pose.position.x, r.pose.position.y, r.pose.position.z,
+					r.fov.angleLeft * kDeg, r.fov.angleRight * kDeg, r.fov.angleUp * kDeg, r.fov.angleDown * kDeg,
+					l.subImage.imageRect.extent.width, l.subImage.imageRect.extent.height, set.fp_depth_info[0].minDepth,
+					set.fp_depth_info[0].maxDepth, set.fp_depth_info[0].nearZ, set.fp_depth_info[0].farZ);
+			}
+			return true;
+		}
+
 		u32 BuildSubmitArray(PublishedSet& set, const XrCompositionLayerProjection* background, bool stale, float turn,
 			const XrCompositionLayerBaseHeader** out)
 		{
 			u32 n = 0;
 			if (background)
 				out[n++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(background);
+			// [VR] DepthLayer: the first-person screen's quads go as one projection layer, in the first one's position.
+			const bool depth_proj = set.fp_screen && set.fp_depth.valid;
+			int proj_at = -1;
+			const XrCompositionLayerQuad* eye_quad[2] = {nullptr, nullptr};
 			for (u32 i = 0; i < set.count && n < kLayerCapacity + 1; i++)
 			{
 				PublishedSet::Entry& e = set.e[i];
@@ -6116,8 +6459,45 @@ namespace VR::XRCompositor
 				}
 				if (e.role == kRoleScreen && turn != 0.0f)
 					ApplyTurn(e, set.fp_head, turn);
+				if (depth_proj && e.role == kRoleScreen && e.kind == kKindQuad && !e.parked)
+				{
+					if (e.quad.eyeVisibility != XR_EYE_VISIBILITY_RIGHT && !eye_quad[0])
+						eye_quad[0] = &e.quad;
+					if (e.quad.eyeVisibility != XR_EYE_VISIBILITY_LEFT && !eye_quad[1])
+						eye_quad[1] = &e.quad;
+					if (proj_at < 0)
+					{
+						proj_at = static_cast<int>(n);
+						out[n++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&e.quad); // replaced below
+					}
+					continue;
+				}
 				out[n++] = (e.kind == kKindCylinder) ? reinterpret_cast<const XrCompositionLayerBaseHeader*>(&e.cyl) :
 				                                       reinterpret_cast<const XrCompositionLayerBaseHeader*>(&e.quad);
+			}
+			if (proj_at >= 0)
+			{
+				if (BuildDepthProjection(set, eye_quad[0], eye_quad[1], turn))
+				{
+					out[proj_at] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&set.fp_proj);
+				}
+				else
+				{
+					// No projection after all: the quads go as they would without depth (both eyes' in order).
+					u32 m = static_cast<u32>(proj_at);
+					const XrCompositionLayerBaseHeader* rest[kLayerCapacity + 1];
+					const u32 tail = n - m - 1;
+					for (u32 k = 0; k < tail; k++)
+						rest[k] = out[m + 1 + k];
+					n = m;
+					for (int v = 0; v < 2; v++)
+					{
+						if (eye_quad[v] && (v == 0 || eye_quad[1] != eye_quad[0]) && n < kLayerCapacity + 1)
+							out[n++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(eye_quad[v]);
+					}
+					for (u32 k = 0; k < tail && n < kLayerCapacity + 1; k++)
+						out[n++] = rest[k];
+				}
 			}
 			return n;
 		}
@@ -8418,6 +8798,18 @@ namespace VR::XRCompositor
 			chain.waited = false;
 			chain.release_pending = false;
 		}
+		for (auto& chain : s.depth_chains)
+		{
+			chain.swapchain = XR_NULL_HANDLE;
+			chain.images.clear();
+			chain.ever_released = false;
+			chain.wait_pending = false;
+			chain.waited = false;
+			chain.release_pending = false;
+		}
+		s.present_depth = FpDepth{};
+		s.depth_layer = false;
+		s.warned_depth = false;
 		s.swapchain_width = 0;
 		s.swapchain_height = 0;
 		s.next_cmd_buffer = 0;
@@ -8463,6 +8855,31 @@ namespace VR::XRCompositor
 				pc.flush ? "at once (PCSX2_VR_PACER_COPIES_FLUSH: the GS submits after the copy)" :
 				           "with the GS's next submit (about one GS frame later than before)");
 		}
+
+		// [VR] DepthLayer, read once like PacerCopies: the first-person frame as a projection layer with its depth. It needs
+		// the extension (enabled with the instance only when the switch is on), a D32_SFLOAT depth swapchain, and the GS
+		// thread doing the copies (PacerCopies off). Anything missing: logged once, it stays off, nothing else changes.
+		if (EmuConfig.VR.DepthLayer)
+		{
+			bool has_d32 = false;
+			for (int64_t f : formats)
+				has_d32 = has_d32 || (f == static_cast<int64_t>(VK_FORMAT_D32_SFLOAT));
+			if (!XRSession::HasDepthLayer())
+				Console.Warning("(VR) Depth layer: off: the runtime does not offer XR_KHR_composition_layer_depth.");
+			else if (pc.on)
+				Console.Warning("(VR) Depth layer: off: it needs [VR] PacerCopies off (the GS thread copies the depth beside "
+								"the frame).");
+			else if (!has_d32)
+				Console.Warning("(VR) Depth layer: off: the runtime offers no VK_FORMAT_D32_SFLOAT swapchain.");
+			else
+			{
+				s.depth_layer = true;
+				Console.WriteLn("(VR) Depth layer: on ([VR] DepthLayer): in first person the frame goes as a projection layer "
+								"at its render pose with its depth (D32_SFLOAT, the GS's raw z/2^32 under the Z-driven depth "
+								"fit's range), for the runtime's reprojection; the first-person screen quads otherwise.");
+			}
+		}
+		DepthExport::SetCompositorWants(s.depth_layer);
 
 		s.warned_pacer = false;
 		s.warned_beginframe = false;
@@ -8562,6 +8979,8 @@ namespace VR::XRCompositor
 		if (!s.initialized)
 			return;
 		s_present_wait_left_ns = kPresentWaitBudgetNs;
+		// [VR] DepthLayer: set by this present's copy (CopyEyes) when the depth went in with the colour.
+		s.present_depth = FpDepth{};
 		PublishFirstPersonScreen();
 
 		// Headset rate: the VR pacer begins and ends a frame every display period; this present only refreshes the
@@ -8978,6 +9397,20 @@ namespace VR::XRCompositor
 				}
 				pub_fp_head = fp_head;
 				pub_fp_image = placed ? ImageKey(stamped) : 0;
+				// [VR] DepthLayer: the eyes that see this frame's screen, at its render pose with the head's roll (the quad
+				// itself is placed roll-level), so the projection layer shows each eye what the quad would.
+				if (s.present_depth.valid)
+				{
+					const float half_ipd = 0.5f * ((s.present_depth.ipd_m > 0.0f) ? s.present_depth.ipd_m : 0.064f);
+					// Turned like the screen by the stick turn since the frame was rendered (turn_yaw, as hyaw below).
+					const float sa = std::sin(turn_yaw), ca = std::cos(turn_yaw);
+					for (int k = 0; k < 2; k++)
+					{
+						const XrVector3f o = DepthExport::EyeOffset(q, (k == 0) ? -half_ipd : half_ipd);
+						s.present_depth.eye_offset[k] = {ca * o.x + sa * o.z, o.y, -sa * o.x + ca * o.z};
+					}
+					s.present_depth.eyes_placed = true;
+				}
 				const float fx = -2.0f * (q.x * q.z + q.w * q.y);
 				const float fy = -2.0f * (q.y * q.z - q.w * q.x);
 				const float fz = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
@@ -9370,6 +9803,7 @@ namespace VR::XRCompositor
 		PublishedSet set = {};
 		FillPublishedSet(&set, layers, layer_count, sources);
 		ParkFreeSlots(&set);
+		set.fp_depth = pub_fp_screen ? s.present_depth : FpDepth{};
 		set.fp_screen = pub_fp_screen;
 		set.fp_head = pub_fp_head;
 		set.fp_image = pub_fp_image;
@@ -9414,6 +9848,7 @@ namespace VR::XRCompositor
 	{
 		if (!s.initialized)
 			return;
+		DepthExport::SetCompositorWants(false);
 
 		s.pacer_exit.store(true, std::memory_order_release);
 

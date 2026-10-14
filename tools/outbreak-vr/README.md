@@ -417,6 +417,29 @@ person armed, offline,
 1.5 m first-person screen gives a floor of 1 - 1.5/1.0 = -0.5 at strength 1; the sidecar's `near_floor` is the value to
 expect for other settings, -1 for the old 0.75 m).
 
+Depth layer and depth probe (`VR/DepthExport`, research note `research/2026-10-13-depth-export.md`). `[VR] DepthLayer`
+(off by default, read when VR starts): in first person the shown frame goes to the runtime as one projection layer at
+the pose it was rendered from instead of the two screen quads, with its depth chained to each view
+(`XR_KHR_composition_layer_depth`, a `D32_SFLOAT` depth swapchain per eye), so the runtime's own reprojection can use
+it. With the switch off the instance does not even enable the extension: no depth swapchain, no depth copy, no
+projection layer. Logs `(VR) Depth layer ([VR] DepthLayer): ... enabled.` (or that the runtime does not offer it),
+`(VR) Depth layer: on ...` (or why it stays off: no extension, `PacerCopies` on, no D32 format), `(VR) XR depth
+swapchain created (eye N): ...`, `(VR) Depth export: first frame: ...` (which depth target, the fit and the range the
+runtime is given) and `(VR) Depth layer: first projection layer with depth: ...` (each view's pose and fov). While the
+depth is missing for a present the frame goes as quads, and `(VR) Depth export: no depth for the shown frame: <why>.`
+says why once per reason. `PCSX2_VR_DEPTHLAYER_NODEPTH=1` sends the same projection layer with no depth chained, an A/B
+for whether the runtime's use of the depth shows. Headset-free check, offline only: `PCSX2_VR_DEPTHPROBE=<seconds>`
+(no session needed) reads the exported depth back every that many seconds without waiting on the GPU and logs
+`(VR) Depth probe #N: ...` with a 5 x 3 grid in metres; `PCSX2_VR_DEPTHPROBE_AT="x,y,z;..."` adds points in metres
+from the render camera (x right, y up, -z ahead), each read at its pixel in each eye's layer (the layer's disparity
+for that depth applied) with a 9 x 9 window's nearest / median / farthest; `PCSX2_VR_DEPTHPROBE_DUMP=<skip>,<count>`
+also writes `depthprobe/depth_N_L0.pfm` and `_L1.pfm` (metres) and the same present's colour `colour_N_L0.ppm` into the
+install folder (never commit them); `PCSX2_VR_DEPTHPROBE_LIVE=1` reads the depth target as it is at the present instead
+of the snapshot, to show what the hand-off would give without it. Example, slot 7 (J's Bar counter), scripted head as
+`handtest.py` launches it: `PCSX2_VR_DEPTHPROBE=2 PCSX2_VR_DEPTHPROBE_AT="0.063,-0.349,-1.040"` reads the counter top
+under the Handgun's trigger volume, 1.045 m ahead. `PCSX2_VR_SELFTEST` / `vr_selftests` run `(VR) Depth export
+self-test: N checks passed.` (the conversion, the runtime's reading of the range, the projection views, the tracker).
+
 Rules when testing: never change emulation speed; never pause, savestate or dump RAM while online
 (obsrv drops clients after ~30 s without packets and bans speed changes); do not run the virtual pad
 while an anti-cheat game is open.
