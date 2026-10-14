@@ -1017,7 +1017,8 @@ def profile_problems(serial, prof):
     has("camera.silence cut handler", cut is not None, "no entry on 0x%X" % g["cut_handler"])
     if cut is not None:
         want("camera.silence cut handler 0x%X on" % g["cut_handler"], _silence_on(cut), 0)
-    servo = dict((e.get("address"), e) for e in silence if e.get("offlineOnly"))
+    # Entries gated on a VR setting (whenSetting, e.g. SeamlessDoors) are not servo words.
+    servo = dict((e.get("address"), e) for e in silence if e.get("offlineOnly") and not e.get("whenSetting"))
     ours = dict(g["pitch_servo"])
     for a, own in g["pitch_servo"]:
         e = servo.get(a)

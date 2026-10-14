@@ -34,7 +34,11 @@ install with its own settings (`HandTargeting`, `MenuPanel` and `ReloadGesture` 
 of the File #1 savestates. Headset-free speed in slot 5 matches the CI build.
 `D:\Games\PS2\Launch-Playtest-Models-SteamVR.cmd` runs the same with `handmodels` on top (the game's own weapon models in
 the hand, holster and sling, and the CC0 hand model; `GameWeaponModels`, on), from `run-playtest-models`: built with LTO, 26 of
-26 self-tests, its in-session drawing not yet run in a session.
+27 self-tests. Checked on SteamVR's null headset (2026-10-14): the models draw in a real session (mesh images 0.5 ms
+mean, 60 frames/s submitted), and the run found SteamVR's 16-swapchain limit starving the menu panel; fixed (12e76d9: the
+edge fill gives its swapchain up and the creation is retried), also on `playtest`. It also has `doors` (`SeamlessDoors`, off:
+your own door opening keeps first person; 15 camera-shot calls NOP'd, offline only; the words are checked offline, a door
+opened with the switch on is not yet).
 
 ## Where things are
 
