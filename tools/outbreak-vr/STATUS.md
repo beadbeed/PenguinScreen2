@@ -31,6 +31,9 @@ renderer, not drawn with yet), built locally with LTO like CI (25 of 25 self-tes
 `D:\Games\PS2\Launch-Playtest-SteamVR.cmd`. It runs `D:\dev\PenguinScreen2-buildun-playtest`, a separate portable
 install with its own settings (`HandTargeting`, `MenuPanel` and `ReloadGesture` on, `DepthLayer` off), memory cards and copies
 of the File #1 savestates. Headset-free speed in slot 5 matches the CI build.
+`D:\Games\PS2\Launch-Playtest-Models-SteamVR.cmd` runs the same with `handmodels` on top (the game's own weapon models in
+the hand, holster and sling, and the CC0 hand model; `GameWeaponModels`, on), from `run-playtest-models`: built with LTO, 26 of
+26 self-tests, its in-session drawing not yet run in a session.
 
 ## Where things are
 
