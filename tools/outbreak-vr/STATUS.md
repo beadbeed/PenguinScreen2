@@ -42,6 +42,13 @@ opened with the switch on is not yet).
 Since 2026-10-14 21:15 `run-playtest-models` (and `Playtest\Slot*.cmd`) runs branch `melee` (handmodels + `PhysicalMelee`, off),
 an LTO build with 30 of 30 self-tests; its `resources` junction points at the `melee` worktree.
 
+**Morning of 2026-10-15, for Alex:** `D:\Games\PS2\Playtest\Slot5/6/7/9.cmd` run `nightly` (local LTO build, 39 of 39 self-tests),
+in `D:\dev\PenguinScreen2-buildun-playtest-models` with its own settings. On there: `PhysicalMelee` (Contact), `MeleeHitJolt`,
+`SeamlessDoors`, `MenuPanel` (+ `MenuPanelRoom = Freeze`), `HandTargeting`, `ReloadGesture`, the game weapon models;
+off: `BeltPouches`, `DepthLayer`, `DepthWarp`, `PhysicalMeleeOnline`. A/B for leaning (slot 7, lean 10-20 cm at the counter):
+`DepthWarp = true`, then `DepthLayer = true`, then neither (in `run-playtest-models\inis\PenguinScreen2.ini`, `[VR]`).
+Everything new since 10-14 evening is checked offline (and the menus and the warp on the null headset) only.
+
 **2026-10-15 overnight build: branch `nightly`** = `vrmelee` (contact-driven melee: `PhysicalMeleeMode = Contact`, the game's own
 attack spawn called on the VR weapon's contact, strength from swing speed; `meleecoop`'s local-only caves and
 `PhysicalMeleeOnline`; `BeltPouches` off) + `panelfeel` (`MenuPanelRoom = Freeze`: the room holds still and dims behind a
