@@ -438,11 +438,16 @@ static void warnWidthFit(const std::string_view serial, u32 value, u32 width, co
 
 static std::optional<s64> parseSignedOffset(std::string_view sv);
 
-static void parseGuardList(const std::string_view serial, const ryml::ConstNodeRef& seq,
+// Returns false when any guard was skipped (each one is warned about), so a caller for which a guard list that came out
+// less strict than written is unsafe can drop its whole entry (review b8).
+static bool parseGuardList(const std::string_view serial, const ryml::ConstNodeRef& seq,
 	const char* what, std::vector<VR::ProfileDB::CameraGuard>& out)
 {
+	const size_t before = out.size();
+	size_t seen = 0;
 	for (const ryml::ConstNodeRef& g : seq.children())
 	{
+		seen++;
 		if (!g.is_map())
 			continue;
 		const bool chain_form = g.has_child("pointer");
@@ -474,6 +479,11 @@ static void parseGuardList(const std::string_view serial, const ryml::ConstNodeR
 			const std::optional<u32> wdt = StringUtil::FromChars<u32>(nodeVal(g["width"]));
 			if (wdt.has_value() && (wdt.value() == 1 || wdt.value() == 2 || wdt.value() == 4))
 				guard.width = static_cast<u8>(wdt.value());
+			else
+			{
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a {} with a width other than 1, 2 or 4; skipping it.", serial, what);
+				continue;
+			}
 		}
 		if (chain_form)
 		{
@@ -535,6 +545,7 @@ static void parseGuardList(const std::string_view serial, const ryml::ConstNodeR
 		warnWidthFit(serial, eq.value(), guard.width, what);
 		out.push_back(guard);
 	}
+	return out.size() - before == seen;
 }
 
 static bool parseAuthoredDepthMap(const std::string_view serial, const char* where,
@@ -1380,14 +1391,22 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 				Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a camera silence op with a missing/invalid address/on/off; skipping it.", serial);
 				continue;
 			}
-			if (!inMainRam(addr.value(), 4))
+			if (!inMainRam(addr.value(), 4) || (addr.value() & 3u) != 0)
 			{
-				Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a camera silence address {:#x} outside main RAM; skipping it.", serial, addr.value());
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a camera silence address {:#x} outside main RAM or not "
+								   "word-aligned; skipping it.", serial, addr.value());
 				continue;
 			}
 			CameraSilence sil{addr.value(), von.value(), voff.value()};
-			if (sn.has_child("when") && sn["when"].is_seq())
-				parseGuardList(serial, sn["when"], "camera silence when", sil.when);
+			// A when list with a guard that did not parse would patch the word more often than written (review b8): the
+			// entry is dropped whole, and so is a when that is not a list.
+			if (sn.has_child("when") &&
+				(!sn["when"].is_seq() || !parseGuardList(serial, sn["when"], "camera silence when", sil.when)))
+			{
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera silence {:#x} has a when guard that did not parse; "
+								   "skipping the entry.", serial, addr.value());
+				continue;
+			}
 			// activeWhen: checks on the camera base record (e.g. the weapon raised). An entry whose checks did not
 			// all parse is dropped rather than patched all the time.
 			if (sn.has_child("activeWhen"))
@@ -3585,6 +3604,51 @@ static std::optional<VR::ProfileDB::BreakoutParams> parseBreakout(const std::str
 // melee: [VR] PhysicalMelee. Its presses are the player's own pad input and its writes go only to the host's block, so a
 // bad tuning number keeps its default (with a warning); an enemies or override block missing a key drops only that part
 // (no contact buzz, or no hit on the VR weapon: the swing still presses the game's own attack).
+// Review b8: the caves hardcode the host block's address and magic (cave A: lui t3,0x10; lw t1,-0x1000(t3) for 0xFF000;
+// lui t2,0x4D45; ori t2,t2,0x4C31 for the magic), so melee.override must name what they read, or the host would write its
+// 0x90 bytes where no cave looks (and the caves would never see them). True when some cave's words hold a lui of the
+// block's high half followed in that cave by a load, store or addiu off that register landing inside the block, and a
+// lui / ori pair building the magic.
+static bool CavesAddressMeleeBlock(const VR::ProfileDB::CameraProfile& cam, u32 block, u32 magic)
+{
+	const auto is_mem_or_addiu = [](u32 op) {
+		return op == 0x09 || (op >= 0x20 && op <= 0x2F) || op == 0x31 || op == 0x37 || op == 0x39 || op == 0x3F;
+	};
+	const u32 block_hi = ((block + 0x8000u) >> 16) & 0xFFFFu;
+	bool block_ok = false, magic_ok = false;
+	for (const VR::ProfileDB::CameraCave& cv : cam.caves)
+	{
+		std::vector<u32> words;
+		for (const VR::ProfileDB::CameraSilence& sil : cam.silence)
+		{
+			if (sil.ee_address >= cv.from && sil.ee_address < cv.to)
+				words.push_back(sil.value_on);
+		}
+		for (size_t i = 0; i < words.size(); i++)
+		{
+			const u32 w = words[i];
+			if ((w >> 26) != 0x0F || ((w >> 21) & 31u) != 0)
+				continue; // not a lui
+			const u32 rt = (w >> 16) & 31u;
+			const u32 imm = w & 0xFFFFu;
+			for (size_t k = i + 1; k < words.size() && k < i + 64; k++)
+			{
+				const u32 x = words[k];
+				const u32 op = x >> 26;
+				if (((x >> 21) & 31u) != rt)
+					continue;
+				const s32 lo = static_cast<s16>(static_cast<u16>(x & 0xFFFFu));
+				const u32 addr = (imm << 16) + static_cast<u32>(lo);
+				if (imm == block_hi && is_mem_or_addiu(op) && addr >= block && addr < block + 0x90u)
+					block_ok = true;
+				if (op == 0x0D && ((x >> 16) & 31u) == rt && ((imm << 16) | (x & 0xFFFFu)) == magic)
+					magic_ok = true;
+			}
+		}
+	}
+	return block_ok && magic_ok;
+}
+
 static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_view serial, const ryml::ConstNodeRef& node)
 {
 	using VR::ProfileDB::MeleeParams;
@@ -4179,6 +4243,22 @@ bool VR::ProfileDB::SelfTestMeleeParse()
 			"jolt: a misaligned block is dropped, contact kept");
 	}
 	check(parse("melee: 3\n", &m) && !m.has_value(), "a block that is not a map is none");
+	{
+		// The block / caves cross-check (review b8), on cave A's first words.
+		CameraProfile cam;
+		CameraCave cv;
+		cv.from = 0xFE000;
+		cv.to = 0xFE020;
+		cam.caves.push_back(cv);
+		const u32 a[] = {0x3C0B0010, 0x8D69F000, 0x3C0A4D45, 0x354A4C31};
+		for (u32 i = 0; i < 4; i++)
+			cam.silence.push_back(CameraSilence{0xFE000 + i * 4, a[i], 0});
+		check(CavesAddressMeleeBlock(cam, 0xFF000, 0x4D454C31), "caves: cave A reads block 0xFF000 and its magic");
+		check(!CavesAddressMeleeBlock(cam, 0xFF100, 0x4D454C31), "caves: another block is refused");
+		check(!CavesAddressMeleeBlock(cam, 0xFF000, 0x4D454C32), "caves: another magic is refused");
+		CameraProfile none;
+		check(!CavesAddressMeleeBlock(none, 0xFF000, 0x4D454C31), "caves: no caves, no override");
+	}
 	if (failed)
 		Console.Error("(VR) Melee profile self-test FAIL: %s", failed);
 	else
@@ -4576,6 +4656,16 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 	if (node.has_child("melee") && node["melee"].is_map())
 	{
 		out.melee = parseMelee(serial, node["melee"]);
+		if (out.melee.has_value() && out.melee->has_override &&
+			!(out.camera.has_value() && CavesAddressMeleeBlock(out.camera.value(), out.melee->block, out.melee->magic)))
+		{
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee.override block {:#x} / magic {:#x} is not what any camera.caves "
+							   "cave reads; ignoring the override, so the hit stays on the game's own swing.",
+				serial, out.melee->block, out.melee->magic);
+			out.melee->has_override = false;
+			out.melee->has_contact = false;
+			out.melee->has_online = false;
+		}
 		if (out.melee.has_value() && !(out.camera.has_value() && out.camera->base.has_value()))
 			Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a melee block but no camera.base; the swing is read from that "
 							   "record, so a swing never attacks here.", serial);

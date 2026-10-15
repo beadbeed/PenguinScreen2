@@ -3349,6 +3349,10 @@ namespace VR::CameraDriver
 		// (the hold starts there, so the room on screen does not move as it begins).
 		MenuPanel::RoomFreeze s_room_freeze;
 		HeadPose::Snapshot s_last_cam_pose;
+		// s_vsync_counter when s_last_cam_pose was written: a Freeze starts from it only while it is this fresh (about
+		// 100 ms), so a pose left from before a disarm, a cutscene or a pause is never the hold (review b4).
+		u64 s_last_cam_pose_vsync = 0;
+		constexpr u64 kLastCamPoseFreshVsyncs = 6;
 		u64 s_room_freeze_ms = 0;
 
 		HeadPose::Snapshot FreshHeadPose()
@@ -3598,6 +3602,7 @@ namespace VR::CameraDriver
 			s_fov_saved = false;
 			UnlatchFov(true);
 			s_armed_logged = false;
+			s_last_cam_pose = HeadPose::Snapshot{}; // b4: no Freeze from a pose of a VM that is gone
 			s_silence_applied = false;
 			s_hooks_installed = false;
 			s_base.valid = false;
@@ -3641,8 +3646,6 @@ namespace VR::CameraDriver
 		const ProfileDB::CameraProfile& cam = profile->camera.value();
 		SampleLocalSlot(cam, crc, vm_state == VMState::Running);
 		SyncSilenceProfile(&cam, crc, vm_state == VMState::Running);
-		if (vm_state == VMState::Running)
-			ApplyKeptSilence(cam, crc, switched_on);
 
 		// The env fake head first, then a scripted head from PINE test input, then the headset. The test
 		// head also reaches the input snapshot, so the zones and SpatialControls::HeadAnchor see it too.
@@ -3692,6 +3695,9 @@ namespace VR::CameraDriver
 		}
 		s_online_safe = OnlineSafeNow(); // again, now that private co-op is known
 		const bool net_ok = (net_mode != NetMode::Restricted);
+		// The kept patches (keepThroughDisarm) after the net mode is this vsync's, as their gate reads it (review b5).
+		if (vm_state == VMState::Running)
+			ApplyKeptSilence(cam, crc, switched_on);
 		// Breaking free of a grab: read from the local record whether first person is armed or not (a grab hands the
 		// camera back; the 3D screen without the head-tracked camera counts too), only in VR off split-screen (the VR
 		// controllers do the pressing), only while the game runs, and never on obsrv (first person's network rule: the
@@ -3763,6 +3769,8 @@ namespace VR::CameraDriver
 				}
 			}
 			s_armed_logged = armed;
+			if (!armed)
+				s_last_cam_pose = HeadPose::Snapshot{}; // b4: a Freeze after a re-arm starts from that run's own pose
 		}
 
 		if (!armed)
@@ -4008,6 +4016,7 @@ namespace VR::CameraDriver
 				{
 					w.fov_deg = fov_sizes_screen ? fov_now : 0.0f;
 					s_last_cam_pose = cam_pose;
+					s_last_cam_pose_vsync = s_vsync_counter;
 					PushStampedPose(cam_pose);
 					PushWritten(w, cam_pose);
 					PublishMatchedPose(la);
@@ -4033,9 +4042,11 @@ namespace VR::CameraDriver
 					// [VR] MenuPanelRoom = Freeze: the camera holds the view it had as the screen came up, so the room stays
 					// put in the world behind the panel instead of trailing the head at the game's 30 fps.
 					bool began = false, ended = false;
+					const bool last_fresh = s_last_cam_pose.valid && s_vsync_counter >= s_last_cam_pose_vsync &&
+					                        s_vsync_counter - s_last_cam_pose_vsync <= kLastCamPoseFreshVsyncs;
 					const HeadPose::Snapshot* held = s_room_freeze.Step(true,
 						EmuConfig.VR.MenuPanelRoom == Pcsx2Config::VROptions::MenuPanelRoomMode::Freeze,
-						s_last_cam_pose.valid ? &s_last_cam_pose : nullptr, pose, &began, &ended);
+						last_fresh ? &s_last_cam_pose : nullptr, pose, &began, &ended);
 					LogRoomFreeze(began, ended, pose);
 					drive_camera(true, held);
 				}

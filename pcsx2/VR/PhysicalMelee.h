@@ -422,7 +422,7 @@ namespace VR::PhysicalMelee
 	bool RegionZero(GuestReader reader, u32 lo, u32 hi, u32* busy_addr = nullptr);
 
 	// CPU thread: CameraDriver's whenSetting gate asks, in private co-op, whether the caves may be in: true only while the
-	// last input poll decided CoopFull.
+	// last input poll decided CoopFull, and that poll ran within the last 250 ms (a stale decision counts as false).
 	bool CoopOverrideLive();
 
 	// Decide, RoomMasterSlot and RegionZero on scripted inputs and a scripted memory. Returns the failed checks.

@@ -63,8 +63,14 @@ namespace VR::MeshRaster
 
 		// floor() without the library call (no SSE4.1 to inline it); the argument is within int range or a texture
 		// coordinate that SafeCoord has bounded.
+		// Clamped to +-2^30 first (NaN to the low end), so a corner far outside never overflows the conversion (review a8).
 		int FloorToInt(float f)
 		{
+			constexpr float kLimit = 1073741824.0f;
+			if (!(f > -kLimit))
+				return -(1 << 30);
+			if (f >= kLimit)
+				return 1 << 30;
 			const int i = static_cast<int>(f);
 			return (static_cast<float>(i) > f) ? i - 1 : i;
 		}
@@ -849,7 +855,9 @@ namespace VR::MeshRaster
 			const ScreenVert* pb = &b_in;
 			const ScreenVert* pc = &c_in;
 			// Edge functions are positive inside when the corners run this way round (in sample space, y down).
-			s64 area2 = static_cast<s64>(pb->x - pa->x) * (pc->y - pa->y) - static_cast<s64>(pb->y - pa->y) * (pc->x - pa->x);
+			// Differences in s64 (review a8): corners are clamped to +-2^30, so an s32 difference could overflow.
+			s64 area2 = (static_cast<s64>(pb->x) - pa->x) * (static_cast<s64>(pc->y) - pa->y) -
+			            (static_cast<s64>(pb->y) - pa->y) * (static_cast<s64>(pc->x) - pa->x);
 			if (area2 == 0)
 				return;
 			if (area2 < 0)
@@ -877,9 +885,9 @@ namespace VR::MeshRaster
 			// Edge functions a->b, b->c, c->a at the first sample, and how each changes a sample to the right and down. A
 			// sample exactly on an edge counts only for an edge that is a top or left edge (one that goes up, or goes right
 			// along the top): the rest start a hair outside.
-			const s64 dx0 = b.x - a.x, dy0 = b.y - a.y;
-			const s64 dx1 = c.x - b.x, dy1 = c.y - b.y;
-			const s64 dx2 = a.x - c.x, dy2 = a.y - c.y;
+			const s64 dx0 = static_cast<s64>(b.x) - a.x, dy0 = static_cast<s64>(b.y) - a.y;
+			const s64 dx1 = static_cast<s64>(c.x) - b.x, dy1 = static_cast<s64>(c.y) - b.y;
+			const s64 dx2 = static_cast<s64>(a.x) - c.x, dy2 = static_cast<s64>(a.y) - c.y;
 			const s64 first_x = static_cast<s64>(x0) * kSub + kSub / 2;
 			const s64 first_y = static_cast<s64>(y0) * kSub + kSub / 2;
 			const auto bias = [](s64 dx, s64 dy) -> s64 { return (dy < 0 || (dy == 0 && dx > 0)) ? 0 : -1; };
@@ -1267,7 +1275,11 @@ namespace VR::MeshRaster
 					int count = 3;
 					if ((any & kClipMask) != 0)
 					{
-						const u32 planes = (any & (kNear | kFar)) | (((any >> 6) & 0xFu) << 2);
+						// The guard-band codes are the corners' before any clip: a near (or far) cut can make a corner
+						// outside the guard band that no corner flagged, so with those every guard plane is clipped too
+						// (a plane every corner is inside only copies the polygon; review a8).
+						const u32 planes = (any & (kNear | kFar)) |
+						                   (((any & (kNear | kFar)) != 0) ? 0x3Cu : (((any >> 6) & 0xFu) << 2));
 						PolyVert* other = work_b;
 						for (int plane = 0; plane < 6 && count >= 3; plane++)
 						{
@@ -2298,6 +2310,11 @@ namespace VR::MeshRaster
 
 			Mesh empty;
 			check(!Draw(t, cam, empty, Mat4(), mat), "a mesh with no vertices draws nothing");
+
+			// Review a8: the float-to-int snap is clamped (no overflow), and keeps rounding down below it.
+			check(FloorToInt(3.0e20f) == (1 << 30) && FloorToInt(-3.0e20f) == -(1 << 30) && FloorToInt(quiet_nan) == -(1 << 30) &&
+					  FloorToInt(-1.5f) == -2 && FloorToInt(2.5f) == 2 && FloorToInt(-3.0f) == -3,
+				"the snap to int is clamped to 2^30 and still a floor");
 
 			Geometry gone;
 			gone.Tri(AddPx(gone, h, 100.0f, 4.0f, 5.0f), AddPx(gone, h, 100.0f, 20.0f, 5.0f),

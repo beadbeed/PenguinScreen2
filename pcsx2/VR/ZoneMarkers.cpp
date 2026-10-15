@@ -479,6 +479,9 @@ namespace VR::ZoneMarkers
 				ys[i] = half - p.y * px_per_m;
 				ws[i] = std::clamp(kLineM * p.s * px_per_m, kMinLinePx, kMaxLinePx);
 			}
+			// A corner far off the image (a plane nearly edge-on) is kept for the line's direction, but the pixel bounds are
+			// clamped before the conversion to int (review a8); NaN never reaches here (ProjectOnPlane, Finite).
+			const auto to_px = [](float f) { return static_cast<int>(std::clamp(f, -1.0e6f, 1.0e6f)); };
 			static constexpr float kBoxAlpha[3] = {kRingAlpha, 0.62f, 0.95f};
 			const int glow = std::clamp<int>(marks[0].glow, 0, 2);
 			const float line_alpha = kBoxAlpha[glow];
@@ -493,10 +496,10 @@ namespace VR::ZoneMarkers
 				const int b = edge[1];
 				const float w = 0.5f * (ws[a] + ws[b]);
 				const float reach = w + 1.0f;
-				const int bx0 = std::max(0, static_cast<int>(std::floor(std::min(xs[a], xs[b]) - reach)));
-				const int bx1 = std::min(kSize - 1, static_cast<int>(std::ceil(std::max(xs[a], xs[b]) + reach)));
-				const int by0 = std::max(0, static_cast<int>(std::floor(std::min(ys[a], ys[b]) - reach)));
-				const int by1 = std::min(kSize - 1, static_cast<int>(std::ceil(std::max(ys[a], ys[b]) + reach)));
+				const int bx0 = std::max(0, to_px(std::floor(std::min(xs[a], xs[b]) - reach)));
+				const int bx1 = std::min(kSize - 1, to_px(std::ceil(std::max(xs[a], xs[b]) + reach)));
+				const int by0 = std::max(0, to_px(std::floor(std::min(ys[a], ys[b]) - reach)));
+				const int by1 = std::min(kSize - 1, to_px(std::ceil(std::max(ys[a], ys[b]) + reach)));
 				for (int py = by0; py <= by1; py++)
 				{
 					u32* row = out_rgba.data() + static_cast<size_t>(py) * kImageSize;

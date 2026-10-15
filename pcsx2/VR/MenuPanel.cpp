@@ -41,6 +41,16 @@ namespace VR::MenuPanel
 	namespace
 	{
 		std::atomic_bool s_screen_up{false};
+		// [VR] MenuPanelRoom = Freeze holding the room (PublishRoom; read by the compositor and the GS).
+		std::atomic_bool s_room_frozen{false};
+
+		// What CameraDriver published for the screen, cleared as the GS renderer goes (the VM stopped): with no more vsyncs
+		// nothing would clear it, and the compositor would keep a stale "screen up" or "room frozen" (review a5).
+		void ClearPublished()
+		{
+			s_screen_up.store(false, std::memory_order_release);
+			s_room_frozen.store(false, std::memory_order_release);
+		}
 
 		// The present-time gate (GS thread): a screen up, or one gone fewer than this many vsyncs ago, so frames drawn while
 		// it was up and presented after its flag fell still show without it on the first-person screen.
@@ -939,6 +949,7 @@ void main()
 
 	void Destroy()
 	{
+		ClearPublished();
 		ForgetRooms(true);
 		for (auto& p : s_panel)
 			p.reset();
@@ -975,7 +986,7 @@ void main()
 		return false;
 	}
 	void OnVSync() { s_room_shown = false; }
-	void Destroy() {}
+	void Destroy() { ClearPublished(); }
 #endif
 
 	// --- Calm menus ------------------------------------------------------------------------------------------------------
@@ -983,7 +994,6 @@ void main()
 	{
 		std::atomic<u8> s_room_mode{static_cast<u8>(RoomMode::Live)};
 		std::atomic<float> s_room_brightness{1.0f};
-		std::atomic_bool s_room_frozen{false};
 
 		constexpr float kPi = 3.14159265358979f;
 

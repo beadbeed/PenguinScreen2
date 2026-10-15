@@ -219,7 +219,8 @@ namespace VR::CameraDriver
 	// since the recenter. With yaw_sign -1 the map is a reflection (the game's yaw grows the other way); the inverse still
 	// holds. The map follows the character: it changes as the character walks and as the base yaw turns, so a game point
 	// is only as old as the latest publish (GetMapping is false once that is over 250 ms old, which is also every vsync
-	// the camera is not driven: disarmed, a menu up, a cutscene).
+	// the camera is not driven: disarmed, a cutscene, a menu up without [VR] MenuPanel; with it the camera keeps being
+	// driven, camera only, under a game screen).
 	struct Mapping
 	{
 		bool valid = false;            // numbers usable: finite, units_per_meter non-zero, a recenter reference taken

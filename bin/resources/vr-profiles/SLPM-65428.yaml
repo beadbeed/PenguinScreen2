@@ -267,6 +267,10 @@ SLPM-65428:
       # back on disarm. The arrival shot runs during the room load, while first person is off (status 3), so a silence
       # entry would already be put back by then: keepThroughDisarm keeps it patched, armed or not, and puts it back as
       # soon as the switch goes off, the network adapter comes on, first person is turned off, or the overlay changes.
+      # "First person is turned off" means the switches (VR or HeadCamera off, or split screen), not the armed state:
+      # with the switches on, every arrival shot FUN_00550220 starts is skipped, also for a room entered while first
+      # person is disarmed (a cutscene arrival, a scripted shot), and FUN_00550220 is not proven door-only, so any other
+      # arrival shot it runs is skipped too (nightly review m7 / b7: documented, not tightened).
       - { address: 0x5914FC, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_00591160, local player
       - { address: 0x5916F0, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_00591160, local player
       - { address: 0x591804, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_00591160, local player

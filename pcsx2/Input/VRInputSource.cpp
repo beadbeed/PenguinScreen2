@@ -615,6 +615,7 @@ void VRInputSource::BuildInstance(Instance& in) const
 	in.ever_emitted = false;
 	in.held_through_gap = {};
 	in.reload_latched = {};
+	in.raise_latched = {};
 }
 
 // The reload (VR::ReloadDriver) on this instance, if it sits on the reload's pad: while a reload runs every control bound
@@ -635,8 +636,13 @@ void VRInputSource::ApplyReload(Instance& in, SC::ControlValues& values, const V
 		const std::string& target = in.spec.bind[k].target;
 		if (target == VR::ReloadDriver::kRaiseButton)
 		{
-			if (reload.suppress_raise)
-				values[i] = 0.0f;
+			// Held back while a reload runs; after one that ended on a screen (or with first person gone) a press held
+			// through stays back until let go (review a1); a fresh bumper press under the hold-back ends the reload (a4).
+			bool fresh = false;
+			values[i] = VR::ReloadDriver::RaiseButton(values[i], reload.suppress_raise, reload.raise_release_first,
+				in.raise_latched[i], &fresh);
+			if (fresh && in.kind == SC::DeviceKind::Gamepad)
+				VR::ReloadDriver::NoteRaisePressed();
 		}
 		else if (in.kind == SC::DeviceKind::Gamepad && !reload.reload_button.empty() && target == reload.reload_button)
 		{
