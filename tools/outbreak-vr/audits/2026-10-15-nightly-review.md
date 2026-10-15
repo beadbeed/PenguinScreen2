@@ -364,3 +364,43 @@ was running):**
   resize or Shutdown, because it runs inside copy paths.
 
 **Still open:** addendum 3's m8, m9, m11, m12. None was refuted.
+
+## Fixed on `minorsB` (2026-10-15)
+
+Each item was checked against the code first; none was refuted. Built locally (`build-minorsB`, no LTO), 41 of 41
+self-tests passed. No null-headset run: `null_driver.py` closes SteamVR with `taskkill /IM`, and the time was short.
+With the defaults (DepthLayer and DepthWarp off) only m12's success path (an empty per-thread list) and m11's order
+run every frame.
+
+- **m12** (da4c83e). Confirmed: a wait on a kept acquire that failed with anything but a timeout was retried every
+  frame for the session. `WaitDropsAcquire`: `XR_ERROR_CALL_ORDER_INVALID` (the runtime holds no image acquired and
+  not waited) drops the acquire at once. Any other failure drops it after 30 in a row (a lost session or a destroyed
+  handle is the loss teardown's). The next frame acquires again. Used by the eye, depth, lever, hand, panel, HUD,
+  zone, pacer-copy and warp chains; the edge fill already turns itself off. The acquire side is unchanged: a failed
+  acquire leaves nothing to clear. Static only: no runtime gives these errors on demand.
+- **m9** (97b3701). Confirmed: `copy_w = min(sw, W - dx)` went negative for `dx >= W`, and the u32 sums in
+  `DepthExport::Export` wrapped back into range and passed. Now an empty frame, or an offset at or past the merged
+  image's edge, is refused before the subtraction. The panel path refuses an empty frame. `Export` checks its
+  rectangles in 64 bits. Static only.
+- **m7, the rest** (f296fc3). `DepthLayerOff` from `EnsureSwapchains` (eye 1's depth chain failing) left eye 0's
+  alive. `EnsureSwapchains` now destroys the depth chains whenever the layer is off. It runs at the start of a
+  present's copy, before anything is acquired for that present. `DestroyDepthChains` is shared with
+  `YieldDepthLayerSwapchains`: the GS's copies are waited for first, and `DestroySwapchainSynced` drops a deferred
+  publish. Static only (DepthLayer not run).
+- **a6** (8075fac), partly.
+  - Confirmed: a `CreateRenderTarget` that failed was retried at every draw the tracker asked at. It is now logged
+    once and not tried again for 60 vsyncs.
+  - Kept: the snapshot after the room with no screen up. It is at most one GPU copy per frame (a clear or backdrop
+    snapshot ends the asking for that frame). It is what lets a screen's first frames split before its flag reaches
+    the GS (the tracker self-test asserts it).
+  - The cheap retry when the colour target was not found is kept too (the self-test asserts it).
+- **m8** (95b58eb). Confirmed: with the depth layer, `BuildSubmitArray` dropped every Screen quad after the first per
+  eye (also in its fallback), so `make_split_layer`'s split-screen viewports were lost. The projection is now made
+  only with at most one Screen quad per eye; otherwise the quads go as quads, without depth. Static only.
+- **m11** (8925698). Confirmed only in part:
+  - The backdrop skip returned before `IsBadFrame`, so the skipdraw countdown (`m_skip` / `m_skip_offset`) and a
+    CRC hack missed that draw. The skip is now taken right after `IsBadFrame`.
+  - No other bookkeeping is missed. A draw that is not rendered writes no target, so nothing needs invalidating, as
+    with `IsBadFrame`'s own skip.
+
+**Still open from addendum 3:** none of m7-m12. The a6 per-frame snapshot with no screen up stays by design (above).
