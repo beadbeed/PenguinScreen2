@@ -441,6 +441,7 @@ namespace
 	};
 	ContactCaveRun s_contact_run;
 	bool s_contact_spawn_ok = true; // the stub appends a node (else the game refused: no weapon object)
+	bool s_contact_clear_mid_call = false; // the host clears the block while the spawn runs (a vsync inside it, review d8)
 	struct CaveECall
 	{
 		bool called = false;
@@ -475,6 +476,9 @@ namespace
 				ee.Store32(kObject + 0x28, ee.r[4]);
 				ee.Store32(kObject + 0x10, 0xFFFF0000u); // +0x12 life -1, as the game leaves it
 			}
+			if (s_contact_clear_mid_call)
+				for (u32 off = 0; off < 0x90u; off += 4)
+					ee.Store32(kBlock + off, 0);
 			for (int k : {1, 2, 3, 8, 9, 10, 11, 12, 13})
 				ee.r[k] = 0xDEAD0000u + static_cast<u32>(k); // the callee may clobber any temporary
 			*next = ee.r[31];
@@ -565,6 +569,8 @@ namespace
 		bool spawn_ok = true;
 		u32 named = kLocalRecord; // block +0x08
 		u8 focus = 0;             // u8 0x3AEF74
+		u32 window = 6;           // block +0x18
+		bool clear_mid_call = false;
 	};
 	struct CaveDResult
 	{
@@ -583,6 +589,7 @@ namespace
 			return res;
 		s_contact_run = {};
 		s_contact_spawn_ok = c.spawn_ok;
+		s_contact_clear_mid_call = c.clear_mid_call;
 		ee.Store32(kBlock, c.magic ? 0x4D454C31u : 0u);
 		ee.Store8(kBlock + 0x04, c.stamp);
 		ee.Store32(kBlock + 0x08, c.named);
@@ -590,7 +597,7 @@ namespace
 		ee.Store32(kBlock + 0x0C, c.seq);
 		ee.Store32(kBlock + 0x10, c.served);
 		ee.Store32(kBlock + 0x14, c.live_obj);
-		ee.Store32(kBlock + 0x18, 6);
+		ee.Store32(kBlock + 0x18, c.window);
 		ee.Store32(kBlock + 0x20, c.left);
 		ee.Store8(kBlock + 0x28, c.strike_stamp);
 		ee.Store8(0x48BF93, c.counter);
@@ -942,6 +949,22 @@ namespace
 			check(r.ok && r.spawned && r.obj == 0 && r.left == 0 && r.made == 0);
 		}
 		{
+			// Review d8: the host clears the block while the spawn runs (a vsync inside FUN_005521B0). The object still
+			// gets the window saved before the call (it dies by itself, not life 0, which would never reach 0 again), and
+			// nothing is noted in the cleared block.
+			CaveDCase c;
+			c.clear_mid_call = true;
+			CaveDResult r = RunCaveD(c);
+			check(r.ok && r.spawned && r.life == 6 && r.obj == 0 && r.left == 0 && r.made == 0 && r.served == 0);
+			c = CaveDCase{};
+			c.window = 0; // a zero window: the game's own life (-1, until ended) stays, nothing noted
+			r = RunCaveD(c);
+			check(r.ok && r.spawned && r.life == 0xFFFF && r.obj == 0 && r.left == 0 && r.made == 0);
+			c.window = 9; // the window is the block's, read before the call
+			r = RunCaveD(c);
+			check(r.ok && r.spawned && r.life == 9 && r.obj == kObject && r.left == 9 && r.made == 1);
+		}
+		{
 			// Review d1: a fresh request for a record that is not the camera focus (u8 0x3AEF74): nothing spawned, served
 			// or counted down, no byte of memory changed, on to cave F and the game's hit test as unarmed.
 			CaveDCase c;
@@ -1236,7 +1259,7 @@ int main(int argc, char* argv[])
 			if (!sil.offline_only || sil.keep_through_disarm || sil.when.empty())
 				return false;
 			const u32 a = sil.ee_address;
-			if (a >= 0xFE200u && a < 0xFE370u)
+			if (a >= 0xFE200u && a < 0xFE394u)
 				cave_d++;
 			else if (a >= 0xFE400u && a < 0xFE470u)
 				cave_e++;
