@@ -11,6 +11,7 @@
 #include "VR/VRProfileDB.h"
 #include "VR/XRCompositor.h"
 
+#include "Config.h"
 #include "Input/VRInputSource.h"
 #include "Memory.h"
 #include "MemoryTypes.h"
@@ -419,7 +420,8 @@ namespace VR::BeltPouches
 		{
 			const std::string serial = VMManager::GetDiscSerial();
 			profile = serial.empty() ? nullptr : ProfileDB::Lookup(serial, VMManager::GetDiscCRC());
-			if (profile && (!profile->pouches.has_value() || profile->pouches->list.empty()))
+			// [VR] BeltPouches (off by default) gates the whole rig: off, no pouch is placed, ticked or drawn.
+			if (profile && (!EmuConfig.VR.BeltPouches || !profile->pouches.has_value() || profile->pouches->list.empty()))
 				profile = nullptr;
 		}
 		const ProfileDB::PouchParams* params = profile ? &profile->pouches.value() : nullptr;

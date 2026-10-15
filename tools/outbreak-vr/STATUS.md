@@ -218,6 +218,7 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 | `ZoneMarkers` | true | false: no holstered weapon or zone markers |
 | `GameWeaponModels` | true | false: the procedural glove and placeholder weapon shapes as before. True: both hands are the CC0 hand model and the weapon in the hand, holster and sling is the game's own model, at its real size, placed where the game attaches it to the hand (`feedback.weapon.hold`); a weapon without a model or a known grip keeps the placeholder (logged once). Branch `handmodels`; `research/2026-10-14-weapon-models-in-hand.md` |
 | `PickupCue` | true | false: no pickup tick or name |
+| `BeltPouches` | false | true: the chest-rig pouches and the buckle (reach in to name an item, squeeze to open the item screen at that cell) and their rings. Off since Alex's 2026-10-14 session: grab things through the item screen |
 | `ReloadGesture` | true | false: no reload gesture (the hip squeeze opens the item screen even with the gun raised; L1 by hand still reloads) |
 | `HandTargeting` | false | true: File #1 offline only, a read-only prototype: the right hand against the J's Bar Handgun's trigger volume (a wireframe box, one tick on entering it, `Hand targeting:` lines in the emulog); nothing is written to the game. Its trigger and distances are the File #1 profile's `reach.hand` |
 | `DedicatedXrQueue` | false | true: the OpenXR session gets its own Vulkan queue. The emulog says `(VR) XR queue: dedicated` or `shared with the GS (why)`. |

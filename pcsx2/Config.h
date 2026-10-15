@@ -1354,6 +1354,9 @@ struct Pcsx2Config
 		// (and the button, "Kevin's 45 Auto  (A)") when something on the floor comes within reach of the character's own
 		// Circle press. Only reads the game's memory; shown in the headset only. Ini only for now.
 		bool PickupCue = true;
+		// The belt pouches (chest rig + buckle, BeltPouches): off since Alex's 2026-10-14 headset session ("the little
+		// circular quick slots... maybe just stick to the inventory"); the item screen stays the way to grab things.
+		bool BeltPouches = false;
 		// First person, File #1 offline only (not online, not private co-op): a read-only prototype of reaching for the
 		// J's Bar Handgun with the right hand. It maps the hand's position into the game's coordinates, tests it against
 		// the Handgun's trigger volume (the one the pickup cue's list walk reads), draws that volume as a wireframe box

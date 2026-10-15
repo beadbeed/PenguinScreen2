@@ -159,7 +159,7 @@ SLPM-65428:
       - { node: 0x720D40, index: 2, x: 498, y: 160, rect: [0.807, 0.307, 0.895, 0.430], up: 0, right: 3, down: 4 }   # cell 2
       - { node: 0x720DD8, index: 3, x: 550, y: 160, rect: [0.895, 0.307, 0.982, 0.430], up: 1, left: 2, down: 4 }    # cell 3
       - { node: 0x722928, index: 0, x: 550, y: 216, rect: [0.888, 0.456, 0.979, 0.581], up: 2 }                      # equipped box
-  # Belt pouches (VR only, first person), Dungeons of Eternity style: five pouches on your body, the four on your chest
+  # Belt pouches ([VR] BeltPouches, off by default since 2026-10-14), Dungeons of Eternity style: five pouches on your body, the four on your chest
   # laid out like the item screen's 2 x 2 grid and the equipped box at your belt buckle. Reach a hand into one and it
   # ticks: once and lightly for an empty cell, twice and firmer while the cell holds an item (the local record's item
   # byte +0xC84 + k for cell k, 0 = empty; the equipped box shows the special item, Kevin's .45 whether or not it is
