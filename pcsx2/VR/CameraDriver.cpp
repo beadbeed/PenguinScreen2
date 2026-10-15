@@ -3646,8 +3646,6 @@ namespace VR::CameraDriver
 		const ProfileDB::CameraProfile& cam = profile->camera.value();
 		SampleLocalSlot(cam, crc, vm_state == VMState::Running);
 		SyncSilenceProfile(&cam, crc, vm_state == VMState::Running);
-		if (vm_state == VMState::Running)
-			ApplyKeptSilence(cam, crc, switched_on);
 
 		// The env fake head first, then a scripted head from PINE test input, then the headset. The test
 		// head also reaches the input snapshot, so the zones and SpatialControls::HeadAnchor see it too.
@@ -3697,6 +3695,9 @@ namespace VR::CameraDriver
 		}
 		s_online_safe = OnlineSafeNow(); // again, now that private co-op is known
 		const bool net_ok = (net_mode != NetMode::Restricted);
+		// The kept patches (keepThroughDisarm) after the net mode is this vsync's, as their gate reads it (review b5).
+		if (vm_state == VMState::Running)
+			ApplyKeptSilence(cam, crc, switched_on);
 		// Breaking free of a grab: read from the local record whether first person is armed or not (a grab hands the
 		// camera back; the 3D screen without the head-tracked camera counts too), only in VR off split-screen (the VR
 		// controllers do the pressing), only while the game runs, and never on obsrv (first person's network rule: the
