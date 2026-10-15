@@ -210,6 +210,11 @@ namespace VR::ReloadDriver
 	// ends the attempt (Result::Raised). CPU thread.
 	void NoteRaisePressed();
 
+	// A savestate was loaded (GameFeedback::OnStateLoaded; offline only): an attempt in flight belongs to the old scene, so
+	// it lets go at once (L1 up, R1 back release-first after the gap), and the gesture and the stance start over. CPU
+	// thread (review a3).
+	void OnStateLoaded();
+
 	// CPU thread, every input poll, before BeltPouches::Poll and before the controls compose. hands: the snapshot's
 	// (SpatialControls::HandsFromSnapshot); reader reads guest memory (null: main RAM); dt in seconds. Steps the gesture and
 	// the driver, plays their haptics and toasts, writes their log lines.

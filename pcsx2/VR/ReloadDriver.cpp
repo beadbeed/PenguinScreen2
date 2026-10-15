@@ -1271,6 +1271,22 @@ namespace VR::ReloadDriver
 		s_raise_pressed = true;
 	}
 
+	void OnStateLoaded()
+	{
+		// An attempt in flight lets go as an end into a screen does: L1 up now, R1 back after the gap and release-first.
+		if (s_driver.phase == Phase::Lowering || s_driver.phase == Phase::Holding)
+		{
+			Console.WriteLn("(VR) Reload: stopped, a savestate was loaded (gesture).");
+			s_driver.phase = Phase::Releasing;
+			s_driver.phase_s = 0.0f;
+			s_driver.release_first = true;
+		}
+		s_raise_pressed = false;
+		s_gesture.Reset();
+		s_gesture_phase = ReloadGesture::Phase::Idle;
+		s_stance = StanceHold{};
+	}
+
 	bool Reloading()
 	{
 		const u64 ms = s_reloading_ms.load(std::memory_order_acquire);
