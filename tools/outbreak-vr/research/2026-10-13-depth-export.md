@@ -214,12 +214,33 @@ Assumed or not checked:
   - the Handgun on the counter top (about 1.05 m) moves -14 px;
   - the hanging lamp and the beer taps move against the back wall;
   - a per-pixel scatter would leave 4.6% holes, which the mesh stretches over instead.
-- **Not checked:** the GPU pass in a session. Both null-headset launches failed inside SteamVR before any frame
-  (`xrGetVulkanGraphicsDevice2KHR`: `XR_ERROR_RUNTIME_FAILURE`; xrclient: "failed to find VkPhysicalDevice matching
-  adapter UUID"). The emulator ran flat. The settings were restored (`null_driver.py off`, `forcedDriver` gone) and no
-  SteamVR process was left. So the GPU pass, the change of swapchain owner and the timing are built, not run.
-- **GPU cost:** the timestamps are in place (the `(VR) Warp:` line). Estimated well under the 1.5 ms target: two eyes of
-  98k vertices with 9 depth reads each, and 2 x 2 Mpx of fill. To be measured.
+- **Null-headset checked** (SteamVR 2.17.10, null HMD, SteamVR started before the emulator: launched first, the
+  emulator only after `vrserver` and `vrcompositor` were up; two failed launches before that, see below):
+  - the pacer takes both eye swapchains (`the pacer draws into an eye swapchain`, at 1920x1344 then 1536x1344 after the
+    frame-size change, which re-made the ring);
+  - the pass runs every submitted display frame: 300 frames warped every 5 s at a steady 60/s submit, no pass busy, no
+    image not back, `Frames` lines as with the switch off;
+  - the swapchains go from warped to undisplaced and back as the depth comes and goes (`no depth with this frame`, `not
+    the first-person screen`), with no black or frozen frame in the log or the dumps;
+  - **GPU time per display frame, both eyes:** 0.06-0.08 ms mean warped, 0.16-0.35 ms undisplaced (full-screen fill
+    with no depth-test rejects). The 5 s maxima were 0.19-1.29 ms, and one 5.1 ms spike in the window of the dump
+    readback;
+  - **`PCSX2_VR_DEPTHWARP_TEST_SHIFT=0.10`:** the dumped left-eye pair, block-matched source against warped. The
+    null HMD's view is rolled 180 deg, so "right" is -x in the quad and the expected signs flip. Results:
+    - the back room (neon sign) -26 px (expected -25.6 at 7.3 m);
+    - the counter front panel +29 px (expected +30.6 at 0.77 m);
+    - the counter top with the Handgun +24 px;
+    - the hanging lamp +23 px;
+    - no black added: 2.95% near-black in the warped image against 3.01% in the source (the game's own dark areas);
+    - nothing torn on inspection.
+  - **Switch off:** `(VR) Depth warp: off`, no depth export, the eye swapchains made and filled by the GS thread exactly
+    as before (no warp lines), the same `Frames` line.
+  - **The failed launches:** with SteamVR started by the OpenXR loader, both launches failed in
+    `xrGetVulkanGraphicsDevice2KHR` ("failed to find VkPhysicalDevice matching adapter UUID") and ran flat. The first
+    successful launch also found a bug: the pacer never picked an empty target for the first eye, so the Screen entries
+    were dropped (a black screen). That is fixed in `WarpTargetFor`.
+  - **Restored afterwards:** `null_driver.py off`, `forcedDriver` gone, SteamVR's processes closed.
+- **GPU cost:** measured as above, far under the 1.5 ms target.
 
 **Limits:**
 - HUD sprites and translucent effects without depth move with the surface behind them.

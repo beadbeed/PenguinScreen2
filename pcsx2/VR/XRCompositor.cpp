@@ -8804,14 +8804,17 @@ namespace VR::XRCompositor
 			for (WarpTarget& t : wp.target)
 				if (t.swapchain == sc && t.width == w && t.height == h)
 					return &t;
+			// The one already on sc (made again at a new size), else an empty one, else any not holding the other eye's.
 			WarpTarget* t = nullptr;
 			for (WarpTarget& c : wp.target)
-			{
-				if (c.swapchain == sc || (c.swapchain != keep && (!t || c.swapchain == XR_NULL_HANDLE)))
-					t = &c;
 				if (c.swapchain == sc)
-					break;
-			}
+					t = &c;
+			for (WarpTarget& c : wp.target)
+				if (!t && c.swapchain == XR_NULL_HANDLE)
+					t = &c;
+			for (WarpTarget& c : wp.target)
+				if (!t && (keep == XR_NULL_HANDLE || c.swapchain != keep))
+					t = &c;
 			if (!t)
 				return nullptr;
 			const Internal::VulkanHandles& hd = Internal::GetVulkanHandles();
