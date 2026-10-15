@@ -177,7 +177,7 @@ namespace
 	}
 
 	// [VR] PhysicalMelee's caves, run as the EE would run them: the File #1 profile's camera.silence words in a small
-	// interpreter of just the instructions they use (lui, ori, addiu, sltiu, sll, addu, subu, lw, lbu, sw, sh, sb, sd, lwc1, swc1, mul.s,
+	// interpreter of just the instructions they use (lui, ori, addiu, sltiu, sll, addu, subu, and, xor, sltu, lw, lh, lbu, sw, sh, sb, sd, lwc1, swc1, mul.s,
 	// beq, bne, bgez, bgtz, blez, j, jal, jr, with delay slots; the FPU loads and stores only move bits). A stub stands in
 	// for game code the caves call or jump to: Run asks it where control goes on from an address outside the cave.
 	struct MiniEE
@@ -238,6 +238,12 @@ namespace
 						r[rd] = r[rs] + r[rt];
 					else if (fn == 0x23)
 						r[rd] = r[rs] - r[rt];
+					else if (fn == 0x24)
+						r[rd] = r[rs] & r[rt];
+					else if (fn == 0x26)
+						r[rd] = r[rs] ^ r[rt];
+					else if (fn == 0x2B)
+						r[rd] = r[rs] < r[rt] ? 1u : 0u;
 					else if (fn == 0x08)
 					{
 						*branch = *taken = true;
@@ -455,6 +461,7 @@ namespace
 	};
 	std::vector<CaveFCall> s_cave_f_calls; // cave F's calls into the game, in order
 	u32 s_cave_f_filter = 0;               // what the filter FUN_006337C0 answers (1: the game would not send)
+	u32 s_cave_f_sender_or = 0;            // other +0xBA0 bits the sender (or the game under it) sets (review d12)
 	int s_hit_tests = 0;                   // how often the frame's hit test FUN_005A9DB0 ran
 	struct HitNotice
 	{
@@ -515,7 +522,7 @@ namespace
 			s_cave_f_calls.push_back(c);
 			if (pc == 0x64C620)
 			{
-				ee.Store32(ee.r[4] + 0xBA0, ee.Load32(ee.r[4] + 0xBA0) | 0x08000000u); // the sender's own +0xBA0 bit 27
+				ee.Store32(ee.r[4] + 0xBA0, ee.Load32(ee.r[4] + 0xBA0) | 0x08000000u | s_cave_f_sender_or); // the sender's own +0xBA0 bit 27
 				ee.Store16(0x23BF0C, static_cast<u16>(ee.r[5]));                       // and its last-type mark
 			}
 			ee.r[2] = pc == 0x6337C0 ? s_cave_f_filter : 0u;
@@ -845,6 +852,16 @@ namespace
 			check(r.ok && r.calls.size() == 1 && r.calls[0].pc == 0x64C620 && r.calls[0].a1 == 1 &&
 				  r.calls[0].action == 0x00000302u && r.calls[0].last_type == 0 && r.action == real && r.ba0 == 0x100u &&
 				  r.last_type == 0x0007 && r.left == 30 && r.sends == 1);
+			// Review d12: only what the swing's message changed is put back. A +0xBA0 bit set under the call stays; bit 27
+			// (the sender's) is this console's again, set or clear.
+			s_cave_f_sender_or = 0x00000001u;
+			r = RunCaveF(c);
+			check(r.ok && r.calls.size() == 1 && r.action == real && r.ba0 == 0x101u && r.sends == 1);
+			c.ba0 = 0x08000100u;
+			r = RunCaveF(c);
+			check(r.ok && r.calls.size() == 1 && r.action == real && r.ba0 == 0x08000101u);
+			s_cave_f_sender_or = 0;
+			c.ba0 = 0x00000100u;
 			c.left = 12; // a swing still showing: no second one
 			r = RunCaveF(c);
 			check(r.ok && r.calls.empty() && r.left == 11);
@@ -1267,7 +1284,7 @@ int main(int argc, char* argv[])
 				cave_d++;
 			else if (a >= 0xFE400u && a < 0xFE470u)
 				cave_e++;
-			else if (a >= 0xFE500u && a < 0xFE7C8u)
+			else if (a >= 0xFE500u && a < 0xFE7DCu)
 				cave_f++;
 			else if ((a == 0x5CDF64u && sil.value_off == 0x0C16A76Cu && sil.value_on == 0x0C03F880u) ||
 					 (a == 0x636990u && sil.value_off == 0x27BDFFD0u && sil.value_on == 0x0803F900u) ||
