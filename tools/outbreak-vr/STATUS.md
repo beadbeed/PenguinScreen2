@@ -176,6 +176,11 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
    s. If it happens, note when.
 2. **A/B the smoothness fixes** once they're in: first `DedicatedXrQueue = true`, then that plus `PacerCopies = true`. Run
    `session_report.py --session` after each.
+2b. **Physical melee** (`melee` build, `PhysicalMelee = true`, offline): equip a melee weapon yourself (the iron pipe or the
+   scrub brush in J's Bar; the tools never confirm a menu), raise it (bumper or holster grip), and swing at a zombie
+   (slot 5). Does a swing attack every time, and never on a small move? Does the hit land where the pipe in your hand
+   meets the zombie (and miss when it does not)? Are the tick and the contact buzz clear? Try a lowered swing too (it
+   raises the weapon first, 0.6 s). Send the emulog (`(VR) Melee:` lines; `PCSX2_VR_MELEE_LOG=1` for more).
 3. **Hand targeting** (`HandTargeting = true`, slot 7, at the counter): does the wireframe box sit on the pistol, and do you
    get one tick when your right hand enters it?
 3b. **Depth layer** (`DepthLayer = true`): lean toward the counter, then again with `PCSX2_VR_DEPTHLAYER_NODEPTH=1` set.
@@ -217,9 +222,27 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 | `PacerCopies` | false | true (with `DedicatedXrQueue` in effect): the VR pacer copies the frame, hands and cards into the headset's swapchains itself, so the GS thread never calls into the runtime or waits for its queue lock; the frame shows about one GS frame later (`PCSX2_VR_PACER_COPIES_FLUSH=1` takes that back with one more GS submit); the emulog says `(VR) Pacer copies: on` or why it stays off |
 | `MenuPanel` | false | true: a game screen (the profile's `camera.lookAt.pauseWhen`, File #1's u32 `0x720AA0`: item screen, map, pause, take-it prompts) keeps first person: the camera alone follows the head (no stick turn, aim or body-follow; the sticks and buttons are the menu's as before), the room keeps rendering in stereo, and the screen's own draws go on a flat panel 1.0 m ahead (0.80 m tall, placed where you look as it comes up), where the menu pointer aims. The screens' full-frame tint is left out. While a screen is up the desktop window shows the room without it, and the depth layer sends quads. Needs `PacerCopies` off (else screens pull away as before). The emulog says `(VR) Menu panel: on`, `shown ...` / `hidden`, or why not |
 | `SeamlessDoors` | false | true: File #1, strictly offline (no network adapter, so not private co-op either): a door you open yourself plays no door shot and no arrival shot (camera mode `0x3AEF75` stays 0), so first person holds while your character opens the door, drops only for the black fade and load, and comes back as soon as you are in the next room. The door, locks, keys, door state, the load and partners are unchanged. Profile `camera.silence` entries with `whenSetting: SeamlessDoors` (the arrival ones `keepThroughDisarm`); branch `doors`; `research/2026-10-14-doors.md` |
+| `PhysicalMelee` | false | true: File #1, strictly offline (no network adapter, so not private co-op either): with a melee weapon equipped, a deliberate swing of the right controller (a point 40 cm up the handle faster than 2.2 m/s over 20 cm of a stroke that goes somewhere) presses Circle on your own pad (R1 first if the weapon is down: 0.6 s later), and a code cave puts the game's own melee hit test (a capsule along a pipe, a sphere on a knife) on the VR weapon, where your hand holds it; the game's damage, stagger and hit reaction follow. The hit window opens 33 ms after the press (spawn frames moved to 2). A tick when the swing goes live, a buzz when an enemy's HP drops. Nothing with a screen up, grabbed or hurt. Profile `melee` block and `camera.silence` entries with `whenSetting: PhysicalMelee`; branch `melee`; `research/2026-10-14-melee.md`. `PCSX2_VR_MELEE_LOG=1` logs why a swing does or does not attack |
 | `DepthLayer` | false | true: in first person the frame goes to SteamVR as one projection layer at its render pose with its depth (`XR_KHR_composition_layer_depth`, a D32 depth swapchain per eye), for the runtime's own reprojection; false = the two screen quads, and no depth swapchain or copy at all. Needs `PacerCopies` off. The emulog says `(VR) Depth layer: on` or why it stays off; `PCSX2_VR_DEPTHLAYER_NODEPTH=1` sends the projection layer without the depth (an A/B) |
 
 ## In progress
+
+**Physical melee (`melee`, from `handmodels`), checked offline headset-free on 2026-10-14**
+(`research/2026-10-14-melee.md`; road step 4):
+- **How the game swings:** Circle with the weapon raised starts sub-action 3; the swing's motion (pipe 596, brush and
+  spear 602, knife 265) spawns an attack object at one frame and ends it at another; the object copies the weapon
+  object's world matrix every frame and the game tests a capsule (pipe: 100 cm along the model's X, r 30 cm) or a sphere
+  (knife, r 30 cm) on it against the enemies (`0x3FFCA0`, 0xD90 a slot, s16 HP `+0x544`), stages the damage in `+0x138`
+  and `FUN_0060F0C0` applies it. Bullets go the same way (a 10 m ray from the muzzle).
+- **The override:** two caves at `0xFE000` (free RAM) and five patched words make the local player's attack object copy
+  the VR weapon's pose (written by the host at `0xFF000` each input poll, stamped against the game's frame counter)
+  instead. Checked offline over PINE and then in the build: with the volume 3 m off the zombie the same swing misses, on
+  it a zombie 2 m out of Kevin's reach is hit; a scripted VR swing presses Circle, the game swings 33 ms later, its attack
+  object sits on the VR weapon, the zombie loses 60 + 10 HP and staggers, the contact is logged; switch off: nothing
+  patched or pressed.
+- **Caveat:** no savestate has a melee weapon equipped and equipping needs a menu confirm, so every live run poked the
+  equip (a floor pipe's record, borrowing the held 45's object). Alex has to try a real one.
+- **Self-tests:** the detector, the driver, the game matrix, the profile parser and the File #1 entries: 30 of 30 suites.
 
 **Game weapon models in the hand (`handmodels`, from `playtest`), checked offline headset-free on 2026-10-14**
 (`research/2026-10-14-weapon-models-in-hand.md`):

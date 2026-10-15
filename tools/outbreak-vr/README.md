@@ -382,6 +382,26 @@ Logs: `(VR) Reload gesture: on (magazine at the left hip; L1 with the weapon low
 driver self-test: passed.` (the lowering, L1 hold and stop rules and R1 coming back after L1, against a fake File #1
 and File #2, plus the stance hysteresis and the release-first latch).
 
+Physical melee (VR setting `PhysicalMelee`, off by default, ini only; File #1's profile `melee` block and its
+`camera.silence` entries with `whenSetting: PhysicalMelee`; `VR/PhysicalMelee.cpp`, polled from
+`VRInputSource::PollEvents` after the reload; research `2026-10-14-melee.md`). Strictly offline (no network adapter,
+not online-safe), first person armed, a melee weapon equipped (the local record's equipped item record, ItemData
+`Melee`), stance normal or raised, no game screen: the right controller's point `tip` (0.40 m) up the handle is tracked;
+a stroke starts above `speed` (2.2 m/s, smoothed over 25 ms), ends below `rest` (0.8 m/s) for 80 ms, and counts once,
+when it has travelled `travel` (0.20 m) with its straight-line distance at least `straightness` (0.6) of its path, within
+0.6 s. A count presses Circle for `pressMs` (100 ms) on the VR Gamepad's pad (R1 too, held from the request until the
+swing is over, when the weapon was down; given up after `raiseMs`), waits up to 0.3 s for the game's swing (sub-action
+3), ticks the right hand (0.35, 25 ms) as it starts, and buzzes it (1.0, 90 ms) the first time an enemy's HP drops during
+it or `contactMs` (250 ms) after; the next swing is taken `cooldownMs` (250 ms) after. Every poll it can, it writes the
+VR weapon's matrix in game space (`HandModel::ModelFrame`, the placement the hand draws the model with, mapped point by
+point with `CameraDriver::GameFromVr`) to the block at `0xFF000` with the magic, the local record and the game counter's
+stamp; the caves use it for the local player's attack object while it is at most 6 frames old, and the original copy
+otherwise. Logs: `(VR) Physical melee: on (...)` or `off (why)` once per game, `(VR) Melee: swing at 4.1 m/s (0.21 m of
+stroke); the game's swing started 33 ms later.`, `(VR) Melee: contact, enemy 49 HP 600 -> 540.`, `(VR) Melee: swing not
+made: <why>.`; `PCSX2_VR_MELEE_LOG=1` adds a line twice a second (the gates, the peak speed, the phase, the block).
+`vr_selftests` runs `Physical melee` (the detector on scripted swings, stabs, sweeps, shakes and tracking loss; the
+driver against a fake game; the matrix), `Melee profile parser` and the File #1 entry check.
+
 First-person stereo depth (VR settings `NearDepthMetres`, default 0 = the profile's `stereo.firstPerson.nearest`,
 below 0 off, 0.45-1.5 m overrides; `RollParallax`, on by default; ini only): true stereo depth now reaches in front of
 the screen plane down to `nearest` (1.0 m in both profiles, as you see it, at any strength; it was 0.75 m, and stays
