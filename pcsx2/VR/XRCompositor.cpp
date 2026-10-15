@@ -1325,13 +1325,15 @@ namespace VR::XRCompositor
 			return true;
 		}
 
+		bool WarpOn(); // [VR] DepthWarp, defined with its state
+
 		void DepthLayerOff(const char* why)
 		{
 			if (!s.depth_layer)
 				return;
 			s.depth_layer = false;
 			s.present_depth = FpDepth{};
-			DepthExport::SetCompositorWants(false);
+			DepthExport::SetCompositorWants(WarpOn()); // m10: still wanted while the warp uses it
 			Console.Warning("(VR) Depth layer: off for this session: %s; the first-person screen goes as quads.", why);
 		}
 
@@ -8803,6 +8805,8 @@ namespace VR::XRCompositor
 				{
 					wp.pipe_failed = true;
 					wp.on.store(false, std::memory_order_release);
+					// m10: the depth export is no longer wanted for the warp (still for the depth layer, if that is on).
+					DepthExport::SetCompositorWants(s.depth_layer);
 					Console.Error("(VR) Depth warp: the mesh pass could not be built; off for this session (frames as before).");
 					return false;
 				}
