@@ -3530,7 +3530,7 @@ static std::optional<VR::ProfileDB::BreakoutParams> parseBreakout(const std::str
 static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_view serial, const ryml::ConstNodeRef& node)
 {
 	using VR::ProfileDB::MeleeParams;
-	warnUnknownKeys(serial, node, "melee", {"attackButton", "swing", "enemies", "override", "online", "tip", "speed", "rest", "endMs",
+	warnUnknownKeys(serial, node, "melee", {"attackButton", "screenFlag", "swing", "enemies", "override", "online", "tip", "speed", "rest", "endMs",
 		"travel", "straightness", "strokeMs", "pressMs", "pressMaxMs", "raiseMs", "swingMs", "contactMs", "cooldownMs", "contact",
 		"jolt", "notes"});
 	MeleeParams mp;
@@ -3541,6 +3541,14 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee attackButton is empty; keeping {}.", serial, mp.attack_button);
 		else
 			mp.attack_button.assign(b.data(), b.size());
+	}
+	if (node.has_child("screenFlag"))
+	{
+		const std::optional<u32> a = parseAddress(nodeVal(node["screenFlag"]));
+		if (a.has_value() && inMainRam(a.value(), 1))
+			mp.screen_flag = a.value();
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee screenFlag is not a main-RAM address; ignoring it.", serial);
 	}
 	// Small whole numbers (bytes the game compares, a record offset) in decimal or 0x hex.
 	const auto read_small = [&](const ryml::ConstNodeRef& n, const char* key, u32 hi, u32& dst) {

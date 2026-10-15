@@ -2497,8 +2497,8 @@ namespace VR::PhysicalMelee
 					mp->has_override ? "follows the VR weapon" : "stays on the game's own swing (no melee.override)",
 					mp->enemy_count ? "; a buzz when it lands" : "");
 			else
-				verdict = fmt::format("on online, private co-op (swing to attack with {}; partners see the game's own swing; the "
-									  "hit follows the VR weapon, by contact in PhysicalMeleeMode = Contact, only while this "
+				verdict = fmt::format("on online, private co-op (nothing is pressed online, attack with {} yourself; the "
+									  "hit follows the VR weapon only by contact, PhysicalMeleeMode = Contact, and only while this "
 									  "console runs the room's enemies{}{})",
 					mp->attack_button, mi.has_online ? "" : ", so never: the profile has no melee.online",
 					mp->enemy_count ? "; a buzz when it lands" : "");
@@ -2518,10 +2518,10 @@ namespace VR::PhysicalMelee
 						"");
 			else if (mode == Mode::CoopPress && master >= 0)
 				line = fmt::format("room {}: the console of slot {} runs its enemies (this is slot {}), so the hit is the game's "
-								   "own swing (press only)", room, master, slot);
+								   "own swing (nothing pressed online)", room, master, slot);
 			else if (mode == Mode::CoopPress)
 				line = "no room master is known (the network overlay or its table is not read), so the hit is the game's own "
-				       "swing (press only)";
+				       "swing (nothing pressed online)";
 			if (line != s_mode_line)
 			{
 				s_mode_line = line;
@@ -2574,7 +2574,17 @@ namespace VR::PhysicalMelee
 			aim_idle = raised && sub == mp->sub_idle;
 			swinging = raised && sub == mp->sub_attack;
 		}
-		const bool screen = SpatialControls::MenuMode();
+		// A screen up or opening (never-confirm rule; review d3): MenuMode (pauseWhen 0x720AA0) rises 0.55-0.65 s after the
+		// game opens the item screen or the map, so melee.screenFlag (0x48BF7E, up at once) counts too, and a press
+		// starts only once both have been clear kScreenClearS (screen_block); one in flight lets go as either rises.
+		u32 screen_flag = 0;
+		const bool screen_now = SpatialControls::MenuMode() ||
+		                        (mp && mp->screen_flag.has_value() &&
+		                            (!Read(reader, mp->screen_flag.value(), 1, &screen_flag) || screen_flag != 0));
+		static float s_screen_clear_s = 0.0f;
+		s_screen_clear_s = screen_now ? 0.0f : std::min(s_screen_clear_s + dt, 10.0f);
+		const bool screen = screen_now;
+		const bool screen_block = screen_now || s_screen_clear_s < kScreenClearS;
 		const bool usable = env && melee && (raised || normal);
 
 		// The enemies' HP: a drop since the last poll (read only).
@@ -2640,7 +2650,7 @@ namespace VR::PhysicalMelee
 				for (int k = 0; k < 3; k++)
 					di.tip[k] = pos[k] + r[k];
 			}
-			di.armed = usable && !screen && s_drive.phase == Phase::Idle;
+			di.armed = usable && !screen_block && s_drive.phase == Phase::Idle;
 			dout = Detect(di, mp ? mp->detect : DetectorParams{}, s_detect);
 			if (dout.swing)
 			{
@@ -2652,7 +2662,9 @@ namespace VR::PhysicalMelee
 			ri.dt = dt;
 			ri.request = dout.swing;
 			ri.usable = usable;
-			ri.screen = screen;
+			// Idle takes no request until the screens have been clear kScreenClearS; an attempt in flight ends (Screen) the
+			// moment one rises (screen_block is then true too).
+			ri.screen = screen_block;
 			ri.raised = raised;
 			ri.aim_idle = aim_idle;
 			ri.swinging = swinging;
@@ -2757,8 +2769,10 @@ namespace VR::PhysicalMelee
 
 		frame.pad_port = s_pad_port;
 		frame.attack_button = s_attack_button;
-		frame.hold_attack = o.hold_attack && !screen;
-		frame.hold_raise = o.hold_raise && !screen;
+		// Online nothing is pressed at all (review d3: a partner's take-it prompt can open between two polls, and the
+		// press would confirm it); contact mode as the room's master needs no press.
+		frame.hold_attack = o.hold_attack && !screen_block && mode == Mode::Offline;
+		frame.hold_raise = o.hold_raise && !screen_block && mode == Mode::Offline;
 		return frame;
 	}
 }

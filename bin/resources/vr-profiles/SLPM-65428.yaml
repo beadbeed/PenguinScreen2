@@ -928,6 +928,9 @@ SLPM-65428:
   # must read zero before the caves go in online.
   melee:
     attackButton: Circle
+    # u8 0x48BF7E: up as soon as a screen opens (item screen, map, pause), before pauseWhen's 0x720AA0. No press starts
+    # while it or a game screen is up, or until both have been clear 0.2 s; a press in flight lets go when either rises.
+    screenFlag: 0x48BF7E
     swing: { sub: 0x09, idle: 1, attack: 3, normalStance: 1 }
     enemies: { table: 0x3FFCA0, stride: 0xD90, count: 64, present: 0x00, hp: 0x544 }
     override: { block: 0xFF000, magic: 0x4D454C31, counter: 0x48BF93 }

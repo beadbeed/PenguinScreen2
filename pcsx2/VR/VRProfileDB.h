@@ -787,6 +787,11 @@ namespace VR::ProfileDB
 	struct MeleeParams
 	{
 		std::string attack_button = "Circle";
+		// screenFlag (u8, File #1 0x48BF7E): non-zero as soon as the game opens a screen (the item screen, the map, pause),
+		// 0.55-0.65 s before camera.lookAt.pauseWhen (0x720AA0) rises. No press starts while it or MenuMode is up or until
+		// both have been clear kScreenClearS, and a press in flight lets go the moment either rises (never-confirm rule;
+		// review d3).
+		std::optional<u32> screen_flag;
 		u32 sub_offset = 0x09;  // the local record's sub-action byte
 		u32 sub_idle = 1;       // ... aim idle (with the stance raised)
 		u32 sub_attack = 3;     // ... the melee swing
