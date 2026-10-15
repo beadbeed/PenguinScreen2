@@ -2938,6 +2938,9 @@ void GSRendererHW::RoundSpriteOffset()
 void GSRendererHW::Draw()
 {
 	static u32 num_skipped_channel_shuffle_draws = 0;
+#ifdef ENABLE_VR
+	bool vr_skip = false;
+#endif
 
 	const GSDrawingContext* context = m_context;
 	m_cached_ctx.TEX0 = context->TEX0;
@@ -3017,9 +3020,9 @@ void GSRendererHW::Draw()
 			}
 		}
 		// A game screen's backdrop tint over the whole frame: left out while the split is on (the room is shown
-		// untinted around the panel, and on the panel the tint would cover every pixel).
-		if (VR::MenuPanel::SkipDraw())
-			return;
+		// untinted around the panel, and on the panel the tint would cover every pixel). m11: left out after
+		// IsBadFrame, so the skipdraw hacks' draw count (m_skip) and the game's CRC hack still see the draw.
+		vr_skip = VR::MenuPanel::SkipDraw();
 	}
 #endif
 
@@ -3028,6 +3031,13 @@ void GSRendererHW::Draw()
 		GL_INS("HW: Warning skipping a draw call (%lld)", s_n);
 		return;
 	}
+#ifdef ENABLE_VR
+	if (vr_skip)
+	{
+		GL_INS("HW: VR menu panel: a game screen's backdrop left out (%lld)", s_n);
+		return;
+	}
+#endif
 
 	if (GSVector4i(m_vt.m_min.p.xyxy(m_vt.m_max.p)).eq(GSVector4i::zero()) && m_vt.m_eq.rgba == 0xffff && 
 		m_vt.m_max.c.rgba32() == 0 && m_draw_env->PRIM.PRIM == GS_POINTLIST && m_env.PRIM.PRIM != GS_POINTLIST)
