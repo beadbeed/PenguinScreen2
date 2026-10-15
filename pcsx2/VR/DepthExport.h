@@ -156,6 +156,21 @@ namespace VR::DepthExport
 	DepthTracker& Tracker();
 	bool TakeSnapshot(GSTexture* depth);
 
+	// [VR] MenuPanel's room (research/2026-10-13-menu-panel.md): while a game screen is up, the screen clears the depth
+	// again before its own draws, so the tracker's snapshot of that frame holds the screen's depth, not the room's. The
+	// room the headset shows then is MenuPanel's colour snapshot, taken just before the screen's first draw; this is
+	// the depth at that same point, one per MenuPanel slot (SplitTracker::kSlots), labelled with the colour target.
+	// GSRendererHW takes it right after MenuPanel's snapshot (drops it when there is no depth to take), and a present
+	// that shows that slot's room exports it (ExportRequest::room_slot). Under MenuPanelRoom = Freeze the room is drawn
+	// every frame from the held camera, so each frame's depth goes with its own picture and render pose.
+	inline constexpr u32 kRoomSlots = 2;
+	bool TakeRoomSnapshot(u32 slot, u32 fbp, u32 zbp, GSTexture* depth);
+	void DropRoomSnapshot(u32 slot);
+	// The room depth of `slot` was taken for colour target fbp (on this device).
+	bool HasRoomSnapshot(u32 slot, u32 fbp);
+	// Its depth target's base block (for the log), 0 when none.
+	u32 RoomSnapshotZbp(u32 slot);
+
 	// GSRendererHW at each present, right after Merge (before the present's submit, so VR::EndOfFrame's copies find it on
 	// the GPU): this frame's depth copied into the export buffer in the GS's command buffer, laid out as the colour image
 	// `current` is: depth texel (src_x + x, src_y + y) at colour pixel
@@ -163,6 +178,7 @@ namespace VR::DepthExport
 	struct ExportRequest
 	{
 		bool use_snapshot = false;   // the tracker's snapshot, else `depth`
+		int room_slot = -1;          // >= 0: MenuPanel's room depth of that slot (TakeRoomSnapshot), over both of those
 		GSTexture* depth = nullptr;  // the live depth target
 		GSTexture* colour = nullptr; // the shown colour image (only the probe's dump reads it)
 		u32 src_x = 0, src_y = 0;    // the displayed rectangle's origin in the depth texture (scaled texels)

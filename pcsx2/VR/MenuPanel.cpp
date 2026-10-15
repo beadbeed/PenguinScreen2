@@ -741,14 +741,14 @@ void main()
 		return a;
 	}
 
-	void TakeSnapshot(GSTexture* colour)
+	int TakeSnapshot(GSTexture* colour)
 	{
 		GSDeviceVK* const dev = VulkanDevice();
 		const int slot = s_tracker.snapshot_slot;
 		if (!dev || !colour || slot < 0 || slot >= static_cast<int>(SplitTracker::kSlots) || colour->IsDepthStencil())
 		{
 			s_tracker.SnapshotTaken(false);
-			return;
+			return -1;
 		}
 		if (s_room_device != dev)
 			ForgetRooms(false);
@@ -767,13 +767,22 @@ void main()
 			if (!snap)
 			{
 				s_tracker.SnapshotTaken(false);
-				return;
+				return -1;
 			}
 		}
 		// The GS's own copy, recorded in draw order into the GS command buffer: the room as drawn, before the screen's
 		// first draw.
 		g_gs_device->CopyRect(colour, snap, GSVector4i(0, 0, colour->GetWidth(), colour->GetHeight()), 0, 0);
 		s_tracker.SnapshotTaken(true);
+		return slot;
+	}
+
+	int ShownRoomSlot(u32 fbp)
+	{
+		if (!EmuConfig.VR.MenuPanel || !s_room_shown || !SplitOn() || s_room_device != VulkanDevice())
+			return -1;
+		const int slot = s_tracker.SlotForPresent(fbp);
+		return (slot >= 0 && s_room[slot]) ? slot : -1;
 	}
 
 	GSTexture* RoomFor(u32 fbp, GSTexture* colour)
@@ -937,8 +946,13 @@ void main()
 		(void)d;
 		return SplitAction::None;
 	}
-	void TakeSnapshot(GSTexture*) { s_tracker.SnapshotTaken(false); }
+	int TakeSnapshot(GSTexture*)
+	{
+		s_tracker.SnapshotTaken(false);
+		return -1;
+	}
 	GSTexture* RoomFor(u32, GSTexture*) { return nullptr; }
+	int ShownRoomSlot(u32) { return -1; }
 	bool ExportPanel(u32, GSTexture*, u32, u32, u32, u32, float, float, float, float, GSTexture*, u32, u32)
 	{
 		NoPanel("the menu panel is Vulkan only");

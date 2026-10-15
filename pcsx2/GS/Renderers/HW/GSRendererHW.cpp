@@ -481,11 +481,18 @@ void GSRendererHW::VRBeforeEndOfFrame(GSTexture* current)
 		return;
 	}
 	// [VR] MenuPanel: a game screen clears the depth again before its own draws, so the frame's depth is no longer the
-	// room's under it; that present goes as quads.
+	// room's under it. The room shown then is MenuPanel's colour snapshot from just before the screen's first draw, and
+	// the room's depth was taken at that same point (Draw, TakeRoomSnapshot): that present exports it. Without one (the
+	// frame shown as drawn, or no depth taken) it goes as quads.
+	int room_slot = -1;
 	if (EmuConfig.VR.MenuPanel && VR::MenuPanel::SplitOn())
 	{
-		VR::DepthExport::NoExport("a game screen is up (its own depth clear covers the room's)");
-		return;
+		room_slot = VR::MenuPanel::ShownRoomSlot(m_vr_shown.tbp);
+		if (room_slot < 0 || !VR::DepthExport::HasRoomSnapshot(static_cast<u32>(room_slot), m_vr_shown.tbp))
+		{
+			VR::DepthExport::NoExport("a game screen is up and the shown frame has no room depth (its own depth clear covers the room's)");
+			return;
+		}
 	}
 	const VR::StereoState::Params st = VR::StereoState::Get();
 	if (!(st.fp_units_per_meter > 0.0f))
@@ -499,7 +506,10 @@ void GSRendererHW::VRBeforeEndOfFrame(GSTexture* current)
 		return;
 	}
 	const VR::DepthExport::DepthTracker& tracker = VR::DepthExport::Tracker();
-	const VR::DepthExport::PresentSource source = VR::DepthExport::SourceForPresent(tracker, m_vr_shown.tbp, 0);
+	// The room's depth stands in for the tracker's (which holds the screen's): Snapshot here is only "not live".
+	const VR::DepthExport::PresentSource source = (room_slot >= 0) ?
+	                                                  VR::DepthExport::PresentSource::Snapshot :
+	                                                  VR::DepthExport::SourceForPresent(tracker, m_vr_shown.tbp, 0);
 	if (source == VR::DepthExport::PresentSource::None)
 	{
 		VR::DepthExport::NoExport("no depth-tested frame was drawn into the shown colour target");
@@ -509,7 +519,7 @@ void GSRendererHW::VRBeforeEndOfFrame(GSTexture* current)
 	// the tracker says, to see what the shown frame would get without the snapshot.
 	static const bool s_force_live = VR::DepthExport::ProbeEnabled() && std::getenv("PCSX2_VR_DEPTHPROBE_LIVE") != nullptr;
 	VR::DepthExport::PresentSource source_used = source;
-	if (s_force_live && tracker.live_zbp != 0 && g_texture_cache->VRFindDepthTarget(tracker.live_zbp))
+	if (s_force_live && room_slot < 0 && tracker.live_zbp != 0 && g_texture_cache->VRFindDepthTarget(tracker.live_zbp))
 		source_used = VR::DepthExport::PresentSource::Live;
 	GSTextureCache::Target* live = nullptr;
 	if (source_used == VR::DepthExport::PresentSource::Live)
@@ -553,6 +563,12 @@ void GSRendererHW::VRBeforeEndOfFrame(GSTexture* current)
 	req.layers = static_cast<u32>(current->GetArrayLayers());
 	req.colour_bp = m_vr_shown.tbp;
 	req.src_bp = req.use_snapshot ? tracker.snap_zbp : tracker.live_zbp;
+	if (room_slot >= 0)
+	{
+		req.room_slot = room_slot;
+		req.use_snapshot = false;
+		req.src_bp = VR::DepthExport::RoomSnapshotZbp(static_cast<u32>(room_slot));
+	}
 	req.fit.valid = true;
 	req.fit.a0 = s_vr_zqfit.a0;
 	req.fit.beta = s_vr_zqfit.beta;
@@ -2979,7 +2995,19 @@ void GSRendererHW::Draw()
 			VR::MenuPanel::SplitAction::Snapshot)
 		{
 			GSTextureCache::Target* const rt = g_texture_cache->VRFindColorTarget(note.fbp);
-			VR::MenuPanel::TakeSnapshot(rt ? rt->m_texture : nullptr);
+			const int room_slot = VR::MenuPanel::TakeSnapshot(rt ? rt->m_texture : nullptr);
+			// The room's depth at the same point, before the screen's own depth clear, for the present that shows this
+			// room (VR::DepthExport::TakeRoomSnapshot): the depth target of the room's depth-tested run into this colour
+			// target, as the depth tracker saw it.
+			if (room_slot >= 0)
+			{
+				const VR::DepthExport::DepthTracker& dt = VR::DepthExport::Tracker();
+				GSTextureCache::Target* const ds = (VR::DepthExport::Wanted() && dt.live && dt.live_draws > 0 && dt.live_fbp == note.fbp) ?
+				                                       g_texture_cache->VRFindDepthTarget(dt.live_zbp) :
+				                                       nullptr;
+				if (!(ds && VR::DepthExport::TakeRoomSnapshot(static_cast<u32>(room_slot), note.fbp, dt.live_zbp, ds->m_texture)))
+					VR::DepthExport::DropRoomSnapshot(static_cast<u32>(room_slot));
+			}
 		}
 		// A game screen's backdrop tint over the whole frame: left out while the split is on (the room is shown
 		// untinted around the panel, and on the panel the tint would cover every pixel).
