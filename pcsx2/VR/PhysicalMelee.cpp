@@ -1116,6 +1116,15 @@ namespace VR::PhysicalMelee
 			out[2] = v[2] + w * tz + (x * ty - y * tx);
 		}
 
+		bool TestPartnerSwing()
+		{
+			static const bool s_test = [] {
+				const char* e = std::getenv("PCSX2_VR_TEST_PARTNER_SWING");
+				return e && e[0] == '1';
+			}();
+			return s_test;
+		}
+
 		bool Diag()
 		{
 			static const bool s_diag = [] {
@@ -1515,6 +1524,11 @@ namespace VR::PhysicalMelee
 		c(!Overrides(Mode::CoopPress) && Overrides(Mode::CoopFull) && Overrides(Mode::Offline) && !Overrides(Mode::Off) &&
 			  Presses(Mode::CoopPress) && !Presses(Mode::Off),
 			"mode: what each mode does");
+		c(PartnerSwingFrames(Mode::CoopFull, false) == kPartnerSwingFrames && PartnerSwingFrames(Mode::Offline, false) == 0 &&
+			  PartnerSwingFrames(Mode::CoopPress, false) == 0 && PartnerSwingFrames(Mode::Off, false) == 0 &&
+			  PartnerSwingFrames(Mode::CoopPress, true) == 0 && PartnerSwingFrames(Mode::Off, true) == 0 &&
+			  PartnerSwingFrames(Mode::Offline, true) == kPartnerSwingFrames && kPartnerSwingFrames > 0 && kPartnerSwingFrames < 60,
+			"partner swing: online with the hit on the VR weapon only (or the offline test switch), under a second");
 
 		// The room table: tag word at base, the room u16 at base + 8, four rows of 4 bytes from base + 0x10.
 		s_test_base = 0x820000;
@@ -2193,8 +2207,11 @@ namespace VR::PhysicalMelee
 					// A fresh block: the strike fields (and the caves' own) start from zero, whatever RAM held.
 					for (u32 off = 0x0C; off < 0x40; off += 4)
 						memWrite32(b + off, 0);
+					memWrite32(b + 0x8C, 0); // cave F's count of partner-swing messages
 					s_strike_seq = 0;
 				}
+				// Cave F: partners see the start of a swing after each strike, online only (CoopFull).
+				memWrite32(b + 0x30, PartnerSwingFrames(mode, TestPartnerSwing()));
 				for (int k = 0; k < 16; k++)
 				{
 					u32 w;

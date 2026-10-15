@@ -332,6 +332,12 @@ namespace VR::PhysicalMelee
 	Mode Decide(const ModeIn& in);
 	inline bool Presses(Mode mode) { return mode != Mode::Off; }
 	inline bool Overrides(Mode mode) { return mode == Mode::Offline || mode == Mode::CoopFull; }
+	// Contact mode online (CoopFull, the only case its hits apply online): cave F shows partners the start of a swing for
+	// this many game frames after each strike (block +0x30), then sends the swing's end; this console never runs it.
+	// Offline nothing is shown (0), unless test is set (PCSX2_VR_TEST_PARTNER_SWING=1: offline the sender returns at
+	// once, so only the cave's own steps run; for the headset-free checks).
+	constexpr u32 kPartnerSwingFrames = 30;
+	inline u32 PartnerSwingFrames(Mode mode, bool test) { return (mode == Mode::CoopFull || (test && mode == Mode::Offline)) ? kPartnerSwingFrames : 0u; }
 
 	// Online: who runs the room's enemies, as the game decides an enemy's death (FUN_0060EF30 through 0x1AF440 and
 	// NETAQ.BIN's per-room table): only while the network overlay's tag word reads tag, the u16 at room is below 128, and

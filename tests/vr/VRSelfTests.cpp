@@ -176,7 +176,7 @@ namespace
 	}
 
 	// [VR] PhysicalMelee's caves, run as the EE would run them: the File #1 profile's camera.silence words in a small
-	// interpreter of just the instructions they use (lui, ori, addiu, sltiu, subu, lw, lbu, sw, sh, sd, lwc1, swc1, mul.s,
+	// interpreter of just the instructions they use (lui, ori, addiu, sltiu, sll, addu, subu, lw, lbu, sw, sh, sb, sd, lwc1, swc1, mul.s,
 	// beq, bne, bgez, bgtz, blez, j, jal, jr, with delay slots; the FPU loads and stores only move bits). A stub stands in
 	// for game code the caves call or jump to: Run asks it where control goes on from an address outside the cave.
 	struct MiniEE
@@ -231,7 +231,11 @@ namespace
 				case 0x00:
 					if (i == 0)
 						break;
-					if (fn == 0x23)
+					if (fn == 0x00)
+						r[rd] = r[rt] << ((i >> 6) & 31u);
+					else if (fn == 0x21)
+						r[rd] = r[rs] + r[rt];
+					else if (fn == 0x23)
 						r[rd] = r[rs] - r[rt];
 					else if (fn == 0x08)
 					{
@@ -267,6 +271,7 @@ namespace
 				case 0x24: r[rt] = (Load32(r[rs] + simm) >> (((r[rs] + simm) & 3u) * 8u)) & 0xFFu; break;
 				case 0x2B: Store32(r[rs] + simm, r[rt]); break;
 				case 0x29: Store16(r[rs] + simm, static_cast<u16>(r[rt])); break;
+				case 0x28: Store8(r[rs] + simm, static_cast<u8>(r[rt])); break;
 				case 0x3F: Store32(r[rs] + simm, r[rt]); Store32(r[rs] + simm + 4u, 0); break; // sd: these values are 32-bit
 				case 0x11:
 					// mul.s fd, fs, ft only
@@ -426,6 +431,13 @@ namespace
 		u32 sp = 0, ra = 0, a0 = 0, a1 = 0;
 	};
 	CaveECall s_cave_e; // what FUN_00636990's body (the stub) was entered with
+	struct CaveFCall
+	{
+		u32 pc = 0, a1 = 0, a2 = 0, action = 0, ba0 = 0;
+		u16 last_type = 0;
+	};
+	std::vector<CaveFCall> s_cave_f_calls; // cave F's calls into the game, in order
+	u32 s_cave_f_filter = 0;               // what the filter FUN_006337C0 answers (1: the game would not send)
 
 	bool ContactStub(MiniEE& ee, u32 pc, u32* next)
 	{
@@ -443,6 +455,30 @@ namespace
 			}
 			for (int k : {1, 2, 3, 8, 9, 10, 11, 12, 13})
 				ee.r[k] = 0xDEAD0000u + static_cast<u32>(k); // the callee may clobber any temporary
+			*next = ee.r[31];
+			return true;
+		}
+		if (pc == 0x64C620 || pc == 0x6337C0 || pc == 0x62CDA0)
+		{
+			// Cave F's calls: the state-message sender (what it would copy: the record's action bytes +0x08-+0x0B and
+			// the message type, with the frame's last-type halfword), the game's filter (its answer scripted), and the
+			// item-use mark FUN_0062CDA0.
+			CaveFCall c;
+			c.pc = pc;
+			c.a1 = ee.r[5];
+			c.a2 = ee.r[6];
+			c.action = ee.Load32(ee.r[4] + 0x08);
+			c.ba0 = ee.Load32(ee.r[4] + 0xBA0);
+			c.last_type = static_cast<u16>(ee.Load32(0x23BF0C));
+			s_cave_f_calls.push_back(c);
+			if (pc == 0x64C620)
+			{
+				ee.Store32(ee.r[4] + 0xBA0, ee.Load32(ee.r[4] + 0xBA0) | 0x08000000u); // the sender's own +0xBA0 bit 27
+				ee.Store16(0x23BF0C, static_cast<u16>(ee.r[5]));                       // and its last-type mark
+			}
+			ee.r[2] = pc == 0x6337C0 ? s_cave_f_filter : 0u;
+			for (int k : {1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13})
+				ee.r[k] = 0xDEAD0000u + static_cast<u32>(k);
 			*next = ee.r[31];
 			return true;
 		}
@@ -523,7 +559,7 @@ namespace
 		ee.r[31] = 0x5CDF6C;
 		const u32 sp = ee.r[29];
 		ee.r[16] = 0x11111111;
-		const u32 out = ee.Run(0xFE200, 0xFE200, 0xFE400);
+		const u32 out = ee.Run(0xFE200, 0xFE200, 0xFE800); // cave D, then cave F (nothing for it to do here)
 		res.ok = out == 0x5A9DB0 && ee.r[31] == 0x5CDF6C && ee.r[29] == sp && ee.r[16] == 0x11111111;
 		res.spawned = s_contact_run.spawned;
 		for (int k = 0; k < 4; k++)
@@ -556,6 +592,191 @@ namespace
 		*f0 = MiniEE::F(ee.f[0]);
 		*original = s_cave_e.sp == sp - 48 && s_cave_e.ra == kReturn;
 		return out == kReturn && ee.r[29] == sp && s_cave_e.called && s_cave_e.a0 == kLocalRecord && s_cave_e.a1 == kNode;
+	}
+
+	// Cave F (after cave D, every frame): the strike's hit notice spent as the swing's own stage FUN_006474A0 does it, and
+	// online the partners' swing (a state message with the swing's action bytes, then its end).
+	constexpr u32 kTypeTable = 0x6E5940, kLocalSlot = 0x48BF7D;
+	struct CaveFCase
+	{
+		u8 weapon = 34;                      // the record's weapon type (+0xCA8): 34 iron pipe (class 4)
+		u8 notice = 1, kind = 2, idx = 49;   // +0x116, +0x117, +0x118 (the enemy hit); 0xFF, 0xFF in +0x119, +0x11A
+		bool all_ff = false;                 // +0x117-+0x11A all 0xFF (a hit that told the owner: FUN_00548FC0)
+		u32 watch = 9, made = 1, seen = 1;   // block +0x38, +0x24 (cave D's strikes), +0x34 (cave F's)
+		u32 partner = 0, left = 0;           // block +0x30 (the host: partners' swing frames, 0 off), +0x2C
+		u8 stance = 1, sub = 0, slot = 0, local_slot = 0;
+		u32 ba0 = 0x00000100;
+		u32 filter = 0;
+	};
+	struct CaveFResult
+	{
+		bool ok = false;
+		u8 notice = 0, kind = 0;
+		u32 ba0 = 0, action = 0, uses = 0, left = 0, watch = 0, seen = 0, sends = 0;
+		u16 last_type = 0;
+		std::vector<CaveFCall> calls;
+	};
+	CaveFResult RunCaveF(const CaveFCase& c)
+	{
+		CaveFResult res;
+		MiniEE ee;
+		if (!ContactCaveMemory(ee))
+			return res;
+		s_cave_f_calls.clear();
+		s_cave_f_filter = c.filter;
+		ee.Store32(kBlock, 0x4D454C31u);
+		ee.Store32(kBlock + 0x08, kLocalRecord);
+		ee.Store32(kBlock + 0x18, 6);
+		ee.Store32(kBlock + 0x24, c.made);
+		ee.Store32(kBlock + 0x2C, c.left);
+		ee.Store32(kBlock + 0x30, c.partner);
+		ee.Store32(kBlock + 0x34, c.seen);
+		ee.Store32(kBlock + 0x38, c.watch);
+		const u32 R = kLocalRecord;
+		ee.Store8(R + 0x02, 0);
+		ee.Store8(R + 0x03, c.slot);
+		ee.Store8(kLocalSlot, c.local_slot);
+		ee.Store8(R + 0x08, c.stance);
+		ee.Store8(R + 0x09, c.sub);
+		ee.Store8(R + 0x0A, 7);
+		ee.Store8(R + 0x0B, 1);
+		ee.Store8(R + 0x116, c.notice);
+		ee.Store8(R + 0x117, c.all_ff ? 0xFF : c.kind);
+		ee.Store8(R + 0x118, c.all_ff ? 0xFF : c.idx);
+		ee.Store8(R + 0x119, 0xFF);
+		ee.Store8(R + 0x11A, 0xFF);
+		ee.Store32(R + 0xBA0, c.ba0);
+		ee.Store32(R + 0xCA8, c.weapon);
+		ee.Store16(0x23BF0C, 0x0007); // the frame's last message type, whatever it was
+		static constexpr u8 kClass[][2] = {{32, 1}, {33, 1}, {34, 4}, {35, 4}, {41, 5}, {42, 4}, {44, 5}, {1, 2}};
+		for (const auto& k : kClass)
+			ee.Store8(kTypeTable + 0x44u * k[0] + 0x05u, k[1]);
+		ee.r[31] = 0x5CDF6C;
+		const u32 sp = ee.r[29];
+		ee.r[16] = 0x11111111;
+		const u32 out = ee.Run(0xFE500, 0xFE500, 0xFE800);
+		res.ok = out == 0x5A9DB0 && ee.r[31] == 0x5CDF6C && ee.r[29] == sp && ee.r[16] == 0x11111111;
+		res.notice = static_cast<u8>(ee.Load32(R + 0x114) >> 16);
+		res.kind = static_cast<u8>(ee.Load32(R + 0x114) >> 24);
+		res.ba0 = ee.Load32(R + 0xBA0);
+		res.action = ee.Load32(R + 0x08);
+		res.uses = ee.Load32(kBlock + 0x3C);
+		res.left = ee.Load32(kBlock + 0x2C);
+		res.watch = ee.Load32(kBlock + 0x38);
+		res.seen = ee.Load32(kBlock + 0x34);
+		res.sends = ee.Load32(kBlock + 0x8C);
+		res.last_type = static_cast<u16>(ee.Load32(0x23BF0C));
+		res.calls = s_cave_f_calls;
+		return res;
+	}
+
+	bool MeleeCaveF()
+	{
+		bool ok = true;
+		const auto check = [&ok](bool c) { ok = ok && c; };
+		const u32 real = 0x01070001u; // stance 1, sub 0, +0x0A 7, +0x0B 1
+		{
+			// A pipe's strike hit an enemy: the notice cleared (the rest kept), +0xBA0 bit 31 and FUN_0062CDA0, as the
+			// swing's stage does, so the game's next character loop spends the durability.
+			const CaveFResult r = RunCaveF(CaveFCase{});
+			check(r.ok && r.notice == 0 && r.kind == 2 && r.ba0 == 0x80000100u && r.uses == 1 && r.watch == 8 &&
+				  r.calls.size() == 1 && r.calls[0].pc == 0x62CDA0 && r.calls[0].ba0 == 0x80000100u);
+		}
+		for (u8 w : {35, 41, 42, 44})
+		{
+			CaveFCase c;
+			c.weapon = w; // the curved pipe, the brush, the pole, the spear: the same
+			const CaveFResult r = RunCaveF(c);
+			check(r.ok && r.uses == 1 && r.ba0 == 0x80000100u);
+		}
+		for (u8 w : {32, 33, 1})
+		{
+			CaveFCase c;
+			c.weapon = w; // the knives (and a gun): the notice cleared, nothing spent, as in the game
+			const CaveFResult r = RunCaveF(c);
+			check(r.ok && r.notice == 0 && r.uses == 0 && r.ba0 == 0x100u && r.calls.empty());
+		}
+		{
+			CaveFCase c;
+			c.all_ff = true; // a hit that told the owner (code 1 + 1 = 2): the pipe is used too
+			check(RunCaveF(c).uses == 1);
+			c.notice = 2; // code 3: nothing
+			const CaveFResult r = RunCaveF(c);
+			check(r.ok && r.notice == 0 && r.uses == 0 && r.calls.empty());
+		}
+		{
+			CaveFCase c;
+			c.stance = 2;
+			c.sub = 3; // the canned swing: its own stage reads the notice
+			CaveFResult r = RunCaveF(c);
+			check(r.ok && r.notice == 1 && r.uses == 0);
+			c.sub = 1; // aim idle: spent
+			check(RunCaveF(c).uses == 1);
+			c = CaveFCase{};
+			c.ba0 = 0x80000100u; // a use already pending: next frame
+			r = RunCaveF(c);
+			check(r.ok && r.notice == 1 && r.uses == 0 && r.calls.empty());
+			c = CaveFCase{};
+			c.watch = 0; // no strike lately: the notice is not this mode's
+			r = RunCaveF(c);
+			check(r.ok && r.notice == 1 && r.uses == 0);
+			c = CaveFCase{};
+			c.notice = 0; // no hit: nothing
+			r = RunCaveF(c);
+			check(r.ok && r.uses == 0 && r.watch == 8 && r.calls.empty());
+			c = CaveFCase{};
+			c.slot = 1; // not this console's slot (the game's own test): cleared, not spent
+			r = RunCaveF(c);
+			check(r.ok && r.notice == 0 && r.uses == 0 && r.calls.empty());
+		}
+		{
+			// A new strike (cave D's count moved): watched for its window + 3 frames; offline (partner 0) nothing sent.
+			CaveFCase c;
+			c.made = 2;
+			c.notice = 0;
+			CaveFResult r = RunCaveF(c);
+			check(r.ok && r.seen == 2 && r.watch == 8 && r.calls.empty() && r.left == 0 && r.sends == 0);
+			// Online: one type-1 message built with stance 2, sub 3, phase 0, then everything put back.
+			c.partner = 30;
+			r = RunCaveF(c);
+			check(r.ok && r.calls.size() == 1 && r.calls[0].pc == 0x64C620 && r.calls[0].a1 == 1 &&
+				  r.calls[0].action == 0x00000302u && r.calls[0].last_type == 0 && r.action == real && r.ba0 == 0x100u &&
+				  r.last_type == 0x0007 && r.left == 30 && r.sends == 1);
+			c.left = 12; // a swing still showing: no second one
+			r = RunCaveF(c);
+			check(r.ok && r.calls.empty() && r.left == 11);
+			c.left = 0;
+			c.stance = 3; // hurt: no swing
+			r = RunCaveF(c);
+			check(r.ok && r.calls.empty() && r.left == 0);
+			c.stance = 2;
+			c.sub = 1; // aim idle: the swing
+			r = RunCaveF(c);
+			check(r.ok && r.calls.size() == 1 && r.calls[0].action == 0x00000302u && r.action == 0x01070102u);
+		}
+		{
+			// The swing's end for partners after its frames: the game's filter as for a swing ending (2, 3), then the
+			// message with the real action bytes, unless the filter drops it (aim idle) or the record is hurt.
+			CaveFCase c;
+			c.notice = 0;
+			c.left = 1;
+			CaveFResult r = RunCaveF(c);
+			check(r.ok && r.left == 0 && r.calls.size() == 2 && r.calls[0].pc == 0x6337C0 && r.calls[0].a1 == 2 &&
+				  r.calls[0].a2 == 3 && r.calls[1].pc == 0x64C620 && r.calls[1].a1 == 1 && r.calls[1].action == real &&
+				  r.calls[1].last_type == 0 && r.last_type == 0x0007 && r.sends == 0x100);
+			c.filter = 1;
+			r = RunCaveF(c);
+			check(r.ok && r.left == 0 && r.calls.size() == 1 && r.calls[0].pc == 0x6337C0 && r.sends == 0);
+			c.filter = 0;
+			c.stance = 4;
+			r = RunCaveF(c);
+			check(r.ok && r.left == 0 && r.calls.empty());
+			c.stance = 1;
+			c.left = 5; // still counting
+			r = RunCaveF(c);
+			check(r.ok && r.left == 4 && r.calls.empty());
+		}
+		return ok;
 	}
 
 	bool MeleeContactCaves()
@@ -633,6 +854,7 @@ namespace
 			check(RunCaveE(false, kObject, kObject, 1.5f, &f0, &original) && original && f0 == 2.0f);
 			check(RunCaveE(true, 0, 0, 1.5f, &f0, &original) && original && f0 == 2.0f);
 		}
+		check(MeleeCaveF());
 		return ok;
 	}
 
@@ -873,7 +1095,7 @@ int main(int argc, char* argv[])
 		// The knives have their own (lower) speeds; the pipe takes the block's.
 		if (!(m.ContactFor(33).speed < m.ContactFor(34).speed) || m.ContactFor(34).speed != m.contact.speed)
 			return false;
-		int sites = 0, cave_d = 0, cave_e = 0;
+		int sites = 0, cave_d = 0, cave_e = 0, cave_f = 0;
 		size_t first_cave = 0, last_site = 0;
 		bool any_cave = false;
 		for (size_t i = 0; i < p->camera->silence.size(); i++)
@@ -888,12 +1110,14 @@ int main(int argc, char* argv[])
 				cave_d++;
 			else if (a >= 0xFE400u && a < 0xFE470u)
 				cave_e++;
+			else if (a >= 0xFE500u && a < 0xFE7A4u)
+				cave_f++;
 			else if ((a == 0x5CDF64u && sil.value_off == 0x0C16A76Cu && sil.value_on == 0x0C03F880u) ||
 					 (a == 0x636990u && sil.value_off == 0x27BDFFD0u && sil.value_on == 0x0803F900u) ||
 					 (a == 0x636994u && sil.value_off == 0xFFBF0020u && sil.value_on == 0))
 			{
-				if (sil.when.size() != 3)
-					return false; // the overlay and its cave's first and last non-zero word
+				if (sil.when.size() != (a == 0x5CDF64u ? 5u : 3u))
+					return false; // the overlay and its caves' first and last non-zero words (cave D's site: D and F)
 				sites++;
 				last_site = i;
 				continue;
@@ -906,9 +1130,9 @@ int main(int argc, char* argv[])
 				first_cave = i;
 			any_cave = true;
 		}
-		return sites == 3 && cave_d == 87 && cave_e == 25 && last_site < first_cave;
+		return sites == 3 && cave_d == 87 && cave_e == 25 && cave_f == 169 && last_site < first_cave;
 	});
-	RunSilent("Physical melee contact caves (D, E: File #1 profile words, interpreted)", MeleeContactCaves);
+	RunSilent("Physical melee contact caves (D, E, F: File #1 profile words, interpreted)", MeleeContactCaves);
 	RunGamepad();
 	RunSilent("CameraDriver::SelfTestAssembler (hook)", VR::CameraDriver::SelfTestAssembler);
 	RunSilent("CameraDriver::SelfTestMath (math, predict, comfort, FOV)", VR::CameraDriver::SelfTestMath);
