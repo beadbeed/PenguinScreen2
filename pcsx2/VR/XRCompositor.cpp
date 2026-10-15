@@ -1373,17 +1373,16 @@ namespace VR::XRCompositor
 			Console.Warning("(VR) Depth layer: off for this session: %s; the first-person screen goes as quads.", why);
 		}
 
-		bool YieldDepthLayerSwapchains(const char* who)
+		// The depth swapchains destroyed (the depth layer off). The GS's copies into the depth images are done first (as
+		// DestroySwapchains); a depth image still acquired goes with its swapchain, and DestroySwapchainSynced drops a
+		// deferred publish that may show it.
+		void DestroyDepthChains()
 		{
-			if (s.abandoned.load(std::memory_order_acquire))
-				return false;
 			bool any = false;
 			for (const auto& chain : s.depth_chains)
 				any = any || (chain.swapchain != XR_NULL_HANDLE);
 			if (!any)
-				return false;
-			DepthLayerOff("its depth swapchains were given up (the runtime's swapchain limit was reached)");
-			// The GS's copies into the depth images are done first (as DestroySwapchains).
+				return;
 			WaitAllFences();
 			for (auto& chain : s.depth_chains)
 			{
@@ -1396,6 +1395,20 @@ namespace VR::XRCompositor
 				chain.waited = false;
 				chain.release_pending = false;
 			}
+			s.present_depth = FpDepth{};
+		}
+
+		bool YieldDepthLayerSwapchains(const char* who)
+		{
+			if (s.abandoned.load(std::memory_order_acquire))
+				return false;
+			bool any = false;
+			for (const auto& chain : s.depth_chains)
+				any = any || (chain.swapchain != XR_NULL_HANDLE);
+			if (!any)
+				return false;
+			DepthLayerOff("its depth swapchains were given up (the runtime's swapchain limit was reached)");
+			DestroyDepthChains();
 			Console.Warning("(VR) Depth layer: its 2 depth swapchains given to %s.", who);
 			return true;
 		}
@@ -1428,6 +1441,11 @@ namespace VR::XRCompositor
 				if (s.depth_chains[eye].swapchain == XR_NULL_HANDLE && !CreateDepthChain(eye, w, h))
 					DepthLayerOff("a depth swapchain could not be made");
 			}
+			// m7: with the layer off (above, or by DepthLayerOff elsewhere) its depth swapchains go here, at the start of a
+			// present's copy, before anything is acquired or recorded for it, and count no longer against the runtime's
+			// limit. Nothing again once they are gone.
+			if (!s.depth_layer)
+				DestroyDepthChains();
 
 			s.swapchain_width = w;
 			s.swapchain_height = h;
