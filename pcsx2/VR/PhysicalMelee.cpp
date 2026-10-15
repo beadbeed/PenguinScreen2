@@ -1052,6 +1052,11 @@ namespace VR::PhysicalMelee
 		// Online (private co-op): whether the last poll decided CoopFull (CameraDriver's gate reads it), the line it logged,
 		// and whether the caves' free RAM read zero before they first went in (Unknown until it is read while eligible).
 		bool s_coop_live = false;
+		// CameraDriver::SteadyNowMs of the poll that set s_coop_live: the gate trusts it only while that poll is this
+		// recent (250 ms, as ReloadDriver::Reloading; past a hitch), so polls that stop reaching melee (no VR input instance)
+		// cannot leave the caves in on a stale decision (review m2, d13).
+		u64 s_coop_live_ms = 0;
+		constexpr u64 kCoopLiveStaleMs = 250;
 		std::string s_mode_line;
 		enum class FreeRam : u8
 		{
@@ -1723,7 +1728,10 @@ namespace VR::PhysicalMelee
 
 	bool CoopOverrideLive()
 	{
-		return s_coop_live;
+		if (!s_coop_live)
+			return false;
+		const u64 now = CameraDriver::SteadyNowMs();
+		return now >= s_coop_live_ms && now - s_coop_live_ms <= kCoopLiveStaleMs;
 	}
 
 	namespace
@@ -2501,6 +2509,7 @@ namespace VR::PhysicalMelee
 		mi.free_clear = s_free == FreeRam::Clear;
 		const Mode mode = (mp && fb && gamepad) ? Decide(mi) : Mode::Off;
 		s_coop_live = mode == Mode::CoopFull;
+		s_coop_live_ms = CameraDriver::SteadyNowMs();
 
 		// The arm-time line: once per game, and again whenever the verdict changes.
 		if (profile)
