@@ -1171,6 +1171,15 @@ namespace VR::ReloadDriver
 			reloading = action_known && v == fb->weapon_reload_action;
 		}
 		const bool menu = SpatialControls::MenuMode();
+		// A screen opening: MenuMode (pauseWhen 0x720AA0) rises 0.55-0.65 s after the game opens the item screen or the map,
+		// and melee.screenFlag (File #1 0x48BF7E, the menu byte) 30-60 ms after the press, so the driver lets go of L1 on
+		// either; a flag that cannot be read counts as up (review a2).
+		bool screen = menu;
+		if (env && !screen && profile->melee.has_value() && profile->melee->screen_flag.has_value())
+		{
+			u32 v = 0;
+			screen = !Read(reader, profile->melee->screen_flag.value(), 1, &v) || v != 0;
+		}
 		const bool usable = env && setting && gun && stance_ok;
 
 		// The plain controls, the first time a gun is raised in a session: the game's own reload, and the gesture's.
@@ -1219,7 +1228,7 @@ namespace VR::ReloadDriver
 		di.request = go.reload_requested;
 		di.usable = usable;
 		di.weapon = weapon;
-		di.screen = menu;
+		di.screen = screen;
 		di.raise_pressed = s_raise_pressed;
 		s_raise_pressed = false;
 		di.raised = raised_now;
