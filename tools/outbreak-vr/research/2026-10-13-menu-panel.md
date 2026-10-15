@@ -133,7 +133,8 @@ Not checked, or assumed:
 - **Mono panel**: the left eye's layer; screens draw at zero separation, so both are the same.
 - **The desktop window** shows the room without the screen while the split is on (it shows what Merge made). The
   headset is the only place the screen shows then.
-- **Placement** is fixed (constants in `XRCompositor`, `kPanel*`), not yet tunable, and does not follow a turned head.
+- **Placement** is fixed (constants, now `MenuPanel::kPanel*`), not yet tunable. Since `panelfeel` it comes round after a
+  turn of more than 60 deg (Calm menus, below).
 - **`[VR] PacerCopies` on**: the panel is off (logged), screens pull away as before.
 - **Not seen**: inventory-full swaps, the file reader with a file, cutscene text, co-op (private server). Examine text
   and "Obtained" lines are not screens (no `0x720AA0`): they stay in the room view as before.
@@ -147,10 +148,116 @@ Not checked, or assumed:
   snapshot was taken before, `SKIP` a backdrop left out.
 - `PCSX2_VR_MENUPANEL_DUMP=<dir>[,everyN]` (offline only): the panel, the room snapshot and the finished frame (left eye)
   as `menupanel_<n>_panel.png`, `_room.png` and `_frame.png`, with a log line of the panel's coverage. Never commit them.
+  Since `panelfeel` also `_shown.png` (the present's picture after the lift) and a line with the room's brightness as
+  shown against its snapshot (the `MenuPanelRoom` dim).
 
 ## Next (stage 2 and smaller steps)
 
-- In the headset: comfort, size and distance, and whether the panel should follow a turned head.
+- In the headset: comfort, size and distance; `MenuPanelRoom` Freeze against Dim and Live, the brightness, the 60 deg
+  re-place (Calm menus, below).
 - Real translucency: render the screen's draws into a second target (they follow the room in every frame seen), or
   mask by the screen's own draw rectangles.
 - Stage 2: a VR-native inventory over the game's menu logic (ROADMAP).
+
+## Calm menus: `[VR] MenuPanelRoom` (2026-10-14, branch `panelfeel`)
+
+Alex played the panel on 2026-10-14. His verdict: it all works, but it feels "a little funny, a little funky". The
+inventory sat well in view, but the background behind it kept moving. The cause is the room behind the panel: the
+game's own 30 fps view, about 100 ms behind the head. With a crisp panel in front of it, the room swims. Same tools and
+rules as above (`run-panel`, a local build of `panelfeel`, offline, normal speed, the scripted PINE head, screens opened
+and closed with the game's own buttons, nothing confirmed). Code: `MenuPanel` (pure parts and the dim),
+`CameraDriver` (the hold), `VRManager::PresentationLift` (the dim), `XRCompositor` (placement, edge fill).
+
+### What a screen looks like now
+
+`[VR] MenuPanelRoom` (read live, under `MenuPanel = true`) picks what the room behind the panel does:
+
+| Value | Camera under the screen | Room |
+|---|---|---|
+| `Freeze` (default) | Held at the pose it was last written from as the screen came up; the head no longer drives it | Dimmed to `MenuPanelRoomBrightness` (0.55) and a little greyer (80% saturation); black past its edges |
+| `Dim` | Follows the head, as on 10-14 | Dimmed the same way |
+| `Live` | Follows the head | As in play (the 10-14 build) |
+
+- **The hold.** The camera is written every vsync from the held pose, so the game's view matrix does not move. The game
+  draws every frame from that pose, and every frame is placed at that render pose, so the room stays put in the world
+  as you look around. It is like a VR game pausing into its scene. The game still runs under the item screen, the map
+  and the take-it prompt (a zombie still moves); under offline pause nothing moves at all.
+- **Resuming.** As the screen goes, the camera is written from the head again, in one step. Every frame is placed where
+  it was rendered from, so the world does not jump; only the picture's edge catches up with the head. No easing:
+  easing would bring back the very lag the hold removes.
+- **The dim** goes through the presentation lift's own shader pass (the File #1 profile's gamma 1.2 already runs it in
+  first person). It eases in over 0.25 s and out over 0.2 s, and only on presents whose frame is a split room (the
+  screen on the panel, not in the picture). The brightness is corrected for the lift's gamma (multiplied by
+  `dim^gamma` before it), so 0.55 is 0.55 of what you would see. There is no vignette: that would need a layer or a
+  shader of its own.
+- **The edge fill is off while the room is held.** The fill is head-locked: a continuation of the picture for a head
+  that stayed where the frame was rendered from. With the room held, the head moves away from that pose, and the fill
+  would swim with it. Black around the held room instead.
+- **The panel** stands where you look as the screen comes up: 1.0 m ahead, 0.12 m below the eyes, 0.80 m tall, along
+  the head's yaw only (the item screen opens with a look down at the belt). It stays put in the world. Only a turn of
+  more than 60 deg away from it brings it round, gliding (0.15 s time constant), in front of your eyes as they are
+  then. The menu pointer aims at the panel's pose every present, so it follows a glide. Distance and size are unchanged
+  until Alex has an opinion.
+- **No new layer, no new swapchain.** The held room is the first-person screen's own layer. It is not a stored copy of
+  one frame: the game keeps drawing it from the held pose. That needs no extra 16 MB copy, and you would still see a
+  zombie move. The dim is the existing lift pass.
+
+### What the game does with its camera while we stop following the head
+
+The old `pauseWhen` path stopped writing the camera. The game then held it still (above: 0.0 deg turned with the switch
+off), because File #1's room camera writers are silenced in first person. `Freeze` does not stop writing. It writes
+the same pose every vsync, so the camera is held by construction, and a drift in the game cannot show. Measured with
+the scripted head turning 40 deg under each screen (`menupanel_test.py`, `run-panel`, Freeze):
+
+| | Item screen | Map | Pause | Take-it prompt |
+|---|---|---|---|---|
+| View matrix `0x3062E0` turned (head 40.0 deg) | 0.0 deg | 0.0 deg | 0.0 deg | 0.0 deg |
+| Camera eye to target turned | 0.0 deg | 0.0 deg | 0.0 deg | 0.0 deg |
+| Game counter u8 `0x48BF93` (255/s with no screen) | 255.7/s | 254.6/s | 0.0/s | 255.1/s |
+| After the screen closed, with the head kept at 40 deg | at the head by the first 30 ms sample (0.0 deg off) | the same | the same | (not measured) |
+
+Under `Dim` and `Live` the view turned 40.0 deg with the head under the item screen and the map, within 0.0 deg over
+the last second, as on 10-13. The menu pointer still steered cells 1, 3 and 0 in 0.16-0.66 s with no confirm, in every
+mode.
+
+### The dim, measured
+
+`PCSX2_VR_MENUPANEL_DUMP` now also writes `_shown.png`: the present's picture after the lift. It logs the room's
+brightness as shown against its own snapshot, over the room's pixels off the panel (`the room as shown is N% of its
+snapshot's brightness`):
+- **headset-free** (no lift, gamma 1): 54.8%, 54.7% and 54.9% once the dim is in (the map, pause and take-it prompt
+  dumps). The first frame of a screen gives 96.6%, the 11th 66.8%: the ease. Live gives 100.0%.
+- **null headset** (the session's gamma 1.2 lift): Freeze 75.2% against Live 136.8% on the same view. 75.2 / 136.8 =
+  0.550, so the gamma correction holds. Without it, the room would sit at 0.55^(1/1.2) = 0.61.
+
+### Verified
+
+- **built** (local `build-panel`).
+- **self-tests passed**: `vr_selftests` 33 of 33. The new suite, "Menu panel room and placement" (49 checks), covers
+  the look per mode, the clamps, the ease times, the gamma identity, the hold (begins at the last write, stamped as the
+  head, not moving, ends with the screen or a switch to Dim), the placement (yaw only, facing the eyes) and the re-place
+  (59 deg stays, 61 deg glides, across the back the short way, no second set-off, in front of the eyes then).
+- **checked offline, headset-free**: the table above under Freeze; Dim and Live on the item screen and the map; the dim
+  in every mode.
+- **null-headset checked**: Freeze and Live on the item screen and the map (the first two launches got no Vulkan
+  device from SteamVR, as before; it worked with SteamVR started first). The panel was shown and held, `brought round
+  0 time(s)` (the null head does not turn). The pointer's ray hit (0.938, 0.246), (0.938, 0.369) and (0.851, 0.246) for
+  (0.939, 0.245), (0.939, 0.368) and (0.851, 0.245). There was no xrEndFrame error, and the dim was measured as above.
+  `null_driver.py off` afterwards: `steamvr.vrsettings` md5 identical to before, no `forcedDriver`, SteamVR closed.
+- **reviewed only**: the edge fill going black while the room is held (no log line for it), and the re-place in a
+  session (the null head is fixed; the logic is the self-tested `PanelPlacer`).
+
+### Risks and open points
+
+- **Turning far under Freeze**: past about 58 deg to the side (the picture spans +-57.8 x +-50 deg at 1.5 m) you see
+  black, with no fill. The panel comes round after 60 deg, so you are not left facing nothing. Is black better than the
+  head-locked fill? Only the headset can tell.
+- **Leaning** under Freeze moves nothing: the held pose includes the head's position. A lean shows the room as the
+  flat picture it is.
+- **A recenter while a screen is up** moves the held view with it (a recenter is a jump anyway).
+- **The character moved by the game** under a screen (a zombie's push) moves the held camera with it: the eye is the
+  character's head plus the held offset.
+- **`ShadeBoost` on** (a GS setting) replaces the lift pass, so there is no dim then.
+- **The desktop window** shows the dim too (it shows the room alone while a screen is up anyway).
+- **Not checked in the headset**: whether Freeze is calm, whether the dim is too dark or too light, whether 60 deg is
+  the right point to bring the panel round, and the hand-over between the held and the live room as a screen closes.
