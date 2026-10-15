@@ -9410,8 +9410,10 @@ namespace VR::XRCompositor
 					wp.warned_pass = true;
 					Console.Error("(VR) Depth warp: a pass could not be recorded or submitted; the eyes keep their last image.");
 				}
-				// Released even when nothing went in: the image then still holds what it last held.
-				for (int j = 0; j < nj; j++)
+				// m4: on a failed record or submit nothing went in, so the images are not released (that would show an older
+				// frame): they stay acquired and waited, and the next display frame's pass draws into them. The runtime keeps
+				// showing the last image released.
+				for (int j = 0; ok && j < nj; j++)
 				{
 					WarpTarget& t = *jobs[j].t;
 					const XrResult rr = LockedRelease(t.swapchain);
