@@ -6699,6 +6699,16 @@ namespace VR::XRCompositor
 				}
 				submitted_depth_failed();
 				s.present_depth.valid = false;
+				// m1 (addendum 3): a deferred set published above already carries this present's depth: it goes without
+				// it too (the image was not released, so the runtime has nothing of it to show).
+				{
+					std::lock_guard<std::mutex> publish(s.publish_mutex);
+					for (int k = 0; k < 2; k++)
+					{
+						if (s.published.fp_depth.valid && s.published.fp_depth.depth[k] == dchain.swapchain)
+							s.published.fp_depth.valid = false;
+					}
+				}
 			}
 			for (int i = 0; i < kHandSlots; i++)
 			{
