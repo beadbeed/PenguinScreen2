@@ -282,8 +282,11 @@ namespace VR::ProfileDB
 		// Only while first person runs in private co-op (CameraDriver's NetMode::PrivateCoop), e.g. patches that
 		// change what the game sends to partners.
 		bool coop_only = false;
-		// Optional (whenSetting: <name>): only patched while that VR switch is on, and only offline (no network adapter,
-		// not online-safe; private co-op excluded too). Known names: SeamlessDoors, PhysicalMelee. Off: a word we patched is put back.
+		// Optional (whenSetting: <name>): only patched while that VR switch is on and never online-safe; strictly offline
+		// (no network adapter), or in private co-op only where SilenceSettingCoopLive allows it (PhysicalMelee and
+		// PhysicalMeleeContact with [VR] PhysicalMeleeOnline while this console runs the room's enemies; SeamlessDoors and
+		// MeleeHitJolt never). Known names (IsSilenceSettingName): SeamlessDoors, PhysicalMelee, PhysicalMeleeContact,
+		// MeleeHitJolt; an unknown name drops the entry. Off: a word we patched is put back.
 		std::string when_setting;
 		// Optional (keepThroughDisarm: true, needs whenSetting): patched while the switch is on, the profile's `when`
 		// guard passes and the game is offline, whether first person is armed or not (e.g. code that runs during a room

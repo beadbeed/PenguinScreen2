@@ -298,9 +298,12 @@ melee:
 | `pressMs`, `pressMaxMs` | the attack button is held `pressMs` (default `100`); the game's swing must start within `pressMaxMs` (default `300`) |
 | `raiseMs`, `swingMs` | R1 may take `raiseMs` (default `900`) to bring the weapon up; a swing is followed for at most `swingMs` (default `2500`) |
 | `contactMs`, `cooldownMs` | an HP drop up to `contactMs` (default `250`) after the swing still buzzes; the next swing waits `cooldownMs` (default `250`) |
+| `jolt` | for the VR setting `MeleeHitJolt` (a prototype, strictly offline; needs `contact`): a contact strike turns the struck enemy's bones near the hit the way the swing went, then eases them back, through File #1's cave G (entries marked `whenSetting: MeleeHitJolt`). `block` (16-byte aligned) and `magic`: the host's block for cave G; `hook` `{ address, on }`: the word that reads `on` while cave G is in; `bones` `{ pointer, table, count }`: the enemy record's model pointer offset, the model's bone-pointer table offset and the bone count. Tuning (decimal): the turn is `minDeg` at `slow` m/s and below, `maxDeg` at `fast` and above, eased back over `minFrames` to `maxFrames` enemy updates; `chains`: per struck sphere `{ sphere, bones, parents, weights, below }` (a chain with a bone past `count` is skipped). Missing or bad: no jolt |
 
 A bad number keeps its default with a warning; a bad `enemies`, `override`,
-`online` or `contact` block drops only that part.
+`online`, `contact` or `jolt` block drops only that part. An `override` whose
+`block` and `magic` are not what a `camera.caves` cave reads is dropped too
+(and `online` and `contact` with it).
 
 ## `menuPointer`: point-and-click menus
 
