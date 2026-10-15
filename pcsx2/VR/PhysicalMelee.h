@@ -397,6 +397,8 @@ namespace VR::PhysicalMelee
 	};
 	Mode Decide(const ModeIn& in);
 	inline bool Presses(Mode mode) { return mode != Mode::Off; }
+	// How long the game's screens (MenuMode and melee.screenFlag) must have read clear before a press may start.
+	inline constexpr float kScreenClearS = 0.2f;
 	inline bool Overrides(Mode mode) { return mode == Mode::Offline || mode == Mode::CoopFull; }
 	// Contact mode online (CoopFull, the only case its hits apply online): cave F shows partners the start of a swing for
 	// this many game frames after each strike (block +0x30), then sends the swing's end; this console never runs it.

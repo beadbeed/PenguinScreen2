@@ -793,6 +793,14 @@ SLPM-65428:
       - { address: 0x0FE8B8, on: 0x8FBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
       - { address: 0x0FE8BC, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
       - { address: 0x0FE8C0, on: 0x27BD0020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+    # The code caves the melee entries above write (nightly review M2, b2, d2). Each goes in all or nothing: its whole
+    # range must read zero (or exactly these words) and holds exactly `words` silence entries; the body is written and
+    # read back before any site that jumps into it (an entry whose `when` reads a word in the range) is patched. Sites
+    # go back at once; a body is zeroed only once the game counter 0x48BF93 has moved 3 frames and the EE is not in it.
+    caves:
+      - { from: 0xFE000, to: 0xFE158, words: 84, counter: 0x48BF93 }    # A, B, C (PhysicalMelee)
+      - { from: 0xFE200, to: 0xFE7B4, words: 285, counter: 0x48BF93 }   # D, E, F (PhysicalMeleeContact)
+      - { from: 0xFE800, to: 0xFE8C4, words: 49, counter: 0x48BF93 }    # G (MeleeHitJolt)
     lookAt:
       eye: 0x306338
       target: 0x306344
@@ -928,6 +936,9 @@ SLPM-65428:
   # must read zero before the caves go in online.
   melee:
     attackButton: Circle
+    # u8 0x48BF7E: up as soon as a screen opens (item screen, map, pause), before pauseWhen's 0x720AA0. No press starts
+    # while it or a game screen is up, or until both have been clear 0.2 s; a press in flight lets go when either rises.
+    screenFlag: 0x48BF7E
     swing: { sub: 0x09, idle: 1, attack: 3, normalStance: 1 }
     enemies: { table: 0x3FFCA0, stride: 0xD90, count: 64, present: 0x00, hp: 0x544 }
     override: { block: 0xFF000, magic: 0x4D454C31, counter: 0x48BF93 }

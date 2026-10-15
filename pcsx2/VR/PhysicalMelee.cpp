@@ -243,7 +243,9 @@ namespace VR::PhysicalMelee
 					finish(Result::NotRaised);
 				break;
 			case Phase::Pressing:
-				if (!in.usable)
+				// Lowered inside the press (the player let go of the bumper): Circle in the normal stance is search, pick
+				// up, open; the press ends at once (review m1).
+				if (!in.usable || !in.raised)
 					finish(Result::Lost);
 				else if (in.screen)
 					finish(Result::Screen);
@@ -287,7 +289,7 @@ namespace VR::PhysicalMelee
 				break;
 		}
 		out.phase = st.phase;
-		out.hold_attack = st.phase == Phase::Pressing && st.phase_s < p.press_s;
+		out.hold_attack = st.phase == Phase::Pressing && st.phase_s < p.press_s && in.raised;
 		out.hold_raise = st.we_raise && (st.phase == Phase::Raising || st.phase == Phase::Pressing || st.phase == Phase::Swinging);
 		return out;
 	}
@@ -869,6 +871,21 @@ namespace VR::PhysicalMelee
 					"driver: a screen mid-raise ends it, Circle never pressed, R1 let go");
 			}
 			{
+				// Raised by the player, lowered inside the press (review m1): the press ends, Circle never held lowered.
+				DriverState st;
+				DriverParams p;
+				DriverIn in;
+				in.dt = 1.0f / 60.0f;
+				in.usable = in.raised = in.aim_idle = true;
+				in.request = true;
+				const DriverOut o1 = Step(in, p, st);
+				in.request = false;
+				in.raised = in.aim_idle = false; // the normal stance: still usable
+				const DriverOut o2 = Step(in, p, st);
+				c(o1.hold_attack && !o2.hold_attack && o2.finished && o2.result == Result::Lost,
+					"driver: lowered inside the press lets Circle go at once");
+			}
+			{
 				// Hurt or grabbed mid-swing (not usable): ended, everything let go.
 				DriveRun r;
 				r.Run(0.3f);
@@ -1011,6 +1028,11 @@ namespace VR::PhysicalMelee
 		constexpr u32 kBlockBytes = 0x90;
 		bool s_block_armed = false;
 		u32 s_block_addr = 0;
+		// What the armed block holds at +0x00 and the game it was written for: ClearBlock zeroes only a block that still
+		// reads our magic in that game, never RAM of a VM started since (review d4) or a state's own block (d5).
+		u32 s_block_magic = 0;
+		u32 s_block_crc = 0;
+		bool s_block_stale = false; // after a state load: the next write starts the strike fields from zero
 		// The enemies' HP last poll (present, value), for the contact buzz.
 		struct EnemySeen
 		{
@@ -1075,7 +1097,8 @@ namespace VR::PhysicalMelee
 		// The whole block back to zero (the magic first), so the caves see nothing and the free RAM reads as it was.
 		void ClearBlock()
 		{
-			if (s_block_armed && VMManager::HasValidVM() && s_block_addr + kBlockBytes <= Ps2MemSize::MainRam)
+			if (s_block_armed && VMManager::HasValidVM() && s_block_addr + kBlockBytes <= Ps2MemSize::MainRam &&
+				VMManager::GetDiscCRC() == s_block_crc && static_cast<u32>(memRead32(s_block_addr)) == s_block_magic)
 			{
 				for (u32 off = 0; off < kBlockBytes; off += 4)
 					memWrite32(s_block_addr + off, 0);
@@ -1162,11 +1185,14 @@ namespace VR::PhysicalMelee
 		u32 s_pend_bone = 0;
 		bool s_jolt_armed = false; // cave G's block holds the magic (cleared once when the jolt may not run)
 		u32 s_jolt_addr = 0;
+		u32 s_jolt_magic = 0; // as s_block_magic / s_block_crc (review d4)
+		u32 s_jolt_crc = 0;
 		int s_jolt_wait_zone = -1; // the sphere the pending strike's jolt was armed for (waiting in cave G for the hit), or -1
 
 		void ClearJolt()
 		{
-			if (s_jolt_armed && VMManager::HasValidVM() && s_jolt_addr + kJoltBlockBytes <= Ps2MemSize::MainRam)
+			if (s_jolt_armed && VMManager::HasValidVM() && s_jolt_addr + kJoltBlockBytes <= Ps2MemSize::MainRam &&
+				VMManager::GetDiscCRC() == s_jolt_crc && static_cast<u32>(memRead32(s_jolt_addr)) == s_jolt_magic)
 			{
 				for (u32 off = 0; off < kJoltBlockBytes; off += 4)
 					memWrite32(s_jolt_addr + off, 0);
@@ -1295,6 +1321,8 @@ namespace VR::PhysicalMelee
 			memWrite32(blk, mp.jolt_magic);
 			s_jolt_armed = true;
 			s_jolt_addr = blk;
+			s_jolt_magic = mp.jolt_magic;
+			s_jolt_crc = VMManager::GetDiscCRC();
 			Console.WriteLn("(VR) Melee: jolt%s, enemy %d struck on bone %u at %.1f m/s, %.1f deg over %d frames:%s (1/65536 turn, "
 							"about the parent's x y z); swing (%.0f, %.0f, %.0f) cm/s at (%.0f, %.0f, %.0f).",
 				wait ? " armed at the strike (starts on the hit's update)" : " after the hit", enemy, s_pend_bone, static_cast<double>(s_pend_speed), static_cast<double>(size.deg), size.frames, line.c_str(),
@@ -2347,9 +2375,12 @@ namespace VR::PhysicalMelee
 		s_enemies_valid = false;
 		s_detect.Reset();
 		s_drive.Reset();
-		// The state's RAM has its own block (zero unless it was saved while armed); write it again before trusting it.
-		s_block_armed = false;
-		s_jolt_armed = false;
+		// The state's RAM has its own block (zero unless it was saved while armed): a block saved armed (our magic, this
+		// game) is zeroed by the next poll that does not write it (review d5), anything else is left alone; either way it
+		// is written afresh before the caves trust it.
+		s_block_armed = s_block_addr != 0;
+		s_block_stale = true;
+		s_jolt_armed = s_jolt_addr != 0;
 		ResetContact();
 	}
 
@@ -2408,10 +2439,17 @@ namespace VR::PhysicalMelee
 		}
 		const bool setting = EmuConfig.VR.PhysicalMelee;
 		const bool offline = StrictlyOffline();
-		// The local slot (the profile's camera.base index byte).
+		// The local slot: CameraDriver's debounced one (the one `record` was resolved from), never the index byte read
+		// here. Offline the game puts a partner's slot in that byte while it runs the partners, and a partner's record
+		// and its weapon would then pass every check below (review M1).
 		u32 slot = 0;
 		const bool slot_known = profile && profile->camera.has_value() && profile->camera->base.has_value() &&
-		                        profile->camera->base->is_indexed && Read(reader, profile->camera->base->index_addr, 1, &slot);
+		                        profile->camera->base->is_indexed && CameraDriver::LocalSlot(&slot);
+		// And nothing is written for a record that was not also the local record on the previous poll (a second guard
+		// on the same rule: the block, the caves and a strike act on one steady record).
+		static u32 s_prev_record = 0;
+		const bool record_steady = profile && record != 0 && record == s_prev_record;
+		s_prev_record = profile ? record : 0;
 
 		// Where it may act (tools/outbreak-vr/research/2026-10-14-melee-coop.md). Offline in full. Online only with
 		// PhysicalMeleeOnline in private co-op: every console runs every character's swing from the state partners send,
@@ -2490,8 +2528,8 @@ namespace VR::PhysicalMelee
 					mp->has_override ? "follows the VR weapon" : "stays on the game's own swing (no melee.override)",
 					mp->enemy_count ? "; a buzz when it lands" : "");
 			else
-				verdict = fmt::format("on online, private co-op (swing to attack with {}; partners see the game's own swing; the "
-									  "hit follows the VR weapon, by contact in PhysicalMeleeMode = Contact, only while this "
+				verdict = fmt::format("on online, private co-op (nothing is pressed online, attack with {} yourself; the "
+									  "hit follows the VR weapon only by contact, PhysicalMeleeMode = Contact, and only while this "
 									  "console runs the room's enemies{}{})",
 					mp->attack_button, mi.has_online ? "" : ", so never: the profile has no melee.online",
 					mp->enemy_count ? "; a buzz when it lands" : "");
@@ -2511,10 +2549,10 @@ namespace VR::PhysicalMelee
 						"");
 			else if (mode == Mode::CoopPress && master >= 0)
 				line = fmt::format("room {}: the console of slot {} runs its enemies (this is slot {}), so the hit is the game's "
-								   "own swing (press only)", room, master, slot);
+								   "own swing (nothing pressed online)", room, master, slot);
 			else if (mode == Mode::CoopPress)
 				line = "no room master is known (the network overlay or its table is not read), so the hit is the game's own "
-				       "swing (press only)";
+				       "swing (nothing pressed online)";
 			if (line != s_mode_line)
 			{
 				s_mode_line = line;
@@ -2567,7 +2605,17 @@ namespace VR::PhysicalMelee
 			aim_idle = raised && sub == mp->sub_idle;
 			swinging = raised && sub == mp->sub_attack;
 		}
-		const bool screen = SpatialControls::MenuMode();
+		// A screen up or opening (never-confirm rule; review d3): MenuMode (pauseWhen 0x720AA0) rises 0.55-0.65 s after the
+		// game opens the item screen or the map, so melee.screenFlag (0x48BF7E, up at once) counts too, and a press
+		// starts only once both have been clear kScreenClearS (screen_block); one in flight lets go as either rises.
+		u32 screen_flag = 0;
+		const bool screen_now = SpatialControls::MenuMode() ||
+		                        (mp && mp->screen_flag.has_value() &&
+		                            (!Read(reader, mp->screen_flag.value(), 1, &screen_flag) || screen_flag != 0));
+		static float s_screen_clear_s = 0.0f;
+		s_screen_clear_s = screen_now ? 0.0f : std::min(s_screen_clear_s + dt, 10.0f);
+		const bool screen = screen_now;
+		const bool screen_block = screen_now || s_screen_clear_s < kScreenClearS;
 		const bool usable = env && melee && (raised || normal);
 
 		// The enemies' HP: a drop since the last poll (read only).
@@ -2633,7 +2681,7 @@ namespace VR::PhysicalMelee
 				for (int k = 0; k < 3; k++)
 					di.tip[k] = pos[k] + r[k];
 			}
-			di.armed = usable && !screen && s_drive.phase == Phase::Idle;
+			di.armed = usable && !screen_block && s_drive.phase == Phase::Idle;
 			dout = Detect(di, mp ? mp->detect : DetectorParams{}, s_detect);
 			if (dout.swing)
 			{
@@ -2645,7 +2693,9 @@ namespace VR::PhysicalMelee
 			ri.dt = dt;
 			ri.request = dout.swing;
 			ri.usable = usable;
-			ri.screen = screen;
+			// Idle takes no request until the screens have been clear kScreenClearS; an attempt in flight ends (Screen) the
+			// moment one rises (screen_block is then true too).
+			ri.screen = screen_block;
 			ri.raised = raised;
 			ri.aim_idle = aim_idle;
 			ri.swinging = swinging;
@@ -2678,7 +2728,7 @@ namespace VR::PhysicalMelee
 		float m[16] = {};
 		float origin[3] = {}, axes[3][3] = {};
 		u32 counter = 0;
-		if (usable && Overrides(mode) && mp->has_override && hand && attach.valid)
+		if (usable && record_steady && Overrides(mode) && mp->has_override && hand && attach.valid)
 		{
 			CameraDriver::Mapping map;
 			if (CameraDriver::GetMapping(&map) &&
@@ -2686,8 +2736,9 @@ namespace VR::PhysicalMelee
 				GameMatrix(origin, axes, MapPoint, &map, m) && Read(reader, mp->counter, 1, &counter))
 			{
 				const u32 b = mp->block;
-				if (!s_block_armed)
+				if (!s_block_armed || s_block_stale)
 				{
+					s_block_stale = false;
 					// A fresh block: the strike fields (and the caves' own) start from zero, whatever RAM held.
 					for (u32 off = 0x0C; off < 0x40; off += 4)
 						memWrite32(b + off, 0);
@@ -2713,6 +2764,8 @@ namespace VR::PhysicalMelee
 				memWrite32(b, mp->magic);
 				s_block_armed = true;
 				s_block_addr = b;
+				s_block_magic = mp->magic;
+				s_block_crc = VMManager::GetDiscCRC();
 				wrote = true;
 			}
 		}
@@ -2750,8 +2803,10 @@ namespace VR::PhysicalMelee
 
 		frame.pad_port = s_pad_port;
 		frame.attack_button = s_attack_button;
-		frame.hold_attack = o.hold_attack && !screen;
-		frame.hold_raise = o.hold_raise && !screen;
+		// Online nothing is pressed at all (review d3: a partner's take-it prompt can open between two polls, and the
+		// press would confirm it); contact mode as the room's master needs no press.
+		frame.hold_attack = o.hold_attack && !screen_block && mode == Mode::Offline;
+		frame.hold_raise = o.hold_raise && !screen_block && mode == Mode::Offline;
 		return frame;
 	}
 }

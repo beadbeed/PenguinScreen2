@@ -288,57 +288,24 @@ value, so does the other, which makes it worse rather than safer. See M1.
 - **d4 (MINOR-MAJOR):** VM reset leaves s_block_armed / s_jolt_armed set, so the next VM gets 0x90 zero bytes at 0xFF000 and 0x70 at 0xFF100 (`PhysicalMelee.cpp:1076-1084`, `1167-1175`). Fix: clear the flags without writing on VM reset/shutdown/ELF change, or check CRC + magic first.
 - **d5-d13 (minor):** d5 state load leaves stale block contents (set armed=true on load so the next poll clears); d6 = b3 (caves stay after overlay swap); d7 = M2/b2; d8 cave D can give the strike object life 0 if the block is cleared mid-call (save the window on the stack); d9 cave E matches only the object pointer, add a0 == block+8; d10 cave G: v0/v1 clobbered, kind-2 entries never finish, bone index not checked against the model's real count; d11 cave A/B assumptions only checkable by test; d12 partner-swing message restores +0xBA0/+0x08 whole; d13 CoopOverrideLive can go stale if Poll stops (add a "Poll ran this vsync" stamp).
 
-## Fixed on branch `nightfix` (2026-10-15)
+---
 
-Each item was checked against the code before the fix; none was refuted. All are built locally, 39 of 39 self-tests
-passed, and DepthWarp-off behaviour is unchanged (no WarpTarget exists then; a7 is a no-op when the panel is the
-whole picture).
+## Fix status (branch `reviewfix`, 2026-10-15)
 
-- **c1** (2f9f4e6). The CRITICAL is confirmed: `GSDeviceVK.cpp:858` sets `VMA_ALLOCATOR_CREATE_EXTERNALLY_SYNCHRONIZED_BIT`.
-  - The warp's two D16 depth images and the dump buffer are now made and freed with the ring, on the GS thread
-    (`WarpEnsureSlots` / `WarpDestroySlots`). The dump buffer is host-coherent, so the pacer no longer calls
-    `vmaInvalidateAllocation`.
-  - The pacer only makes views and framebuffers (`WarpTargetDepthView`, `WarpFramebuffer`).
-  - A ring re-make (under `submit_mutex`, queue idle) drops the pacer's views first and keeps each target's swapchain
-    and acquire state.
-  - No VMA call is left on the pacer.
-  - Includes **m6** (`WarpTargetFor` gives up on a fence timeout instead of destroying views) and addendum 3's m6 (the
-    colour view leak in `WarpFramebuffer`).
-- **M3 / M4 = c2** (d940b9e). `DestroySwapchainSynced` (with `submit_mutex` held) calls `WarpForgetSwapchain`. For an
-  eye swapchain a WarpTarget draws into, it waits on every in-flight `wp.fence[]` (1 s, logged on a timeout) and
-  destroys the target, before `xrDestroySwapchain`.
-- **m5** (7584f5f). A memory barrier at the start of each warp pass: earlier passes' depth writes, then ALL_COMMANDS,
-  so the render pass's UNDEFINED transition and clear are ordered after them.
-- **m4** (202c9ba). On a failed record or submit, the eye images stay acquired and waited for the next pass instead of
-  being released stale.
-- **a7** (3a149a1). The published pointer transform is the whole picture laid out around the panel through u0..v1.
+Each item was checked against the code before fixing; none was refuted. Self-tests 41 of 41 (39 before, plus
+`SelfTestStableSlot` and `SelfTestCaves`; a Press-mode driver check was added to the melee driver suite). The offline
+checks used `run-reviewfix` with no headset: slot 5, the test-only poked pipe, the right hand scripted over PINE,
+normal speed (`review_test.py` in the session scratchpad).
 
-**Null-headset check** (SteamVR 2.17.10 null HMD, started before the emulator; run-nightfix, slot 7, DepthWarp on,
-offline):
-- the frame-size change ran: eye swapchains 1920x1344 re-made at 1536x1344, the ring re-made, and the pacer
-  re-targeting both eyes;
-- then 300 frames warped every 5 s, with no pass busy, no image not back, and 0.062 ms GPU mean;
-- no Vulkan or XR error in the log;
-- restored afterwards: `null_driver.py off` (settings md5 identical to the backup, no `forcedDriver`), and SteamVR's
-  processes closed.
-
-**Second pass (2026-10-15, same branch; built, 39 of 39 self-tests; no null-headset run, because another pcsx2-qt.exe
-was running):**
-- **c3** (403bac4). The pacer keeps a copy of the set its eye images were last drawn for. When the pass does not run
-  (busy, an image late, no target, a failed record), that set's Screen entries, head and turn clock go out instead of
-  the newer set's, as keep_screen does, and the turn is worked out again.
-  - Only when both sets have the same number of Screen entries.
-  - The copy is dropped when one of its swapchains is destroyed.
-  - The Warp line counts these frames ("at the poses last drawn for").
-- **c4** (943f154).
-  - Every swapchain create and destroy is counted, and a LIMIT_REACHED logs how many the compositor holds.
-  - `CreateSwapchainYielding`, after the edge fill, now gives up DepthLayer's two depth swapchains: the depth layer
-    goes off for the session, the GS's copies are waited first, and the published depth is dropped. Then it retries.
-- **m10** (c02eb94). The compositor's want follows what is still on: the warp's pipeline failure keeps the want for
-  the depth layer, and `DepthLayerOff` keeps it for the warp.
-- **m1** (dc3898e). A depth release that fails also invalidates `s.published.fp_depth` when it names that swapchain
-  (the deferred set was published before the releases).
-- **m7** (e5bbffa), partly. Shutdown destroys the depth swapchains. `DepthLayerOff` still leaves them to the next
-  resize or Shutdown, because it runs inside copy paths.
-
-**Still open:** addendum 3's m8, m9, m11, m12. None was refuted.
+| Id | Status | Commit | Evidence |
+|---|---|---|---|
+| M1 / d1 | fixed, host side | 43b005f | `CameraDriver::StableSlot`: the slot byte is sampled once per running vsync, and a value is taken only after 8 vsyncs in a row. `GetBase`, PhysicalMelee (owner and room-master checks), the GameFeedback weapon reader and the item owner check (pouches, reload) use `CameraDriver::LocalSlot`. Melee writes its block only for a record that was also local on the previous poll. **Offline:** 254,538 PINE reads over 20 s saw the raw byte non-zero 1,824 times, and the block named only Kevin's record 0x476DD0 (128,316 reads). Contact hits still land (600 -> 540 / 510). |
+| d1, cave side | **not done** | | The caves still compare only block+8. Adding a `record+3 == 0x3AEF74` check means reassembling caves A/B/C/D/F and verifying them live. Left for a separate change. The host never names a non-local record (above). |
+| d3 | fixed | 512542f | New `melee.screenFlag` (0x48BF7E). No press while it or MenuMode is up, or until both have been clear for 0.2 s, and a press in flight is dropped the moment either rises. Nothing is pressed online (CoopPress or CoopFull). Static and self-tests only: the timing into a real opening screen is not run live. |
+| M2 / b2 | fixed | 3d13353 | New `camera.caves` (3 caves, entry counts). Install is all or nothing: the whole range (NOP slots and gaps included) must be zero or exactly our words. The body is written and read back before any site is patched, and a site is patched only while its cave is in. **Offline:** 0x12345678 written at 0xFE09C (a gap in A-C) while the cave was in gave the log "changed under us". Site 0x552D8C read stock 0xC5020200, the cave's 70 words were zeroed, the foreign word was left, and the install was "refused" (logged once). When the word was cleared, the cave went in again. |
+| d2 | fixed | 3d13353 | Sites are put back at once. A body is zeroed only after the counter at 0x48BF93 has moved 3 frames (and at least 3 vsyncs) with the EE's pc and $ra outside the cave, and any site still reading ours is put back first. Offline the zeroing ran 3-4 vsyncs after the sites. Online, every install re-checks the range (b2). |
+| b1 | fixed | 31bf47a | A copy of the tracked list is kept. On a list change in the same game, or when the profile goes away, the tracked words go back before the tracking is dropped. Cave bodies stay resident. Static and self-tests only: a live profile reload was not run. |
+| d4 / d5 | fixed | 6380394 | The block and jolt clears write only while the block reads our magic in the same game (CRC). After a load, a block saved armed is cleared, and its strike fields start from zero. |
+| m1 / a9 | fixed | cb9236f | Pressing ends with Lost when the weapon is lowered, and `hold_attack` requires the raised stance (driver self-test). |
+| m2, m3, m7 | not done (time) | | m7 stays as documented: the arrival words are patched while the switch is on, not only while armed. |
+| a1-a5, a8, b3-b5, b8, b9, d6-d13 | not done (time) | | b3 is partly covered: a cave whose overlay guard fails now drains instead of staying in, so its words are no longer orphaned. |
