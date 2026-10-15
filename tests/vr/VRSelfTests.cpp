@@ -1330,6 +1330,7 @@ int main(int argc, char* argv[])
 	RunSilent("CameraDriver::SelfTestAssembler (hook)", VR::CameraDriver::SelfTestAssembler);
 	RunSilent("CameraDriver::SelfTestMath (math, predict, comfort, FOV)", VR::CameraDriver::SelfTestMath);
 	RunSilent("CameraDriver::SelfTestStableSlot (the debounced local slot, review M1)", VR::CameraDriver::SelfTestStableSlot);
+	RunSilent("CameraDriver::SelfTestCaves (all-or-nothing caves, review M2 / d2)", VR::CameraDriver::SelfTestCaves);
 	RunSilent("ProfileDB::SelfTestMultibandResolve", VR::ProfileDB::SelfTestMultibandResolve);
 	RunAutoStereo();
 	RunCameraDriverLogged();

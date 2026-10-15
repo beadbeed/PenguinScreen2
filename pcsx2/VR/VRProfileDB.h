@@ -292,6 +292,23 @@ namespace VR::ProfileDB
 		bool keep_through_disarm = false;
 	};
 
+	// camera.caves: a block of camera.silence entries that is one piece of code in free RAM (a code cave), and the jump
+	// sites that enter it (the silence entries outside it whose `when` reads a word inside it). Installed all or nothing
+	// (CameraDriver; nightly review M2, b2, d2): the whole range [from, to) must read zero or exactly our words (the gaps
+	// between entries zero), the body goes in and is read back before any site is patched, and a site is only patched
+	// while its cave is in. Sites are put back at once; the body is zeroed only once the game counter (`counter`, u8)
+	// has moved kCaveDrainFrames frames and the EE's pc and $ra are outside the cave. `words` is how many silence
+	// entries the range must hold: a profile edit or a rejected line that drops one makes the cave unusable (nothing
+	// in it or entering it is ever patched).
+	struct CameraCave
+	{
+		u32 from = 0;
+		u32 to = 0;                // exclusive, 4-byte aligned
+		u32 words = 0;             // silence entries expected in [from, to)
+		std::optional<u32> counter; // u8 game frame counter (File #1 0x48BF93)
+		bool usable = false;       // the entries in range match `words`, share one whenSetting, and are off = 0
+	};
+
 	struct CameraCodeHook
 	{
 		bool enabled = false;
@@ -421,6 +438,7 @@ namespace VR::ProfileDB
 		std::optional<CameraBase> base;
 		std::vector<CameraGuard> guards;
 		std::vector<CameraSilence> silence;
+		std::vector<CameraCave> caves;
 		std::vector<CameraCodeHook> code_hooks;
 		std::optional<CameraPadLook> pad_look;
 		std::optional<CameraLookAt> look_at;

@@ -1432,6 +1432,64 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 		}
 	}
 
+	if (cnode.has_child("caves") && cnode["caves"].is_seq())
+	{
+		for (const ryml::ConstNodeRef& cv : cnode["caves"].children())
+		{
+			if (!cv.is_map())
+				continue;
+			warnUnknownKeys(serial, cv, "camera.caves", {"from", "to", "words", "counter", "notes"});
+			const std::optional<u32> from = cv.has_child("from") ? parseAddress(nodeVal(cv["from"])) : std::nullopt;
+			const std::optional<u32> to = cv.has_child("to") ? parseAddress(nodeVal(cv["to"])) : std::nullopt;
+			const std::optional<u32> words = cv.has_child("words") ? StringUtil::FromChars<u32>(nodeVal(cv["words"])) : std::nullopt;
+			CameraCave cave;
+			if (!from.has_value() || !to.has_value() || !words.has_value() || (from.value() & 3u) != 0 ||
+				(to.value() & 3u) != 0 || to.value() <= from.value() || !inMainRam(from.value(), to.value() - from.value()))
+			{
+				// Kept, unusable: a site entering a cave the profile names badly must never be patched either.
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a camera.caves entry without a usable from/to/words; "
+								   "nothing in it is ever patched.", serial);
+				if (from.has_value() && to.has_value() && to.value() > from.value())
+				{
+					cave.from = from.value();
+					cave.to = to.value();
+					cam.caves.push_back(cave);
+				}
+				continue;
+			}
+			cave.from = from.value();
+			cave.to = to.value();
+			cave.words = words.value();
+			if (cv.has_child("counter"))
+			{
+				const std::optional<u32> c = parseAddress(nodeVal(cv["counter"]));
+				if (c.has_value() && inMainRam(c.value(), 1))
+					cave.counter = c.value();
+			}
+			u32 found = 0;
+			bool same = true, zero_off = true, aligned = true;
+			const std::string* setting = nullptr;
+			for (const CameraSilence& sil : cam.silence)
+			{
+				if (sil.ee_address < cave.from || sil.ee_address >= cave.to)
+					continue;
+				found++;
+				zero_off = zero_off && sil.value_off == 0;
+				aligned = aligned && (sil.ee_address & 3u) == 0;
+				if (!setting)
+					setting = &sil.when_setting;
+				else
+					same = same && *setting == sil.when_setting;
+			}
+			cave.usable = found == cave.words && same && zero_off && aligned;
+			if (!cave.usable)
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera cave {:#x}-{:#x} holds {} silence entries (wants {}){}{}{}; "
+								   "nothing in it or entering it is ever patched.", serial, cave.from, cave.to, found, cave.words,
+					same ? "" : ", mixed whenSetting", zero_off ? "" : ", an off value not 0", aligned ? "" : ", a misaligned address");
+			cam.caves.push_back(cave);
+		}
+	}
+
 	if (cnode.has_child("codeHooks") && cnode["codeHooks"].is_seq())
 	{
 		const auto readReg = [&](const ryml::ConstNodeRef& n, const char* key, u8& dst) {

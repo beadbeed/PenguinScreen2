@@ -145,6 +145,43 @@ namespace VR::CameraDriver
 	// Pure: StableSlot's rules (a partner's flicker never becomes the slot; a real change does, after the hold).
 	bool SelfTestStableSlot();
 
+	// --- Code caves (camera.caves; nightly review M2, b2, d2) ---
+	// A cave's range against our words: ram[k] is what the word at from + 4k holds, ours[k] our word there (0 in a gap
+	// between entries and in a NOP slot). Clear: every word 0. Ours: every word exactly ours. Foreign: anything else
+	// (a word that is neither, or part ours and part zero); *first_bad (may be null) then names the first word that is
+	// neither 0 nor ours, or the first word that differs from ours for a part-written cave.
+	enum class CaveRegion
+	{
+		Clear,
+		Ours,
+		Foreign,
+	};
+	CaveRegion CheckCaveRegion(const u32* ram, const u32* ours, size_t n, size_t* first_bad = nullptr);
+
+	// A memory view for the cave install (the guest's in the emulator, an array in the self-test).
+	struct CaveMemory
+	{
+		u32 (*read)(void* ctx, u32 address) = nullptr;
+		void (*write)(void* ctx, u32 address, u32 value) = nullptr;
+		void* ctx = nullptr;
+	};
+	// All or nothing: true when the cave at `from` holds exactly `ours` afterwards. A Clear range gets every word written
+	// and read back; a read-back mismatch zeroes what was written and fails. A Foreign range is not written at all.
+	bool InstallCave(const CaveMemory& mem, u32 from, const u32* ours, size_t n, CaveRegion* seen = nullptr);
+	// Zero the words that hold exactly our word (a foreign word is left as it is). Returns how many were zeroed.
+	size_t ZeroCave(const CaveMemory& mem, u32 from, const u32* ours, size_t n);
+	// A cave's body may be zeroed only once its sites have been back to stock for kCaveDrainFrames of the game's frame
+	// counter (and at least kCaveDrainMinVsyncs vsyncs; kCaveDrainNoCounterVsyncs without a counter), and the EE's pc
+	// and $ra are outside [from, to): a game function the cave called may still return into it.
+	inline constexpr u32 kCaveDrainFrames = 3;
+	inline constexpr u32 kCaveDrainMinVsyncs = 3;
+	inline constexpr u32 kCaveDrainNoCounterVsyncs = 8;
+	bool CaveDrainDone(bool has_counter, u32 counter_at_start, u32 counter_now, u32 vsyncs, u32 pc, u32 ra, u32 from, u32 to);
+
+	// Pure: the cave rules above over an array (a foreign word refuses the whole install, a read-back failure rolls back,
+	// the drain waits for the counter and for pc / $ra to leave).
+	bool SelfTestCaves();
+
 	// CPU thread, after Apply: true while the game runs, the camera guards pass (or failed for no longer than
 	// the profile's disarm grace) and this vsync resolved camera.base, whether or not first person is armed. Valid while grabbed, down or dead too (it ignores
 	// releaseWhen, the head pose and the network mode). For reads only (GameFeedback's hurt and weapon cues, and the

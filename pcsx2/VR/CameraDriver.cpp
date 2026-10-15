@@ -21,6 +21,7 @@
 #include "Config.h"
 #include "MTGS.h"
 #include "Memory.h"
+#include "R5900.h"
 #include "VMManager.h"
 
 #include "common/Console.h"
@@ -1204,6 +1205,227 @@ namespace VR::CameraDriver
 			}
 		}
 
+		// --- camera.caves (review M2, b2, d2): all-or-nothing code caves ---
+		// Per cave: Out (body not ours: zero, or refused), In (body written and read back; its sites may be patched),
+		// Draining (sites back to stock; the body is zeroed once CaveDrainDone).
+		enum class CaveState : u8
+		{
+			Out,
+			In,
+			Draining,
+		};
+		struct CaveRun
+		{
+			CaveState st = CaveState::Out;
+			u32 drain_vsyncs = 0;
+			u32 drain_counter = 0;
+			bool refused_logged = false;
+			bool broken_logged = false;
+			bool changed_logged = false;
+		};
+		struct CaveLayout
+		{
+			const ProfileDB::CameraProfile* cam = nullptr;
+			u32 crc = 0;
+			size_t silence_count = 0;
+			std::vector<std::vector<u32>> ours; // per cave, per word (0 in a gap)
+			std::vector<int> body;              // per silence entry: the cave it is part of, or -1
+			std::vector<int> site;              // per silence entry: the cave its `when` reads (it jumps there), or -1
+			std::vector<int> gate;              // per cave: the silence entry whose gates stand for the cave's, or -1
+		};
+		CaveLayout s_cave_layout;
+		std::vector<CaveRun> s_caves;
+
+		u32 CaveRead(void*, u32 address) { return static_cast<u32>(memRead32(address)); }
+		void CaveWrite(void*, u32 address, u32 value) { memWrite32(address, value); }
+		const CaveMemory kGuestCaveMemory{CaveRead, CaveWrite, nullptr};
+
+		bool SilenceSettingGateOpen(const ProfileDB::CameraSilence& sil);
+
+		void EnsureCaveLayout(const ProfileDB::CameraProfile& cam, u32 crc)
+		{
+			CaveLayout& L = s_cave_layout;
+			if (L.cam == &cam && L.crc == crc && L.silence_count == cam.silence.size() && s_caves.size() == cam.caves.size())
+				return;
+			L = CaveLayout{};
+			L.cam = &cam;
+			L.crc = crc;
+			L.silence_count = cam.silence.size();
+			L.ours.resize(cam.caves.size());
+			L.gate.assign(cam.caves.size(), -1);
+			L.body.assign(cam.silence.size(), -1);
+			L.site.assign(cam.silence.size(), -1);
+			s_caves.assign(cam.caves.size(), CaveRun{});
+			for (size_t c = 0; c < cam.caves.size(); c++)
+			{
+				const ProfileDB::CameraCave& cv = cam.caves[c];
+				L.ours[c].assign((cv.to - cv.from) / 4u, 0u);
+			}
+			for (size_t i = 0; i < cam.silence.size(); i++)
+			{
+				const ProfileDB::CameraSilence& sil = cam.silence[i];
+				for (size_t c = 0; c < cam.caves.size(); c++)
+				{
+					const ProfileDB::CameraCave& cv = cam.caves[c];
+					if (sil.ee_address >= cv.from && sil.ee_address < cv.to)
+					{
+						L.body[i] = static_cast<int>(c);
+						L.ours[c][(sil.ee_address - cv.from) / 4u] = sil.value_on;
+						if (L.gate[c] < 0)
+							L.gate[c] = static_cast<int>(i);
+						break;
+					}
+				}
+				if (L.body[i] >= 0)
+					continue;
+				for (const ProfileDB::CameraGuard& g : sil.when)
+				{
+					for (size_t c = 0; c < cam.caves.size() && !g.is_chain; c++)
+					{
+						if (g.ee_address >= cam.caves[c].from && g.ee_address < cam.caves[c].to)
+							L.site[i] = static_cast<int>(c);
+					}
+				}
+			}
+		}
+
+		bool CaveBodyEntry(size_t i)
+		{
+			return i < s_cave_layout.body.size() && s_cave_layout.body[i] >= 0;
+		}
+
+		// A site may be patched only while its cave is In; a silence entry entering no cave always may.
+		bool CaveSiteOpen(size_t i)
+		{
+			if (i >= s_cave_layout.site.size() || s_cave_layout.site[i] < 0)
+				return true;
+			const size_t c = static_cast<size_t>(s_cave_layout.site[i]);
+			return c < s_caves.size() && s_caves[c].st == CaveState::In;
+		}
+
+		void StartDrain(const ProfileDB::CameraCave& cv, CaveRun& run)
+		{
+			run.st = CaveState::Draining;
+			run.drain_vsyncs = 0;
+			run.drain_counter = cv.counter.has_value() ? memRead8(cv.counter.value()) : 0u;
+		}
+
+		// Once per vsync, before the silence entries (ApplySilence: armed = true; RestoreSilence: false). Installs a wanted
+		// cave whole (or refuses it whole), turns a cave that is not wanted, or that changed under us, to Draining (its
+		// sites go back this same vsync, in the entry loop that follows), and zeroes a drained body.
+		void UpdateCaves(const ProfileDB::CameraProfile& cam, u32 crc, bool armed)
+		{
+			EnsureCaveLayout(cam, crc);
+			if (cam.caves.empty())
+				return;
+			const bool running = VMManager::GetState() == VMState::Running;
+			for (size_t c = 0; c < cam.caves.size(); c++)
+			{
+				const ProfileDB::CameraCave& cv = cam.caves[c];
+				CaveRun& run = s_caves[c];
+				const std::vector<u32>& ours = s_cave_layout.ours[c];
+				const int gi = s_cave_layout.gate[c];
+				bool want = armed && cv.usable && gi >= 0;
+				if (want)
+				{
+					const ProfileDB::CameraSilence& g = cam.silence[static_cast<size_t>(gi)];
+					want = (g.when.empty() || GuardListPass(g.when)) && SilenceSettingGateOpen(g) &&
+					       !(g.offline_only && OnlineSafeNow()) && !(g.coop_only && s_net_mode != NetMode::PrivateCoop);
+				}
+				if (!cv.usable && !run.broken_logged)
+				{
+					run.broken_logged = true;
+					Console.Warning("(VR) CameraDriver: cave 0x%X-0x%X is not usable in this profile; nothing in it or entering it is patched.",
+						cv.from, cv.to);
+				}
+				if (!running)
+					continue;
+				std::vector<u32> ram(ours.size());
+				for (size_t k = 0; k < ours.size(); k++)
+					ram[k] = static_cast<u32>(memRead32(cv.from + static_cast<u32>(k) * 4u));
+				size_t bad = 0;
+				const CaveRegion region = CheckCaveRegion(ram.data(), ours.data(), ours.size(), &bad);
+				const u32 bad_at = cv.from + static_cast<u32>(bad) * 4u;
+				switch (run.st)
+				{
+					case CaveState::Out:
+						if (!want)
+							break;
+						if (region == CaveRegion::Ours ||
+							(region == CaveRegion::Clear && InstallCave(kGuestCaveMemory, cv.from, ours.data(), ours.size())))
+						{
+							run.st = CaveState::In;
+							run.refused_logged = false;
+							run.changed_logged = false;
+							Console.WriteLn("(VR) CameraDriver: cave 0x%X-0x%X in (%zu words, read back).", cv.from, cv.to, ours.size());
+						}
+						else if (!run.refused_logged)
+						{
+							run.refused_logged = true;
+							Console.Warning("(VR) CameraDriver: cave 0x%X-0x%X refused: 0x%08X at 0x%X is not ours and not zero "
+											"(the free RAM is in use); nothing in it or entering it is patched.",
+								cv.from, cv.to, ram[bad], bad_at);
+						}
+						break;
+					case CaveState::In:
+						if (region != CaveRegion::Ours)
+						{
+							if (!run.changed_logged)
+							{
+								run.changed_logged = true;
+								Console.Warning("(VR) CameraDriver: cave 0x%X-0x%X changed under us (0x%08X at 0x%X); its sites go back.",
+									cv.from, cv.to, ram[bad], bad_at);
+							}
+							StartDrain(cv, run);
+						}
+						else if (!want)
+							StartDrain(cv, run);
+						break;
+					case CaveState::Draining:
+					{
+						if (want && region == CaveRegion::Ours)
+						{
+							run.st = CaveState::In;
+							break;
+						}
+						// Every site entering it must read stock before the body goes: put back any that still reads ours
+						// (the entry loop restores the tracked ones; this catches one stranded by a load or a profile
+						// change) and wait again.
+						bool site_in = false;
+						for (size_t i = 0; i < cam.silence.size(); i++)
+						{
+							if (s_cave_layout.site[i] != static_cast<int>(c))
+								continue;
+							const ProfileDB::CameraSilence& sil = cam.silence[i];
+							if (sil.value_on != sil.value_off && static_cast<u32>(memRead32(sil.ee_address)) == sil.value_on)
+							{
+								memWrite32(sil.ee_address, sil.value_off);
+								site_in = true;
+							}
+						}
+						if (site_in)
+						{
+							StartDrain(cv, run);
+							break;
+						}
+						if (run.drain_vsyncs < 0xFFFFFFFFu)
+							run.drain_vsyncs++;
+						const u32 counter_now = cv.counter.has_value() ? memRead8(cv.counter.value()) : 0u;
+						if (CaveDrainDone(cv.counter.has_value(), run.drain_counter, counter_now, run.drain_vsyncs, cpuRegs.pc,
+								cpuRegs.GPR.n.ra.UL[0], cv.from, cv.to))
+						{
+							const size_t zeroed = ZeroCave(kGuestCaveMemory, cv.from, ours.data(), ours.size());
+							run.st = CaveState::Out;
+							if (zeroed > 0)
+								Console.WriteLn("(VR) CameraDriver: cave 0x%X-0x%X out (%zu words zeroed, %u vsyncs after its sites).",
+									cv.from, cv.to, zeroed, run.drain_vsyncs);
+						}
+						break;
+					}
+				}
+			}
+		}
+
 		bool s_silence_applied = false;
 		u32 s_silence_crc = 0;
 		std::vector<u8> s_silence_patched; // per entry: the word holds value_on because of us
@@ -1235,6 +1457,8 @@ namespace VR::CameraDriver
 		{
 			if (s_silence_crc != crc || s_silence_patched.size() != cam.silence.size())
 				s_silence_patched.assign(cam.silence.size(), 0);
+			// The caves first: a site below is patched only while its cave is in (body written and read back).
+			UpdateCaves(cam, crc, true);
 			size_t patched = 0;
 			size_t restored = 0;
 			for (size_t i = 0; i < cam.silence.size(); i++)
@@ -1242,6 +1466,8 @@ namespace VR::CameraDriver
 				const ProfileDB::CameraSilence& sil = cam.silence[i];
 				if (sil.keep_through_disarm)
 					continue; // ApplyKeptSilence owns it
+				if (CaveBodyEntry(i))
+					continue; // UpdateCaves owns it
 				if (!sil.when.empty() && !GuardListPass(sil.when))
 				{
 					s_silence_patched[i] = 0; // the code holding it is gone; a reload brings the original back
@@ -1251,7 +1477,7 @@ namespace VR::CameraDriver
 					continue;
 				const u32 cur = static_cast<u32>(memRead32(sil.ee_address));
 				const bool active = SilenceSettingGateOpen(sil) && !(sil.offline_only && OnlineSafeNow()) &&
-				                    !(sil.coop_only && s_net_mode != NetMode::PrivateCoop) &&
+				                    !(sil.coop_only && s_net_mode != NetMode::PrivateCoop) && CaveSiteOpen(i) &&
 				                    (sil.active_when.empty() || (base.has_value() && RecordChecksPass(sil.active_when, base.value())));
 				if (!active)
 				{
@@ -1285,6 +1511,8 @@ namespace VR::CameraDriver
 		{
 			if (s_silence_crc != crc || s_silence_patched.size() != cam.silence.size())
 				s_silence_patched.assign(cam.silence.size(), 0);
+			// Caves go to Draining: their sites go back below, at once; the bodies only once nothing can be in them.
+			UpdateCaves(cam, crc, false);
 			size_t restored = 0;
 			bool repair_pending = false;
 			for (size_t i = 0; i < cam.silence.size(); i++)
@@ -1292,6 +1520,8 @@ namespace VR::CameraDriver
 				const ProfileDB::CameraSilence& sil = cam.silence[i];
 				if (sil.keep_through_disarm)
 					continue; // kept through the disarm; ApplyKeptSilence puts it back
+				if (CaveBodyEntry(i))
+					continue; // UpdateCaves owns it (zeroed only after the drain)
 				const bool repair = s_silence_repair && !sil.when.empty();
 				if (!s_silence_patched[i] && !repair)
 					continue;
@@ -1335,7 +1565,7 @@ namespace VR::CameraDriver
 			for (size_t i = 0; i < cam.silence.size(); i++)
 			{
 				const ProfileDB::CameraSilence& sil = cam.silence[i];
-				if (!sil.keep_through_disarm || sil.value_on == sil.value_off)
+				if (!sil.keep_through_disarm || sil.value_on == sil.value_off || CaveBodyEntry(i))
 					continue;
 				if (!GuardListPass(sil.when))
 				{
@@ -1346,7 +1576,7 @@ namespace VR::CameraDriver
 				}
 				const u32 cur = static_cast<u32>(memRead32(sil.ee_address));
 				const bool active = first_person_on && SilenceSettingGateOpen(sil) && !(sil.offline_only && OnlineSafeNow()) &&
-				                    !(sil.coop_only && s_net_mode != NetMode::PrivateCoop);
+				                    !(sil.coop_only && s_net_mode != NetMode::PrivateCoop) && CaveSiteOpen(i);
 				if (!active)
 				{
 					if (cur == sil.value_on && (s_kept_patched[i] || s_kept_repair))
@@ -3283,6 +3513,7 @@ namespace VR::CameraDriver
 			s_disarm_reason = DisarmReason::NoVM;
 			s_kept_patched.assign(s_kept_patched.size(), 0); // no VM: its memory (and our kept patches) are gone
 			s_slot.Reset();
+			s_caves.assign(s_caves.size(), CaveRun{}); // and our caves with it
 			SetLookAtActive(false);
 			SpatialControls::SetMoveStickSuppressed(-1);
 			SpatialControls::SetSprintBlocked(false);
@@ -3804,6 +4035,14 @@ namespace VR::CameraDriver
 		ResetDeltaState();
 		// The loaded state's own slot, held afresh (it may have been saved inside the partners' loop).
 		s_slot.Reset();
+		// The loaded memory's caves: each drains (stranded sites go back, the body is zeroed later) unless it is wanted
+		// and reads exactly ours, when it is simply in again.
+		for (CaveRun& run : s_caves)
+		{
+			run.st = CaveState::Draining;
+			run.drain_vsyncs = 0;
+			run.drain_counter = 0;
+		}
 		s_silence_repair = true;
 		s_kept_repair = true;
 		s_fov_saved = false;
@@ -4029,6 +4268,171 @@ namespace VR::CameraDriver
 		if (guards_now)
 			*guards_now = s_local_guards_now;
 		return true;
+	}
+
+	CaveRegion CheckCaveRegion(const u32* ram, const u32* ours, size_t n, size_t* first_bad)
+	{
+		bool all_zero = true, all_ours = true;
+		size_t neither = n, differs = n;
+		for (size_t k = 0; k < n; k++)
+		{
+			all_zero = all_zero && ram[k] == 0;
+			if (ram[k] != ours[k])
+			{
+				all_ours = false;
+				if (differs == n)
+					differs = k;
+				if (ram[k] != 0 && neither == n)
+					neither = k;
+			}
+		}
+		if (first_bad)
+			*first_bad = (neither != n) ? neither : (differs != n ? differs : 0);
+		if (all_zero)
+			return CaveRegion::Clear;
+		if (all_ours)
+			return CaveRegion::Ours;
+		return CaveRegion::Foreign;
+	}
+
+	bool InstallCave(const CaveMemory& mem, u32 from, const u32* ours, size_t n, CaveRegion* seen)
+	{
+		std::vector<u32> ram(n);
+		for (size_t k = 0; k < n; k++)
+			ram[k] = mem.read(mem.ctx, from + static_cast<u32>(k) * 4u);
+		const CaveRegion region = CheckCaveRegion(ram.data(), ours, n);
+		if (seen)
+			*seen = region;
+		if (region == CaveRegion::Ours)
+			return true;
+		if (region != CaveRegion::Clear)
+			return false;
+		for (size_t k = 0; k < n; k++)
+		{
+			if (ours[k] != 0)
+				mem.write(mem.ctx, from + static_cast<u32>(k) * 4u, ours[k]);
+		}
+		for (size_t k = 0; k < n; k++)
+		{
+			if (mem.read(mem.ctx, from + static_cast<u32>(k) * 4u) != ours[k])
+			{
+				ZeroCave(mem, from, ours, n);
+				return false;
+			}
+		}
+		return true;
+	}
+
+	size_t ZeroCave(const CaveMemory& mem, u32 from, const u32* ours, size_t n)
+	{
+		size_t zeroed = 0;
+		for (size_t k = 0; k < n; k++)
+		{
+			const u32 a = from + static_cast<u32>(k) * 4u;
+			if (ours[k] != 0 && mem.read(mem.ctx, a) == ours[k])
+			{
+				mem.write(mem.ctx, a, 0);
+				zeroed++;
+			}
+		}
+		return zeroed;
+	}
+
+	bool CaveDrainDone(bool has_counter, u32 counter_at_start, u32 counter_now, u32 vsyncs, u32 pc, u32 ra, u32 from, u32 to)
+	{
+		if (vsyncs < kCaveDrainMinVsyncs)
+			return false;
+		if (has_counter ? (((counter_now - counter_at_start) & 0xFFu) < kCaveDrainFrames) : (vsyncs < kCaveDrainNoCounterVsyncs))
+			return false;
+		const auto inside = [&](u32 a) { return a >= from && a < to; };
+		return !inside(pc) && !inside(ra);
+	}
+
+	bool SelfTestCaves()
+	{
+		bool ok = true;
+		const auto check = [&](bool c, const char* what) {
+			if (!c)
+			{
+				ok = false;
+				Console.Error("(VR) Cave self-test FAILED: %s", what);
+			}
+		};
+		struct Ram
+		{
+			u32 w[16] = {};
+			int writes = 0;
+			bool stuck = false; // word 5 ignores writes (a read-back failure)
+		};
+		const auto rd = [](void* c, u32 a) { return static_cast<Ram*>(c)->w[(a - 0x1000u) / 4u]; };
+		const auto wr = [](void* c, u32 a, u32 v) {
+			Ram* r = static_cast<Ram*>(c);
+			r->writes++;
+			const u32 k = (a - 0x1000u) / 4u;
+			if (!(r->stuck && k == 5))
+				r->w[k] = v;
+		};
+		// A cave of 8 words at 0x1000 with two NOP slots (words 2 and 4) and a gap between entries (word 6).
+		const u32 ours[8] = {0x3C0B0010, 0x8D69F000, 0, 0x152A000F, 0x00000000, 0x2529003C, 0, 0x03E00008};
+		{
+			Ram r;
+			const CaveMemory m{rd, wr, &r};
+			CaveRegion seen{};
+			check(InstallCave(m, 0x1000, ours, 8, &seen) && seen == CaveRegion::Clear, "a clear range installs");
+			bool same = true;
+			for (int k = 0; k < 8; k++)
+				same = same && r.w[k] == ours[k];
+			check(same, "every word is ours afterwards");
+			const int w = r.writes;
+			check(InstallCave(m, 0x1000, ours, 8, &seen) && seen == CaveRegion::Ours && r.writes == w,
+				"an installed cave is left as is");
+			check(ZeroCave(m, 0x1000, ours, 8) == 5 && CheckCaveRegion(r.w, ours, 8) == CaveRegion::Clear, "zeroed whole");
+		}
+		{
+			Ram r;
+			r.w[2] = 0x12345678; // a non-zero word in a NOP slot
+			const CaveMemory m{rd, wr, &r};
+			size_t bad = 99;
+			check(CheckCaveRegion(r.w, ours, 8, &bad) == CaveRegion::Foreign && bad == 2, "a foreign word in a NOP slot is seen");
+			check(!InstallCave(m, 0x1000, ours, 8) && r.writes == 0, "a foreign word refuses the whole install, nothing written");
+		}
+		{
+			Ram r;
+			r.w[6] = 1; // the gap between entries
+			const CaveMemory m{rd, wr, &r};
+			check(!InstallCave(m, 0x1000, ours, 8) && r.writes == 0, "a non-zero gap word refuses it too");
+		}
+		{
+			Ram r;
+			r.w[0] = ours[0]; // part ours (another build's cave, a part-written one)
+			const CaveMemory m{rd, wr, &r};
+			check(!InstallCave(m, 0x1000, ours, 8) && r.writes == 0, "a part-written cave is refused");
+		}
+		{
+			Ram r;
+			r.stuck = true;
+			const CaveMemory m{rd, wr, &r};
+			check(!InstallCave(m, 0x1000, ours, 8) && CheckCaveRegion(r.w, ours, 8) == CaveRegion::Clear,
+				"a read-back failure rolls the cave back to zero");
+		}
+		{
+			Ram r;
+			const CaveMemory m{rd, wr, &r};
+			InstallCave(m, 0x1000, ours, 8);
+			r.w[3] = 0xDEADBEEF; // someone else's word lands in it
+			check(ZeroCave(m, 0x1000, ours, 8) == 4 && r.w[3] == 0xDEADBEEF, "zeroing leaves a foreign word alone");
+		}
+		check(!CaveDrainDone(true, 10, 12, 10, 0x200000, 0x200000, 0x1000, 0x1020), "the drain waits for the counter");
+		check(CaveDrainDone(true, 10, 13, 10, 0x200000, 0x200000, 0x1000, 0x1020), "three frames on, it is done");
+		check(CaveDrainDone(true, 0xFE, 0x01, 10, 0x200000, 0x200000, 0x1000, 0x1020), "the counter wraps");
+		check(!CaveDrainDone(true, 10, 13, 2, 0x200000, 0x200000, 0x1000, 0x1020), "and for the minimum vsyncs");
+		check(!CaveDrainDone(true, 10, 20, 10, 0x1008, 0x200000, 0x1000, 0x1020), "not while pc is in the cave");
+		check(!CaveDrainDone(true, 10, 20, 10, 0x200000, 0x101C, 0x1000, 0x1020), "not while $ra returns into it");
+		check(!CaveDrainDone(false, 0, 0, 7, 0x200000, 0x200000, 0x1000, 0x1020) &&
+				  CaveDrainDone(false, 0, 0, 8, 0x200000, 0x200000, 0x1000, 0x1020),
+			"without a counter, a fixed wait");
+		Console.WriteLn("(VR) Cave self-test %s", ok ? "passed" : "FAILED");
+		return ok;
 	}
 
 	bool StableSlot::Update(u32 raw, u32 need, u32* out)
