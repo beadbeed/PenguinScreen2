@@ -61,6 +61,10 @@ until Alex says File #1 is there. Both stay where they are: File #2 has the shar
 - **Melee:**
   - a physical swing attacks (swing speed and direction trigger the game's attack);
   - a buzz on contact, and a clear cue when an attack is live.
+  - (2026-10-14, branch `vrmelee`, checked offline) the hit on contact with no attack action: the VR weapon touching a
+    zombie makes the game apply the hit through its own code, harder the faster the swing (`PhysicalMeleeMode = Contact`,
+    `research/2026-10-14-vr-melee.md`). Next: the headset; a procedural bone jolt on the hit bone ("ragdoll-lite",
+    researched there, not built).
 - **Reload:**
   - **Native:** lower the gun, stand still and hold the left trigger. This works today.
   - **Gesture:** a magazine grab at the left hip brought to the gun, which then holds that trigger for you (in progress,

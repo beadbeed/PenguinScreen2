@@ -414,6 +414,32 @@ driver against a fake game; the matrix), `Melee profile parser`, the File #1 ent
 mode table, the room master read, the free-RAM check) and `Physical melee caves` (caves A, B and C run from the
 profile's words on a small EE interpreter, for the local record and for others).
 
+Contact mode (VR setting `PhysicalMeleeMode`, `Contact` by default, `Press` for the above; ini only; profile
+`melee.contact`, `camera.silence` entries with `whenSetting: PhysicalMeleeContact`; research `2026-10-14-vr-melee.md`).
+Wherever the caves may run (`Overrides`: offline, or `CoopFull` online), nothing is pressed: the detector and driver are
+idle and the character never enters an attack action. Every poll the block is written, the weapon's own hit shape is
+read from the game (the weapon type `+0xCA8` -> its attack id -> the attack's shape: the pipe's capsule from x = +40 to
+-60 of the model, r 30; the knife's sphere r 30 at x = -10) and placed with the block's matrix; each live enemy (present,
+kind 2, HP above 0) gives its hurt spheres (`+0x1E0` count, `+0x1D8` shapes, `+0x1DC` world centres); the shape, swept
+from the last poll, touches one when the segment comes within the summed radii plus `lead` (8 cm). The tip speed is the
+far hit point's in the headset's space (smoothed 20 ms). `StrikeStep`: an armed enemy touched at or above `speed`
+(1.8 m/s, knives 1.5) is struck, once per swing (re-armed when the tip has been under `rearm` for `rearmMs`, or the
+weapon off it for `leaveMs`), never while the last strike's object lives or within `cooldownMs`; it waits up to `holdMs` (35 ms) after the first
+touch while the tip still speeds up (the strength from the fastest it went). A strike writes the
+window (`+0x18`), the strength (`+0x1C`, `Strength`: `light` 0.6 rising to 1 at `firm` 3 m/s, 1 to `heavy` 5.5 m/s,
+then `strong` 1.5), its stamp (`+0x28`) and the strike number (`+0x0C`); cave D (`0xFE200`, called from `0x5CDF64`
+before the frame's hit test) calls `FUN_005521B0` for the local record and gives the new attack object that life;
+cave E (`0xFE400`, at `FUN_00636990`) multiplies the game's critical multiplier by the strength for that object's node
+only. A buzz at the strike (0.65-1.0 for 50-110 ms by strength). Logs: `(VR) Melee: contact mode (...)` / `press mode`,
+`contact shape for weapon type T: the game's capsule, 100 long, radius 30.`, `strike, enemy N (sphere S) at V m/s,
+strength X.`, `hit, enemy N HP a -> b, reaction class C (...), zone Z, M ms after the strike (h of s strikes landed).` or
+`strike on enemy N made no hit (...)`; with `PCSX2_VR_MELEE_LOG=1` also each poll's touch. `vr_selftests`: `Physical melee
+contact` (strength, segment and sphere distances, the swept touch, scripted swings: fast, very fast, at 20 polls a
+second, a slow sweep, a waggle inside a zombie, the back swing, the same swing held inside, two zombies, a live strike,
+over the head), the File #1 `melee.contact` and `PhysicalMeleeContact` entry check, and `Physical melee contact caves`
+(caves D and E on the interpreter with stubs for the game's spawn and multiplier: a fresh request, served, the canned
+swing, stale requests and blocks, a live strike's countdown, a refused spawn, the strike's node and every other node).
+
 First-person stereo depth (VR settings `NearDepthMetres`, default 0 = the profile's `stereo.firstPerson.nearest`,
 below 0 off, 0.45-1.5 m overrides; `RollParallax`, on by default; ini only): true stereo depth now reaches in front of
 the screen plane down to `nearest` (1.0 m in both profiles, as you see it, at any strength; it was 0.75 m, and stays
