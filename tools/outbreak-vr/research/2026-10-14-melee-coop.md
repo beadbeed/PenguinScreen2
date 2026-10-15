@@ -167,6 +167,15 @@ Steps:
 2. **Alex is master.** Both go to another room, Alex first. Alex's log: `(VR) Melee: online, room M: this console (slot
    A) runs its enemies, so the hit follows the VR weapon.` Alex hits a zombie with the VR weapon somewhere the canned swing would not reach (to the side,
    or low). The brother: does the zombie flinch and lose HP on his screen too? After enough hits, does it die on both?
+   2b. **(meleepolish) The partner swing.** With contact mode (the default) Alex's own character never swings; for each
+   strike his console sends partners the start of the game's swing (cave F, 0.5 s). The brother: does Alex's character
+   swing once per strike, starting about when the zombie reacts, and go back to standing (or holding the weapon up if
+   Alex holds R1) without warping or freezing? Does a quick second strike show a second swing? Any flinch on the
+   brother's screen that Alex's does not show (his console's own prediction of that canned swing) should be overwritten
+   within a moment. Alex: nothing changes on his side (no hang, no swing).
+   2c. **(meleepolish) Durability.** Alex hits until his pipe bends (Kevin: 5 a hit, 8 hits from 40). Alex's screen: the
+   item becomes the curved pipe, as after a canned swing. The brother: does Alex's character's weapon change too (the
+   game's item-use mark `+0xD92` goes out as on a canned hit; not watched online)?
 3. **A miss as master.** Alex swings the VR weapon well away from a zombie that the canned swing would hit. Alex's
    screen: no hit. The brother: note whether the zombie flinches for a moment and then carries on (his console's
    prediction, overwritten by Alex's).
@@ -179,7 +188,9 @@ game reports a communication error, or Alex's log shows `the caves' free RAM is 
 Online-Safe First Person (applies at once: PhysicalMelee turns off and the caves come out on the next frame), or both
 leave the game normally. Never pause or load a state.
 
-Afterwards: Alex's emulog lines above, and what the brother saw in steps 2 and 3, decide whether `CoopFull` stays.
+Afterwards: Alex's emulog lines above, and what the brother saw in steps 2, 2b, 2c and 3, decide whether `CoopFull`
+stays. If the partner swing looks wrong (stuck, warping, a communication error), abort as above; it exists only in
+`CoopFull`, so Online-Safe or `PhysicalMeleeOnline` off removes it.
 
 ## Not known
 

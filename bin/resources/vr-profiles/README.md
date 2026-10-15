@@ -267,7 +267,11 @@ where the caves may run, nothing is pressed at all: the VR weapon's own hit
 shape (the game's capsule or sphere for that weapon) touching an enemy's hurt
 spheres at speed makes the game apply the hit through its own code, harder
 the faster the swing, while the character never enters an attack action
-(File #1's caves D and E, entries marked `whenSetting: PhysicalMeleeContact`).
+(File #1's caves D, E and F, entries marked `whenSetting: PhysicalMeleeContact`).
+A strike that hits spends the weapon's durability through the game's own
+item-use path (and breaks or bends it when it runs out), as the canned
+swing's hit does; online, as the room's master, partners are sent the start
+of a swing for each strike (the block's `+0x30`, written by the host).
 
 ```yaml
 melee:

@@ -430,15 +430,29 @@ window (`+0x18`), the strength (`+0x1C`, `Strength`: `light` 0.6 rising to 1 at 
 then `strong` 1.5), its stamp (`+0x28`) and the strike number (`+0x0C`); cave D (`0xFE200`, called from `0x5CDF64`
 before the frame's hit test) calls `FUN_005521B0` for the local record and gives the new attack object that life;
 cave E (`0xFE400`, at `FUN_00636990`) multiplies the game's critical multiplier by the strength for that object's node
-only. A buzz at the strike (0.65-1.0 for 50-110 ms by strength). Logs: `(VR) Melee: contact mode (...)` / `press mode`,
+only; cave D goes on to cave F (`0xFE500`), which runs the frame's hit test `FUN_005A9DB0` itself and then, within a
+strike's window + 3 frames, handles the record's hit notice `+0x116` (written by the hit, cleared by `FUN_005ABA30` next
+frame; read otherwise only by the swing's stage `FUN_006474A0`) the way that stage does: for a pipe, pole, brush or spear
+(weapon class 4 or 5) that hit, `+0xBA0` bit 31 and `FUN_0062CDA0`, so the next character loop spends durability through
+the game's `FUN_0062D2C0` -> `FUN_0062CDE0` -> `FUN_00581A00` (Kevin's pipe 5 a hit, 40 -> 35; at the last use it bends,
+1 -> 20, `FUN_00584580`; knives nothing), never during the canned swing. Online (`CoopFull` only; the host writes
+`kPartnerSwingFrames`, 30, to `+0x30`) cave F also shows partners a swing: after a strike one type-1 state message
+(`FUN_0064C620`) built while the record's action bytes read stance 2, sub 3, phase 0 (put back at once with `+0xBA0` and
+the frame's last-type mark `0x23BF0C`; this console never runs the swing), and 30 frames later the swing's end as the
+game sends it (its filter `FUN_006337C0(record, 2, 3)` first; nothing while hurt); `+0x8C` counts them (starts in the low
+byte, ends in the next). `PCSX2_VR_TEST_PARTNER_SWING=1` sets the frames offline too (the sender returns at once
+offline), for the headset-free checks. A buzz at the strike (0.65-1.0 for 50-110 ms by strength). Logs: `(VR) Melee: contact mode (...)` / `press mode`,
 `contact shape for weapon type T: the game's capsule, 100 long, radius 30.`, `strike, enemy N (sphere S) at V m/s,
 strength X.`, `hit, enemy N HP a -> b, reaction class C (...), zone Z, M ms after the strike (h of s strikes landed).` or
 `strike on enemy N made no hit (...)`; with `PCSX2_VR_MELEE_LOG=1` also each poll's touch. `vr_selftests`: `Physical melee
 contact` (strength, segment and sphere distances, the swept touch, scripted swings: fast, very fast, at 20 polls a
 second, a slow sweep, a waggle inside a zombie, the back swing, the same swing held inside, two zombies, a live strike,
 over the head), the File #1 `melee.contact` and `PhysicalMeleeContact` entry check, and `Physical melee contact caves`
-(caves D and E on the interpreter with stubs for the game's spawn and multiplier: a fresh request, served, the canned
-swing, stale requests and blocks, a live strike's countdown, a refused spawn, the strike's node and every other node).
+(caves D, E and F on the interpreter with stubs for the game's spawn, multiplier, hit test, sender, filter and item mark: a
+fresh request, served, the canned swing, stale requests and blocks, a live strike's countdown, a refused spawn, the
+strike's node and every other node; the hit notice for each weapon class, code 1, 2 and 3, the canned swing, a pending
+use, no strike lately, another slot; the partners' swing: its message bytes, everything put back, one at a time, not
+while hurt, its end through the filter).
 
 First-person stereo depth (VR settings `NearDepthMetres`, default 0 = the profile's `stereo.firstPerson.nearest`,
 below 0 off, 0.45-1.5 m overrides; `RollParallax`, on by default; ini only): true stereo depth now reaches in front of
