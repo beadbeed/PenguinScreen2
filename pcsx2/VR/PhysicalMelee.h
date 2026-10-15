@@ -205,6 +205,8 @@ namespace VR::PhysicalMelee
 		float lead_cm = 8.0f;    // game units added to the summed radii, so the strike is asked for a frame before the touch
 		float cooldown_s = 0.12f; // after a strike the next one waits at least this long
 		int window_frames = 6;   // the strike's attack object lives this many game frames (the node dies at its first hit)
+		float hold_s = 0.035f;   // after the first touch the strike waits up to this long while the tip is still speeding
+		                         // up and still touching, so its strength is the swing's, not the edge of the reach's
 	};
 	ContactParams SanitizedContact(const ContactParams& in);
 
@@ -255,6 +257,10 @@ namespace VR::PhysicalMelee
 		std::array<Enemy, 64> enemies{};
 		float slow_s = 0.0f;       // the tip slower than rearm this long
 		float since_strike_s = 10.0f;
+		int pending = -1;          // touched at speed, the strike held while the tip still speeds up
+		float pending_s = 0.0f;
+		float pending_peak = 0.0f; // the fastest the tip went while held
+		float last_speed = 0.0f;
 		void Reset() { *this = StrikeState{}; }
 	};
 
@@ -275,7 +281,8 @@ namespace VR::PhysicalMelee
 	};
 
 	// One poll: re-arms enemies (slow tip or off them), then strikes the first armed touched enemy if the tip is fast
-	// enough, nothing is live and the cooldown has passed. One strike per swing per enemy.
+	// enough, nothing is live and the cooldown has passed: at once, or up to hold_s later while the tip is still speeding
+	// up and the weapon still touches it (the strength from the fastest it went). One strike per swing per enemy.
 	StrikeOut StrikeStep(const StrikeIn& in, const ContactParams& p, StrikeState& st);
 
 	// Strength, the geometry and the strike logic on scripted swings. Returns the failed checks.

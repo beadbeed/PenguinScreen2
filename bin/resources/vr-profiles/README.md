@@ -262,6 +262,13 @@ private co-op, where it presses the game's own attack and the caves go in only
 while this console runs the room's enemies (`online` below). Needs a `Gamepad`
 control bound to the attack button and `feedback.weapon` (the stance).
 
+With `PhysicalMeleeMode = Contact` (the default) and a `contact` block (below)
+where the caves may run, nothing is pressed at all: the VR weapon's own hit
+shape (the game's capsule or sphere for that weapon) touching an enemy's hurt
+spheres at speed makes the game apply the hit through its own code, harder
+the faster the swing, while the character never enters an attack action
+(File #1's caves D and E, entries marked `whenSetting: PhysicalMeleeContact`).
+
 ```yaml
 melee:
   attackButton: Circle
@@ -280,6 +287,7 @@ melee:
 | `enemies` | read only, for the contact buzz: the enemy table's address, its `stride` and `count` (1 to 256), and the offsets of the present byte and the 2-byte HP in each slot. Missing a key: no contact buzz |
 | `override` | the 16-byte aligned block the emulator writes the VR weapon's pose into each input poll (`+0` the `magic` while armed, `+4` the game's frame counter `counter` read that poll, `+8` the local record's address, `+0x40` the 4 x 4 row-vector matrix, `+0x80` the position) for the game's code caves to read. Missing or bad: the hit stays on the game's own swing |
 | `online` | read only, for `PhysicalMeleeOnline` in private co-op (needs `override`): `room` the u16 room the local player is in, `masters` the network overlay's table of each room's players (4 bytes a room, rooms 0-127; the first is the slot whose console runs the room's enemies), `overlay` a word of that overlay's header that must read `overlayTag` (else no console is taken as the master), `free` where the caves' free RAM starts (up to the block's end; it must read zero before the caves go in online). Missing or bad: online the swing stays the game's own |
+| `contact` | for `PhysicalMeleeMode = Contact` (the default; needs `override` and `enemies`): the VR weapon touching an enemy makes the game apply a hit through its own code, with no attack action and nothing pressed. Read only: `shape` where the game keeps a weapon's hit shape (`types` the weapon-type table, `typeStride`, `attackId` its attack id byte; `params` the attack parameters, `paramStride`, `shapeIndex` their shape index byte; `shapes` the table of 8-byte shape entries; `weaponType` the record's u16 weapon type), `spheres` each enemy's hurt spheres (`count` u8, `shapes` and `centres` the list pointers, `kind` the kind byte and `enemyKind` its value for enemies; optionally `reaction` and `zone`, the hit record's class and zone bytes, for the log), `hook` the word (`address`) that reads `on` while the profile's `whenSetting: PhysicalMeleeContact` cave is in. Tuning (decimal): `speed` (m/s at the weapon's far hit point, default `1.8`) a touch strikes at or above; `rearm` (`0.9`) and `rearmMs` (`100`): an enemy that was struck is armed again once the tip has been slower than `rearm` that long, or `leaveMs` (`150`) after the weapon left it; the strength is `light` (`0.6`) at `speed` rising to 1 at `firm` (`3.0`), 1 up to `heavy` (`5.5`), then `strong` (`1.5`; above 1 the game raises its reaction class by one); `lead` (cm, `8`) is added to the radii so the strike is asked a frame before the touch; `cooldownMs` (`120`) between strikes; `holdMs` (`35`): after the first touch the strike waits at most that long while the tip still speeds up and still touches, so its strength is the swing's and not the edge of the reach's; `windowFrames` (`6`) the strike's attack object's life in game frames. `weapons`: a list of `{ type, ...tuning }` by the game's weapon type, each starting from the block's tuning. Missing or bad: contact mode falls back to the press |
 | `tip` | the point whose speed is measured, metres up the controller's handle (`0` to `1.5`, default `0.40`) |
 | `speed`, `rest`, `endMs` | a stroke starts above `speed` m/s (`0.5` to `10`, default `2.2`) and ends below `rest` (`0.1` to `5`, default `0.8`; halved if not below `speed`) for `endMs` (default `80`) |
 | `travel`, `straightness`, `strokeMs` | it counts as one swing once it has travelled `travel` metres (default `0.20`) with its straight-line distance at least `straightness` of its path (`0` to `1`, default `0.6`: a waggle never counts), within `strokeMs` (default `600`) |
@@ -287,8 +295,8 @@ melee:
 | `raiseMs`, `swingMs` | R1 may take `raiseMs` (default `900`) to bring the weapon up; a swing is followed for at most `swingMs` (default `2500`) |
 | `contactMs`, `cooldownMs` | an HP drop up to `contactMs` (default `250`) after the swing still buzzes; the next swing waits `cooldownMs` (default `250`) |
 
-A bad number keeps its default with a warning; a bad `enemies`, `override` or
-`online` block drops only that part.
+A bad number keeps its default with a warning; a bad `enemies`, `override`,
+`online` or `contact` block drops only that part.
 
 ## `menuPointer`: point-and-click menus
 

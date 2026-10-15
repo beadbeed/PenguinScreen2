@@ -3663,7 +3663,7 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 		if (ok)
 		{
 			warnUnknownKeys(serial, ct, "melee.contact", {"shape", "spheres", "hook", "speed", "rearm", "rearmMs", "leaveMs",
-				"firm", "heavy", "light", "strong", "lead", "cooldownMs", "windowFrames", "weapons", "notes"});
+				"firm", "heavy", "light", "strong", "lead", "cooldownMs", "holdMs", "windowFrames", "weapons", "notes"});
 			const ryml::ConstNodeRef sh = ct["shape"], sp = ct["spheres"], hk = ct["hook"];
 			warnUnknownKeys(serial, sh, "melee.contact.shape", {"types", "typeStride", "attackId", "params", "paramStride",
 				"shapeIndex", "shapes", "weaponType", "notes"});
@@ -3716,6 +3716,7 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 				f("strong", 1.0f, 3.0f, 1.0f, c.strong);
 				f("lead", 0.0f, 50.0f, 1.0f, c.lead_cm);
 				f("cooldownMs", 0.0f, 2000.0f, 0.001f, c.cooldown_s);
+				f("holdMs", 0.0f, 100.0f, 0.001f, c.hold_s);
 				if (n.has_child("windowFrames"))
 				{
 					const std::optional<s64> v = parseDecOrHex(nodeVal(n["windowFrames"]));
@@ -3750,7 +3751,7 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 							continue;
 						}
 						warnUnknownKeys(serial, w, "melee.contact.weapons", {"type", "speed", "rearm", "rearmMs", "leaveMs", "firm",
-							"heavy", "light", "strong", "lead", "cooldownMs", "windowFrames", "notes"});
+							"heavy", "light", "strong", "lead", "cooldownMs", "holdMs", "windowFrames", "notes"});
 						VR::PhysicalMelee::ContactParams c = o.contact;
 						read_tuning(w, "melee.contact.weapons", c);
 						o.contact_weapons.emplace_back(static_cast<u16>(t.value()), c);
@@ -3884,7 +3885,7 @@ bool VR::ProfileDB::SelfTestMeleeParse()
 		const char* spheres = "    spheres: { count: 0x1E0, shapes: 0x1D8, centres: 0x1DC, kind: 0x02, enemyKind: 2 }\n";
 		const std::string full = std::string(base) + where + spheres +
 			"    speed: 2.0\n    rearm: 1.0\n    rearmMs: 80\n    leaveMs: 200\n    firm: 3.2\n    heavy: 6.0\n    light: 0.5\n"
-			"    strong: 1.8\n    lead: 6\n    cooldownMs: 150\n    windowFrames: 5\n"
+			"    strong: 1.8\n    lead: 6\n    cooldownMs: 150\n    holdMs: 20\n    windowFrames: 5\n"
 			"    weapons:\n      - { type: 33, speed: 1.5, heavy: 4.5 }\n      - { type: 44, heavy: 7.0 }\n      - { speed: 1.0 }\n";
 		check(parse(full.c_str(), &m) && m.has_value() && m->has_contact, "contact: a full block parses");
 		if (m.has_value() && m->has_contact)
@@ -3900,7 +3901,7 @@ bool VR::ProfileDB::SelfTestMeleeParse()
 			check(std::fabs(c.speed - 2.0f) < 1e-6f && std::fabs(c.rearm - 1.0f) < 1e-6f && std::fabs(c.rearm_s - 0.08f) < 1e-6f &&
 					  std::fabs(c.leave_s - 0.2f) < 1e-6f && std::fabs(c.firm - 3.2f) < 1e-6f && std::fabs(c.heavy - 6.0f) < 1e-6f &&
 					  std::fabs(c.light - 0.5f) < 1e-6f && std::fabs(c.strong - 1.8f) < 1e-6f && std::fabs(c.lead_cm - 6.0f) < 1e-6f &&
-					  std::fabs(c.cooldown_s - 0.15f) < 1e-6f && c.window_frames == 5,
+					  std::fabs(c.cooldown_s - 0.15f) < 1e-6f && std::fabs(c.hold_s - 0.02f) < 1e-6f && c.window_frames == 5,
 				"contact: the tuning, milliseconds to seconds");
 			check(m->contact_weapons.size() == 2 && std::fabs(m->ContactFor(33).speed - 1.5f) < 1e-6f &&
 					  std::fabs(m->ContactFor(33).heavy - 4.5f) < 1e-6f && std::fabs(m->ContactFor(33).firm - 3.2f) < 1e-6f &&

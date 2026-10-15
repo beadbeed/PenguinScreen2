@@ -704,7 +704,8 @@ SLPM-65428:
     # word that shows cave D is in, and the tuning: a touch strikes at or above speed (m/s at the weapon's far hit point),
     # an enemy struck is armed again once the tip is slower than rearm for rearmMs or the weapon has left it for leaveMs;
     # the strength is light at speed rising to 1 at firm (the game's own hit), strong from heavy (above 1 the game raises
-    # the reaction class: a pipe staggers at once, a spear knocks down); lead (cm) asks a frame before the touch; the
+    # the reaction class: a pipe staggers at once, a spear knocks down); lead (cm) asks a frame before the touch, holdMs waits
+    # at most that long after the first touch while the tip still speeds up (the strength is the swing's); the
     # strike's attack object lives windowFrames game frames. Weapons by the game's weapon type (+0xCA8).
     contact:
       shape: { types: 0x6E5940, typeStride: 0x44, attackId: 0x06, params: 0x6E7C90, paramStride: 0x20, shapeIndex: 0x0E, shapes: 0x6EBFA0, weaponType: 0xCA8 }
@@ -720,6 +721,7 @@ SLPM-65428:
       strong: 1.5
       lead: 8
       cooldownMs: 120
+      holdMs: 35
       windowFrames: 6
       weapons:
         - { type: 32, speed: 1.5, firm: 2.5, heavy: 4.5 }   # Kevin's knife: a short blade, a slower tip

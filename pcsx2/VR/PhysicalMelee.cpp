@@ -347,6 +347,7 @@ namespace VR::PhysicalMelee
 		p.lead_cm = std::clamp(FiniteOr(in.lead_cm, d.lead_cm), 0.0f, 50.0f);
 		p.cooldown_s = std::clamp(FiniteOr(in.cooldown_s, d.cooldown_s), 0.0f, 2.0f);
 		p.window_frames = std::clamp(in.window_frames, 1, 30);
+		p.hold_s = std::clamp(FiniteOr(in.hold_s, d.hold_s), 0.0f, 0.1f);
 		return p;
 	}
 
@@ -458,20 +459,45 @@ namespace VR::PhysicalMelee
 			if (e.struck && (slow || e.off_s >= p.leave_s))
 				e.struck = false;
 		}
+		const float last = st.last_speed;
+		st.last_speed = speed;
 		if (!in.usable || in.live || st.since_strike_s < p.cooldown_s)
+		{
+			st.pending = -1;
 			return out;
-		const float strength = Strength(speed, p);
-		if (strength <= 0.0f)
+		}
+		const auto strike = [&](int id, float at_speed) {
+			st.enemies[id].struck = true;
+			st.since_strike_s = 0.0f;
+			st.pending = -1;
+			out.enemy = id;
+			out.strength = std::max(Strength(at_speed, p), Strength(p.speed, p));
+		};
+		if (st.pending >= 0)
+		{
+			// Held: strike once the tip stops speeding up, the hold is over, or the weapon is leaving the enemy.
+			const int id = st.pending;
+			st.pending_s += dt;
+			st.pending_peak = std::max(st.pending_peak, speed);
+			if (!touching(id) || speed <= last || st.pending_s >= p.hold_s)
+				strike(id, st.pending_peak);
+			return out;
+		}
+		if (Strength(speed, p) <= 0.0f)
 			return out;
 		for (int k = 0; k < in.touching_count && in.touching; k++)
 		{
 			const int id = in.touching[k];
 			if (id < 0 || id >= static_cast<int>(st.enemies.size()) || st.enemies[id].struck)
 				continue;
-			st.enemies[id].struck = true;
-			st.since_strike_s = 0.0f;
-			out.enemy = id;
-			out.strength = strength;
+			if (p.hold_s > 0.0f && speed > last && speed < p.heavy)
+			{
+				st.pending = id;
+				st.pending_s = 0.0f;
+				st.pending_peak = speed;
+			}
+			else
+				strike(id, speed);
 			break;
 		}
 		return out;
@@ -1328,6 +1354,8 @@ namespace VR::PhysicalMelee
 				// The weight of it: a firm buzz now, harder for a harder swing (times the Haptic Strength setting).
 				const float k = std::clamp((so.strength - cp.light) / std::max(cp.strong - cp.light, 0.01f), 0.0f, 1.0f);
 				Pulse(SpatialControls::HapticCue{0.65f + 0.35f * k, 0.05f + 0.06f * k});
+				if (s_pend_enemy >= 0)
+					Console.WriteLn("(VR) Melee: strike on enemy %d made no hit before the next strike.", s_pend_enemy);
 				s16 hp = 0;
 				EnemyVolume e;
 				ReadEnemy(reader, mp, static_cast<u32>(so.enemy), &e, &hp);
@@ -1705,6 +1733,18 @@ namespace VR::PhysicalMelee
 			c(r.first_strength >= 1.0f, "swing: a fast swing is at least the game's own hit");
 		}
 		{
+			// The hold: the same swing struck at first touch (no hold) is weaker than with the hold, which waits for the
+			// tip to stop speeding up, and comes a few polls later at most.
+			ContactParams nohold = p;
+			nohold.hold_s = 0.0f;
+			StrikeState a1, a2;
+			const SwingResult h0 = RunSwing(-1.4f, 1.4f, 0.4f, 1.0f / 72.0f, one, a1, nohold);
+			const SwingResult h1 = RunSwing(-1.4f, 1.4f, 0.4f, 1.0f / 72.0f, one, a2, p);
+			c(h0.strikes == 1 && h1.strikes == 1 && h1.first_strength > h0.first_strength &&
+				  h1.first_t > h0.first_t && h1.first_t - h0.first_t <= p.hold_s + 1.5f / 72.0f,
+				"hold: the strike waits for the swing's speed, at most hold_s");
+		}
+		{
 			StrikeState st;
 			const SwingResult r = RunSwing(-1.4f, 1.4f, 0.12f, 1.0f / 72.0f, one, st);
 			c(r.strikes == 1 && std::fabs(r.first_strength - p.strong) < 1e-5f, "swing: a very fast swing is strong");
@@ -1953,7 +1993,8 @@ namespace VR::PhysicalMelee
 					mp->enemy_count ? "; a buzz when it lands" : "");
 			else
 				verdict = fmt::format("on online, private co-op (swing to attack with {}; partners see the game's own swing; the "
-									  "hit follows the VR weapon only while this console runs the room's enemies{}{})",
+									  "hit follows the VR weapon, by contact in PhysicalMeleeMode = Contact, only while this "
+									  "console runs the room's enemies{}{})",
 					mp->attack_button, mi.has_online ? "" : ", so never: the profile has no melee.online",
 					mp->enemy_count ? "; a buzz when it lands" : "");
 			const u32 crc = VMManager::GetDiscCRC();
@@ -1966,7 +2007,10 @@ namespace VR::PhysicalMelee
 			// Online: who runs this room's enemies, whenever that changes.
 			std::string line;
 			if (mode == Mode::CoopFull)
-				line = fmt::format("room {}: this console (slot {}) runs its enemies, so the hit follows the VR weapon", room, slot);
+				line = fmt::format("room {}: this console (slot {}) runs its enemies, so the hit follows the VR weapon{}", room, slot,
+					(mp->has_contact && EmuConfig.VR.PhysicalMeleeMode == Pcsx2Config::VROptions::PhysicalMeleeModeType::Contact) ?
+						" (contact: no attack action, so partners see no swing)" :
+						"");
 			else if (mode == Mode::CoopPress && master >= 0)
 				line = fmt::format("room {}: the console of slot {} runs its enemies (this is slot {}), so the hit is the game's "
 								   "own swing (press only)", room, master, slot);
