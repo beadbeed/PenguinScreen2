@@ -20,6 +20,7 @@
 
 #include "VR/BeltPouches.h"
 #include "VR/DepthExport.h"
+#include "VR/DepthWarp.h"
 #include "VR/CameraDriver.h"
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
@@ -980,6 +981,7 @@ int main(int argc, char* argv[])
 							 "FAIL: " + std::to_string(failed.size()) + " check(s), first: " + failed.front());
 	}
 	RunLogged("Depth export", VR::DepthExport::SelfTest, "(VR) Depth export self-test");
+	RunLogged("Depth warp", VR::DepthWarp::SelfTest, "(VR) Depth warp self-test");
 	RunLogged("Menu panel", VR::MenuPanel::SelfTest, "(VR) Menu panel self-test");
 	RunLogged("Menu panel room and placement", VR::MenuPanel::FeelSelfTest, "(VR) Menu panel feel self-test");
 	// [VR] GameWeaponModels: File #1's profile names the game's weapon-type table and the scenario's item table, with the
