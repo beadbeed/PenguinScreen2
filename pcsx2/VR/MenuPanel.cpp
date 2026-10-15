@@ -330,6 +330,11 @@ namespace VR::MenuPanel
 		// The room snapshots, one per tracker slot, on the device that made them.
 		GSTexture* s_room[SplitTracker::kSlots] = {};
 		GSDeviceVK* s_room_device = nullptr;
+		// a6: a snapshot texture that could not be made is not tried again for kSnapRetryVsyncs (the tracker asks again
+		// at the screen's next draw, and a screen has hundreds), so the frames go unsplit meanwhile.
+		constexpr u64 kSnapRetryVsyncs = 60;
+		u64 s_snap_failed_at = 0;
+		bool s_snap_failed = false;
 
 		// The panel images: two, alternating, so a present's pass never writes the image the compositor may still be
 		// copying from the present before.
@@ -762,13 +767,24 @@ void main()
 		}
 		if (!snap)
 		{
-			snap = g_gs_device->CreateRenderTarget(colour->GetWidth(), colour->GetHeight(), colour->GetFormat(), false, false,
-				colour->GetArrayLayers());
-			if (!snap)
+			if (s_snap_failed && s_trace_vsync - s_snap_failed_at < kSnapRetryVsyncs)
 			{
 				s_tracker.SnapshotTaken(false);
 				return -1;
 			}
+			snap = g_gs_device->CreateRenderTarget(colour->GetWidth(), colour->GetHeight(), colour->GetFormat(), false, false,
+				colour->GetArrayLayers());
+			if (!snap)
+			{
+				if (!s_snap_failed)
+					Console.Warning("(VR) Menu panel: the room snapshot (%dx%d) could not be made; tried again in 1 s.",
+						colour->GetWidth(), colour->GetHeight());
+				s_snap_failed = true;
+				s_snap_failed_at = s_trace_vsync;
+				s_tracker.SnapshotTaken(false);
+				return -1;
+			}
+			s_snap_failed = false;
 		}
 		// The GS's own copy, recorded in draw order into the GS command buffer: the room as drawn, before the screen's
 		// first draw.
