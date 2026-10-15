@@ -8496,6 +8496,12 @@ namespace VR::XRCompositor
 			bool warned_ring = false;
 			// The pacer's:
 			WarpTarget target[2];
+			// c3: the set whose Screen entries the eye images last released were drawn for (their quad poses, fp_head and
+			// turn clock). A display frame whose pass does not run submits those instead of the newer set's, so an image
+			// never goes out at a pose it was not drawn for. Invalid once one of its swapchains is destroyed.
+			PublishedSet last_drawn;
+			bool last_drawn_valid = false;
+			u32 n_held = 0; // display frames that showed last_drawn's poses (the Warp line)
 			VkCommandPool pool = VK_NULL_HANDLE;
 			VkCommandBuffer cmd[kWarpCmdBuffers] = {};
 			VkFence fence[kWarpCmdBuffers] = {};
@@ -8894,6 +8900,17 @@ namespace VR::XRCompositor
 
 		void WarpForgetSwapchain(XrSwapchain swapchain)
 		{
+			// c3: the held set must not name a destroyed swapchain.
+			if (wp.last_drawn_valid)
+			{
+				for (u32 i = 0; i < wp.last_drawn.count; i++)
+				{
+					const PublishedSet::Entry& e = wp.last_drawn.e[i];
+					const XrSwapchain sc = (e.kind == kKindCylinder) ? e.cyl.subImage.swapchain : e.quad.subImage.swapchain;
+					if (e.role == kRoleScreen && sc == swapchain)
+						wp.last_drawn_valid = false;
+				}
+			}
 			bool any = false;
 			for (const WarpTarget& t : wp.target)
 				any = any || (t.swapchain == swapchain);
@@ -9101,13 +9118,13 @@ namespace VR::XRCompositor
 				wp.window_start_ms = now;
 			if (now < wp.window_start_ms + 5000)
 				return;
-			Console.WriteLn("(VR) Warp: %u frames warped, %u drawn as they are, %u not drawn (pass busy %u, images not back %u); "
-							"GPU %.3f ms mean, %.3f ms max per display frame (all eyes, %u timed); the last eye move since the "
+			Console.WriteLn("(VR) Warp: %u frames warped, %u drawn as they are, %u not drawn (pass busy %u, images not back %u; %u at the "
+							"poses last drawn for); GPU %.3f ms mean, %.3f ms max per display frame (all eyes, %u timed); the last eye move since the "
 							"render pose shifts a 1.05 m counter %.1f px.",
-				wp.n_warped, wp.n_flat, wp.n_busy + wp.n_wait, wp.n_busy, wp.n_wait,
+				wp.n_warped, wp.n_flat, wp.n_busy + wp.n_wait, wp.n_busy, wp.n_wait, wp.n_held,
 				wp.gpu_n ? wp.gpu_sum_ms / wp.gpu_n : 0.0, wp.gpu_max_ms, wp.gpu_n, wp.last_shift_px);
 			wp.window_start_ms = now;
-			wp.n_warped = wp.n_flat = wp.n_busy = wp.n_wait = 0;
+			wp.n_warped = wp.n_flat = wp.n_busy = wp.n_wait = wp.n_held = 0;
 			wp.gpu_sum_ms = wp.gpu_max_ms = 0.0;
 			wp.gpu_n = 0;
 		}
@@ -9138,8 +9155,49 @@ namespace VR::XRCompositor
 		// swapchain gets the set's ring frame, warped to the eye's position at this frame's display time (head; turn is the
 		// stick turn BuildSubmitArray turns the screen by). Screen entries whose swapchain the pacer never released go out of
 		// the set.
-		void WarpPass(PublishedSet& set, float turn, const XrPosef& head, bool head_ok)
+		// c3: the eye images were not drawn this display frame, so they hold what was drawn for wp.last_drawn: its Screen
+		// entries, head and turn clock go out instead of the newer set's (as keep_screen does for the GS's copies), and the
+		// screen turn is worked out again from its clock. Only when it shows the same number of Screen entries.
+		void WarpHoldLastDrawn(PublishedSet& set, float& turn, XrTime display_time)
 		{
+			if (!wp.last_drawn_valid || wp.last_drawn.serial == set.serial)
+				return;
+			const PublishedSet& last = wp.last_drawn;
+			u32 n_set = 0, n_last = 0;
+			for (u32 i = 0; i < set.count; i++)
+				n_set += (set.e[i].role == kRoleScreen) ? 1u : 0u;
+			for (u32 i = 0; i < last.count; i++)
+				n_last += (last.e[i].role == kRoleScreen) ? 1u : 0u;
+			if (n_set == 0 || n_set != n_last)
+				return;
+			u32 k = 0;
+			for (u32 i = 0; i < set.count; i++)
+			{
+				if (set.e[i].role != kRoleScreen)
+					continue;
+				while (k < last.count && last.e[k].role != kRoleScreen)
+					k++;
+				set.e[i] = last.e[k++];
+			}
+			set.fp_screen = last.fp_screen;
+			set.fp_head = last.fp_head;
+			set.publish_display_time = last.publish_display_time;
+			set.turn_rate = last.turn_rate;
+			set.fp_image = last.fp_image;
+			set.fp_warp = last.fp_warp;
+			set.fp_depth = last.fp_depth;
+			turn = 0.0f;
+			if (set.fp_screen && set.turn_rate != 0.0f && set.publish_display_time != 0)
+			{
+				const double dt = std::clamp(static_cast<double>(display_time - set.publish_display_time) * 1.0e-9, 0.0, 0.1);
+				turn = set.turn_rate * static_cast<float>(dt);
+			}
+			wp.n_held++;
+		}
+
+		void WarpPass(PublishedSet& set, float& turn, XrTime display_time, const XrPosef& head, bool head_ok)
+		{
+			bool drew = false;
 			const FpWarp& fw = set.fp_warp;
 			struct Job
 			{
@@ -9413,6 +9471,7 @@ namespace VR::XRCompositor
 				// m4: on a failed record or submit nothing went in, so the images are not released (that would show an older
 				// frame): they stay acquired and waited, and the next display frame's pass draws into them. The runtime keeps
 				// showing the last image released.
+				bool all_released = ok;
 				for (int j = 0; ok && j < nj; j++)
 				{
 					WarpTarget& t = *jobs[j].t;
@@ -9421,6 +9480,14 @@ namespace VR::XRCompositor
 					t.waited = false;
 					if (XR_SUCCEEDED(rr) && ok)
 						t.released = true;
+					else
+						all_released = false;
+				}
+				if (all_released)
+				{
+					drew = true;
+					wp.last_drawn = set;
+					wp.last_drawn_valid = true;
 				}
 				if (ok && dumped)
 				{
@@ -9438,6 +9505,9 @@ namespace VR::XRCompositor
 					}
 				}
 			}
+
+			if (!drew)
+				WarpHoldLastDrawn(set, turn, display_time);
 
 			// A Screen entry whose swapchain the pacer has never released has no image to show: out of this frame.
 			u32 n = 0;
@@ -9498,6 +9568,7 @@ namespace VR::XRCompositor
 			wp.flat_ever_logged = false;
 			wp.dump_done = false;
 			wp.total_warped = 0;
+			wp.last_drawn_valid = false;
 			wp.on.store(false, std::memory_order_release);
 		}
 
@@ -9748,7 +9819,7 @@ namespace VR::XRCompositor
 						}
 						// [VR] DepthWarp: the eyes' images drawn for this frame's eyes (the pacer owns the eye swapchains).
 						if (WarpOn())
-							WarpPass(set, turn, warp_head, warp_head_ok);
+							WarpPass(set, turn, fs.predictedDisplayTime, warp_head, warp_head_ok);
 						if (views_ok)
 						{
 							// The edge fill behind the first-person screen while its swapchain holds a fill of this spell.
