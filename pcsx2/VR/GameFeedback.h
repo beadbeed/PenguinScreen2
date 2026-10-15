@@ -88,6 +88,7 @@ namespace VR::GameFeedback
 		u32 count_offset = 0;
 		u32 owner_offset = 0;
 		u32 slot_address = 0;
+		bool slot_from_camera = false; // live callers set it: the owner check uses CameraDriver::LocalSlot, not slot_address
 	};
 	ItemTable ItemTableOf(const ProfileDB::Profile& profile);
 

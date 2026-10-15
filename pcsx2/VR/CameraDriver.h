@@ -119,6 +119,32 @@ namespace VR::CameraDriver
 	// (overlay data such as the GAME overlay's tables is only resident then).
 	bool LocalRecord(u32* base, bool* guards_now = nullptr);
 
+	// The local slot (an indexed camera.base's index byte, File #1 u8 0x48BF7D), debounced. Offline the game itself
+	// sets that byte to 1, then 2, while it runs the AI partners (0x588C30) and puts 0 back, so a vsync can land on a
+	// partner's slot (research/2026-10-13-near-cull.md; nightly review M1). A new value is taken only after it reads the
+	// same on `need` consecutive samples (one per running vsync); a read that differs keeps the last stable value.
+	// Pure.
+	struct StableSlot
+	{
+		bool known = false;  // a value has held for `need` samples since the last Reset
+		u32 stable = 0;      // the slot in use while known
+		u32 candidate = 0;   // the latest read and how many samples in a row it has held
+		u32 run = 0;
+		u32 ignored = 0;     // samples that read something other than `stable` while known (saturates)
+		// One sample; true while known (*out, may be null, the stable slot).
+		bool Update(u32 raw, u32 need, u32* out = nullptr);
+		void Reset() { *this = StableSlot{}; }
+	};
+	inline constexpr u32 kSlotStableVsyncs = 8;
+
+	// CPU thread, after Apply: the debounced local slot (StableSlot), the one camera.base, LocalRecord and every
+	// owner check of the local player's items must use. False until it has held kSlotStableVsyncs running vsyncs (and
+	// after a savestate load, a game change or no VM, until it holds again). Never read 0x48BF7D directly.
+	bool LocalSlot(u32* slot);
+
+	// Pure: StableSlot's rules (a partner's flicker never becomes the slot; a real change does, after the hold).
+	bool SelfTestStableSlot();
+
 	// CPU thread, after Apply: true while the game runs, the camera guards pass (or failed for no longer than
 	// the profile's disarm grace) and this vsync resolved camera.base, whether or not first person is armed. Valid while grabbed, down or dead too (it ignores
 	// releaseWhen, the head pose and the network mode). For reads only (GameFeedback's hurt and weapon cues, and the

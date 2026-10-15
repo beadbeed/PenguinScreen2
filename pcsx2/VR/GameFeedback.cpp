@@ -858,7 +858,7 @@ namespace VR::GameFeedback
 			w.readable = ReadAt(static_cast<u64>(record) + fb->weapon_equipped_offset, 1, &eq);
 			w.eq = eq;
 			if (profile->camera.has_value() && profile->camera->base.has_value() && profile->camera->base->is_indexed)
-				w.slot_known = ReadAt(profile->camera->base->index_addr, 1, &w.slot);
+				w.slot_known = CameraDriver::LocalSlot(&w.slot); // debounced, never the raw byte (review M1)
 			const u64 rec = static_cast<u64>(fb->weapon_table) + static_cast<u64>(eq) * static_cast<u64>(fb->weapon_stride);
 			w.rec_in_ram = w.readable && eq != 0 && rec + fb->weapon_stride <= static_cast<u64>(Ps2MemSize::MainRam);
 			if (w.rec_in_ram)
@@ -1445,7 +1445,9 @@ namespace VR::GameFeedback
 		const u32 at = static_cast<u32>(rec);
 		u32 id = 0;
 		u32 count = 0;
-		r.slot_known = peek(table.slot_address, 1, &r.slot);
+		// Live, the debounced local slot (CameraDriver::LocalSlot; review M1: the raw byte holds a partner's slot while
+		// the game runs the partners offline). A scripted table (self-tests) reads its own slot byte.
+		r.slot_known = table.slot_from_camera ? CameraDriver::LocalSlot(&r.slot) : peek(table.slot_address, 1, &r.slot);
 		if (!peek(at, 1, &r.present) || !peek(at + 2, 1, &r.own_index) || !peek(at + table.owner_offset, 1, &r.owner) ||
 			!peek(at + table.id_offset, 2, &id) || !peek(at + table.count_offset, 2, &count))
 			return r;

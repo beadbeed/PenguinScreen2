@@ -859,9 +859,10 @@ namespace VR::ReloadDriver
 		{
 			if (!profile.pouches.has_value())
 				return Spare::Unknown;
-			const GameFeedback::ItemTable table = GameFeedback::ItemTableOf(profile);
+			GameFeedback::ItemTable table = GameFeedback::ItemTableOf(profile);
 			if (!table.valid)
 				return Spare::Unknown;
+			table.slot_from_camera = (reader == nullptr); // live: the debounced local slot (review M1)
 			bool unknown = false;
 			bool any = false;
 			for (const ProfileDB::Pouch& pouch : profile.pouches->list)

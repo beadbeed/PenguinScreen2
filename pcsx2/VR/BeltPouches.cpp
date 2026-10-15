@@ -527,7 +527,8 @@ namespace VR::BeltPouches
 		// reader's checks (present, naming itself, the local player's) before its name is shown. Reads only.
 		if (params && (out.name[0] || out.name[1]))
 		{
-			const GameFeedback::ItemTable item_table = GameFeedback::ItemTableOf(*profile);
+			GameFeedback::ItemTable item_table = GameFeedback::ItemTableOf(*profile);
+			item_table.slot_from_camera = (reader == nullptr); // live: the debounced local slot (review M1)
 			for (int h = 0; h < 2; h++)
 			{
 				const int k = out.hover[h];

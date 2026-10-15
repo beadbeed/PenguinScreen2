@@ -719,6 +719,54 @@ namespace VR::CameraDriver
 		u64 s_vsync_counter = 0;
 		u32 s_base_unresolved_vsyncs = 0;
 		bool s_local_check_failed = false; // an indexed base's local-record check is failing (logged once per episode)
+		// The debounced local slot (StableSlot; review M1): sampled once per running vsync in Apply, used by GetBase.
+		StableSlot s_slot;
+		u32 s_slot_crc = 0;
+		u32 s_slot_logged_ignored = 0;
+
+		u32 ReadIndex(const ProfileDB::CameraBase& spec)
+		{
+			switch (spec.index_width)
+			{
+				case 1: return memRead8(spec.index_addr);
+				case 2: return memRead16(spec.index_addr);
+				default: return memRead32(spec.index_addr);
+			}
+		}
+
+		// Apply, once per vsync after the profile lookup: feed the index byte to the filter while the EE runs (a paused
+		// EE can sit inside the partners' loop with a partner's slot in the byte, so a paused vsync is no sample).
+		void SampleLocalSlot(const ProfileDB::CameraProfile& cam, u32 crc, bool running)
+		{
+			if (!cam.base.has_value() || !cam.base->is_indexed)
+			{
+				s_slot.Reset();
+				return;
+			}
+			if (crc != s_slot_crc)
+			{
+				s_slot.Reset();
+				s_slot_crc = crc;
+				s_slot_logged_ignored = 0;
+			}
+			if (!running)
+				return;
+			const bool was_known = s_slot.known;
+			const u32 was = s_slot.stable;
+			const u32 ignored_before = s_slot.ignored;
+			const u32 raw = ReadIndex(cam.base.value());
+			u32 now = 0;
+			if (s_slot.Update(raw, kSlotStableVsyncs, &now) && (!was_known || now != was))
+				Console.WriteLn("(VR) CameraDriver: local slot %u (held %u vsyncs)%s.", now, kSlotStableVsyncs,
+					was_known ? ", changed" : "");
+			if (s_slot.ignored != ignored_before &&
+				(s_slot_logged_ignored == 0 || s_slot.ignored >= s_slot_logged_ignored * 10))
+			{
+				s_slot_logged_ignored = s_slot.ignored;
+				Console.WriteLn("(VR) CameraDriver: local slot byte read %u for a vsync (the partners' turn); slot %u kept "
+								"(%u such reads ignored so far).", raw, s_slot.stable, s_slot.ignored);
+			}
+		}
 
 		u32 ReadSized(u32 address, u8 width);
 		bool RecordCheckPass(const ProfileDB::RecordCheck& c, u32 base);
@@ -805,13 +853,14 @@ namespace VR::CameraDriver
 			if (cam.base->is_indexed)
 			{
 				const ProfileDB::CameraBase& spec = cam.base.value();
-				u32 idx = 0;
-				switch (spec.index_width)
+				// The debounced slot, never this vsync's raw byte (review M1: offline the byte holds a partner's slot
+				// while the game runs the partners, and that partner's record passes the id check below).
+				if (!s_slot.known)
 				{
-					case 1: idx = memRead8(spec.index_addr); break;
-					case 2: idx = memRead16(spec.index_addr); break;
-					default: idx = memRead32(spec.index_addr); break;
+					s_base.valid = false;
+					return std::nullopt;
 				}
+				const u32 idx = s_slot.stable;
 				// Only the record the game itself runs as the local player may be written (File #1 0x639A30: a
 				// human record is local only when its +0x03 byte equals the local slot byte). Anything else (an
 				// index past the table, a record whose id byte disagrees, a failed check) leaves the base
@@ -3233,6 +3282,7 @@ namespace VR::CameraDriver
 		{
 			s_disarm_reason = DisarmReason::NoVM;
 			s_kept_patched.assign(s_kept_patched.size(), 0); // no VM: its memory (and our kept patches) are gone
+			s_slot.Reset();
 			SetLookAtActive(false);
 			SpatialControls::SetMoveStickSuppressed(-1);
 			SpatialControls::SetSprintBlocked(false);
@@ -3264,6 +3314,7 @@ namespace VR::CameraDriver
 		if (!profile || !profile->camera.has_value())
 		{
 			s_disarm_reason = DisarmReason::NoProfile;
+			s_slot.Reset();
 			SetLookAtActive(false);
 			SpatialControls::SetMoveStickSuppressed(-1);
 			SpatialControls::SetSprintBlocked(false); // no first person here to keep the latch out of
@@ -3287,6 +3338,7 @@ namespace VR::CameraDriver
 			return;
 		}
 		const ProfileDB::CameraProfile& cam = profile->camera.value();
+		SampleLocalSlot(cam, crc, vm_state == VMState::Running);
 		if (vm_state == VMState::Running)
 			ApplyKeptSilence(cam, crc, switched_on);
 
@@ -3750,6 +3802,8 @@ namespace VR::CameraDriver
 	void OnStateLoaded()
 	{
 		ResetDeltaState();
+		// The loaded state's own slot, held afresh (it may have been saved inside the partners' loop).
+		s_slot.Reset();
 		s_silence_repair = true;
 		s_kept_repair = true;
 		s_fov_saved = false;
@@ -3975,6 +4029,75 @@ namespace VR::CameraDriver
 		if (guards_now)
 			*guards_now = s_local_guards_now;
 		return true;
+	}
+
+	bool StableSlot::Update(u32 raw, u32 need, u32* out)
+	{
+		if (run != 0 && raw == candidate)
+		{
+			if (run < 0xFFFFFFFFu)
+				run++;
+		}
+		else
+		{
+			candidate = raw;
+			run = 1;
+		}
+		if (known && raw != stable && ignored < 0xFFFFFFFFu)
+			ignored++;
+		if (run >= (need == 0 ? 1u : need))
+		{
+			stable = candidate;
+			known = true;
+		}
+		if (known && out)
+			*out = stable;
+		return known;
+	}
+
+	bool LocalSlot(u32* slot)
+	{
+		if (!s_slot.known)
+			return false;
+		if (slot)
+			*slot = s_slot.stable;
+		return true;
+	}
+
+	bool SelfTestStableSlot()
+	{
+		bool ok = true;
+		const auto check = [&](bool c, const char* what) {
+			if (!c)
+			{
+				ok = false;
+				Console.Error("(VR) StableSlot self-test FAILED: %s", what);
+			}
+		};
+		StableSlot s;
+		u32 v = 99;
+		for (u32 i = 0; i + 1 < kSlotStableVsyncs; i++)
+			check(!s.Update(0, kSlotStableVsyncs, &v), "not known before the hold");
+		check(v == 99, "out untouched while unknown");
+		check(s.Update(0, kSlotStableVsyncs, &v) && v == 0, "known after the hold");
+		// The partners' flicker: 1 or 2 for a vsync (or a few) never becomes the slot, and the slot stays 0 meanwhile.
+		const u32 flicker[] = {1, 0, 2, 0, 0, 1, 1, 0, 2, 2, 2, 0, 1, 2, 1, 2, 1, 2, 1, 2, 0};
+		for (const u32 raw : flicker)
+			check(s.Update(raw, kSlotStableVsyncs, &v) && v == 0, "a flicker keeps slot 0");
+		check(s.ignored == 15, "the flicker reads are counted");
+		for (u32 i = 0; i + 1 < kSlotStableVsyncs; i++)
+			check(s.Update(1, kSlotStableVsyncs, &v) && v == 0, "seven partner reads in a row are still not the slot");
+		check(s.Update(0, kSlotStableVsyncs, &v) && v == 0, "back to 0 restarts the count");
+		// A real change (another seat) is taken after the hold.
+		for (u32 i = 0; i < kSlotStableVsyncs; i++)
+			s.Update(3, kSlotStableVsyncs, &v);
+		check(v == 3 && s.stable == 3, "a held change is taken");
+		s.Reset();
+		check(!s.known && !s.Update(3, kSlotStableVsyncs, &v), "Reset forgets the slot");
+		StableSlot one;
+		check(one.Update(2, 0, &v) && v == 2, "need 0 acts as 1");
+		Console.WriteLn("(VR) StableSlot self-test %s", ok ? "passed" : "FAILED");
+		return ok;
 	}
 
 	bool LocalRecordAny(u32* base)

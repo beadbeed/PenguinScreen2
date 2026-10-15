@@ -2408,10 +2408,17 @@ namespace VR::PhysicalMelee
 		}
 		const bool setting = EmuConfig.VR.PhysicalMelee;
 		const bool offline = StrictlyOffline();
-		// The local slot (the profile's camera.base index byte).
+		// The local slot: CameraDriver's debounced one (the one `record` was resolved from), never the index byte read
+		// here. Offline the game puts a partner's slot in that byte while it runs the partners, and a partner's record
+		// and its weapon would then pass every check below (review M1).
 		u32 slot = 0;
 		const bool slot_known = profile && profile->camera.has_value() && profile->camera->base.has_value() &&
-		                        profile->camera->base->is_indexed && Read(reader, profile->camera->base->index_addr, 1, &slot);
+		                        profile->camera->base->is_indexed && CameraDriver::LocalSlot(&slot);
+		// And nothing is written for a record that was not also the local record on the previous poll (a second guard
+		// on the same rule: the block, the caves and a strike act on one steady record).
+		static u32 s_prev_record = 0;
+		const bool record_steady = profile && record != 0 && record == s_prev_record;
+		s_prev_record = profile ? record : 0;
 
 		// Where it may act (tools/outbreak-vr/research/2026-10-14-melee-coop.md). Offline in full. Online only with
 		// PhysicalMeleeOnline in private co-op: every console runs every character's swing from the state partners send,
@@ -2678,7 +2685,7 @@ namespace VR::PhysicalMelee
 		float m[16] = {};
 		float origin[3] = {}, axes[3][3] = {};
 		u32 counter = 0;
-		if (usable && Overrides(mode) && mp->has_override && hand && attach.valid)
+		if (usable && record_steady && Overrides(mode) && mp->has_override && hand && attach.valid)
 		{
 			CameraDriver::Mapping map;
 			if (CameraDriver::GetMapping(&map) &&
