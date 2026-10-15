@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -1016,13 +1017,38 @@ namespace VR::PhysicalMelee
 		}
 
 		const bool env = mp && fb && gamepad && setting && offline;
-		// A melee weapon in hand.
+		// A melee weapon in hand: the local record's equipped item record, behind the same checks the weapon reader makes
+		// (present, its own index, owned by the local slot), read here so it works with or without a headset session; how
+		// the game attaches its model, from the weapon reader (or the scenario's item table).
 		bool melee = false;
-		GameFeedback::WeaponView wv;
-		if (env && GameFeedback::WeaponInHand() == GameFeedback::Hold::Weapon)
+		u16 item_id = 0;
+		HandModel::GameAttach attach;
+		if (env)
 		{
-			wv = GameFeedback::GetWeapon();
-			melee = wv.valid && ItemData::KindOf(wv.item_id) == ItemData::Kind::Melee;
+			u32 eq = 0, present = 0, index = 0, owner = 0, id = 0, slot = 0;
+			const bool slot_known = profile->camera.has_value() && profile->camera->base.has_value() &&
+			                        profile->camera->base->is_indexed && Read(reader, profile->camera->base->index_addr, 1, &slot);
+			if (slot_known && Read(reader, record + fb->weapon_equipped_offset, 1, &eq) && eq != 0)
+			{
+				const u64 r = static_cast<u64>(fb->weapon_table) + static_cast<u64>(eq) * fb->weapon_stride;
+				if (r + fb->weapon_stride <= Ps2MemSize::MainRam && Read(reader, static_cast<u32>(r), 1, &present) &&
+					Read(reader, static_cast<u32>(r + 2), 1, &index) &&
+					Read(reader, static_cast<u32>(r + fb->weapon_owner_offset), 1, &owner) &&
+					Read(reader, static_cast<u32>(r + fb->weapon_id_offset), 2, &id) && present == 1 && index == eq &&
+					owner == slot + 1)
+				{
+					item_id = static_cast<u16>(id);
+					melee = ItemData::KindOf(item_id) == ItemData::Kind::Melee;
+				}
+			}
+			if (melee)
+			{
+				const GameFeedback::WeaponView wv = GameFeedback::GetWeapon();
+				if (wv.valid && wv.item_id == item_id && wv.attach.valid)
+					attach = wv.attach;
+				else
+					GameFeedback::AttachFor(item_id, &attach);
+			}
 		}
 		// The stance and the sub-action.
 		bool raised = false, normal = false, aim_idle = false, swinging = false;
@@ -1120,13 +1146,13 @@ namespace VR::PhysicalMelee
 
 		// The override block: where the VR weapon is, in the game's space, every poll it can be known; cleared otherwise.
 		bool wrote = false;
-		if (usable && mp->has_override && hand && wv.attach.valid && ProfileDB::SilenceSettingOn("PhysicalMelee"))
+		if (usable && mp->has_override && hand && attach.valid)
 		{
 			CameraDriver::Mapping map;
 			float origin[3], axes[3][3], m[16];
 			u32 counter = 0;
 			if (CameraDriver::GetMapping(&map) &&
-				HandModel::ModelFrame(wv.attach, HandModel::Held::Melee, pos, quat, origin, axes) &&
+				HandModel::ModelFrame(attach, HandModel::Held::Melee, pos, quat, origin, axes) &&
 				GameMatrix(origin, axes, MapPoint, &map, m) && Read(reader, mp->counter, 1, &counter))
 			{
 				const u32 b = mp->block;
@@ -1152,6 +1178,29 @@ namespace VR::PhysicalMelee
 		}
 		if (!wrote)
 			ClearBlock();
+
+		// PCSX2_VR_MELEE_LOG=1 (tuning, debugging): twice a second, why a swing would or would not attack, and the fastest
+		// the measured point moved since the last line.
+		static const bool s_diag = [] {
+			const char* e = std::getenv("PCSX2_VR_MELEE_LOG");
+			return e && e[0] == '1';
+		}();
+		if (s_diag && profile)
+		{
+			static float s_diag_s = 0.0f;
+			static float s_diag_peak = 0.0f;
+			s_diag_peak = std::max(s_diag_peak, dout.speed);
+			s_diag_s += dt;
+			if (s_diag_s >= 0.5f)
+			{
+				Console.WriteLn("(VR) Melee diag: env %d melee %d (item %u) raised %d normal %d aim idle %d swinging %d screen %d hand %d "
+								"| peak %.2f m/s, stroke %d | %s | block %s",
+					env, melee, static_cast<unsigned>(item_id), raised, normal, aim_idle, swinging, screen, hand,
+					static_cast<double>(s_diag_peak), dout.in_stroke, PhaseName(s_drive.phase), wrote ? "written" : "clear");
+				s_diag_s = 0.0f;
+				s_diag_peak = 0.0f;
+			}
+		}
 
 		frame.pad_port = s_pad_port;
 		frame.attack_button = s_attack_button;
