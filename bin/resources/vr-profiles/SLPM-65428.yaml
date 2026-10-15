@@ -317,21 +317,24 @@ SLPM-65428:
       - { address: 0x5569E8, on: 0x00000000, off: 0xA6200BC8, when: [{ address: 0x540004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: sh zero, 0xBC8(s1)
       # Physical melee (VR setting PhysicalMelee, off by default; tools/outbreak-vr/research/2026-10-14-melee.md and
       # 2026-10-14-melee-coop.md). A melee swing's attack object (FUN_005521B0 builds it, FUN_00552CF0 moves it every
-      # frame) copies the weapon object's matrix (+0x1C0) and position (+0x200), and the game's hit test (a capsule along a
-      # pipe, a sphere on a knife) runs on that. Three caves in free RAM (0xFE000, zero in every File #1 dump) act for the
-      # LOCAL player only: A and B make its attack object copy them from the host's block at 0xFF000 instead (laid out as a
-      # fake object at 0xFEE80), C opens its hit window at motion frame 2: each only while the block holds the magic
-      # 0x4D454C31, names the record as the local one and was stamped within 6 frames of the game counter 0x48BF93.
-      # Otherwise, and for every other character (AI partners offline, the other players online), the original code runs
-      # exactly. The host (VR::PhysicalMelee) writes the VR weapon's pose there each input poll. The sites first (each checks
-      # that its cave is in place), then the caves, so a disarm puts the sites back before the caves go. Offline, and online
-      # only with [VR] PhysicalMeleeOnline in private co-op while this console runs the room's enemies (CameraDriver's
-      # whenSetting gate, VR::PhysicalMelee::CoopOverrideLive); checked offline over PINE, slot 5's zombie.
+      # frame) copies the weapon object's matrix (+0x1C0) and position (+0x200), and the game's hit test (a capsule
+      # along a pipe, a sphere on a knife) runs on that. Three caves in free RAM (0xFE000, zero in every File #1 dump)
+      # act for the LOCAL player only: A and B make its attack object copy them from the host's block at 0xFF000 instead
+      # (laid out as a fake object at 0xFEE80), C opens its hit window at motion frame 2: each only while the block
+      # holds the magic 0x4D454C31, names the record as the local one, the record's identity byte +0x03 equals the
+      # camera focus u8 0x3AEF74 (the room camera's init 0x58DED8 sets it to the local slot; nothing else writes it, so
+      # a vsync that caught the partners' slot flicker cannot make a partner's record pass: nightly review M1 / d1) and
+      # was stamped within 6 frames of the game counter 0x48BF93. Otherwise, and for every other character (AI partners
+      # offline, the other players online), the original code runs exactly. The host (VR::PhysicalMelee) writes the VR
+      # weapon's pose there each input poll. The sites first (each checks that its cave is in place), then the caves, so
+      # a disarm puts the sites back before the caves go. Offline, and online only with [VR] PhysicalMeleeOnline in
+      # private co-op while this console runs the room's enemies (CameraDriver's whenSetting gate,
+      # VR::PhysicalMelee::CoopOverrideLive); checked offline over PINE, slot 5's zombie.
       - { address: 0x552D8C, on: 0x0803F800, off: 0xC5020200, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE000, equals: 0x3C0B0010 }], offlineOnly: true, whenSetting: PhysicalMelee }   # attack object, every frame: j 0xFE000 (cave A)
       - { address: 0x552D90, on: 0x00000000, off: 0x24860050, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE000, equals: 0x3C0B0010 }], offlineOnly: true, whenSetting: PhysicalMelee }   # ... its delay slot (addiu a2,a0,80, done in the cave)
-      - { address: 0x5523C4, on: 0x0C03F828, off: 0x8E030000, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE0A0, equals: 0x8E030000 }], offlineOnly: true, whenSetting: PhysicalMelee }   # attack object built: jal 0xFE0A0 (cave B) over lw v1,0(s0)
-      - { address: 0x5523C8, on: 0x00000000, off: 0xC4620200, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE0A0, equals: 0x8E030000 }], offlineOnly: true, whenSetting: PhysicalMelee }   # ... its delay slot (lwc1 f2,0x200(v1), done in the cave)
-      - { address: 0x5523E0, on: 0x00000000, off: 0x8E030000, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE0A0, equals: 0x8E030000 }], offlineOnly: true, whenSetting: PhysicalMelee }   # ... the second lw v1,0(s0): v1 already holds cave B's choice
+      - { address: 0x5523C4, on: 0x0C03F85C, off: 0x8E030000, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE170, equals: 0x8E030000 }], offlineOnly: true, whenSetting: PhysicalMelee }   # attack object built: jal 0xFE170 (cave B) over lw v1,0(s0)
+      - { address: 0x5523C8, on: 0x00000000, off: 0xC4620200, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE170, equals: 0x8E030000 }], offlineOnly: true, whenSetting: PhysicalMelee }   # ... its delay slot (lwc1 f2,0x200(v1), done in the cave)
+      - { address: 0x5523E0, on: 0x00000000, off: 0x8E030000, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE170, equals: 0x8E030000 }], offlineOnly: true, whenSetting: PhysicalMelee }   # ... the second lw v1,0(s0): v1 already holds cave B's choice
       # The hit window: the spawn event of each melee motion in the event script FUN_005661C0 (addiu a0,zero,<frame>; a1 the
       # record; jal FUN_00565C80) calls cave C instead, which sets the frame to 2 for the local record only (about 70 ms after
       # the press, so the VR weapon is live when your swing arrives) and jumps on to FUN_00565C80. The frame words stay stock.
@@ -342,197 +345,218 @@ SLPM-65428:
       - { address: 0x5696B0, on: 0x0C03F840, off: 0x0C159720, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE100, equals: 0x3C0B0010 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn event, motion 602 brush, spear (frame 32 at 0x5696A0): jal 0xFE100 (cave C)
       - { address: 0x56973C, on: 0x0C03F840, off: 0x0C159720, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE100, equals: 0x3C0B0010 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn event, motion 603 (frame 38 at 0x56972C): jal 0xFE100 (cave C)
       - { address: 0x5697B4, on: 0x0C03F840, off: 0x0C159720, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE100, equals: 0x3C0B0010 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn event, motion 604 (frame 40 at 0x5697A4): jal 0xFE100 (cave C)
-      - { address: 0x0FE000, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # cave A
+      - { address: 0x0FE000, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # cave A: magic, owner == block +0x08, owner +0x03 == focus u8 0x3AEF74, stamp fresh -> the VR weapon; else the weapon object
       - { address: 0x0FE004, on: 0x8D69F000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
       - { address: 0x0FE008, on: 0x3C0A4D45, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
       - { address: 0x0FE00C, on: 0x354A4C31, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE010, on: 0x152A000F, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE010, on: 0x152A0014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
       - { address: 0x0FE014, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
       - { address: 0x0FE018, on: 0x8D69F008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE01C, on: 0x1526000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE01C, on: 0x15260011, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
       - { address: 0x0FE020, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE024, on: 0x3C0A0049, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE028, on: 0x914ABF93, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE02C, on: 0x9169F004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE030, on: 0x01494823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE034, on: 0x05210002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE038, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE03C, on: 0x2529003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE040, on: 0x2D290007, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE044, on: 0x11200002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE048, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE04C, on: 0x2568EE80, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE050, on: 0xC5020200, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE054, on: 0xC5010204, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE058, on: 0xC5000208, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE05C, on: 0xE4820038, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE060, on: 0xE481003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE064, on: 0xE4800040, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE068, on: 0x24860050, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE06C, on: 0x250701C0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE070, on: 0x24050008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE074, on: 0x8CE90000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE078, on: 0x8CEA0004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE07C, on: 0x24A5FFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE080, on: 0xACC90000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE084, on: 0xACCA0004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE088, on: 0x24E70008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE08C, on: 0x1CA0FFF9, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE090, on: 0x24C60008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE094, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE098, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0A0, on: 0x8E030000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # cave B
-      - { address: 0x0FE0A4, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0A8, on: 0x8D69F000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0AC, on: 0x3C0A4D45, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0B0, on: 0x354A4C31, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0B4, on: 0x152A000F, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0B8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0BC, on: 0x8D69F008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0C0, on: 0x1535000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0C4, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0C8, on: 0x3C0A0049, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0CC, on: 0x914ABF93, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0D0, on: 0x9169F004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0D4, on: 0x01494823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0D8, on: 0x05210002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0DC, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0E0, on: 0x2529003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0E4, on: 0x2D290007, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0E8, on: 0x11200002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0EC, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0F0, on: 0x2563EE80, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0F4, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE0F8, on: 0xC4620200, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE100, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # cave C: magic, owner == local record (0xFF008), stamp fresh -> addiu a0,zero,2; then j 0x565C80
+      - { address: 0x0FE024, on: 0x90C90003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE028, on: 0x3C0A003B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE02C, on: 0x914AEF74, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE030, on: 0x152A000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE034, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE038, on: 0x3C0A0049, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE03C, on: 0x914ABF93, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE040, on: 0x9169F004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE044, on: 0x01494823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE048, on: 0x05210002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE04C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE050, on: 0x2529003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE054, on: 0x2D290007, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE058, on: 0x11200002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE05C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE060, on: 0x2568EE80, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE064, on: 0xC5020200, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE068, on: 0xC5010204, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE06C, on: 0xC5000208, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE070, on: 0xE4820038, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE074, on: 0xE481003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE078, on: 0xE4800040, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE07C, on: 0x24860050, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE080, on: 0x250701C0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE084, on: 0x24050008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE088, on: 0x8CE90000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE08C, on: 0x8CEA0004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE090, on: 0x24A5FFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE094, on: 0xACC90000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE098, on: 0xACCA0004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE09C, on: 0x24E70008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0A0, on: 0x1CA0FFF9, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0A4, on: 0x24C60008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0A8, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0AC, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE170, on: 0x8E030000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # cave B (0xFE170): magic, s5 == block +0x08, s5 +0x03 == focus u8 0x3AEF74, stamp fresh -> v1 = the fake object 0xFEE80
+      - { address: 0x0FE174, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE178, on: 0x8D69F000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE17C, on: 0x3C0A4D45, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE180, on: 0x354A4C31, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE184, on: 0x152A0014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE188, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE18C, on: 0x8D69F008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE190, on: 0x15350011, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE194, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE198, on: 0x92A90003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE19C, on: 0x3C0A003B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE1A0, on: 0x914AEF74, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE1A4, on: 0x152A000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE1A8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE1AC, on: 0x3C0A0049, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE1B0, on: 0x914ABF93, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE1B4, on: 0x9169F004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE1B8, on: 0x01494823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE1BC, on: 0x05210002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE1C0, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE1C4, on: 0x2529003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE1C8, on: 0x2D290007, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE1CC, on: 0x11200002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE1D0, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE1D4, on: 0x2563EE80, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE1D8, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE1DC, on: 0xC4620200, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE100, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # cave C: magic, owner == local record (0xFF008), owner +0x03 == focus u8 0x3AEF74, stamp fresh -> addiu a0,zero,2; then j 0x565C80
       - { address: 0x0FE104, on: 0x8D69F000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
       - { address: 0x0FE108, on: 0x3C0A4D45, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
       - { address: 0x0FE10C, on: 0x354A4C31, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE110, on: 0x152A000F, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE110, on: 0x152A0014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
       - { address: 0x0FE114, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
       - { address: 0x0FE118, on: 0x8D69F008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE11C, on: 0x1525000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE11C, on: 0x15250011, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
       - { address: 0x0FE120, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE124, on: 0x3C0A0049, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE128, on: 0x914ABF93, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE12C, on: 0x9169F004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE130, on: 0x01494823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE134, on: 0x05210002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE138, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE13C, on: 0x2529003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE140, on: 0x2D290007, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE144, on: 0x11200002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE148, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE14C, on: 0x24040002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE150, on: 0x08159720, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      - { address: 0x0FE154, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      # Contact mode (VR setting PhysicalMeleeMode = Contact, the default with PhysicalMelee; tools/outbreak-vr/research/
-      # 2026-10-14-vr-melee.md): the VR weapon touching an enemy makes the game apply a hit through its own code, with no
-      # attack action and no button. Cave D (0xFE200), called once a game frame instead of the attack nodes' hit test
-      # FUN_005A9DB0: when the host asks for a strike (block +0x0C, fresh), calls the attack spawn FUN_005521B0 for the
-      # local record (never during its canned swing) and gives the new attack object a life of the block's window; caves
-      # A and B put it on the VR weapon; then on to cave F. Cave F (0xFE500), then on to FUN_005A9DB0: (1) the strike's hit
-      # notice (the record's +0x116, which the swing's own stage FUN_006474A0 reads and clears; nothing else does) handled
-      # as that stage does it: a pipe, pole, brush or spear (weapon class 4 or 5) that hit sets the record's +0xBA0 bit 31
-      # and calls FUN_0062CDA0, so the next character loop spends the weapon's durability through the game's own
-      # FUN_0062D2C0 -> FUN_0062CDE0 -> FUN_00581A00 (and breaks it when it runs out); knives spend nothing, as in the game;
-      # (2) online only (the host's +0x30, frames), partners are sent the start of a swing: one type-1 state message
-      # (FUN_0064C620) built while the record's action bytes read stance 2, sub 3, put back at once (this console never
-      # runs the swing), and after those frames the swing's end as the game sends it (its filter FUN_006337C0 first).
-      # Cave E (0xFE400), at the entry of the critical multiplier FUN_00636990: for the live strike's node only, the game's
-      # own multiplier times the host's strength (above 1 the game raises the reaction class by one). The sites first (each
-      # checks its caves' first and last non-zero words), then the caves. Same gate as PhysicalMelee; checked offline over
-      # PINE, slot 5's zombie.
-      - { address: 0x5CDF64, on: 0x0C03F880, off: 0x0C16A76C, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE200, equals: 0x3C0B0010 }, { address: 0xFE354, equals: 0x0803F940 }, { address: 0xFE500, equals: 0x3C0B0010 }, { address: 0xFE7AC, equals: 0x0816A76C }], offlineOnly: true, whenSetting: PhysicalMeleeContact }   # the frame's attack nodes: jal 0xFE200 (cave D, then cave F) over jal FUN_005A9DB0
+      - { address: 0x0FE124, on: 0x90A90003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE128, on: 0x3C0A003B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE12C, on: 0x914AEF74, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE130, on: 0x152A000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE134, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE138, on: 0x3C0A0049, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE13C, on: 0x914ABF93, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE140, on: 0x9169F004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE144, on: 0x01494823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE148, on: 0x05210002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE14C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE150, on: 0x2529003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE154, on: 0x2D290007, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE158, on: 0x11200002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE15C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE160, on: 0x24040002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE164, on: 0x08159720, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE168, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      # Contact mode (VR setting PhysicalMeleeMode = Contact, the default with PhysicalMelee;
+      # tools/outbreak-vr/research/2026-10-14-vr-melee.md): the VR weapon touching an enemy makes the game apply a hit
+      # through its own code, with no attack action and no button. Cave D (0xFE200), called once a game frame instead of
+      # the attack nodes' hit test FUN_005A9DB0: when the host asks for a strike (block +0x0C, fresh), calls the attack
+      # spawn FUN_005521B0 for the local record (never during its canned swing) and gives the new attack object a life of
+      # the block's window; caves A and B put it on the VR weapon; then on to cave F. D and F, like A, B and C, act only
+      # for a block +0x08 record whose identity byte +0x03 equals the camera focus u8 0x3AEF74 (else each takes the path
+      # it takes unarmed). Cave F (0xFE500), then on to FUN_005A9DB0: (1) the strike's hit notice (the record's +0x116,
+      # which the swing's own stage FUN_006474A0 reads and clears; nothing else does) handled as that stage does it: a
+      # pipe, pole, brush or spear (weapon class 4 or 5) that hit sets the record's +0xBA0 bit 31 and calls FUN_0062CDA0,
+      # so the next character loop spends the weapon's durability through the game's own FUN_0062D2C0 -> FUN_0062CDE0 ->
+      # FUN_00581A00 (and breaks it when it runs out); knives spend nothing, as in the game; (2) online only (the host's
+      # +0x30, frames), partners are sent the start of a swing: one type-1 state message (FUN_0064C620) built while the
+      # record's action bytes read stance 2, sub 3, put back at once (this console never runs the swing), and after those
+      # frames the swing's end as the game sends it (its filter FUN_006337C0 first). Cave E (0xFE400), at the entry of the
+      # critical multiplier FUN_00636990: for the live strike's node only, the game's own multiplier times the host's
+      # strength (above 1 the game raises the reaction class by one). The sites first (each checks its caves' first and
+      # last non-zero words), then the caves. Same gate as PhysicalMelee; checked offline over PINE, slot 5's zombie.
+      - { address: 0x5CDF64, on: 0x0C03F880, off: 0x0C16A76C, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE200, equals: 0x3C0B0010 }, { address: 0xFE368, equals: 0x0803F940 }, { address: 0xFE500, equals: 0x3C0B0010 }, { address: 0xFE7C0, equals: 0x0816A76C }], offlineOnly: true, whenSetting: PhysicalMeleeContact }   # the frame's attack nodes: jal 0xFE200 (cave D, then cave F) over jal FUN_005A9DB0
       - { address: 0x636994, on: 0x00000000, off: 0xFFBF0020, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE400, equals: 0x3C080010 }, { address: 0xFE460, equals: 0xFFBF0020 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }   # FUN_00636990's delay slot first (sd ra,0x20(sp), done in cave E)
       - { address: 0x636990, on: 0x0803F900, off: 0x27BDFFD0, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE400, equals: 0x3C080010 }, { address: 0xFE460, equals: 0xFFBF0020 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }   # FUN_00636990's entry: j 0xFE400 (cave E) over addiu sp,sp,-48
-      - { address: 0x0FE200, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }   # cave D
+      - { address: 0x0FE200, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }   # cave D: magic, block +0x08 non-zero and its +0x03 == focus u8 0x3AEF74, else straight on to cave F
       - { address: 0x0FE204, on: 0x8D69F000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE208, on: 0x3C0A4D45, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE20C, on: 0x354A4C31, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE210, on: 0x152A0050, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE210, on: 0x152A0055, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE214, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE218, on: 0x8D64F008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE21C, on: 0x1080004D, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE21C, on: 0x10800052, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE220, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE224, on: 0x8D69F020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE228, on: 0x19200006, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE22C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE230, on: 0x2529FFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE234, on: 0xAD69F020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE238, on: 0x1D200002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE23C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE240, on: 0xAD60F014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE244, on: 0x3C0A0049, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE248, on: 0x914ABF93, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE24C, on: 0x9169F004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE250, on: 0x01494823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE254, on: 0x05210002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE258, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE25C, on: 0x2529003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE260, on: 0x2D290007, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE264, on: 0x1120003B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE268, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE26C, on: 0x8D69F00C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE270, on: 0x8D6CF010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE274, on: 0x112C0037, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE278, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE27C, on: 0xAD69F010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE280, on: 0x8D6CF020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE284, on: 0x1D800033, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE288, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE28C, on: 0x9169F028, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE290, on: 0x01494823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE294, on: 0x05210002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE298, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE29C, on: 0x2529003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2A0, on: 0x2D290007, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2A4, on: 0x1120002B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2A8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2AC, on: 0x90890008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2B0, on: 0x240C0002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2B4, on: 0x152C0005, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2B8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2BC, on: 0x90890009, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2C0, on: 0x240C0003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2C4, on: 0x112C0023, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2C8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2CC, on: 0x27BDFFE0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2D0, on: 0xAFBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2D4, on: 0xAFA40008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2D8, on: 0x3C090024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2DC, on: 0x8D29BD9C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2E0, on: 0xAFA90010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2E4, on: 0x24850050, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2E8, on: 0x24860038, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2EC, on: 0x0C15486C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2F0, on: 0x90870C7C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2F4, on: 0x8FA40008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2F8, on: 0x8FAD0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE2FC, on: 0x8FBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE300, on: 0x27BD0020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE304, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE308, on: 0x3C090024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE30C, on: 0x8D29BD9C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE310, on: 0x112D0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE314, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE318, on: 0x1120000E, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE31C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE320, on: 0x8D2A0008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE324, on: 0x1140000B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE224, on: 0x90890003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE228, on: 0x3C0A003B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE22C, on: 0x914AEF74, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE230, on: 0x152A004D, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE234, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE238, on: 0x8D69F020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE23C, on: 0x19200006, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE240, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE244, on: 0x2529FFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE248, on: 0xAD69F020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE24C, on: 0x1D200002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE250, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE254, on: 0xAD60F014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE258, on: 0x3C0A0049, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE25C, on: 0x914ABF93, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE260, on: 0x9169F004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE264, on: 0x01494823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE268, on: 0x05210002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE26C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE270, on: 0x2529003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE274, on: 0x2D290007, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE278, on: 0x1120003B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE27C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE280, on: 0x8D69F00C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE284, on: 0x8D6CF010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE288, on: 0x112C0037, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE28C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE290, on: 0xAD69F010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE294, on: 0x8D6CF020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE298, on: 0x1D800033, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE29C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2A0, on: 0x9169F028, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2A4, on: 0x01494823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2A8, on: 0x05210002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2AC, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2B0, on: 0x2529003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2B4, on: 0x2D290007, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2B8, on: 0x1120002B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2BC, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2C0, on: 0x90890008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2C4, on: 0x240C0002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2C8, on: 0x152C0005, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2CC, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2D0, on: 0x90890009, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2D4, on: 0x240C0003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2D8, on: 0x112C0023, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2DC, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2E0, on: 0x27BDFFE0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2E4, on: 0xAFBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2E8, on: 0xAFA40008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2EC, on: 0x3C090024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2F0, on: 0x8D29BD9C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2F4, on: 0xAFA90010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2F8, on: 0x24850050, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE2FC, on: 0x24860038, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE300, on: 0x0C15486C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE304, on: 0x90870C7C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE308, on: 0x8FA40008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE30C, on: 0x8FAD0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE310, on: 0x8FBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE314, on: 0x27BD0020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE318, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE31C, on: 0x3C090024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE320, on: 0x8D29BD9C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE324, on: 0x112D0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE328, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE32C, on: 0x8D4C0028, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE330, on: 0x15840008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE334, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE338, on: 0x8D6CF018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE33C, on: 0xA54C0012, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE340, on: 0xAD6AF014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE344, on: 0xAD6CF020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE348, on: 0x8D6CF024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE34C, on: 0x258C0001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE350, on: 0xAD6CF024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE354, on: 0x0803F940, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE358, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE32C, on: 0x1120000E, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE330, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE334, on: 0x8D2A0008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE338, on: 0x1140000B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE33C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE340, on: 0x8D4C0028, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE344, on: 0x15840008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE348, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE34C, on: 0x8D6CF018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE350, on: 0xA54C0012, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE354, on: 0xAD6AF014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE358, on: 0xAD6CF020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE35C, on: 0x8D6CF024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE360, on: 0x258C0001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE364, on: 0xAD6CF024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE368, on: 0x0803F940, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE36C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE400, on: 0x3C080010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }   # cave E
       - { address: 0x0FE404, on: 0x8D09F000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE408, on: 0x3C0A4D45, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
@@ -558,179 +582,184 @@ SLPM-65428:
       - { address: 0x0FE458, on: 0x27BDFFD0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE45C, on: 0x0818DA66, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE460, on: 0xFFBF0020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE500, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }   # cave F
+      - { address: 0x0FE500, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }   # cave F: magic, block +0x08 non-zero and its +0x03 == focus u8 0x3AEF74, else straight on to FUN_005A9DB0
       - { address: 0x0FE504, on: 0x8D69F000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE508, on: 0x3C0A4D45, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE50C, on: 0x354A4C31, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE510, on: 0x152A00A6, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE510, on: 0x152A00AB, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE514, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE518, on: 0x8D64F008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE51C, on: 0x108000A3, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE51C, on: 0x108000A8, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE520, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE524, on: 0x27BDFFD0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE528, on: 0xAFBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE52C, on: 0xAFA40008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE530, on: 0x8D69F024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE534, on: 0x8D6CF034, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE538, on: 0x112C002B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE53C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE540, on: 0xAD69F034, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE544, on: 0x8D6CF018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE548, on: 0x258C0003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE54C, on: 0xAD6CF038, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE550, on: 0x8D6CF030, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE554, on: 0x19800024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE558, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE55C, on: 0x8D69F02C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE560, on: 0x1D200021, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE564, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE568, on: 0x90890008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE56C, on: 0x2529FFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE570, on: 0x2D290002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE574, on: 0x1120001C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE524, on: 0x90890003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE528, on: 0x3C0A003B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE52C, on: 0x914AEF74, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE530, on: 0x152A00A3, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE534, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE538, on: 0x27BDFFD0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE53C, on: 0xAFBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE540, on: 0xAFA40008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE544, on: 0x8D69F024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE548, on: 0x8D6CF034, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE54C, on: 0x112C002B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE550, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE554, on: 0xAD69F034, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE558, on: 0x8D6CF018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE55C, on: 0x258C0003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE560, on: 0xAD6CF038, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE564, on: 0x8D6CF030, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE568, on: 0x19800024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE56C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE570, on: 0x8D69F02C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE574, on: 0x1D200021, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE578, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE57C, on: 0xAD6CF02C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE580, on: 0x8D69F08C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE584, on: 0x25290001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE588, on: 0xAD69F08C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE58C, on: 0x8C890008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE590, on: 0xAFA90010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE594, on: 0x8C890BA0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE598, on: 0xAFA90014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE59C, on: 0x3C0A0024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5A0, on: 0x8D49BF0C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5A4, on: 0xAFA90018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5A8, on: 0xA540BF0C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5AC, on: 0x24090302, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5B0, on: 0xAC890008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5B4, on: 0x0C193188, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5B8, on: 0x24050001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5BC, on: 0x8FA40008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5C0, on: 0x8FA90010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE57C, on: 0x90890008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE580, on: 0x2529FFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE584, on: 0x2D290002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE588, on: 0x1120001C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE58C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE590, on: 0xAD6CF02C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE594, on: 0x8D69F08C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE598, on: 0x25290001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE59C, on: 0xAD69F08C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5A0, on: 0x8C890008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5A4, on: 0xAFA90010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5A8, on: 0x8C890BA0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5AC, on: 0xAFA90014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5B0, on: 0x3C0A0024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5B4, on: 0x8D49BF0C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5B8, on: 0xAFA90018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5BC, on: 0xA540BF0C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5C0, on: 0x24090302, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE5C4, on: 0xAC890008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5C8, on: 0x8FA90014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5CC, on: 0xAC890BA0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5D0, on: 0x8FA90018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5D4, on: 0x3C0A0024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5D8, on: 0xA549BF0C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5DC, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5E0, on: 0x10000021, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5E4, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5E8, on: 0x8D69F02C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5EC, on: 0x1920001E, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5F0, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5F4, on: 0x2529FFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5F8, on: 0xAD69F02C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE5FC, on: 0x1D20001A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE600, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE604, on: 0x90890008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE608, on: 0x2529FFFD, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE60C, on: 0x2D290003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE610, on: 0x15200015, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5C8, on: 0x0C193188, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5CC, on: 0x24050001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5D0, on: 0x8FA40008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5D4, on: 0x8FA90010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5D8, on: 0xAC890008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5DC, on: 0x8FA90014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5E0, on: 0xAC890BA0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5E4, on: 0x8FA90018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5E8, on: 0x3C0A0024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5EC, on: 0xA549BF0C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5F0, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5F4, on: 0x10000021, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5F8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE5FC, on: 0x8D69F02C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE600, on: 0x1920001E, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE604, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE608, on: 0x2529FFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE60C, on: 0xAD69F02C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE610, on: 0x1D20001A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE614, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE618, on: 0x24050002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE61C, on: 0x0C18CDF0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE620, on: 0x24060003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE624, on: 0x8FA40008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE628, on: 0x1440000F, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE62C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE630, on: 0x3C0A0024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE634, on: 0x8D49BF0C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE638, on: 0xAFA90018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE63C, on: 0xA540BF0C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE640, on: 0x0C193188, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE644, on: 0x24050001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE648, on: 0x8FA40008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE64C, on: 0x8FA90018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE650, on: 0x3C0A0024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE654, on: 0xA549BF0C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE658, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE65C, on: 0x8D69F08C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE660, on: 0x25290100, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE664, on: 0xAD69F08C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE668, on: 0x0C16A76C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE66C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE670, on: 0x8FA40008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE674, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE678, on: 0x8D69F038, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE67C, on: 0x19200048, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE618, on: 0x90890008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE61C, on: 0x2529FFFD, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE620, on: 0x2D290003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE624, on: 0x15200015, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE628, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE62C, on: 0x24050002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE630, on: 0x0C18CDF0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE634, on: 0x24060003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE638, on: 0x8FA40008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE63C, on: 0x1440000F, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE640, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE644, on: 0x3C0A0024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE648, on: 0x8D49BF0C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE64C, on: 0xAFA90018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE650, on: 0xA540BF0C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE654, on: 0x0C193188, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE658, on: 0x24050001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE65C, on: 0x8FA40008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE660, on: 0x8FA90018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE664, on: 0x3C0A0024, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE668, on: 0xA549BF0C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE66C, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE670, on: 0x8D69F08C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE674, on: 0x25290100, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE678, on: 0xAD69F08C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE67C, on: 0x0C16A76C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE680, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE684, on: 0x2529FFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE688, on: 0xAD69F038, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE68C, on: 0x90890116, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE690, on: 0x11200043, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE684, on: 0x8FA40008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE688, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE68C, on: 0x8D69F038, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE690, on: 0x19200048, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE694, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE698, on: 0x908A0008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE69C, on: 0x240C0002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6A0, on: 0x154C0005, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6A4, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6A8, on: 0x908A0009, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6AC, on: 0x240C0003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6B0, on: 0x114C003B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6B4, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6B8, on: 0x8C8A0BA0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6BC, on: 0x05410003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6C0, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6C4, on: 0x10000036, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE698, on: 0x2529FFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE69C, on: 0xAD69F038, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6A0, on: 0x90890116, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6A4, on: 0x11200043, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6A8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6AC, on: 0x908A0008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6B0, on: 0x240C0002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6B4, on: 0x154C0005, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6B8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6BC, on: 0x908A0009, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6C0, on: 0x240C0003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6C4, on: 0x114C003B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE6C8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6CC, on: 0x240C00FF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6D0, on: 0x908A0117, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6D4, on: 0x154C000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6D8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6DC, on: 0x908A0118, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6E0, on: 0x154C0009, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6E4, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6E8, on: 0x908A0119, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6EC, on: 0x154C0006, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6F0, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6F4, on: 0x908A011A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6F8, on: 0x154C0003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE6FC, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE700, on: 0x10000002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE704, on: 0x25290001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE708, on: 0x24090001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE70C, on: 0xA0800116, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE710, on: 0x908A0CA9, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE714, on: 0x15400022, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE718, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE71C, on: 0x908A0CA8, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE720, on: 0x000A6180, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE724, on: 0x000A5080, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE728, on: 0x014C5021, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE72C, on: 0x3C0C006E, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE730, on: 0x014C5021, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE734, on: 0x914A5945, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE738, on: 0x240C0004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE73C, on: 0x114C0003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE740, on: 0x240C0005, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE744, on: 0x154C0016, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE748, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE74C, on: 0x252CFFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE750, on: 0x2D8C0002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE754, on: 0x11800012, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE758, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE75C, on: 0x908C0002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE760, on: 0x1580000F, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE764, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE768, on: 0x3C0C0049, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE76C, on: 0x918CBF7D, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE770, on: 0x908A0003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE774, on: 0x154C000A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6CC, on: 0x8C8A0BA0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6D0, on: 0x05410003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6D4, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6D8, on: 0x10000036, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6DC, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6E0, on: 0x240C00FF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6E4, on: 0x908A0117, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6E8, on: 0x154C000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6EC, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6F0, on: 0x908A0118, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6F4, on: 0x154C0009, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6F8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE6FC, on: 0x908A0119, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE700, on: 0x154C0006, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE704, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE708, on: 0x908A011A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE70C, on: 0x154C0003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE710, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE714, on: 0x10000002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE718, on: 0x25290001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE71C, on: 0x24090001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE720, on: 0xA0800116, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE724, on: 0x908A0CA9, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE728, on: 0x15400022, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE72C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE730, on: 0x908A0CA8, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE734, on: 0x000A6180, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE738, on: 0x000A5080, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE73C, on: 0x014C5021, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE740, on: 0x3C0C006E, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE744, on: 0x014C5021, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE748, on: 0x914A5945, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE74C, on: 0x240C0004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE750, on: 0x114C0003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE754, on: 0x240C0005, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE758, on: 0x154C0016, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE75C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE760, on: 0x252CFFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE764, on: 0x2D8C0002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE768, on: 0x11800012, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE76C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE770, on: 0x908C0002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE774, on: 0x1580000F, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE778, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE77C, on: 0x8C8A0BA0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE780, on: 0x3C0C8000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE784, on: 0x014C5021, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE788, on: 0x0C18B368, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE78C, on: 0xAC8A0BA0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE790, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE794, on: 0x8D69F03C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE798, on: 0x25290001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE79C, on: 0xAD69F03C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE7A0, on: 0x8FBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE7A4, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE7A8, on: 0x27BD0030, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE7AC, on: 0x0816A76C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE7B0, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE77C, on: 0x3C0C0049, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE780, on: 0x918CBF7D, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE784, on: 0x908A0003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE788, on: 0x154C000A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE78C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE790, on: 0x8C8A0BA0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE794, on: 0x3C0C8000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE798, on: 0x014C5021, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE79C, on: 0x0C18B368, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE7A0, on: 0xAC8A0BA0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE7A4, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE7A8, on: 0x8D69F03C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE7AC, on: 0x25290001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE7B0, on: 0xAD69F03C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE7B4, on: 0x8FBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE7B8, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE7BC, on: 0x27BD0030, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE7C0, on: 0x0816A76C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE7C4, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       # Hit jolt (VR setting MeleeHitJolt, off by default; with PhysicalMelee in contact mode, strictly offline; research/
       # 2026-10-14-vr-melee.md section 9): a contact hit pushes the zombie's struck body part the way the swing went. Cave G
       # (0xFE800) is called from the zombie's update instead of the game's own per-bone jolt FUN_00577870 (same arguments),
@@ -798,8 +827,8 @@ SLPM-65428:
     # read back before any site that jumps into it (an entry whose `when` reads a word in the range) is patched. Sites
     # go back at once; a body is zeroed only once the game counter 0x48BF93 has moved 3 frames and the EE is not in it.
     caves:
-      - { from: 0xFE000, to: 0xFE158, words: 84, counter: 0x48BF93 }    # A, B, C (PhysicalMelee)
-      - { from: 0xFE200, to: 0xFE7B4, words: 285, counter: 0x48BF93 }   # D, E, F (PhysicalMeleeContact)
+      - { from: 0xFE000, to: 0xFE1E0, words: 99, counter: 0x48BF93 }    # A (0xFE000), C (0xFE100), B (0xFE170) (PhysicalMelee)
+      - { from: 0xFE200, to: 0xFE7C8, words: 295, counter: 0x48BF93 }   # D, E, F (PhysicalMeleeContact)
       - { from: 0xFE800, to: 0xFE8C4, words: 49, counter: 0x48BF93 }    # G (MeleeHitJolt)
     lookAt:
       eye: 0x306338

@@ -323,11 +323,24 @@ namespace
 		}
 	};
 
-	// The caves' memory: the profile's cave words, the host's block (magic, the stamp, the local record, the VR weapon's
-	// matrix and position), the game counter, and a weapon object (the canned pose) with its own matrix and position.
+	// The caves' memory: the profile's cave words, the host's block (magic, the stamp, the record it names, the VR
+	// weapon's matrix and position), the game counter, the records' identity bytes (+0x03: Kevin 0, partner 1, the next
+	// 2), the camera focus u8 0x3AEF74 (the local slot, 0 offline), and a weapon object (the canned pose) with its own
+	// matrix and position. named / focus other than Kevin / 0 are the review's d1 case: a block naming a partner (a vsync
+	// that caught the slot flicker), or a focus that is not the named record's slot. The caves must then run the game's
+	// own path, exactly as unarmed.
 	constexpr u32 kLocalRecord = 0x476DD0, kPartnerRecord = 0x476DD0 + 0x10E0, kWeapon = 0x500000, kAttack = 0x600000;
-	constexpr u32 kReturn = 0x00ABC0, kSpawnEvent = 0x565C80;
-	bool MeleeCaveMemory(MiniEE& ee, bool magic, u8 counter, u8 stamp)
+	constexpr u32 kReturn = 0x00ABC0, kSpawnEvent = 0x565C80, kFocus = 0x3AEF74;
+	constexpr u32 kCaveA = 0xFE000, kCaveAEnd = 0xFE0B0, kCaveC = 0xFE100, kCaveCEnd = 0xFE16C, kCaveB = 0xFE170,
+				  kCaveBEnd = 0xFE1E0;
+	void MeleeIdentities(MiniEE& ee, u8 focus)
+	{
+		ee.Store8(kLocalRecord + 0x03, 0);
+		ee.Store8(kPartnerRecord + 0x03, 1);
+		ee.Store8(kPartnerRecord + 0x10E0 + 0x03, 2);
+		ee.Store8(kFocus, focus);
+	}
+	bool MeleeCaveMemory(MiniEE& ee, bool magic, u8 counter, u8 stamp, u32 named = kLocalRecord, u8 focus = 0)
 	{
 		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
 		if (!p || !p->camera.has_value())
@@ -343,7 +356,8 @@ namespace
 		}
 		ee.Store32(0xFF000, magic ? 0x4D454C31u : 0u);
 		ee.Store8(0xFF004, stamp);
-		ee.Store32(0xFF008, kLocalRecord);
+		ee.Store32(0xFF008, named);
+		MeleeIdentities(ee, focus);
 		for (u32 k = 0; k < 16; k++)
 		{
 			ee.Store32(0xFF040 + 4 * k, 0x1000 + k);      // the VR weapon's matrix
@@ -355,22 +369,22 @@ namespace
 			ee.Store32(kWeapon + 0x200 + 4 * k, 0x3000 + k);
 		}
 		ee.Store8(0x48BF93, counter);
-		return words == 39 + 23 + 22;
+		return words == 44 + 28 + 27;
 	}
 
 	// Cave A (every frame of the swing): the attack object's position and matrix come from the VR weapon (from_vr) or
 	// from the weapon object, exactly as the game copies them.
-	bool MeleeCaveA(u32 owner, bool magic, u8 counter, u8 stamp, bool from_vr)
+	bool MeleeCaveA(u32 owner, bool magic, u8 counter, u8 stamp, bool from_vr, u32 named = kLocalRecord, u8 focus = 0)
 	{
 		MiniEE ee;
-		if (!MeleeCaveMemory(ee, magic, counter, stamp))
+		if (!MeleeCaveMemory(ee, magic, counter, stamp, named, focus))
 			return false;
 		ee.r[4] = kAttack;  // a0: the attack object
 		ee.r[6] = owner;    // a2: its owner (the delay slot of the game's own branch set it)
 		ee.r[8] = kWeapon;  // t0: the weapon object
 		ee.r[31] = kReturn;
 		ee.r[16] = 0x11111111;
-		if (ee.Run(0xFE000, 0xFE000, 0xFE0A0) != kReturn || ee.r[16] != 0x11111111)
+		if (ee.Run(kCaveA, kCaveA, kCaveAEnd) != kReturn || ee.r[16] != 0x11111111)
 			return false;
 		const u32 pos = from_vr ? 0x2000 : 0x3000, mat = from_vr ? 0x1000 : 0x4000;
 		for (u32 k = 0; k < 3; k++)
@@ -383,26 +397,26 @@ namespace
 	}
 
 	// Cave B (the attack object is built): v1 the object to copy from, and its +0x200 already in f2.
-	bool MeleeCaveB(u32 owner, bool magic, bool from_vr)
+	bool MeleeCaveB(u32 owner, bool magic, bool from_vr, u32 named = kLocalRecord, u8 focus = 0)
 	{
 		MiniEE ee;
-		if (!MeleeCaveMemory(ee, magic, 10, 9))
+		if (!MeleeCaveMemory(ee, magic, 10, 9, named, focus))
 			return false;
 		ee.Store32(0x700000, kWeapon);
 		ee.r[16] = 0x700000; // s0: the item's weapon object pointer
 		ee.r[21] = owner;    // s5: the record that swings
 		ee.r[31] = kReturn;
-		if (ee.Run(0xFE0A0, 0xFE0A0, 0xFE100) != kReturn)
+		if (ee.Run(kCaveB, kCaveB, kCaveBEnd) != kReturn)
 			return false;
 		const u32 obj = from_vr ? 0xFEE80u : kWeapon;
 		return ee.r[3] == obj && ee.f[2] == (from_vr ? 0x2000u : 0x3000u);
 	}
 
 	// Cave C (the spawn event of a melee motion): on to FUN_00565C80 with the frame (a0) 2 or as the game had it.
-	bool MeleeCaveC(u32 record, bool magic, u8 counter, u8 stamp, bool early)
+	bool MeleeCaveC(u32 record, bool magic, u8 counter, u8 stamp, bool early, u32 named = kLocalRecord, u8 focus = 0)
 	{
 		MiniEE ee;
-		if (!MeleeCaveMemory(ee, magic, counter, stamp))
+		if (!MeleeCaveMemory(ee, magic, counter, stamp, named, focus))
 			return false;
 		ee.r[4] = 16;      // a0: the motion's spawn frame (a pipe's)
 		ee.r[5] = record;  // a1: the record
@@ -410,7 +424,7 @@ namespace
 		ee.r[7] = 0;
 		ee.r[31] = 0x56950C;
 		ee.r[16] = record;
-		if (ee.Run(0xFE100, 0xFE100, 0xFE160) != kSpawnEvent)
+		if (ee.Run(kCaveC, kCaveC, kCaveCEnd) != kSpawnEvent)
 			return false;
 		return ee.r[4] == (early ? 2u : 16u) && ee.r[5] == record && ee.r[6] == 2 && ee.r[7] == 0 &&
 		       ee.r[31] == 0x56950C && ee.r[16] == record;
@@ -549,10 +563,13 @@ namespace
 		u32 seq = 1, served = 0, left = 0, live_obj = 0;
 		u8 stance = 1, sub = 0;
 		bool spawn_ok = true;
+		u32 named = kLocalRecord; // block +0x08
+		u8 focus = 0;             // u8 0x3AEF74
 	};
 	struct CaveDResult
 	{
 		bool ok = false; // left for FUN_005A9DB0 with ra and sp kept
+		bool untouched = false; // no byte of memory changed (block, records, objects): the unarmed path
 		bool spawned = false;
 		u32 served = 0, left = 0, obj = 0, made = 0;
 		u16 life = 0;
@@ -568,7 +585,8 @@ namespace
 		s_contact_spawn_ok = c.spawn_ok;
 		ee.Store32(kBlock, c.magic ? 0x4D454C31u : 0u);
 		ee.Store8(kBlock + 0x04, c.stamp);
-		ee.Store32(kBlock + 0x08, kLocalRecord);
+		ee.Store32(kBlock + 0x08, c.named);
+		MeleeIdentities(ee, c.focus);
 		ee.Store32(kBlock + 0x0C, c.seq);
 		ee.Store32(kBlock + 0x10, c.served);
 		ee.Store32(kBlock + 0x14, c.live_obj);
@@ -585,8 +603,10 @@ namespace
 		ee.r[16] = 0x11111111;
 		s_hit_tests = 0;
 		s_hit_notice = {};
+		const std::map<u32, u32> before = ee.mem;
 		const u32 out = ee.Run(0xFE200, 0xFE200, 0xFE800); // cave D, then cave F (nothing for it to do here), then back
 		res.ok = out == 0x5CDF6C && s_hit_tests == 1 && ee.r[29] == sp && ee.r[16] == 0x11111111;
+		res.untouched = ee.mem == before;
 		res.spawned = s_contact_run.spawned;
 		for (int k = 0; k < 4; k++)
 			res.args[k] = s_contact_run.a[k];
@@ -634,10 +654,13 @@ namespace
 		u8 stance = 1, sub = 0, slot = 0, local_slot = 0;
 		u32 ba0 = 0x00000100;
 		u32 filter = 0;
+		u32 named = kLocalRecord; // block +0x08
+		u8 focus = 0;             // u8 0x3AEF74
 	};
 	struct CaveFResult
 	{
 		bool ok = false;
+		bool untouched = false; // no byte of memory changed by the cave (the hit test's own notice aside)
 		u8 notice = 0, kind = 0;
 		u32 ba0 = 0, action = 0, uses = 0, left = 0, watch = 0, seen = 0, sends = 0;
 		u16 last_type = 0;
@@ -652,7 +675,7 @@ namespace
 		s_cave_f_calls.clear();
 		s_cave_f_filter = c.filter;
 		ee.Store32(kBlock, 0x4D454C31u);
-		ee.Store32(kBlock + 0x08, kLocalRecord);
+		ee.Store32(kBlock + 0x08, c.named);
 		ee.Store32(kBlock + 0x18, 6);
 		ee.Store32(kBlock + 0x24, c.made);
 		ee.Store32(kBlock + 0x2C, c.left);
@@ -661,6 +684,7 @@ namespace
 		ee.Store32(kBlock + 0x38, c.watch);
 		const u32 R = kLocalRecord;
 		ee.Store8(R + 0x02, 0);
+		MeleeIdentities(ee, c.focus);
 		ee.Store8(R + 0x03, c.slot);
 		ee.Store8(kLocalSlot, c.local_slot);
 		ee.Store8(R + 0x08, c.stance);
@@ -694,8 +718,10 @@ namespace
 		ee.r[31] = 0x5CDF6C;
 		const u32 sp = ee.r[29];
 		ee.r[16] = 0x11111111;
+		const std::map<u32, u32> before = ee.mem;
 		const u32 out = ee.Run(0xFE500, 0xFE500, 0xFE800);
 		res.ok = out == 0x5CDF6C && s_hit_tests == 1 && ee.r[29] == sp && ee.r[16] == 0x11111111;
+		res.untouched = ee.mem == before;
 		res.notice = static_cast<u8>(ee.Load32(R + 0x114) >> 16);
 		res.kind = static_cast<u8>(ee.Load32(R + 0x114) >> 24);
 		res.ba0 = ee.Load32(R + 0xBA0);
@@ -765,9 +791,38 @@ namespace
 			r = RunCaveF(c);
 			check(r.ok && r.uses == 0 && r.watch == 8 && r.calls.empty());
 			c = CaveFCase{};
-			c.slot = 1; // not this console's slot (the game's own test): cleared, not spent
+			c.local_slot = 1; // the record is the focus, but the slot byte reads another (the game's own test): cleared, not spent
 			r = RunCaveF(c);
 			check(r.ok && r.notice == 0 && r.uses == 0 && r.calls.empty());
+		}
+		{
+			// Review d1: a record that is not the camera focus (u8 0x3AEF74) is never acted for. Cave F goes straight on to
+			// FUN_005A9DB0 as unarmed: the notice kept, nothing spent or sent, no byte of memory changed.
+			CaveFCase c;
+			c.before = true;
+			c.slot = 1; // Kevin's record reads another identity than the focus (0)
+			CaveFResult r = RunCaveF(c);
+			check(r.ok && r.untouched && r.notice == 1 && r.uses == 0 && r.calls.empty() && r.watch == 9);
+			c = CaveFCase{};
+			c.before = true;
+			c.focus = 1; // the focus is a partner's slot
+			r = RunCaveF(c);
+			check(r.ok && r.untouched && r.notice == 1 && r.uses == 0 && r.calls.empty() && r.watch == 9);
+			c = CaveFCase{};
+			c.before = true;
+			c.named = kPartnerRecord; // the block names partner 1 (identity 1) with the focus on Kevin's slot
+			r = RunCaveF(c);
+			check(r.ok && r.untouched && r.uses == 0 && r.calls.empty());
+			c = CaveFCase{};
+			c.before = true;
+			c.focus = 2;
+			c.made = 2;
+			c.partner = 30; // online with a new strike counted: no state message either
+			r = RunCaveF(c);
+			check(r.ok && r.untouched && r.calls.empty() && r.sends == 0 && r.left == 0);
+			c.focus = 0; // the same with the focus on Kevin: the message goes (the case above is the check's doing)
+			r = RunCaveF(c);
+			check(r.ok && !r.untouched && r.calls.size() >= 1 && r.sends == 1);
 		}
 		{
 			// A new strike (cave D's count moved): watched for its window + 3 frames; offline (partner 0) nothing sent.
@@ -885,6 +940,27 @@ namespace
 			c.spawn_ok = false; // the game made no node (no weapon object): nothing noted
 			const CaveDResult r = RunCaveD(c);
 			check(r.ok && r.spawned && r.obj == 0 && r.left == 0 && r.made == 0);
+		}
+		{
+			// Review d1: a fresh request for a record that is not the camera focus (u8 0x3AEF74): nothing spawned, served
+			// or counted down, no byte of memory changed, on to cave F and the game's hit test as unarmed.
+			CaveDCase c;
+			c.focus = 1; // the focus is partner 1's slot
+			CaveDResult r = RunCaveD(c);
+			check(r.ok && r.untouched && !r.spawned && r.served == 0);
+			c = CaveDCase{};
+			c.named = kPartnerRecord; // the block names partner 1 (a vsync in the slot flicker), focus on Kevin
+			r = RunCaveD(c);
+			check(r.ok && r.untouched && !r.spawned && r.served == 0);
+			c = CaveDCase{};
+			c.focus = 2;
+			c.left = 3;
+			c.live_obj = kObject; // a strike live: not counted down either
+			r = RunCaveD(c);
+			check(r.ok && r.untouched && !r.spawned && r.left == 3 && r.obj == kObject);
+			c.focus = 0; // the same on Kevin's slot: counted down (the case above is the check's doing)
+			r = RunCaveD(c);
+			check(r.ok && !r.untouched && r.left == 2);
 		}
 		{
 			float f0 = 0.0f;
@@ -1062,7 +1138,7 @@ int main(int argc, char* argv[])
 				return false;
 			const u32 a = sil.ee_address;
 			const bool call = std::find(std::begin(kSpawnCalls), std::end(kSpawnCalls), a) != std::end(kSpawnCalls);
-			if (a >= 0xFE000u && a < 0xFE160u)
+			if (a >= kCaveA && a < kCaveBEnd)
 			{
 				if (sil.value_off != 0)
 					return false;
@@ -1088,7 +1164,7 @@ int main(int argc, char* argv[])
 			else
 				return false; // nothing else, the shared spawn frames above all
 		}
-		return sites == 5 && calls == 7 && cave == 39 + 23 + 22 && last_site < first_cave;
+		return sites == 5 && calls == 7 && cave == 44 + 28 + 27 && last_site < first_cave;
 	});
 	{
 		Begin("Physical melee online (PhysicalMelee::SelfTestOnline)");
@@ -1104,13 +1180,25 @@ int main(int argc, char* argv[])
 		const bool a = MeleeCaveA(kLocalRecord, true, 10, 8, true) && MeleeCaveA(kPartnerRecord, true, 10, 8, false) &&
 		               MeleeCaveA(kLocalRecord, false, 10, 8, false) && MeleeCaveA(kLocalRecord, true, 20, 8, false) &&
 		               MeleeCaveA(kLocalRecord, true, 2, 58, true);
+		// Review d1: armed and fresh, but the block names a partner (identity 1) or the focus u8 0x3AEF74 is not the
+		// named record's identity: the game's own path, as unarmed.
+		const bool a1 = MeleeCaveA(kLocalRecord, true, 10, 8, false, kLocalRecord, 1) &&
+		                MeleeCaveA(kPartnerRecord, true, 10, 8, false, kPartnerRecord, 0) &&
+		                MeleeCaveA(kPartnerRecord, true, 10, 8, true, kPartnerRecord, 1) && // the focus is that record's
+		                MeleeCaveA(kLocalRecord, true, 10, 8, false, kLocalRecord, 2);
 		const bool b = MeleeCaveB(kLocalRecord, true, true) && MeleeCaveB(kPartnerRecord, true, false) &&
 		               MeleeCaveB(kLocalRecord, false, false);
+		const bool b1 = MeleeCaveB(kLocalRecord, true, false, kLocalRecord, 1) &&
+		                MeleeCaveB(kPartnerRecord, true, false, kPartnerRecord, 0) &&
+		                MeleeCaveB(kPartnerRecord, true, true, kPartnerRecord, 1);
 		const bool c = MeleeCaveC(kLocalRecord, true, 10, 8, true) && MeleeCaveC(kPartnerRecord, true, 10, 8, false) &&
 		               MeleeCaveC(kPartnerRecord + 0x10E0, true, 10, 8, false) && MeleeCaveC(kLocalRecord, false, 10, 8, false) &&
 		               MeleeCaveC(kLocalRecord, true, 20, 8, false) && MeleeCaveC(kLocalRecord, true, 2, 58, true) &&
 		               MeleeCaveC(kLocalRecord, true, 14, 8, true) && MeleeCaveC(kLocalRecord, true, 15, 8, false);
-		return a && b && c;
+		const bool c1 = MeleeCaveC(kLocalRecord, true, 10, 8, false, kLocalRecord, 1) &&
+		                MeleeCaveC(kPartnerRecord, true, 10, 8, false, kPartnerRecord, 0) &&
+		                MeleeCaveC(kPartnerRecord, true, 10, 8, true, kPartnerRecord, 1);
+		return a && a1 && b && b1 && c && c1;
 	});
 	// Contact mode ([VR] PhysicalMeleeMode = Contact; tools/outbreak-vr/research/2026-10-14-vr-melee.md): the pure parts
 	// (strength from speed, the shape against hurt spheres, the strike and re-arm logic on scripted swings), File #1's
@@ -1148,11 +1236,11 @@ int main(int argc, char* argv[])
 			if (!sil.offline_only || sil.keep_through_disarm || sil.when.empty())
 				return false;
 			const u32 a = sil.ee_address;
-			if (a >= 0xFE200u && a < 0xFE360u)
+			if (a >= 0xFE200u && a < 0xFE370u)
 				cave_d++;
 			else if (a >= 0xFE400u && a < 0xFE470u)
 				cave_e++;
-			else if (a >= 0xFE500u && a < 0xFE7B4u)
+			else if (a >= 0xFE500u && a < 0xFE7C8u)
 				cave_f++;
 			else if ((a == 0x5CDF64u && sil.value_off == 0x0C16A76Cu && sil.value_on == 0x0C03F880u) ||
 					 (a == 0x636990u && sil.value_off == 0x27BDFFD0u && sil.value_on == 0x0803F900u) ||
@@ -1172,7 +1260,7 @@ int main(int argc, char* argv[])
 				first_cave = i;
 			any_cave = true;
 		}
-		return sites == 3 && cave_d == 87 && cave_e == 25 && cave_f == 173 && last_site < first_cave;
+		return sites == 3 && cave_d == 92 && cave_e == 25 && cave_f == 178 && last_site < first_cave;
 	});
 	RunSilent("Physical melee contact caves (D, E, F: File #1 profile words, interpreted)", MeleeContactCaves);
 	// [VR] MeleeHitJolt (a prototype; tools/outbreak-vr/research/2026-10-14-vr-melee.md sections 8 and 9): the pure parts
