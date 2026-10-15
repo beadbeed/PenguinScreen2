@@ -846,6 +846,18 @@ namespace VR::ProfileDB
 					return w.second;
 			return contact;
 		}
+		// jolt ([VR] MeleeHitJolt, a prototype; needs contact): cave G's block (magic, then kJoltEntries entries from +0x10),
+		// the hook word that reads jolt_hook_on while cave G is in, where an enemy's bone matrices are (*(enemy +
+		// jolt_bones) + jolt_bone_table + 4 * bone, each a 4 x 4 world matrix; bones below jolt_bone_count), and the tuning.
+		bool has_jolt = false;
+		u32 jolt_block = 0;
+		u32 jolt_magic = 0;
+		u32 jolt_hook = 0;
+		u32 jolt_hook_on = 0;
+		u32 jolt_bones = 0;
+		u32 jolt_bone_table = 0;
+		u32 jolt_bone_count = 0;
+		PhysicalMelee::JoltParams jolt;
 		PhysicalMelee::DetectorParams detect;
 		PhysicalMelee::DriverParams drive;
 	};

@@ -268,6 +268,7 @@ namespace
 				case 0x0D: r[rt] = r[rs] | imm; break;
 				case 0x0F: r[rt] = imm << 16; break;
 				case 0x23: r[rt] = Load32(r[rs] + simm); break;
+				case 0x21: r[rt] = static_cast<u32>(static_cast<s32>(static_cast<s16>(static_cast<u16>(Load32(r[rs] + simm) >> (((r[rs] + simm) & 2u) * 8u))))); break; // lh
 				case 0x24: r[rt] = (Load32(r[rs] + simm) >> (((r[rs] + simm) & 3u) * 8u)) & 0xFFu; break;
 				case 0x2B: Store32(r[rs] + simm, r[rt]); break;
 				case 0x29: Store16(r[rs] + simm, static_cast<u16>(r[rt])); break;
@@ -1003,7 +1004,8 @@ int main(int argc, char* argv[])
 		int gated = 0, kept = 0;
 		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
 		{
-			if (sil.when_setting.empty() || sil.when_setting == "PhysicalMelee" || sil.when_setting == "PhysicalMeleeContact")
+			if (sil.when_setting.empty() || sil.when_setting == "PhysicalMelee" || sil.when_setting == "PhysicalMeleeContact" ||
+				sil.when_setting == "MeleeHitJolt")
 			{
 				if (sil.keep_through_disarm)
 					return false;
@@ -1171,6 +1173,134 @@ int main(int argc, char* argv[])
 		return sites == 3 && cave_d == 87 && cave_e == 25 && cave_f == 173 && last_site < first_cave;
 	});
 	RunSilent("Physical melee contact caves (D, E, F: File #1 profile words, interpreted)", MeleeContactCaves);
+	// [VR] MeleeHitJolt (a prototype; tools/outbreak-vr/research/2026-10-14-vr-melee.md sections 8 and 9): the pure parts
+	// (the magnitude from the swing's speed, the chain for the struck sphere's bone, each bone's turn in its parent's
+	// frame, the entries as the cave reads them), File #1's melee.jolt and its MeleeHitJolt entries (the zombie's update
+	// site guarded by cave G's first and last words, before the cave), and cave G itself run on the profile's words.
+	{
+		Begin("Physical melee hit jolt (PhysicalMelee::SelfTestJolt)");
+		const std::vector<std::string> failed = VR::PhysicalMelee::SelfTestJolt();
+		Record("Physical melee hit jolt", failed.empty(),
+			failed.empty() ? std::string("passed (it names the failed checks only, no check count)") :
+							 "FAIL: " + std::to_string(failed.size()) + " check(s), first: " + failed.front());
+	}
+	RunSilent("Physical melee hit jolt (File #1 profile, melee.jolt, cave G interpreted)", +[]() {
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		if (!p || !p->melee.has_value() || !p->camera.has_value() || !VR::ProfileDB::IsSilenceSettingName("MeleeHitJolt"))
+			return false;
+		const VR::ProfileDB::MeleeParams& m = p->melee.value();
+		if (!m.has_jolt || m.jolt_block != 0xFF100 || m.jolt_magic != 0x4A4C5431 || m.jolt_hook != 0x6644D0 ||
+			m.jolt_hook_on != 0x0C03FA00 || m.jolt_bones != 0x34 || m.jolt_bone_table != 0x820 || m.jolt_bone_count != 36 ||
+			m.jolt.chains.size() != 3)
+			return false;
+		const VR::PhysicalMelee::JoltChain* head = VR::PhysicalMelee::JoltChainFor(m.jolt, 21);
+		const VR::PhysicalMelee::JoltChain* belly = VR::PhysicalMelee::JoltChainFor(m.jolt, 10);
+		if (!head || head->bones[0] != 20 || head->parents[0] != 11 || !belly || belly->bones[0] != 10 || belly->parents[0] != 2 ||
+			!VR::PhysicalMelee::JoltChainFor(m.jolt, 3))
+			return false;
+		// The entries: the site, then the cave (43 words at 0xFE800, clear of cave F and of the melee block's 0x90 bytes).
+		MiniEE ee;
+		int site = -1, first_cave = -1, words = 0;
+		for (size_t i = 0; i < p->camera->silence.size(); i++)
+		{
+			const VR::ProfileDB::CameraSilence& sil = p->camera->silence[i];
+			if (sil.when_setting != "MeleeHitJolt")
+				continue;
+			if (!sil.offline_only || sil.keep_through_disarm || sil.when.empty())
+				return false;
+			if (sil.ee_address == 0x6644D0u)
+			{
+				if (sil.value_off != 0x0C15DE1Cu || sil.value_on != 0x0C03FA00u || sil.when.size() != 3 || first_cave >= 0)
+					return false;
+				site = static_cast<int>(i);
+				continue;
+			}
+			if (sil.ee_address < 0xFE800u || sil.ee_address >= 0xFE900u || sil.value_off != 0)
+				return false;
+			if (first_cave < 0)
+				first_cave = static_cast<int>(i);
+			ee.Store32(sil.ee_address, sil.value_on);
+			words++;
+		}
+		if (site < 0 || words != 43)
+			return false;
+		// Cave G with the game around it scripted: FUN_00577870 (the game's own jolt) and FUN_0055C450 (the apply) record
+		// their arguments and clobber the temporaries.
+		struct Call
+		{
+			u32 pc, a0, a1, a2;
+			s16 x, y, z;
+		};
+		static std::vector<Call> s_calls;
+		s_calls.clear();
+		ee.stub = +[](MiniEE& e, u32 pc, u32* next) {
+			if (pc != 0x577870 && pc != 0x55C450)
+				return false;
+			Call c{pc, e.r[4], e.r[5], e.r[6], 0, 0, 0};
+			if (pc == 0x55C450)
+			{
+				const auto h = [&](u32 a) { return static_cast<s16>(static_cast<u16>(e.Load32(a) >> ((a & 2u) * 8u))); };
+				c.x = h(e.r[6]);
+				c.y = h(e.r[6] + 2);
+				c.z = h(e.r[6] + 4);
+			}
+			s_calls.push_back(c);
+			for (int k : {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15})
+				e.r[k] = 0xDEAD0000u + static_cast<u32>(k);
+			*next = e.r[31];
+			return true;
+		};
+		constexpr u32 kEnemy = 0x429530, kOther = 0x42A2C0, kBlk = 0xFF100;
+		const auto entry = [&](int k, u32 enemy, u8 bone, u8 frames, s16 x, s16 y, s16 z) {
+			const s16 ang[3] = {x, y, z};
+			VR::PhysicalMelee::JoltEntry je = VR::PhysicalMelee::MakeJoltEntry(enemy, bone, ang, frames > 0 ? frames : 1);
+			je.frames = frames;
+			u32 w[6];
+			VR::PhysicalMelee::PackJoltEntry(je, w);
+			for (int q = 0; q < 6; q++)
+				ee.Store32(kBlk + 0x10u + 24u * static_cast<u32>(k) + 4u * static_cast<u32>(q), w[q]);
+		};
+		const auto run = [&]() {
+			ee.r[4] = kEnemy;
+			ee.r[5] = 0x6E4C78;
+			ee.r[6] = kEnemy + 0xD1C;
+			ee.r[29] = 0x01F00000;
+			ee.r[31] = 0x6644D8;
+			ee.r[16] = 0x5555;
+			return ee.Run(0xFE800, 0xFE800, 0xFE900) == 0x6644D8 && ee.r[29] == 0x01F00000 && ee.r[16] == 0x5555;
+		};
+		entry(0, kEnemy, 20, 3, 300, -60, 9);
+		entry(1, kOther, 20, 5, 1000, 0, 0);
+		entry(2, kEnemy, 11, 0, 500, 0, 0);
+		entry(3, kEnemy, 10, 1, -40, 0, 0);
+		// Without the magic: the game's own jolt only.
+		ee.Store32(kBlk, 0);
+		if (!run() || s_calls.size() != 1 || s_calls[0].pc != 0x577870 || s_calls[0].a0 != kEnemy || s_calls[0].a1 != 0x6E4C78 ||
+			s_calls[0].a2 != kEnemy + 0xD1C || ((ee.Load32(kBlk + 0x14) >> 8) & 0xFF) != 3)
+			return false;
+		// With it: the game's jolt, then this enemy's live entries (0 and 3), each applied, a frame fewer, less its rate.
+		s_calls.clear();
+		ee.Store32(kBlk, 0x4A4C5431);
+		if (!run() || s_calls.size() != 3 || s_calls[0].pc != 0x577870 || s_calls[0].a2 != kEnemy + 0xD1C)
+			return false;
+		const Call& c1 = s_calls[1];
+		const Call& c3 = s_calls[2];
+		if (c1.pc != 0x55C450 || c1.a0 != kEnemy || c1.a1 != 20 || c1.a2 != kBlk + 0x18 || c1.x != 300 || c1.y != -60 || c1.z != 9 ||
+			c3.pc != 0x55C450 || c3.a1 != 10 || c3.a2 != kBlk + 0x10 + 72 + 8 || c3.x != -40)
+			return false;
+		const auto h16 = [&](u32 a) { return static_cast<s16>(static_cast<u16>(ee.Load32(a) >> ((a & 2u) * 8u))); };
+		if (((ee.Load32(kBlk + 0x14) >> 8) & 0xFF) != 2 || h16(kBlk + 0x18) != 200 || h16(kBlk + 0x1A) != -40 || h16(kBlk + 0x1C) != 6 ||
+			((ee.Load32(kBlk + 0x2C) >> 8) & 0xFF) != 5 || h16(kBlk + 0x30) != 1000 || ((ee.Load32(kBlk + 0x44) >> 8) & 0xFF) != 0 ||
+			((ee.Load32(kBlk + 0x5C) >> 8) & 0xFF) != 0 || h16(kBlk + 0x60) != 0)
+			return false;
+		// Two more frames: entry 0 runs out (applied at 200, then 100), entry 3 stays out.
+		s_calls.clear();
+		if (!run() || !run() || s_calls.size() != 4 || s_calls[1].x != 200 || s_calls[3].x != 100 ||
+			((ee.Load32(kBlk + 0x14) >> 8) & 0xFF) != 0)
+			return false;
+		s_calls.clear();
+		return run() && s_calls.size() == 1;
+	});
 	RunGamepad();
 	RunSilent("CameraDriver::SelfTestAssembler (hook)", VR::CameraDriver::SelfTestAssembler);
 	RunSilent("CameraDriver::SelfTestMath (math, predict, comfort, FOV)", VR::CameraDriver::SelfTestMath);

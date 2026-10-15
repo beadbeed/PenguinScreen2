@@ -1153,6 +1153,25 @@ namespace VR::PhysicalMelee
 		float s_pend_speed = 0.0f;
 		int s_pend_sphere = -1;
 		u32 s_strikes = 0, s_strike_hits = 0;
+		// Hit jolt ([VR] MeleeHitJolt): the far hit point's velocity (game units a second, smoothed), and the last strike's
+		// contact (a point on the struck sphere, the swing's velocity there, the sphere's bone) until its hit lands.
+		float s_vel_b[3] = {};
+		bool s_vel_have = false;
+		bool s_pend_jolt = false;
+		float s_pend_contact[3] = {}, s_pend_vel[3] = {}, s_pend_a[3] = {}, s_pend_b[3] = {};
+		u32 s_pend_bone = 0;
+		bool s_jolt_armed = false; // cave G's block holds the magic (cleared once when the jolt may not run)
+		u32 s_jolt_addr = 0;
+
+		void ClearJolt()
+		{
+			if (s_jolt_armed && VMManager::HasValidVM() && s_jolt_addr + kJoltBlockBytes <= Ps2MemSize::MainRam)
+			{
+				for (u32 off = 0; off < kJoltBlockBytes; off += 4)
+					memWrite32(s_jolt_addr + off, 0);
+			}
+			s_jolt_armed = false;
+		}
 
 		void ResetContact()
 		{
@@ -1161,6 +1180,119 @@ namespace VR::PhysicalMelee
 			s_tip_speed = 0.0f;
 			s_prev_valid = false;
 			s_pend_enemy = -1;
+			s_vel_have = false;
+			s_pend_jolt = false;
+		}
+
+		bool ReadF(GuestReader reader, u32 address, float* f);
+
+		// A landed hit's jolt: the chain for the struck sphere's bone, each bone's turn from the strike's contact and
+		// velocity in its parent's frame (the game's bone matrices, read now), written into free entries of cave G's block.
+		void WriteJolt(GuestReader reader, const ProfileDB::MeleeParams& mp, int enemy)
+		{
+			// The struck sphere: the hit's zone (the game's own nearest sphere), its centre and radius now, its bone; the
+			// contact is its point nearest the weapon's shape at the strike.
+			const u32 ebase = mp.enemy_table + static_cast<u32>(enemy) * mp.enemy_stride;
+			u32 zone = 0, count = 0, shapes = 0, centres = 0;
+			float cc[3], rad = 0.0f;
+			if (!mp.zone_offset || !Read(reader, ebase + mp.zone_offset, 1, &zone) || !Read(reader, ebase + mp.sphere_count, 1, &count) ||
+				zone >= count || zone >= 8 || !Read(reader, ebase + mp.sphere_shapes, 4, &shapes) ||
+				!Read(reader, ebase + mp.sphere_centres, 4, &centres) || shapes == 0 || centres == 0 ||
+				shapes + 20u * 8u > Ps2MemSize::MainRam || centres + 12u * 8u > Ps2MemSize::MainRam ||
+				!Read(reader, shapes + 20u * zone + 0x10u, 4, &s_pend_bone) || !ReadF(reader, shapes + 20u * zone + 0x0Cu, &rad) ||
+				!ReadF(reader, centres + 12u * zone, &cc[0]) || !ReadF(reader, centres + 12u * zone + 4u, &cc[1]) ||
+				!ReadF(reader, centres + 12u * zone + 8u, &cc[2]) || rad <= 0.0f)
+			{
+				Console.WriteLn("(VR) Melee: no jolt: the hit's sphere could not be read.");
+				return;
+			}
+			{
+				const float* a = s_pend_a;
+				const float ab[3] = {s_pend_b[0] - a[0], s_pend_b[1] - a[1], s_pend_b[2] - a[2]};
+				const float l2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+				float t = l2 > 1e-6f ? ((cc[0] - a[0]) * ab[0] + (cc[1] - a[1]) * ab[1] + (cc[2] - a[2]) * ab[2]) / l2 : 0.0f;
+				t = std::clamp(t, 0.0f, 1.0f);
+				const float d[3] = {a[0] + ab[0] * t - cc[0], a[1] + ab[1] * t - cc[1], a[2] + ab[2] * t - cc[2]};
+				const float dl = Len3(d[0], d[1], d[2]);
+				for (int q = 0; q < 3; q++)
+					s_pend_contact[q] = dl > 1e-3f ? cc[q] + d[q] / dl * std::min(rad, dl) : cc[q];
+			}
+			const JoltChain* ch = JoltChainFor(mp.jolt, s_pend_bone);
+			if (!ch)
+			{
+				Console.WriteLn("(VR) Melee: no jolt for a hit on bone %u (no chain in the profile).", s_pend_bone);
+				return;
+			}
+			u32 hook = 0;
+			if (!Read(reader, mp.jolt_hook, 4, &hook) || hook != mp.jolt_hook_on)
+			{
+				Console.WriteLn("(VR) Melee: no jolt: cave G is not in.");
+				return;
+			}
+			const u32 base = mp.enemy_table + static_cast<u32>(enemy) * mp.enemy_stride;
+			u32 model = 0;
+			if (!Read(reader, base + mp.jolt_bones, 4, &model) || model == 0 || model + mp.jolt_bone_table + 4u * 256u > Ps2MemSize::MainRam)
+				return;
+			// The bone's world matrix (4 x 4 row vectors, row 3 its joint).
+			const auto bone_world = [&](u32 bone, float w[16]) {
+				u32 ptr = 0;
+				if (bone >= mp.jolt_bone_count || !Read(reader, model + mp.jolt_bone_table + 4u * bone, 4, &ptr) || ptr == 0 ||
+					ptr + 64u > Ps2MemSize::MainRam)
+					return false;
+				for (u32 k = 0; k < 16; k++)
+					if (!ReadF(reader, ptr + 4u * k, &w[k]))
+						return false;
+				return true;
+			};
+			const JoltSize size = JoltMagnitude(s_pend_speed, mp.jolt);
+			const u32 blk = mp.jolt_block;
+			// This enemy's old entries go; then the free ones are taken in order.
+			u8 frames_left[kJoltEntries] = {};
+			for (int k = 0; k < kJoltEntries; k++)
+			{
+				const u32 e = blk + 0x10u + 24u * static_cast<u32>(k);
+				u32 who = 0, bf = 0;
+				Read(reader, e, 4, &who);
+				Read(reader, e + 4, 4, &bf);
+				frames_left[k] = static_cast<u8>(bf >> 8);
+				if (!s_jolt_armed || who == base)
+				{
+					memWrite32(e + 4, 0);
+					frames_left[k] = 0;
+				}
+			}
+			std::string line;
+			int slot = 0;
+			for (int i = 0; i < ch->count; i++)
+			{
+				float bw[16], pw[16];
+				s16 ang[3];
+				if (!bone_world(ch->bones[i], bw) || !bone_world(ch->parents[i], pw) ||
+					!JoltAngles(s_pend_contact, &bw[12], s_pend_vel, pw, size.deg * ch->weights[i], ang))
+					continue;
+				while (slot < kJoltEntries && frames_left[slot] != 0)
+					slot++;
+				if (slot >= kJoltEntries)
+					break;
+				const JoltEntry je = MakeJoltEntry(base, ch->bones[i], ang, size.frames);
+				u32 w[6];
+				PackJoltEntry(je, w);
+				const u32 e = blk + 0x10u + 24u * static_cast<u32>(slot);
+				for (int k = 0; k < 6; k++)
+					memWrite32(e + 4u * static_cast<u32>(k), w[k]);
+				frames_left[slot] = je.frames;
+				line += fmt::format(" bone {} ({}, {}, {})", ch->bones[i], ang[0], ang[1], ang[2]);
+			}
+			if (line.empty())
+				return;
+			memWrite32(blk, mp.jolt_magic);
+			s_jolt_armed = true;
+			s_jolt_addr = blk;
+			Console.WriteLn("(VR) Melee: jolt, enemy %d struck on bone %u at %.1f m/s, %.1f deg over %d frames:%s (1/65536 turn, "
+							"about the parent's x y z); swing (%.0f, %.0f, %.0f) cm/s at (%.0f, %.0f, %.0f).",
+				enemy, s_pend_bone, static_cast<double>(s_pend_speed), static_cast<double>(size.deg), size.frames, line.c_str(),
+				static_cast<double>(s_pend_vel[0]), static_cast<double>(s_pend_vel[1]), static_cast<double>(s_pend_vel[2]),
+				static_cast<double>(s_pend_contact[0]), static_cast<double>(s_pend_contact[1]), static_cast<double>(s_pend_contact[2]));
 		}
 
 		bool ReadF(GuestReader reader, u32 address, float* f)
@@ -1259,7 +1391,7 @@ namespace VR::PhysicalMelee
 		// Contact mode, every input poll with the block written this poll (can): the weapon's shape against the enemies'
 		// hurt spheres, a strike asked of cave D on first contact at speed, the cue, and the result logged.
 		void PollContact(GuestReader reader, const ProfileDB::MeleeParams& mp, u32 record, bool can, const float m[16],
-			const float origin[3], const float axes[3][3], u32 counter, float dt)
+			const float origin[3], const float axes[3][3], u32 counter, float dt, bool jolt)
 		{
 			u32 wt = 0;
 			if (!Read(reader, record + mp.weapon_type_offset, 2, &wt))
@@ -1289,6 +1421,19 @@ namespace VR::PhysicalMelee
 			if (can)
 			{
 				PlaceShape(s_shape, m, a, b);
+				// The far hit point's velocity in the game's space (the jolt's direction).
+				if (s_prev_valid && dt > 0.0f && Len3(b[0] - s_prev_b[0], b[1] - s_prev_b[1], b[2] - s_prev_b[2]) < 200.0f)
+				{
+					const float k = 1.0f - std::exp(-dt / 0.02f);
+					for (int q = 0; q < 3; q++)
+					{
+						const float inst = (b[q] - s_prev_b[q]) / dt;
+						s_vel_b[q] = s_vel_have ? s_vel_b[q] + (inst - s_vel_b[q]) * k : inst;
+					}
+					s_vel_have = true;
+				}
+				else
+					s_vel_have = false;
 				// The far hit point in the headset's space (a model point in centimetres), for the speed.
 				float fm[3] = {s_shape.p[0], s_shape.p[1], s_shape.p[2]};
 				if (s_shape.capsule)
@@ -1317,6 +1462,7 @@ namespace VR::PhysicalMelee
 			{
 				s_tip_have = false;
 				s_tip_speed = 0.0f;
+				s_vel_have = false;
 			}
 			const bool sweep = can && s_prev_valid &&
 			                   Len3(a[0] - s_prev_a[0], a[1] - s_prev_a[1], a[2] - s_prev_a[2]) < 200.0f;
@@ -1378,6 +1524,14 @@ namespace VR::PhysicalMelee
 				s_pend_strength = so.strength;
 				s_pend_speed = s_tip_speed;
 				s_pend_sphere = sph;
+				// The jolt: the weapon's shape and the swing's velocity now; the sphere is the one the game's hit records.
+				s_pend_jolt = jolt && s_vel_have && Finite3(a) && Finite3(b) && Finite3(s_vel_b);
+				for (int q = 0; q < 3; q++)
+				{
+					s_pend_a[q] = a[q];
+					s_pend_b[q] = b[q];
+					s_pend_vel[q] = s_vel_b[q];
+				}
 				s_strikes++;
 				Console.WriteLn("(VR) Melee: strike, enemy %d (sphere %d) at %.1f m/s, strength %.2f.", so.enemy, sph,
 					static_cast<double>(s_tip_speed), static_cast<double>(so.strength));
@@ -1404,6 +1558,9 @@ namespace VR::PhysicalMelee
 									"after the strike (%u of %u strikes landed).",
 						s_pend_enemy, s_pend_hp, hp, cls, ZombieReaction(cls), zone, static_cast<double>(s_pend_s * 1000.0f),
 						s_strike_hits, s_strikes);
+					if (jolt && s_pend_jolt)
+						WriteJolt(reader, mp, s_pend_enemy);
+					s_pend_jolt = false;
 					s_pend_enemy = -1;
 				}
 				else if (s_pend_s > 0.4f)
@@ -1859,6 +2016,220 @@ namespace VR::PhysicalMelee
 		return c.failures;
 	}
 
+	// --- Hit jolt (pure). ---
+
+	JoltSize JoltMagnitude(float speed, const JoltParams& p)
+	{
+		const float span = p.fast - p.slow;
+		float t = (std::isfinite(speed) && span > 0.0f) ? (speed - p.slow) / span : 0.0f;
+		t = std::clamp(std::isfinite(t) ? t : 0.0f, 0.0f, 1.0f);
+		JoltSize s;
+		s.deg = p.min_deg + (p.max_deg - p.min_deg) * t;
+		if (!std::isfinite(s.deg))
+			s.deg = 0.0f;
+		s.frames = std::max(1, static_cast<int>(std::lround(static_cast<float>(p.min_frames) +
+		                                                    static_cast<float>(p.max_frames - p.min_frames) * t)));
+		return s;
+	}
+
+	const JoltChain* JoltChainFor(const JoltParams& p, u32 hit_bone)
+	{
+		for (const JoltChain& c : p.chains)
+			if (c.hit_bone == hit_bone && c.count > 0)
+				return &c;
+		return nullptr;
+	}
+
+	bool JoltAngles(const float contact[3], const float pivot[3], const float vel[3], const float pw[16], float deg, s16 out[3])
+	{
+		out[0] = out[1] = out[2] = 0;
+		const float vl = Len3(vel[0], vel[1], vel[2]);
+		if (!(vl >= 1.0f) || !std::isfinite(deg))
+			return false;
+		const float v[3] = {vel[0] / vl, vel[1] / vl, vel[2] / vl};
+		float r[3] = {contact[0] - pivot[0], contact[1] - pivot[1], contact[2] - pivot[2]};
+		const float rl = Len3(r[0], r[1], r[2]);
+		if (!std::isfinite(rl))
+			return false;
+		const auto cross = [](const float a[3], const float b[3], float o[3]) {
+			o[0] = a[1] * b[2] - a[2] * b[1];
+			o[1] = a[2] * b[0] - a[0] * b[2];
+			o[2] = a[0] * b[1] - a[1] * b[0];
+		};
+		float ax[3];
+		cross(r, v, ax);
+		// A short lever, or one along the swing, says nothing about the turn: the part above the joint goes with the swing.
+		if (rl < 8.0f || Len3(ax[0], ax[1], ax[2]) < 0.2f * rl)
+		{
+			const float up[3] = {0.0f, 1.0f, 0.0f};
+			cross(up, v, ax);
+		}
+		float al = Len3(ax[0], ax[1], ax[2]);
+		if (!(al > 0.05f))
+			return false;
+		for (float& x : ax)
+			x /= al;
+		// Into the parent's frame: rows of the parent's 3 x 3 are its axes in the world (with its scale), v_world = v_parent
+		// * P, so an axis in the parent's frame is a_world * P^-1.
+		const float a = pw[0], b = pw[1], c = pw[2], d = pw[4], e = pw[5], f = pw[6], g = pw[8], h = pw[9], i = pw[10];
+		const float det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+		if (!std::isfinite(det) || std::fabs(det) < 1e-6f)
+			return false;
+		const float inv[9] = {(e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det, (f * g - d * i) / det,
+			(a * i - c * g) / det, (c * d - a * f) / det, (d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det};
+		float ap[3];
+		for (int k = 0; k < 3; k++)
+			ap[k] = ax[0] * inv[0 + k] + ax[1] * inv[3 + k] + ax[2] * inv[6 + k];
+		al = Len3(ap[0], ap[1], ap[2]);
+		if (!(al > 1e-6f))
+			return false;
+		// Small angles: x, y and z in turn about the parent's axes are close to one turn about the axis.
+		const float units = deg * (65536.0f / 360.0f);
+		bool any = false;
+		for (int k = 0; k < 3; k++)
+		{
+			const float u = std::clamp(units * ap[k] / al, -16384.0f, 16384.0f);
+			out[k] = static_cast<s16>(std::lround(u));
+			any = any || out[k] != 0;
+		}
+		return any;
+	}
+
+	JoltEntry MakeJoltEntry(u32 enemy, u8 bone, const s16 angle[3], int frames)
+	{
+		JoltEntry e;
+		e.enemy = enemy;
+		e.bone = bone;
+		e.frames = static_cast<u8>(std::clamp(frames, 1, 255));
+		for (int k = 0; k < 3; k++)
+		{
+			e.angle[k] = angle[k];
+			e.rate[k] = static_cast<s16>(static_cast<int>(angle[k]) / static_cast<int>(e.frames));
+		}
+		return e;
+	}
+
+	void PackJoltEntry(const JoltEntry& e, u32 w[6])
+	{
+		const auto h = [](s16 x) { return static_cast<u32>(static_cast<u16>(x)); };
+		w[0] = e.enemy;
+		w[1] = static_cast<u32>(e.bone) | (static_cast<u32>(e.frames) << 8);
+		w[2] = h(e.angle[0]) | (h(e.angle[1]) << 16);
+		w[3] = h(e.angle[2]);
+		w[4] = h(e.rate[0]) | (h(e.rate[1]) << 16);
+		w[5] = h(e.rate[2]);
+	}
+
+	std::vector<std::string> SelfTestJolt()
+	{
+		Checker c;
+		const JoltParams p;
+		// Magnitude.
+		{
+			const JoltSize lo = JoltMagnitude(p.slow - 1.0f, p), at = JoltMagnitude(p.slow, p), hi = JoltMagnitude(p.fast + 3.0f, p);
+			const JoltSize mid = JoltMagnitude(0.5f * (p.slow + p.fast), p);
+			c(lo.deg == p.min_deg && lo.frames == p.min_frames && at.deg == p.min_deg, "magnitude: at and below slow, the least");
+			c(hi.deg == p.max_deg && hi.frames == p.max_frames, "magnitude: from fast, the most");
+			c(std::fabs(mid.deg - 0.5f * (p.min_deg + p.max_deg)) < 1e-4f &&
+				  mid.frames == static_cast<int>(std::lround(0.5f * (p.min_frames + p.max_frames))),
+				"magnitude: linear between");
+			const JoltSize nan = JoltMagnitude(std::numeric_limits<float>::quiet_NaN(), p);
+			c(nan.deg == p.min_deg && nan.frames >= 1, "magnitude: NaN is the least, never NaN");
+		}
+		// Chains.
+		{
+			JoltParams q;
+			JoltChain head;
+			head.hit_bone = 21;
+			head.count = 2;
+			head.bones[0] = 20;
+			head.bones[1] = 11;
+			JoltChain empty;
+			empty.hit_bone = 10;
+			q.chains = {empty, head};
+			c(JoltChainFor(q, 21) == &q.chains[1] && JoltChainFor(q, 10) == nullptr && JoltChainFor(q, 3) == nullptr,
+				"chains: by the struck sphere's bone; an empty one is none");
+		}
+		// Angles. An upright zombie facing +z (identity parent), the neck at 137 and a head hit at 140 from its left (-x)
+		// moving +x: the lever is short and along the swing, so straight up x swing = (0, 1, 0) x (1, 0, 0) = -z: a negative
+		// turn about z, which carries a point above the joint toward +x.
+		const float id[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+		const float neck[3] = {0.0f, 137.0f, 0.0f};
+		{
+			const float hit[3] = {-20.0f, 140.0f, 0.0f}, vel[3] = {500.0f, 0.0f, 0.0f};
+			s16 a[3];
+			c(JoltAngles(hit, neck, vel, id, 20.0f, a) && a[0] == 0 && a[1] == 0 && std::abs(a[2] + 3641) <= 1,
+				"angles: a side hit level with the joint leans the part away, 20 deg about -z");
+			// Check the sense: rotate the point (0, 30, 0) above the joint by that z turn (row vectors, v * Rz).
+			const float th = static_cast<float>(a[2]) * (6.2831853f / 65536.0f);
+			const float x = 0.0f * std::cos(th) - 30.0f * std::sin(th);
+			c(x > 9.0f, "angles: a point above the joint moves along the swing");
+		}
+		{
+			// A frontal hit on the head (the zombie faces +z, the swing goes -z, into it), 20 above the neck: about -x...
+			// (0, 20, 0) x (0, 0, -1) = (-20, 0, 0): the head tips back (toward -z).
+			const float hit[3] = {0.0f, 157.0f, 10.0f}, vel[3] = {0.0f, 0.0f, -600.0f};
+			s16 a[3];
+			c(JoltAngles(hit, neck, vel, id, 10.0f, a) && a[0] < -1800 && a[1] == 0 && a[2] == 0, "angles: a frontal hit tips it back");
+			const float th = static_cast<float>(a[0]) * (6.2831853f / 65536.0f);
+			// v * Rx with Rx rows (1,0,0), (0,c,s), (0,-s,c): (0, 30, 0) -> (0, 30c, 30s).
+			c(30.0f * std::sin(th) < -4.0f, "angles: the head goes the swing's way (-z)");
+		}
+		{
+			// A low hit (below the joint) folds the part above over it: (0, -15, 0) x (0, 0, -1) = (15, 0, 0).
+			const float pivot[3] = {0.0f, 105.0f, 0.0f}, hit[3] = {0.0f, 90.0f, 25.0f}, vel[3] = {0.0f, 0.0f, -400.0f};
+			s16 a[3];
+			c(JoltAngles(hit, pivot, vel, id, 10.0f, a) && a[0] > 1800, "angles: a hit below the joint folds the body over it");
+		}
+		{
+			// The parent turned 90 deg about y (its x axis is the world's -z): a world axis of -z is its +x.
+			const float turned[16] = {0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1};
+			const float hit[3] = {-20.0f, 140.0f, 0.0f}, vel[3] = {500.0f, 0.0f, 0.0f};
+			s16 a[3];
+			c(JoltAngles(hit, neck, vel, turned, 20.0f, a) && std::abs(a[0] - 3641) <= 1 && a[1] == 0 && a[2] == 0,
+				"angles: the axis goes into the parent's frame");
+			// Its scale does not change the angle.
+			float scaled[16];
+			for (int k = 0; k < 16; k++)
+				scaled[k] = (k < 12 && (k % 4) < 3) ? turned[k] * 1.03f : turned[k];
+			s16 b[3];
+			c(JoltAngles(hit, neck, vel, scaled, 20.0f, b) && b[0] == a[0], "angles: the parent's scale does not matter");
+		}
+		{
+			const float hit[3] = {0.0f, 150.0f, 0.0f}, still[3] = {0.0f, 0.0f, 0.5f}, down[3] = {0.0f, -500.0f, 0.0f};
+			const float flat[16] = {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+			const float side[3] = {300.0f, 0.0f, 0.0f};
+			s16 a[3];
+			c(!JoltAngles(hit, neck, still, id, 20.0f, a), "angles: no velocity, no turn");
+			c(!JoltAngles(neck, neck, down, id, 20.0f, a), "angles: straight down on the joint, no axis");
+			c(!JoltAngles(hit, neck, side, flat, 20.0f, a), "angles: a singular parent, none");
+			c(!JoltAngles(hit, neck, side, id, std::numeric_limits<float>::quiet_NaN(), a), "angles: NaN degrees, none");
+		}
+		// Entries.
+		{
+			const s16 ang[3] = {3641, -1000, 7};
+			const JoltEntry e = MakeJoltEntry(0x429530, 20, ang, 12);
+			c(e.frames == 12 && e.rate[0] == 303 && e.rate[1] == -83 && e.rate[2] == 0, "entry: rates are the angle over the frames");
+			// The cave's sequence: applied with frames left, then the angle less the rate; the last applied is about one rate.
+			int x = e.angle[0], applied = 0, last = 0;
+			for (int f = e.frames; f > 0; f--)
+			{
+				last = x;
+				applied++;
+				x -= e.rate[0];
+			}
+			c(applied == 12 && last == 3641 - 11 * 303 && std::abs(last) <= 2 * e.rate[0], "entry: twelve frames, back to about nothing");
+			u32 w[6];
+			PackJoltEntry(e, w);
+			c(w[0] == 0x429530 && w[1] == 0x0C14 && w[2] == (0x0E39u | (0xFC18u << 16)) && w[3] == 7 && w[4] == (303u | (0xFFADu << 16)) &&
+				  w[5] == 0,
+				"entry: packed as the cave reads it");
+			const JoltEntry z = MakeJoltEntry(1, 2, ang, 0);
+			c(z.frames == 1 && z.rate[0] == 3641, "entry: at least one frame");
+		}
+		return c.failures;
+	}
+
 	void OnStateLoaded()
 	{
 		s_enemies_valid = false;
@@ -1866,6 +2237,7 @@ namespace VR::PhysicalMelee
 		s_drive.Reset();
 		// The state's RAM has its own block (zero unless it was saved while armed); write it again before trusting it.
 		s_block_armed = false;
+		s_jolt_armed = false;
 		ResetContact();
 	}
 
@@ -2235,8 +2607,12 @@ namespace VR::PhysicalMelee
 		if (!wrote)
 			ClearBlock();
 
+		// The hit jolt ([VR] MeleeHitJolt): strictly offline, with contact; otherwise its block goes back to zero.
+		const bool jolt = contact && mode == Mode::Offline && EmuConfig.VR.MeleeHitJolt && mp->has_jolt;
+		if (!jolt)
+			ClearJolt();
 		if (contact)
-			PollContact(reader, *mp, record, wrote && !screen && !swinging, m, origin, axes, counter, dt);
+			PollContact(reader, *mp, record, wrote && !screen && !swinging, m, origin, axes, counter, dt, jolt);
 		else
 			s_contact.Reset();
 

@@ -288,6 +288,67 @@ namespace VR::PhysicalMelee
 	// Strength, the geometry and the strike logic on scripted swings. Returns the failed checks.
 	std::vector<std::string> SelfTestContact();
 
+	// --- Hit jolt ([VR] MeleeHitJolt, a prototype; research/2026-10-14-vr-melee.md sections 8 and 9). Pure. ---
+	//
+	// A contact hit pushes the struck body part the way the swing went: a few bones near the hit get a rotation that
+	// decays to nothing over a few game frames, through the game's own per-bone apply (FUN_0055C450: the bone's local
+	// matrix, about its parent's axes, so its children follow), from cave G in the zombie's update.
+
+	// The bones a hit on one hurt sphere moves: the sphere's bone (hit_bone), then up to four bones, each with its parent
+	// (for the parent's frame) and a share of the angle.
+	struct JoltChain
+	{
+		u32 hit_bone = 0;
+		int count = 0;
+		u8 bones[4] = {};
+		u8 parents[4] = {};
+		float weights[4] = {};
+	};
+	struct JoltParams
+	{
+		float slow = 1.8f;    // m/s at the weapon's far hit point: min_deg and min_frames here and below
+		float fast = 6.0f;    // m/s: max_deg and max_frames here and above (linear between)
+		float min_deg = 8.0f;
+		float max_deg = 24.0f;
+		int min_frames = 10;  // game frames from the full angle back to nothing (linear)
+		int max_frames = 20;
+		std::vector<JoltChain> chains;
+	};
+	struct JoltSize
+	{
+		float deg = 0.0f;
+		int frames = 0;
+	};
+	// The angle and the time for a tip speed (m/s). Never NaN; frames at least 1.
+	JoltSize JoltMagnitude(float speed, const JoltParams& p);
+	// The chain for the struck sphere's bone, null when none.
+	const JoltChain* JoltChainFor(const JoltParams& p, u32 hit_bone);
+	// One bone's rotation: about the axis (pivot -> contact) x velocity (so the struck point moves along the velocity),
+	// moved into the parent's frame (parent_world: its 4 x 4 row-vector world matrix; only the 3 x 3 is used, inverted, so
+	// its scale does not matter), deg degrees, as the three angles FUN_0055C450 applies (65536 a turn, about the parent's
+	// x, y, z). A lever shorter than 8 game units, or one along the velocity, uses straight up instead; false when the
+	// velocity is too slow (under 1 game unit a second), the parent's matrix is singular or nothing is left.
+	bool JoltAngles(const float contact[3], const float pivot[3], const float vel[3], const float parent_world[16], float deg,
+		s16 out[3]);
+	// One entry of cave G's block (24 bytes at block + 0x10 + 24 * k): the enemy, the bone, the frames left, the angles
+	// now and what is taken off them after each frame (angle / frames, toward zero).
+	struct JoltEntry
+	{
+		u32 enemy = 0;
+		u8 bone = 0;
+		u8 frames = 0;
+		s16 angle[3] = {};
+		s16 rate[3] = {};
+	};
+	JoltEntry MakeJoltEntry(u32 enemy, u8 bone, const s16 angle[3], int frames);
+	// The entry as the cave reads it: six little-endian words.
+	void PackJoltEntry(const JoltEntry& e, u32 words[6]);
+	constexpr int kJoltEntries = 4;
+	constexpr u32 kJoltBlockBytes = 0x10 + 24u * kJoltEntries;
+
+	// The magnitude, the chains, the axes and the entries on scripted hits. Returns the failed checks.
+	std::vector<std::string> SelfTestJolt();
+
 	// --- The glue (VRInputSource::PollEvents). ---
 
 	using GuestReader = bool (*)(u32 address, u8 width, u32* value);

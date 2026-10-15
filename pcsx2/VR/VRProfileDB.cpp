@@ -3532,7 +3532,7 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 	using VR::ProfileDB::MeleeParams;
 	warnUnknownKeys(serial, node, "melee", {"attackButton", "swing", "enemies", "override", "online", "tip", "speed", "rest", "endMs",
 		"travel", "straightness", "strokeMs", "pressMs", "pressMaxMs", "raiseMs", "swingMs", "contactMs", "cooldownMs", "contact",
-		"notes"});
+		"jolt", "notes"});
 	MeleeParams mp;
 	if (node.has_child("attackButton"))
 	{
@@ -3766,6 +3766,137 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 							   "(offsets inside an enemy's record, addresses in main RAM, a non-zero hook word); ignoring it, so "
 							   "PhysicalMeleeMode = Contact uses the press.", serial);
 	}
+	// jolt ([VR] MeleeHitJolt, a prototype): cave G's block and hook, where an enemy's bone matrices are, and the tuning;
+	// needs contact (the hits it pushes). A bad tuning number keeps its default; a chain with a bad bone is skipped.
+	if (node.has_child("jolt"))
+	{
+		const ryml::ConstNodeRef jt = node["jolt"];
+		MeleeParams o = mp;
+		bool ok = jt.is_map() && mp.has_contact && jt.has_child("hook") && jt["hook"].is_map() && jt.has_child("bones") &&
+		          jt["bones"].is_map();
+		if (ok)
+		{
+			warnUnknownKeys(serial, jt, "melee.jolt", {"block", "magic", "hook", "bones", "slow", "fast", "minDeg", "maxDeg",
+				"minFrames", "maxFrames", "chains", "notes"});
+			const ryml::ConstNodeRef hk = jt["hook"], bn = jt["bones"];
+			warnUnknownKeys(serial, hk, "melee.jolt.hook", {"address", "on", "notes"});
+			warnUnknownKeys(serial, bn, "melee.jolt.bones", {"pointer", "table", "count", "notes"});
+			ok = read_hex(jt, "block", o.jolt_block) && read_hex(jt, "magic", o.jolt_magic) && read_hex(hk, "address", o.jolt_hook) &&
+			     read_hex(hk, "on", o.jolt_hook_on) && read_hex(bn, "pointer", o.jolt_bones) && read_hex(bn, "table", o.jolt_bone_table) &&
+			     bn.has_child("count");
+			if (ok)
+			{
+				const std::optional<s64> c = parseDecOrHex(nodeVal(bn["count"]));
+				ok = c.has_value() && c.value() >= 1 && c.value() <= 255;
+				if (ok)
+					o.jolt_bone_count = static_cast<u32>(c.value());
+			}
+			ok = ok && o.jolt_magic != 0 && (o.jolt_block % 16) == 0 &&
+			     static_cast<u64>(o.jolt_block) + VR::PhysicalMelee::kJoltBlockBytes <= Ps2MemSize::MainRam &&
+			     (o.jolt_hook % 4) == 0 && o.jolt_hook + 4 <= Ps2MemSize::MainRam && o.jolt_hook_on != 0 &&
+			     o.jolt_bones + 4 <= mp.enemy_stride && o.jolt_bone_table < 0x10000;
+		}
+		if (ok)
+		{
+			VR::PhysicalMelee::JoltParams& j = o.jolt;
+			const auto f = [&](const char* key, float lo, float hi, float& dst) {
+				if (!jt.has_child(key))
+					return;
+				const std::optional<float> v = StringUtil::FromChars<float>(nodeVal(jt[key]));
+				if (v.has_value() && std::isfinite(v.value()) && v.value() >= lo && v.value() <= hi)
+					dst = v.value();
+				else
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee.jolt.{} must be from {} to {}; keeping {}.", serial, key, lo,
+						hi, dst);
+			};
+			const auto n = [&](const char* key, int lo, int hi, int& dst) {
+				if (!jt.has_child(key))
+					return;
+				const std::optional<s64> v = parseDecOrHex(nodeVal(jt[key]));
+				if (v.has_value() && v.value() >= lo && v.value() <= hi)
+					dst = static_cast<int>(v.value());
+				else
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee.jolt.{} must be from {} to {}; keeping {}.", serial, key, lo,
+						hi, dst);
+			};
+			f("slow", 0.1f, 20.0f, j.slow);
+			f("fast", 0.1f, 20.0f, j.fast);
+			f("minDeg", 0.0f, 45.0f, j.min_deg);
+			f("maxDeg", 0.0f, 45.0f, j.max_deg);
+			n("minFrames", 1, 60, j.min_frames);
+			n("maxFrames", 1, 60, j.max_frames);
+			if (j.fast <= j.slow || j.max_deg < j.min_deg || j.max_frames < j.min_frames)
+			{
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee.jolt needs slow < fast, minDeg <= maxDeg and minFrames <= "
+								   "maxFrames; keeping the defaults for those.", serial);
+				const VR::PhysicalMelee::JoltParams d;
+				j.slow = d.slow;
+				j.fast = d.fast;
+				j.min_deg = d.min_deg;
+				j.max_deg = d.max_deg;
+				j.min_frames = d.min_frames;
+				j.max_frames = d.max_frames;
+			}
+			j.chains.clear();
+			if (jt.has_child("chains") && jt["chains"].is_seq())
+			{
+				for (const ryml::ConstNodeRef& c : jt["chains"].children())
+				{
+					VR::PhysicalMelee::JoltChain ch;
+					bool good = c.is_map() && c.has_child("sphere") && c.has_child("bones") && c.has_child("parents") &&
+					            c.has_child("weights") && c["bones"].is_seq() && c["parents"].is_seq() && c["weights"].is_seq();
+					if (good)
+					{
+						warnUnknownKeys(serial, c, "melee.jolt.chains", {"sphere", "bones", "parents", "weights", "notes"});
+						const std::optional<s64> hb = parseDecOrHex(nodeVal(c["sphere"]));
+						good = hb.has_value() && hb.value() >= 0 && hb.value() < o.jolt_bone_count;
+						if (good)
+							ch.hit_bone = static_cast<u32>(hb.value());
+						const auto bone_list = [&](const ryml::ConstNodeRef& l, u8* dst) {
+							int k = 0;
+							for (const ryml::ConstNodeRef& e : l.children())
+							{
+								const std::optional<s64> b = parseDecOrHex(nodeVal(e));
+								if (k >= 4 || !b.has_value() || b.value() < 0 || b.value() >= o.jolt_bone_count)
+									return -1;
+								dst[k++] = static_cast<u8>(b.value());
+							}
+							return k;
+						};
+						const int nb = bone_list(c["bones"], ch.bones);
+						const int np = bone_list(c["parents"], ch.parents);
+						int nw = 0;
+						for (const ryml::ConstNodeRef& e : c["weights"].children())
+						{
+							const std::optional<float> w = StringUtil::FromChars<float>(nodeVal(e));
+							if (nw >= 4 || !w.has_value() || !std::isfinite(w.value()) || w.value() < -2.0f || w.value() > 2.0f)
+							{
+								nw = -1;
+								break;
+							}
+							ch.weights[nw++] = w.value();
+						}
+						good = good && nb >= 1 && nb == np && nb == nw;
+						ch.count = good ? nb : 0;
+					}
+					if (good)
+						j.chains.push_back(ch);
+					else
+						Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee.jolt.chains entry needs sphere, and bones, parents and "
+										   "weights of the same length (1-4; bones below the count, weights -2 to 2); skipping it.",
+							serial);
+				}
+			}
+			o.has_jolt = !j.chains.empty();
+			if (!o.has_jolt)
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee.jolt has no usable chain; ignoring it.", serial);
+			else
+				mp = o;
+		}
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee jolt needs contact, block (16-byte aligned), a non-zero magic, "
+							   "hook and bones (pointer inside an enemy's record, count 1-255); ignoring it.", serial);
+	}
 	// Decimal tuning in the key's unit, stored scaled (milliseconds to seconds).
 	const auto read_float = [&](const char* key, float lo, float hi, float scale, float& dst) {
 		if (!node.has_child(key))
@@ -3919,6 +4050,55 @@ bool VR::ProfileDB::SelfTestMeleeParse()
 		check(parse(order.c_str(), &m) && m.has_value() && m->has_contact && m->contact.firm >= m->contact.speed &&
 				  m->contact.window_frames == 6,
 			"contact: tuning out of order is put in order, a bad window keeps its default");
+	}
+	{
+		const std::string contact = std::string("melee:\n") +
+			"  enemies: { table: 0x3FFCA0, stride: 0xD90, count: 64, present: 0x00, hp: 0x544 }\n"
+			"  override: { block: 0xFF000, magic: 0x4D454C31, counter: 0x48BF93 }\n"
+			"  contact:\n"
+			"    shape: { types: 0x6E5940, typeStride: 0x44, attackId: 0x06, params: 0x6E7C90, paramStride: 0x20, "
+			"shapeIndex: 0x0E, shapes: 0x6EBFA0, weaponType: 0xCA8 }\n"
+			"    hook: { address: 0x5CDF64, on: 0x0C03F880 }\n"
+			"    spheres: { count: 0x1E0, shapes: 0x1D8, centres: 0x1DC, kind: 0x02, enemyKind: 2 }\n";
+		const std::string head = "  jolt:\n    block: 0xFF100\n    magic: 0x4A4C5431\n"
+								 "    hook: { address: 0x6644D0, on: 0x0C03FA00 }\n"
+								 "    bones: { pointer: 0x34, table: 0x820, count: 36 }\n";
+		const std::string full = contact + head +
+			"    slow: 2.0\n    fast: 7.0\n    minDeg: 5\n    maxDeg: 30\n    minFrames: 8\n    maxFrames: 24\n"
+			"    chains:\n"
+			"      - { sphere: 21, bones: [20, 11, 10], parents: [11, 10, 2], weights: [1.0, 0.45, 0.2] }\n"
+			"      - { sphere: 10, bones: [10, 11], parents: [2, 10], weights: [1.0, -0.5] }\n"
+			"      - { sphere: 3, bones: [3, 40], parents: [2, 2], weights: [0.6, 0.3] }\n"
+			"      - { sphere: 5, bones: [5, 6], parents: [4], weights: [1, 1] }\n";
+		check(parse(full.c_str(), &m) && m.has_value() && m->has_jolt, "jolt: a full block parses");
+		if (m.has_value() && m->has_jolt)
+		{
+			const VR::PhysicalMelee::JoltParams& j = m->jolt;
+			check(m->jolt_block == 0xFF100 && m->jolt_magic == 0x4A4C5431 && m->jolt_hook == 0x6644D0 &&
+					  m->jolt_hook_on == 0x0C03FA00 && m->jolt_bones == 0x34 && m->jolt_bone_table == 0x820 &&
+					  m->jolt_bone_count == 36,
+				"jolt: the block, hook and bones");
+			check(std::fabs(j.slow - 2.0f) < 1e-6f && std::fabs(j.fast - 7.0f) < 1e-6f && std::fabs(j.min_deg - 5.0f) < 1e-6f &&
+					  std::fabs(j.max_deg - 30.0f) < 1e-6f && j.min_frames == 8 && j.max_frames == 24,
+				"jolt: the tuning");
+			check(j.chains.size() == 2 && j.chains[0].hit_bone == 21 && j.chains[0].count == 3 && j.chains[0].bones[0] == 20 &&
+					  j.chains[0].parents[2] == 2 && std::fabs(j.chains[0].weights[1] - 0.45f) < 1e-6f && j.chains[1].count == 2 &&
+					  std::fabs(j.chains[1].weights[1] + 0.5f) < 1e-6f,
+				"jolt: chains; one with a bone past the count and one with lists of different lengths are skipped");
+		}
+		const std::string one = "    chains:\n      - { sphere: 10, bones: [10], parents: [2], weights: [1] }\n";
+		check(parse((contact + head + "    slow: 5\n    fast: 2\n    maxDeg: 99\n" + one).c_str(), &m) && m.has_value() &&
+				  m->has_jolt && m->jolt.slow < m->jolt.fast && m->jolt.max_deg == VR::PhysicalMelee::JoltParams{}.max_deg,
+			"jolt: out-of-order speeds go back to the defaults, a bad maxDeg keeps its default");
+		check(parse((std::string("melee:\n  override: { block: 0xFF000, magic: 0x4D454C31, counter: 0x48BF93 }\n") + head + one).c_str(),
+				  &m) && m.has_value() && !m->has_jolt,
+			"jolt: without contact it is dropped");
+		check(parse((contact + "  jolt:\n    block: 0xFF104\n    magic: 0x4A4C5431\n"
+								 "    hook: { address: 0x6644D0, on: 0x0C03FA00 }\n"
+								 "    bones: { pointer: 0x34, table: 0x820, count: 36 }\n" + one)
+						.c_str(),
+				  &m) && m.has_value() && !m->has_jolt && m->has_contact,
+			"jolt: a misaligned block is dropped, contact kept");
 	}
 	check(parse("melee: 3\n", &m) && !m.has_value(), "a block that is not a map is none");
 	if (failed)
@@ -4961,7 +5141,7 @@ static int CountMultibandResolveMismatches(bool log)
 
 bool VR::ProfileDB::IsSilenceSettingName(std::string_view name)
 {
-	return name == "SeamlessDoors" || name == "PhysicalMelee" || name == "PhysicalMeleeContact";
+	return name == "SeamlessDoors" || name == "PhysicalMelee" || name == "PhysicalMeleeContact" || name == "MeleeHitJolt";
 }
 
 bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
@@ -4974,6 +5154,9 @@ bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
 	if (name == "PhysicalMeleeContact")
 		return EmuConfig.VR.PhysicalMelee &&
 		       EmuConfig.VR.PhysicalMeleeMode == Pcsx2Config::VROptions::PhysicalMeleeModeType::Contact;
+	// The hit jolt's cave G: on top of contact mode, strictly offline (SilenceSettingCoopLive says no for it).
+	if (name == "MeleeHitJolt")
+		return EmuConfig.VR.MeleeHitJolt && SilenceSettingOn("PhysicalMeleeContact");
 	return false;
 }
 
