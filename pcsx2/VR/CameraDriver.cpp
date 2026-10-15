@@ -1603,6 +1603,75 @@ namespace VR::CameraDriver
 			s_kept_repair = repair_pending;
 		}
 
+		// Review b1: the silence tracking above is by list index, so a profile reload (a user profile edited or dropped,
+		// ReloadIfChanged) or a profile going away would strand words we patched. SyncSilenceProfile keeps a copy of the
+		// list the tracking refers to; when the list changes (same game) or the profile goes, every tracked word that still
+		// reads ours goes back first (sites and plain entries; cave bodies stay resident, since a game function a cave
+		// called may still return into it, and are then refused or taken over by the new list's caves).
+		struct TrackedWord
+		{
+			u32 addr = 0, on = 0, off = 0;
+		};
+		std::vector<TrackedWord> s_tracked_words;
+		std::vector<u8> s_tracked_body;
+		u32 s_tracked_crc = 0;
+		bool s_tracked_valid = false;
+
+		void ReleaseTrackedSilence(const char* why)
+		{
+			size_t restored = 0;
+			for (size_t i = 0; i < s_tracked_words.size(); i++)
+			{
+				const TrackedWord& w = s_tracked_words[i];
+				const bool ours = (i < s_silence_patched.size() && s_silence_patched[i]) || (i < s_kept_patched.size() && s_kept_patched[i]);
+				if (!ours || s_tracked_body[i] || w.on == w.off)
+					continue;
+				if (static_cast<u32>(memRead32(w.addr)) == w.on)
+				{
+					memWrite32(w.addr, w.off);
+					restored++;
+				}
+			}
+			s_silence_patched.clear();
+			s_kept_patched.clear();
+			s_silence_applied = false;
+			s_caves.clear();
+			s_cave_layout = CaveLayout{};
+			Console.WriteLn("(VR) CameraDriver: %s: %zu patched word(s) put back before the tracking is dropped.", why, restored);
+		}
+
+		// Apply, every vsync, before any silence pass: cam null when the game has no camera profile.
+		void SyncSilenceProfile(const ProfileDB::CameraProfile* cam, u32 crc, bool vm_running)
+		{
+			bool same = s_tracked_valid && cam && crc == s_tracked_crc && cam->silence.size() == s_tracked_words.size();
+			for (size_t i = 0; same && i < cam->silence.size(); i++)
+			{
+				const ProfileDB::CameraSilence& sil = cam->silence[i];
+				const TrackedWord& w = s_tracked_words[i];
+				same = sil.ee_address == w.addr && sil.value_on == w.on && sil.value_off == w.off;
+			}
+			if (same)
+				return;
+			// Only the same game's memory holds our words (another game's RAM is not ours to write).
+			if (s_tracked_valid && crc == s_tracked_crc && vm_running)
+				ReleaseTrackedSilence(cam ? "the profile's camera.silence changed" : "the profile went away");
+			s_tracked_valid = cam != nullptr;
+			s_tracked_crc = crc;
+			s_tracked_words.clear();
+			s_tracked_body.clear();
+			if (!cam)
+				return;
+			s_tracked_words.reserve(cam->silence.size());
+			for (const ProfileDB::CameraSilence& sil : cam->silence)
+			{
+				s_tracked_words.push_back(TrackedWord{sil.ee_address, sil.value_on, sil.value_off});
+				bool body = false;
+				for (const ProfileDB::CameraCave& cv : cam->caves)
+					body = body || (sil.ee_address >= cv.from && sil.ee_address < cv.to);
+				s_tracked_body.push_back(body ? 1 : 0);
+			}
+		}
+
 		bool s_hooks_installed = false;
 		u32 s_hooks_crc = 0;
 		std::vector<u32> s_hook_original;
@@ -3546,6 +3615,7 @@ namespace VR::CameraDriver
 		{
 			s_disarm_reason = DisarmReason::NoProfile;
 			s_slot.Reset();
+			SyncSilenceProfile(nullptr, crc, vm_state == VMState::Running);
 			SetLookAtActive(false);
 			SpatialControls::SetMoveStickSuppressed(-1);
 			SpatialControls::SetSprintBlocked(false); // no first person here to keep the latch out of
@@ -3570,6 +3640,7 @@ namespace VR::CameraDriver
 		}
 		const ProfileDB::CameraProfile& cam = profile->camera.value();
 		SampleLocalSlot(cam, crc, vm_state == VMState::Running);
+		SyncSilenceProfile(&cam, crc, vm_state == VMState::Running);
 		if (vm_state == VMState::Running)
 			ApplyKeptSilence(cam, crc, switched_on);
 
