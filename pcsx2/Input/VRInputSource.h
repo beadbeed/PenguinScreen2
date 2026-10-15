@@ -117,6 +117,7 @@ private:
 		// The reload button's release-first latch per control (ReloadDriver::ReloadButton): a press of the player's own held
 		// when the reload let go of the button stays at 0 until it has been let go once.
 		std::array<bool, VR::SpatialControls::kControlCount> reload_latched{};
+		std::array<VR::ReloadDriver::RaiseLatch, VR::SpatialControls::kControlCount> raise_latched{};
 
 		void ResetState();
 		void ReleaseFirst(VR::SpatialControls::ControlValues& values, const VR::VRInputSnapshot& snap, bool opened);

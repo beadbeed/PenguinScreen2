@@ -76,6 +76,7 @@ namespace VR::ReloadDriver
 		Moved,         // the player walked (the move stick)
 		Screen,        // a game screen opened
 		Lost,          // first person, the session, the gun or its record went away (or the gun changed)
+		Raised,        // the player pressed R1 afresh mid-attempt: the weapon comes back up (review a4)
 	};
 	const char* ResultName(Result result);
 
@@ -102,6 +103,9 @@ namespace VR::ReloadDriver
 		float stick = 0.0f;
 		// Read on the request poll only: the item cells hold no ammo at all, so the reload is not tried.
 		bool no_spare = false;
+		// The player pressed R1 afresh (a press that began while it was held back; RaiseButton's fresh_press) since the
+		// last Step: ends an attempt in Lowering or Holding (Result::Raised), so R1 can always abort a reload (review a4).
+		bool raise_pressed = false;
 	};
 
 	struct Out
@@ -113,6 +117,10 @@ namespace VR::ReloadDriver
 		// The player's own reload button is held back (the driver has the button; ReloadButton below keeps it back until
 		// it has been let go once after).
 		bool mask_reload = false;
+		// The attempt ended on a screen or with first person lost: a press of R1 still held when the hold-back ends stays
+		// back until it has been let go once (RaiseButton), so R1 never comes back into a screen that just opened
+		// (review a1). True through Releasing.
+		bool raise_release_first = false;
 		bool started = false;   // a request was taken this poll (the lowering began)
 		bool finished = false;  // an attempt ended this poll: result, from, to, seconds
 		bool round = false;     // a round went in this poll
@@ -131,6 +139,7 @@ namespace VR::ReloadDriver
 		float since_round_s = 0.0f;
 		float last_round_s = 0.0f; // elapsed_s at the last round in
 		bool saw_action = false;
+		bool release_first = false; // set by an end on Result::Screen or Result::Lost
 		u32 weapon = 0;
 		u32 from = 0;
 		u32 last = 0;
@@ -154,6 +163,19 @@ namespace VR::ReloadDriver
 	// gap), so the end of a reload never turns into a press the player did not make. latched is per control, kept by the
 	// caller.
 	float ReloadButton(float own, bool hold, bool mask, bool& latched);
+
+	// One control bound to R1 (kRaiseButton), as it goes out this poll. own: the player's press (its composed value). While
+	// suppress it reads 0. When release_first was set as the suppression ended, a press still held stays at 0 until it has
+	// been let go once (review a1); otherwise R1 comes back as held (a reload that ran its course raises the weapon again).
+	// fresh_press (may be null) is set when a press began while suppressed, not one held from before the hold-back started
+	// (review a4: the driver ends the attempt on it). latch is per control, kept by the caller.
+	struct RaiseLatch
+	{
+		bool was_suppressed = false;
+		bool prev = false;
+		bool latched = false;
+	};
+	float RaiseButton(float own, bool suppress, bool release_first, RaiseLatch& latch, bool* fresh_press);
 
 	// The driver on scripted game reads (File #1's round-by-round reload and File #2's whole magazine, the lowering, every
 	// stop rule, R1 coming back after L1, the toasts' cases), the stance hysteresis and the reload button's release-first.
@@ -180,8 +202,13 @@ namespace VR::ReloadDriver
 		bool suppress_raise = false; // every control bound to kRaiseButton reads 0
 		bool hold_reload = false;    // the Gamepad's controls bound to reload_button read 1
 		bool mask_reload = false;    // ... read 0 (see ReloadButton)
+		bool raise_release_first = false; // R1 held through the end stays back until let go (see RaiseButton)
 		std::string reload_button;   // feedback.weapon.reloadButton ("L1"); empty without one
 	};
+
+	// VRInputSource::ApplyReload, when a Gamepad control bound to R1 was pressed afresh under the hold-back: the next Poll
+	// ends the attempt (Result::Raised). CPU thread.
+	void NoteRaisePressed();
 
 	// CPU thread, every input poll, before BeltPouches::Poll and before the controls compose. hands: the snapshot's
 	// (SpatialControls::HandsFromSnapshot); reader reads guest memory (null: main RAM); dt in seconds. Steps the gesture and

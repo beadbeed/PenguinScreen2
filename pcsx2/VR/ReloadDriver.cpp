@@ -108,6 +108,8 @@ namespace VR::ReloadDriver
 				return "a game screen opened";
 			case Result::Lost:
 				return "first person or the gun went away";
+			case Result::Raised:
+				return "you raised the weapon (R1)";
 		}
 		return "?";
 	}
@@ -126,6 +128,8 @@ namespace VR::ReloadDriver
 			out.from = st.from;
 			out.to = st.last;
 			out.seconds = (st.last > st.from) ? st.last_round_s : st.elapsed_s;
+			// Into a screen, or with first person gone, R1 held through the end must not come back on its own (a1).
+			st.release_first = (result == Result::Screen || result == Result::Lost);
 			st.phase = Phase::Releasing;
 			st.phase_s = 0.0f;
 		};
@@ -185,6 +189,10 @@ namespace VR::ReloadDriver
 				{
 					finish(Result::Screen);
 				}
+				else if (in.raise_pressed)
+				{
+					finish(Result::Raised); // the player's own R1, pressed afresh: they want the weapon up (a4)
+				}
 				else if (stick > p.stick_dead)
 				{
 					finish(Result::Moved);
@@ -232,6 +240,7 @@ namespace VR::ReloadDriver
 		out.suppress_raise = st.phase != Phase::Idle;
 		out.hold_reload = st.phase == Phase::Holding;
 		out.mask_reload = st.phase != Phase::Idle;
+		out.raise_release_first = st.phase == Phase::Releasing && st.release_first;
 		return out;
 	}
 
@@ -258,6 +267,25 @@ namespace VR::ReloadDriver
 		if (mask || latched)
 			return 0.0f;
 		return own;
+	}
+
+	float RaiseButton(float own, bool suppress, bool release_first, RaiseLatch& latch, bool* fresh_press)
+	{
+		const bool pressed = std::isfinite(own) && own >= 0.5f;
+		if (suppress)
+		{
+			if (fresh_press && latch.was_suppressed && pressed && !latch.prev)
+				*fresh_press = true;
+			latch.was_suppressed = true;
+			latch.prev = pressed;
+			latch.latched = release_first && pressed;
+			return 0.0f;
+		}
+		latch.was_suppressed = false;
+		latch.prev = pressed;
+		if (!pressed)
+			latch.latched = false;
+		return latch.latched ? 0.0f : own;
 	}
 
 	SpatialControls::Hands HideHand(const SpatialControls::Hands& hands, int hand)
@@ -393,6 +421,9 @@ namespace VR::ReloadDriver
 			int last_hold_poll = -1;
 			int finish_poll = -1;
 			int r1_back_poll = -1; // the first poll after the end with R1 no longer held back
+			RaiseLatch r1_latch;   // the player's R1 as VRInputSource sends it (RaiseButton)
+			bool r1_fresh = false; // a fresh R1 press under the hold-back, for the next Step
+			bool r1_sent = false;  // R1 reached the game this poll
 
 			void Poll(bool request = false, float dt = 1.0f / 60.0f)
 			{
@@ -408,8 +439,12 @@ namespace VR::ReloadDriver
 				in.reloading = g.action_known && g.Action();
 				in.stick = g.stick;
 				in.no_spare = no_spare;
+				in.raise_pressed = r1_fresh;
+				r1_fresh = false;
 				out = Step(in, p, st);
-				const bool r1 = g.hold_r1 && !out.suppress_raise;
+				const bool r1 = RaiseButton(g.hold_r1 ? 1.0f : 0.0f, out.suppress_raise, out.raise_release_first, r1_latch,
+				                    &r1_fresh) >= 0.5f;
+				r1_sent = r1;
 				if (out.hold_reload && g.raised)
 					l1_while_raised = true;
 				if (out.hold_reload && (r1 || g.other_r1))
@@ -619,6 +654,65 @@ namespace VR::ReloadDriver
 			for (int i = 0; i < 30 && screen.st.phase != Phase::Idle; ++i)
 				screen.Poll();
 			CheckOrder(c, screen, "screen");
+			// R1 held through it does not come back into the screen (review a1): only after a let-go and a fresh press.
+			screen.Hold(0.5f);
+			c(!screen.r1_sent && screen.g.hold_r1, "screen: R1 held through the end stays back (release-first)");
+			screen.g.hold_r1 = false;
+			screen.Poll();
+			screen.g.hold_r1 = true;
+			screen.Poll();
+			c(screen.r1_sent, "screen: R1 let go and pressed again passes");
+			// The same for first person going away.
+			Run gone;
+			gone.Poll(true);
+			gone.Hold(0.6f);
+			gone.g.usable = false;
+			gone.Poll();
+			gone.Hold(0.3f);
+			c(gone.result == Result::Lost && !gone.r1_sent, "lost: R1 held through the end stays back");
+			// A reload that ran its course gives R1 back as held: the weapon comes up again.
+			Run done;
+			done.Attempt();
+			done.Poll();
+			c(done.result == Result::Reloaded && done.r1_sent, "reloaded: R1 held through comes back");
+
+			// A fresh R1 press mid-attempt ends it (review a4); R1 held from before the hold-back is no fresh press.
+			Run abort;
+			abort.Poll(true);
+			abort.Hold(0.5f);
+			c(abort.finishes == 0, "abort: R1 held from the start is not a press");
+			abort.g.hold_r1 = false;
+			abort.Poll();
+			abort.g.hold_r1 = true;
+			abort.Poll();
+			abort.Poll();
+			c(abort.result == Result::Raised && !abort.out.hold_reload && abort.out.suppress_raise &&
+				  !abort.out.raise_release_first,
+				"abort: a fresh R1 ends it, L1 up at once");
+			for (int i = 0; i < 30 && abort.st.phase != Phase::Idle; ++i)
+				abort.Poll();
+			CheckOrder(c, abort, "abort");
+			abort.Poll();
+			c(abort.r1_sent, "abort: R1 comes back");
+			{
+				RaiseLatch l;
+				bool fresh = false;
+				c(RaiseButton(1.0f, false, false, l, &fresh) == 1.0f && !fresh, "raise: passes when not held back");
+				c(RaiseButton(1.0f, true, false, l, &fresh) == 0.0f && !fresh, "raise: held back, held from before");
+				c(RaiseButton(0.0f, true, false, l, &fresh) == 0.0f && !fresh, "raise: let go under the hold-back");
+				c(RaiseButton(1.0f, true, false, l, &fresh) == 0.0f && fresh, "raise: a fresh press is seen");
+				fresh = false;
+				RaiseLatch n;
+				c(RaiseButton(1.0f, true, false, n, &fresh) == 0.0f && !fresh, "raise: a press at the hold-back's start is not fresh");
+				c(RaiseButton(1.0f, true, true, n, nullptr) == 0.0f, "raise: release-first armed");
+				c(RaiseButton(1.0f, false, false, n, nullptr) == 0.0f, "raise: held after stays back");
+				c(RaiseButton(0.0f, false, false, n, nullptr) == 0.0f && RaiseButton(1.0f, false, false, n, nullptr) == 1.0f,
+					"raise: let go then pressed passes");
+				const float nan = std::numeric_limits<float>::quiet_NaN();
+				RaiseLatch z;
+				c(RaiseButton(nan, true, true, z, &fresh) == 0.0f && !z.latched, "raise: NaN is not a press");
+			}
+
 
 			// First person going away, and the gun changing.
 			Run lost;
@@ -782,6 +876,8 @@ namespace VR::ReloadDriver
 		// Reloading(): when the last poll that had a reload running ran (CameraDriver::SteadyNowMs; 0 none).
 		std::atomic<u64> s_reloading_ms{0};
 		constexpr u64 kReloadingStaleMs = 250;
+		// NoteRaisePressed since the last Poll (review a4).
+		bool s_raise_pressed = false;
 
 		bool DefaultRead(u32 address, u8 width, u32* value)
 		{
@@ -1124,6 +1220,8 @@ namespace VR::ReloadDriver
 		di.usable = usable;
 		di.weapon = weapon;
 		di.screen = menu;
+		di.raise_pressed = s_raise_pressed;
+		s_raise_pressed = false;
 		di.raised = raised_now;
 		di.ammo = ammo;
 		di.action_known = action_known;
@@ -1155,7 +1253,13 @@ namespace VR::ReloadDriver
 		// The magazine hand's reload button is the gesture's too while it owns the hand: a trigger pull at the gun is the
 		// reload, not an L1 with the weapon raised (which would switch the lock-on target).
 		frame.mask_reload = o.mask_reload || go.owns_left_hand;
+		frame.raise_release_first = o.raise_release_first;
 		return frame;
+	}
+
+	void NoteRaisePressed()
+	{
+		s_raise_pressed = true;
 	}
 
 	bool Reloading()
