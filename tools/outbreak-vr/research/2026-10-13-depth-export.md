@@ -244,8 +244,39 @@ Assumed or not checked:
 
 **Limits:**
 - HUD sprites and translucent effects without depth move with the surface behind them.
-- `MenuPanelRoom Freeze` goes unwarped: the frozen room has no export, so it takes the "no depth" path. Warping it needs
-  the depth kept with the frozen snapshot.
+- ~~`MenuPanelRoom Freeze` goes unwarped~~: fixed 2026-10-15 (branch `nightfix`), see "The menu room keeps its depth"
+  below. The first frame of a screen (before its split) and the tail frames after it still go undisplaced.
 - Below the stereo's near floor (0.5 m) the image's disparity is clamped, but the warp uses the true depth.
 - A frame-size change re-makes the ring (a queue idle under `submit_mutex`).
 - A GS device restart without a VR restart is not handled.
+
+## The menu room keeps its depth (2026-10-15, branch `nightfix`)
+
+**Why it was unwarped.** With `[VR] MenuPanel` a game screen clears the depth again before its own draws, into the same
+colour and depth targets as the room. The tracker's run therefore does not end there, and its snapshot (at the next
+frame's clear) holds the screen's depth. So the present declined ("a game screen is up").
+
+**Now:**
+- MenuPanel already copies the room's colour just before the screen's first draw. At that same point the GS also copies
+  the depth target of the room's depth-tested run into that colour target (`DepthExport::TakeRoomSnapshot`, one per
+  MenuPanel slot, labelled with the colour target).
+- A present that shows that slot's room (`MenuPanel::ShownRoomSlot`: `RoomFor` gave it this vsync) exports that depth.
+  Everything after it is unchanged: the fit, the export buffer, the warp and the depth layer.
+- No room depth (the screen's first frame before its split, the tail frames after it, no depth target found): as
+  before, logged.
+- Under `Freeze` each frame is drawn from the held camera and placed at that render pose. So the warp moves the held
+  room from the held eye to the eye now, and a lean behind a menu has parallax. `Dim` and `Live` take it too (each
+  frame's depth goes with its own picture).
+- **Cost:** one more depth copy per screen frame (about 16 MB at 3x, on the GPU), only while a screen is up and the
+  export is wanted.
+
+**Checked offline** (run-nightfix, a local build of `nightfix`; headset-free, no OpenXR runtime, `PCSX2_VR_DEPTHPROBE=1`
+with the counter-top point; `menupanel_test.py items --slot 7`, `MenuPanelRoom = Freeze`, the head turning 40 deg under
+the screen, nothing confirmed):
+- the item screen was up for 6.9 s. From its split frame on, every present exported, 60 a second (probe serials 177 to
+  537), with the log line "the shown room takes the depth taken with its colour snapshot";
+- the counter top read **1.0449 m** in both eyes throughout, the same as before the screen. The grid was unchanged,
+  since the view is held;
+- one present without depth as the screen came up (before its split), and one as it went.
+
+**Self-tests:** 39 of 39 passed. Not checked on the null headset or in the headset: the warped picture behind a menu.
