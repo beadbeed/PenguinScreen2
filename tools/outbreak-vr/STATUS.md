@@ -46,8 +46,10 @@ an LTO build with 30 of 30 self-tests; its `resources` junction points at the `m
 in `D:\dev\PenguinScreen2-buildun-playtest-models` with its own settings. On there: `PhysicalMelee` (Contact), `MeleeHitJolt`,
 `SeamlessDoors`, `MenuPanel` (+ `MenuPanelRoom = Freeze`), `HandTargeting`, `ReloadGesture`, the game weapon models;
 off: `BeltPouches`, `DepthLayer`, `DepthWarp`, `PhysicalMeleeOnline`. A/B for leaning (slot 7, lean 10-20 cm at the counter):
-`DepthLayer = true`, then neither. **Don't turn on `DepthWarp` yet:** the 10-15 review found it allocates GPU memory from the
-pacer thread without the GS's lock (critical; being fixed on `nightfix`) (in `run-playtest-models\inis\PenguinScreen2.ini`, `[VR]`).
+`DepthWarp = true` (our own warp: the review's critical fix is in, and it ran clean on the null headset after the merge:
+6,216 frames warped, 0 skipped, 0.06-0.08 ms GPU, the frozen menu room warped too), then `DepthLayer = true` **with
+`ZoneMarkers = false`** (otherwise SteamVR's 16-swapchain limit is full and the depth layer gives its swapchains to the hands
+within seconds), then neither (in `run-playtest-models\inis\PenguinScreen2.ini`, `[VR]`).
 Everything new since 10-14 evening is checked offline (and the menus and the warp on the null headset) only.
 
 **2026-10-15 overnight build: branch `nightly`** = `vrmelee` (contact-driven melee: `PhysicalMeleeMode = Contact`, the game's own
