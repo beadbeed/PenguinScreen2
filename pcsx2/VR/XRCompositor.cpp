@@ -1108,6 +1108,27 @@ namespace VR::XRCompositor
 		// drops the published entries that show it, then destroys it. Bounded like the queue lock: a pacer stuck in
 		// xrEndFrame for 500 ms means the runtime stopped answering, so VR is abandoned and the swapchain left alive.
 		// With the compositor abandoned the handle is only forgotten.
+		// c4: the swapchains this compositor holds, counted at every create and destroy (any thread), for the log when the
+		// runtime's limit is reached (SteamVR: 16 a session). Forgotten handles (an abandoned compositor) are not uncounted.
+		std::atomic<int> s_live_swapchains{0};
+
+		XrResult CountedCreateSwapchain(const XrSwapchainCreateInfo& ci, XrSwapchain* out)
+		{
+			const XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, out);
+			if (XR_SUCCEEDED(res))
+				s_live_swapchains.fetch_add(1, std::memory_order_relaxed);
+			else if (res == XR_ERROR_LIMIT_REACHED)
+				Console.Warning("(VR) The runtime's swapchain limit was reached (%d held by the compositor; a %ux%u swapchain asked for).",
+					s_live_swapchains.load(std::memory_order_relaxed), ci.width, ci.height);
+			return res;
+		}
+
+		void CountedDestroySwapchain(XrSwapchain swapchain)
+		{
+			if (swapchain != XR_NULL_HANDLE && XR_SUCCEEDED(xrDestroySwapchain(swapchain)))
+				s_live_swapchains.fetch_sub(1, std::memory_order_relaxed);
+		}
+
 		// [VR] DepthWarp: an eye swapchain the pacer draws into is going (submit_mutex held): its passes still in flight are
 		// waited for and its WarpTarget dropped, so neither the GPU nor a later target writes into freed images (M3, M4).
 		// Defined after the warp's state.
@@ -1136,7 +1157,7 @@ namespace VR::XRCompositor
 				ForgetPublishedSwapchain(swapchain);
 			}
 			WarpForgetSwapchain(swapchain);
-			xrDestroySwapchain(swapchain);
+			CountedDestroySwapchain(swapchain);
 		}
 
 		// SteamVR gives a session 16 swapchains (a 17th xrCreateSwapchain returns XR_ERROR_LIMIT_REACHED). With
@@ -1145,12 +1166,17 @@ namespace VR::XRCompositor
 		// the edge fill gives its swapchain up for the session (the background stays black) and the creation is retried
 		// once. GS thread. Defined after the edge fill's state.
 		bool YieldEdgeFillSwapchain(const char* who);
+		// c4: [VR] DepthLayer's two depth swapchains count against the limit too: with the edge fill already given up,
+		// the depth layer goes for the session (the frames go as quads) and its swapchains are freed. Defined after it.
+		bool YieldDepthLayerSwapchains(const char* who);
 
 		XrResult CreateSwapchainYielding(const XrSwapchainCreateInfo& ci, XrSwapchain* out, const char* who)
 		{
-			XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, out);
+			XrResult res = CountedCreateSwapchain(ci, out);
 			if (res == XR_ERROR_LIMIT_REACHED && YieldEdgeFillSwapchain(who))
-				res = xrCreateSwapchain(XRSession::GetSession(), &ci, out);
+				res = CountedCreateSwapchain(ci, out);
+			if (res == XR_ERROR_LIMIT_REACHED && YieldDepthLayerSwapchains(who))
+				res = CountedCreateSwapchain(ci, out);
 			return res;
 		}
 
@@ -1218,7 +1244,7 @@ namespace VR::XRCompositor
 			ci.arraySize = 1;
 			ci.mipCount = 1;
 
-			XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &chain.swapchain);
+			XrResult res = CountedCreateSwapchain(ci, &chain.swapchain);
 			if (XR_FAILED(res))
 			{
 				chain.swapchain = XR_NULL_HANDLE;
@@ -1267,7 +1293,7 @@ namespace VR::XRCompositor
 			ci.faceCount = 1;
 			ci.arraySize = 1;
 			ci.mipCount = 1;
-			const XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &chain.swapchain);
+			const XrResult res = CountedCreateSwapchain(ci, &chain.swapchain);
 			uint32_t count = 0;
 			if (XR_FAILED(res) ||
 				!CheckXR(xrEnumerateSwapchainImages(chain.swapchain, 0, &count, nullptr), "xrEnumerateSwapchainImages (depth)") ||
@@ -1277,7 +1303,7 @@ namespace VR::XRCompositor
 							  "layer is off for this session.",
 					eye, w, h, static_cast<int>(res));
 				if (XR_SUCCEEDED(res))
-					xrDestroySwapchain(chain.swapchain);
+					CountedDestroySwapchain(chain.swapchain);
 				chain.swapchain = XR_NULL_HANDLE;
 				return false;
 			}
@@ -1286,7 +1312,7 @@ namespace VR::XRCompositor
 							 reinterpret_cast<XrSwapchainImageBaseHeader*>(chain.images.data())),
 					"xrEnumerateSwapchainImages (depth)"))
 			{
-				xrDestroySwapchain(chain.swapchain);
+				CountedDestroySwapchain(chain.swapchain);
 				chain.swapchain = XR_NULL_HANDLE;
 				chain.images.clear();
 				return false;
@@ -1307,6 +1333,33 @@ namespace VR::XRCompositor
 			s.present_depth = FpDepth{};
 			DepthExport::SetCompositorWants(false);
 			Console.Warning("(VR) Depth layer: off for this session: %s; the first-person screen goes as quads.", why);
+		}
+
+		bool YieldDepthLayerSwapchains(const char* who)
+		{
+			if (s.abandoned.load(std::memory_order_acquire))
+				return false;
+			bool any = false;
+			for (const auto& chain : s.depth_chains)
+				any = any || (chain.swapchain != XR_NULL_HANDLE);
+			if (!any)
+				return false;
+			DepthLayerOff("its depth swapchains were given up (the runtime's swapchain limit was reached)");
+			// The GS's copies into the depth images are done first (as DestroySwapchains).
+			WaitAllFences();
+			for (auto& chain : s.depth_chains)
+			{
+				if (chain.swapchain != XR_NULL_HANDLE)
+					DestroySwapchainSynced(chain.swapchain);
+				chain.swapchain = XR_NULL_HANDLE;
+				chain.images.clear();
+				chain.ever_released = false;
+				chain.wait_pending = false;
+				chain.waited = false;
+				chain.release_pending = false;
+			}
+			Console.Warning("(VR) Depth layer: its 2 depth swapchains given to %s.", who);
+			return true;
 		}
 
 		bool EnsureSwapchains(u32 w, u32 h, bool stereo)
@@ -1838,7 +1891,7 @@ namespace VR::XRCompositor
 			ci.faceCount = 1;
 			ci.arraySize = 1;
 			ci.mipCount = 1;
-			const XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &lc.swapchain);
+			const XrResult res = CountedCreateSwapchain(ci, &lc.swapchain);
 			if (XR_FAILED(res))
 			{
 				lc.swapchain = XR_NULL_HANDLE;
@@ -3202,7 +3255,7 @@ namespace VR::XRCompositor
 				ci.faceCount = 1;
 				ci.arraySize = 1;
 				ci.mipCount = 1;
-				XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &hc.swapchain);
+				XrResult res = CountedCreateSwapchain(ci, &hc.swapchain);
 				if (XR_FAILED(res))
 				{
 					hc.swapchain = XR_NULL_HANDLE;
@@ -3953,7 +4006,7 @@ namespace VR::XRCompositor
 				ci.faceCount = 1;
 				ci.arraySize = 1;
 				ci.mipCount = 1;
-				XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &zc.swapchain);
+				XrResult res = CountedCreateSwapchain(ci, &zc.swapchain);
 				if (XR_FAILED(res))
 				{
 					zc.swapchain = XR_NULL_HANDLE;
@@ -5120,7 +5173,7 @@ namespace VR::XRCompositor
 			}
 			s_fill.fence_submitted = false;
 			if (s_fill.swapchain != XR_NULL_HANDLE && !s.abandoned.load(std::memory_order_acquire))
-				xrDestroySwapchain(s_fill.swapchain);
+				CountedDestroySwapchain(s_fill.swapchain);
 			s_fill.swapchain = XR_NULL_HANDLE;
 			s_fill.images.clear();
 			s_fill.wait_pending = false;
@@ -5285,7 +5338,7 @@ namespace VR::XRCompositor
 				ci.faceCount = 1;
 				ci.arraySize = 1;
 				ci.mipCount = 1;
-				XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &s_fill.swapchain);
+				XrResult res = CountedCreateSwapchain(ci, &s_fill.swapchain);
 				if (XR_FAILED(res))
 				{
 					s_fill.swapchain = XR_NULL_HANDLE;
@@ -5934,7 +5987,7 @@ namespace VR::XRCompositor
 		void DestroyBackground()
 		{
 			if (s.bg_swapchain != XR_NULL_HANDLE && !s.abandoned.load(std::memory_order_acquire))
-				xrDestroySwapchain(s.bg_swapchain);
+				CountedDestroySwapchain(s.bg_swapchain);
 			s.bg_swapchain = XR_NULL_HANDLE;
 			s.bg_ready = false;
 		}
@@ -5965,7 +6018,7 @@ namespace VR::XRCompositor
 			ci.faceCount = 1;
 			ci.arraySize = 1;
 			ci.mipCount = 1;
-			XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &s.bg_swapchain);
+			XrResult res = CountedCreateSwapchain(ci, &s.bg_swapchain);
 			if (XR_FAILED(res))
 			{
 				s.bg_swapchain = XR_NULL_HANDLE;
@@ -7275,7 +7328,7 @@ namespace VR::XRCompositor
 					if (pc.last_valid[slot] && pc.last_entry[slot].quad.subImage.swapchain == ch.swapchain)
 						pc.last_valid[slot] = false;
 				}
-				xrDestroySwapchain(ch.swapchain);
+				CountedDestroySwapchain(ch.swapchain);
 				ch.swapchain = XR_NULL_HANDLE;
 			}
 			ch.images.clear();
@@ -7294,7 +7347,7 @@ namespace VR::XRCompositor
 			ci.arraySize = 1;
 			ci.mipCount = 1;
 			uint32_t count = 0;
-			XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &ch.swapchain);
+			XrResult res = CountedCreateSwapchain(ci, &ch.swapchain);
 			if (XR_SUCCEEDED(res))
 				res = xrEnumerateSwapchainImages(ch.swapchain, 0, &count, nullptr);
 			if (XR_SUCCEEDED(res) && count > 0)
@@ -7306,7 +7359,7 @@ namespace VR::XRCompositor
 			if (XR_FAILED(res) || count == 0)
 			{
 				if (ch.swapchain != XR_NULL_HANDLE)
-					xrDestroySwapchain(ch.swapchain);
+					CountedDestroySwapchain(ch.swapchain);
 				ch.swapchain = XR_NULL_HANDLE;
 				ch.images.clear();
 				// The eyes are tried again next frame (the screen is the game); a card or a hand stays off this session.
@@ -9989,7 +10042,7 @@ namespace VR::XRCompositor
 				for (PcChain& ch : pc.chains)
 				{
 					if (ch.swapchain != XR_NULL_HANDLE)
-						xrDestroySwapchain(ch.swapchain);
+						CountedDestroySwapchain(ch.swapchain);
 					ch = PcChain{};
 				}
 				if (h.IsValid())
