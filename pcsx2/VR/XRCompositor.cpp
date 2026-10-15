@@ -4,6 +4,7 @@
 #include "VR/XRCompositor.h"
 #include "VR/CameraDriver.h"
 #include "VR/DepthExport.h"
+#include "VR/DepthWarp.h"
 #include "VR/SplitState.h"
 #include "VR/ControlQuads.h"
 #include "VR/HandModel.h"
@@ -33,6 +34,7 @@
 #include "GS/GS.h"
 #include "GS/Renderers/Vulkan/GSDeviceVK.h"
 #include "GS/Renderers/Vulkan/GSTextureVK.h"
+#include "GS/Renderers/Vulkan/VKBuilders.h"
 #endif
 
 #include "common/Console.h"
@@ -338,6 +340,24 @@ namespace VR::XRCompositor
 			bool eyes_placed = false;
 		};
 
+		// [VR] DepthWarp: what the frame the Screen entries show is in the warp's source ring (the GS thread's copy of it,
+		// both eyes, and its exported depth when it had one) and how the eyes that saw it sat (the first-person screen only).
+		struct FpWarp
+		{
+			bool valid = false;  // the frame is in ring slot `slot`
+			int slot = -1;
+			bool layered = false;
+			u32 width = 0, height = 0;
+			bool depth = false;  // the slot holds this frame's depth (each eye's plane), read through fit
+			DepthExport::ZFit fit;
+			float units_per_meter = DepthExport::kDefaultUnitsPerMeter;
+			float ipd_m = 0.0f;
+			// Each eye's offset from the head (fp_head) at the render pose, as FpDepth::eye_offset.
+			XrVector3f eye_offset[2] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+			bool eyes_placed = false;
+			u64 serial = 0; // counts the ring's copies
+		};
+
 		// The layers the GS built at its last present, copied by value: the pacer submits them every display period
 		// until the next present replaces them (the runtime keeps showing each swapchain's last released image).
 		struct PublishedSet
@@ -382,6 +402,8 @@ namespace VR::XRCompositor
 			XrCompositionLayerProjection fp_proj;
 			XrCompositionLayerProjectionView fp_views[2];
 			XrCompositionLayerDepthInfoKHR fp_depth_info[2];
+			// [VR] DepthWarp: the ring slot the Screen entries' frame is in (the pacer draws it into their swapchains).
+			FpWarp fp_warp;
 		};
 
 		struct
@@ -512,6 +534,8 @@ namespace VR::XRCompositor
 			EyeChain depth_chains[2];
 			FpDepth present_depth;
 			bool warned_depth = false;
+			// [VR] DepthWarp: this present's frame in the warp's ring (WarpCopyFrame), for the publish (GS thread).
+			FpWarp present_warp;
 
 			struct LeverChain
 			{
@@ -6437,6 +6461,7 @@ namespace VR::XRCompositor
 				merged.turn_rate = prev.fp_screen ? turn_rate : 0.0f;
 				merged.fp_image = prev.fp_image;
 				merged.fp_depth = prev.fp_depth;
+				merged.fp_warp = prev.fp_warp;
 				merged.serial = prev.serial + 1;
 				// PacerCopies: the kept Screen entries show the frame they were published with.
 				merged.pc_frame = prev.pc_frame;
@@ -6446,6 +6471,9 @@ namespace VR::XRCompositor
 			}
 			next.serial = prev.serial + 1;
 			next.fp_depth = fp_screen ? s.present_depth : FpDepth{};
+			next.fp_warp = s.present_warp;
+			if (!fp_screen)
+				next.fp_warp.eyes_placed = false;
 			next.pc_frame = pc.frame;
 			PcFinishSet(&next);
 			ParkFreeSlots(&next);
@@ -8398,6 +8426,962 @@ namespace VR::XRCompositor
 		// stalls), and it pumps the session events. Legacy: it only waits each frame and parks it for EndOfFrame.
 		// After every call that can block in the runtime it checks whether Shutdown gave up on it (detached), and then
 		// touches nothing more: all it uses lives in the static s, which is never freed.
+		// [VR] DepthWarp (VR/DepthWarp.h): the pacer redraws each eye's image into its swapchain every display frame, from
+		// where that eye is now.
+		// - The GS thread (WarpCopyFrame) copies each present's frame, both eyes, into a slot of a ring of the compositor's
+		//   own images, and the exported depth (DepthExport) beside it into that slot's buffer, in one submit on the
+		//   session's queue as the swapchain copy was. It never acquires an eye swapchain; the publish names the slot
+		//   (PublishedSet::fp_warp), kept with the Screen entries when they are kept.
+		// - The pacer (WarpPass), under submit_mutex after taking the set, acquires and waits each Screen entry's swapchain
+		//   (both or neither, within kWarpWaitBudgetNs; an image not handed back yet stays acquired for the next frame),
+		//   draws the slot's image into it through the mesh (displaced by the depth in first person with depth, else
+		//   undisplaced: the frame as it is), submits once, releases, and the frame's layers go out as before. A Screen
+		//   entry whose swapchain the pacer has never released goes out of this frame.
+		// - Slot safety: the GS writes only a slot that is neither the published one, the deferred one nor the one the pacer
+		//   claimed (under publish_mutex), so with three one is always free; all the copies and passes are on one queue,
+		//   ordered by their barriers (the copy waits for every earlier read, the pass for the copy's writes).
+		constexpr int kWarpSlots = 3;
+		constexpr int kWarpCmdBuffers = 3;
+		constexpr int64_t kWarpWaitBudgetNs = 2000000;
+
+		struct WarpSlot
+		{
+			VkImage img[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE}; // the eyes (mono: the one eye in both)
+			VmaAllocation alloc[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+			VkImageView view[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+			VkBuffer depth = VK_NULL_HANDLE; // two planes of width x height floats
+			VmaAllocation depth_alloc = VK_NULL_HANDLE;
+		};
+
+		// One eye swapchain as the pacer draws into it: its images, a view and framebuffer for each, and a depth attachment.
+		struct WarpTarget
+		{
+			XrSwapchain swapchain = XR_NULL_HANDLE;
+			u32 width = 0, height = 0;
+			std::vector<VkImage> images;
+			std::vector<VkImageView> views;
+			std::vector<VkFramebuffer> fbs;
+			VkImage depth = VK_NULL_HANDLE;
+			VmaAllocation depth_alloc = VK_NULL_HANDLE;
+			VkImageView depth_view = VK_NULL_HANDLE;
+			bool acquired = false;
+			bool waited = false;
+			u32 index = 0;
+			bool released = false; // the pacer released an image of it: the runtime has one to show
+		};
+
+		struct
+		{
+			std::atomic_bool on{false}; // Initialize; off for the session if the pass cannot be built
+			// The GS thread's (claimed under s.publish_mutex):
+			DepthWarp::Pipeline pipe;
+			bool pipe_failed = false;
+			WarpSlot slot[kWarpSlots];
+			u32 slot_w = 0, slot_h = 0;
+			VkFormat slot_format = VK_FORMAT_UNDEFINED;
+			int claimed = -1;
+			u64 serial = 0;
+			const char* no_depth_why = nullptr; // logged once each time it changes
+			bool no_depth_logged = false;
+			bool warned_ring = false;
+			// The pacer's:
+			WarpTarget target[2];
+			VkCommandPool pool = VK_NULL_HANDLE;
+			VkCommandBuffer cmd[kWarpCmdBuffers] = {};
+			VkFence fence[kWarpCmdBuffers] = {};
+			bool in_flight[kWarpCmdBuffers] = {};
+			bool timed[kWarpCmdBuffers] = {};
+			u32 next = 0;
+			VkQueryPool queries = VK_NULL_HANDLE;
+			double ts_period_ns = 0.0;
+			bool pacer_failed = false;
+			float test_shift_m = 0.0f; // PCSX2_VR_DEPTHWARP_TEST_SHIFT: a scripted sideways move of the eyes (offline aid)
+			bool warned_pass = false;
+			const char* flat_logged = nullptr;
+			bool flat_ever_logged = false;
+			// The Warp line, every 5 s.
+			u64 window_start_ms = 0;
+			u32 n_warped = 0, n_flat = 0, n_busy = 0, n_wait = 0;
+			u64 total_warped = 0;
+			double gpu_sum_ms = 0.0, gpu_max_ms = 0.0;
+			u32 gpu_n = 0;
+			float last_shift_px = 0.0f; // the shift of a 1.05 m counter the last warp's eye move implied (for the log)
+			// PCSX2_VR_DEPTHWARP_DUMP=<dir>: the source and warped left eye read back once, as PPM (offline aid).
+			std::string dump_dir;
+			bool dump_done = false;
+			VkBuffer dump_buf = VK_NULL_HANDLE;
+			VmaAllocation dump_alloc = VK_NULL_HANDLE;
+			void* dump_map = nullptr;
+		} wp;
+
+		bool WarpOn()
+		{
+			return wp.on.load(std::memory_order_acquire);
+		}
+
+		void WarpNoDepth(const char* why)
+		{
+			if (why == wp.no_depth_why && wp.no_depth_logged)
+				return;
+			wp.no_depth_why = why;
+			wp.no_depth_logged = true;
+			if (why)
+				Console.WriteLn("(VR) Depth warp: frames go unwarped (%s).", why);
+			else
+				Console.WriteLn("(VR) Depth warp: frames have depth again; the eyes are warped.");
+		}
+
+		void WarpDestroySlots()
+		{
+			GSDeviceVK* const dev = GSDeviceVK::GetInstance();
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			for (WarpSlot& sl : wp.slot)
+			{
+				for (int e = 0; e < 2; e++)
+				{
+					if (sl.view[e] != VK_NULL_HANDLE && h.IsValid())
+						vkDestroyImageView(h.device, sl.view[e], nullptr);
+					if (sl.img[e] != VK_NULL_HANDLE && dev)
+						vmaDestroyImage(dev->GetAllocator(), sl.img[e], sl.alloc[e]);
+				}
+				if (sl.depth != VK_NULL_HANDLE && dev)
+					vmaDestroyBuffer(dev->GetAllocator(), sl.depth, sl.depth_alloc);
+				sl = WarpSlot{};
+			}
+			wp.slot_w = wp.slot_h = 0;
+		}
+
+		// GS thread: the ring at the frame's size (made again on a size change, with the pacer between frames and the queue
+		// idle).
+		bool WarpEnsureSlots(u32 w, u32 h)
+		{
+			if (wp.slot_w == w && wp.slot_h == h && wp.slot_format == s.swapchain_format && wp.slot[0].img[0] != VK_NULL_HANDLE)
+				return true;
+			GSDeviceVK* const dev = GSDeviceVK::GetInstance();
+			const Internal::VulkanHandles& hd = Internal::GetVulkanHandles();
+			if (!dev || !hd.IsValid())
+				return false;
+			if (wp.slot_w != 0)
+			{
+				std::unique_lock<std::timed_mutex> submit(s.submit_mutex, std::defer_lock);
+				if (!submit.try_lock_for(kRuntimeStuckTimeout))
+					return false;
+				{
+					std::lock_guard<std::mutex> publish(s.publish_mutex);
+					s.published.fp_warp.valid = false;
+					wp.claimed = -1;
+				}
+				s.deferred.fp_warp.valid = false;
+				{
+					const VR::ScopedXrQueueLock lock;
+					vkQueueWaitIdle(hd.queue);
+				}
+				WarpDestroySlots();
+			}
+			const VkDeviceSize plane = static_cast<VkDeviceSize>(w) * h * sizeof(float);
+			for (WarpSlot& sl : wp.slot)
+			{
+				for (int e = 0; e < 2; e++)
+				{
+					VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+					ci.imageType = VK_IMAGE_TYPE_2D;
+					ci.format = s.swapchain_format;
+					ci.extent = {w, h, 1};
+					ci.mipLevels = 1;
+					ci.arrayLayers = 1;
+					ci.samples = VK_SAMPLE_COUNT_1_BIT;
+					ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+					ci.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+					ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+					ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+					VmaAllocationCreateInfo aci = {};
+					aci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+					if (vmaCreateImage(dev->GetAllocator(), &ci, &aci, &sl.img[e], &sl.alloc[e], nullptr) != VK_SUCCESS)
+					{
+						sl.img[e] = VK_NULL_HANDLE;
+						WarpDestroySlots();
+						return false;
+					}
+					VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+					vi.image = sl.img[e];
+					vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+					vi.format = s.swapchain_format;
+					vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+					if (vkCreateImageView(hd.device, &vi, nullptr, &sl.view[e]) != VK_SUCCESS)
+					{
+						sl.view[e] = VK_NULL_HANDLE;
+						WarpDestroySlots();
+						return false;
+					}
+				}
+				VkBufferCreateInfo bci = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+				bci.size = plane * 2;
+				bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+				bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+				VmaAllocationCreateInfo aci = {};
+				aci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+				if (vmaCreateBuffer(dev->GetAllocator(), &bci, &aci, &sl.depth, &sl.depth_alloc, nullptr) != VK_SUCCESS)
+				{
+					sl.depth = VK_NULL_HANDLE;
+					WarpDestroySlots();
+					return false;
+				}
+			}
+			wp.slot_w = w;
+			wp.slot_h = h;
+			wp.slot_format = s.swapchain_format;
+			Console.WriteLn("(VR) Depth warp: source ring made (%d slots, %ux%u, two eyes and their depth each).", kWarpSlots, w, h);
+			return true;
+		}
+
+		// GS thread, each present with the warp on: the frame (both eyes, or the one eye in both) and its exported depth into
+		// a free ring slot, in one submit on the session's queue; s.present_warp then names it. False: not copied (the
+		// previous Screen entries stay, with their slot).
+		bool WarpCopyFrame(GSTextureVK* src, bool layered)
+		{
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			const u32 w = s.swapchain_width, hgt = s.swapchain_height;
+			if (!wp.pipe.valid() && !wp.pipe_failed)
+			{
+				if (!DepthWarp::CreatePipeline(h.device, s.swapchain_format, &wp.pipe))
+				{
+					wp.pipe_failed = true;
+					wp.on.store(false, std::memory_order_release);
+					Console.Error("(VR) Depth warp: the mesh pass could not be built; off for this session (frames as before).");
+					return false;
+				}
+				Console.WriteLn("(VR) Depth warp: mesh pass ready (%ux%u cells, D16 depth test, the swapchain's format).",
+					DepthWarp::kGridCells, DepthWarp::kGridCells);
+			}
+			if (!WarpEnsureSlots(w, hgt))
+			{
+				if (!wp.warned_ring)
+				{
+					wp.warned_ring = true;
+					Console.Warning("(VR) Depth warp: the source ring could not be made at %ux%u; frames are not shown.", w, hgt);
+				}
+				return false;
+			}
+			int slot = -1;
+			{
+				std::lock_guard<std::mutex> publish(s.publish_mutex);
+				const int pub = s.published.fp_warp.valid ? s.published.fp_warp.slot : -1;
+				const int def = (s.deferred_valid && s.deferred.fp_warp.valid) ? s.deferred.fp_warp.slot : -1;
+				for (int i = 0; i < kWarpSlots && slot < 0; i++)
+				{
+					if (i != pub && i != def && i != wp.claimed)
+						slot = i;
+				}
+			}
+			if (slot < 0)
+				return false;
+
+			const u32 i = s.next_cmd_buffer;
+			s.next_cmd_buffer = (s.next_cmd_buffer + 1) % NUM_CMD_BUFFERS;
+			if (s.fence_submitted[i])
+			{
+				if (vkWaitForFences(h.device, 1, &s.fences[i], VK_TRUE, ONE_SECOND_NS) != VK_SUCCESS)
+					return false;
+				vkResetFences(h.device, 1, &s.fences[i]);
+				s.fence_submitted[i] = false;
+			}
+			SubmitPendingGsWork();
+			VkCommandBuffer cmd = s.cmd_buffers[i];
+			VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+			bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+			if (vkBeginCommandBuffer(cmd, &bi) != VK_SUCCESS)
+				return false;
+			src->TransitionToLayout(cmd, GSTextureVK::Layout::TransferSrc);
+			const WarpSlot& sl = wp.slot[slot];
+			for (u32 e = 0; e < 2; e++)
+			{
+				// Every earlier read of this slot (a pass, on this queue) is done before it is written again.
+				ImageBarrier(cmd, sl.img[e], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+					VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+				VkImageCopy region = {};
+				region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, layered ? e : 0u, 1};
+				region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+				region.extent = {w, hgt, 1};
+				vkCmdCopyImage(cmd, src->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sl.img[e],
+					VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+				ImageBarrier(cmd, sl.img[e], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+					VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
+			}
+			// The depth, when this present exported one at the frame's size.
+			const DepthExport::ExportInfo& ex = DepthExport::Latest();
+			const VkBuffer depth_src = reinterpret_cast<VkBuffer>(DepthExport::LatestBuffer());
+			const char* no_depth = nullptr;
+			if (!ex.valid || depth_src == VK_NULL_HANDLE)
+				no_depth = "no depth export this frame: not first person, a menu, or the first frames";
+			else if (ex.width != w || ex.height != hgt)
+				no_depth = "the exported depth is not the frame's size";
+			else if (!ex.fit.valid || !(ex.fit.beta > 0.0f))
+				no_depth = "no usable depth fit";
+			const bool with_depth = (no_depth == nullptr);
+			if (with_depth)
+			{
+				const VkDeviceSize plane = static_cast<VkDeviceSize>(w) * hgt * sizeof(float);
+				VkBufferMemoryBarrier bb[2] = {{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER}, {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER}};
+				bb[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+				bb[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+				bb[0].srcQueueFamilyIndex = bb[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				bb[0].buffer = depth_src;
+				bb[0].size = VK_WHOLE_SIZE;
+				bb[1] = bb[0];
+				bb[1].srcAccessMask = 0;
+				bb[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+				bb[1].buffer = sl.depth;
+				vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 2, bb,
+					0, nullptr);
+				VkBufferCopy regions[2] = {};
+				for (u32 e = 0; e < 2; e++)
+				{
+					regions[e].srcOffset = plane * ((layered && ex.layers >= 2) ? e : 0u);
+					regions[e].dstOffset = plane * e;
+					regions[e].size = plane;
+				}
+				vkCmdCopyBuffer(cmd, depth_src, sl.depth, 2, regions);
+				VkBufferMemoryBarrier ab = bb[1];
+				ab.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+				ab.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+				vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 0, nullptr, 1, &ab,
+					0, nullptr);
+			}
+			if (vkEndCommandBuffer(cmd) != VK_SUCCESS)
+				return false;
+			VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+			si.commandBufferCount = 1;
+			si.pCommandBuffers = &cmd;
+			if (LockedQueueSubmitReadingGs(h.queue, si, s.fences[i]) != VK_SUCCESS)
+				return false;
+			s.fence_submitted[i] = true;
+			WarpNoDepth(no_depth);
+
+			FpWarp& fw = s.present_warp;
+			fw = FpWarp{};
+			fw.valid = true;
+			fw.slot = slot;
+			fw.layered = layered;
+			fw.width = w;
+			fw.height = hgt;
+			fw.depth = with_depth;
+			if (with_depth)
+			{
+				fw.fit = ex.fit;
+				fw.units_per_meter = ex.units_per_meter;
+			}
+			fw.ipd_m = GetEyeInfo().valid ? GetEyeInfo().ipd_m : 0.0f;
+			fw.serial = ++wp.serial;
+			return true;
+		}
+
+		void WarpDestroyTarget(WarpTarget& t)
+		{
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			GSDeviceVK* const dev = GSDeviceVK::GetInstance();
+			if (h.IsValid())
+			{
+				for (VkFramebuffer fb : t.fbs)
+					if (fb != VK_NULL_HANDLE)
+						vkDestroyFramebuffer(h.device, fb, nullptr);
+				for (VkImageView v : t.views)
+					if (v != VK_NULL_HANDLE)
+						vkDestroyImageView(h.device, v, nullptr);
+				if (t.depth_view != VK_NULL_HANDLE)
+					vkDestroyImageView(h.device, t.depth_view, nullptr);
+			}
+			if (t.depth != VK_NULL_HANDLE && dev)
+				vmaDestroyImage(dev->GetAllocator(), t.depth, t.depth_alloc);
+			t = WarpTarget{};
+		}
+
+		// Pacer: the target for swapchain sc (a Screen entry's w x h eye chain), made when it is new; `keep` is the other
+		// eye's, which it must not take. An old one's swapchain was destroyed (under submit_mutex, after its entries were
+		// dropped): its views and framebuffers go once the passes that used them are done.
+		WarpTarget* WarpTargetFor(XrSwapchain sc, u32 w, u32 h, XrSwapchain keep)
+		{
+			for (WarpTarget& t : wp.target)
+				if (t.swapchain == sc && t.width == w && t.height == h)
+					return &t;
+			// The one already on sc (made again at a new size), else an empty one, else any not holding the other eye's.
+			WarpTarget* t = nullptr;
+			for (WarpTarget& c : wp.target)
+				if (c.swapchain == sc)
+					t = &c;
+			for (WarpTarget& c : wp.target)
+				if (!t && c.swapchain == XR_NULL_HANDLE)
+					t = &c;
+			for (WarpTarget& c : wp.target)
+				if (!t && (keep == XR_NULL_HANDLE || c.swapchain != keep))
+					t = &c;
+			if (!t)
+				return nullptr;
+			const Internal::VulkanHandles& hd = Internal::GetVulkanHandles();
+			for (int i = 0; i < kWarpCmdBuffers; i++)
+				if (wp.in_flight[i])
+					vkWaitForFences(hd.device, 1, &wp.fence[i], VK_TRUE, 100000000);
+			WarpDestroyTarget(*t);
+			uint32_t count = 0;
+			if (XR_FAILED(xrEnumerateSwapchainImages(sc, 0, &count, nullptr)) || count == 0)
+				return nullptr;
+			std::vector<XrSwapchainImageVulkan2KHR> imgs(count, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+			if (XR_FAILED(xrEnumerateSwapchainImages(sc, count, &count, reinterpret_cast<XrSwapchainImageBaseHeader*>(imgs.data()))))
+				return nullptr;
+			GSDeviceVK* const dev = GSDeviceVK::GetInstance();
+			if (!dev)
+				return nullptr;
+			VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+			ci.imageType = VK_IMAGE_TYPE_2D;
+			ci.format = DepthWarp::kDepthFormat;
+			ci.extent = {w, h, 1};
+			ci.mipLevels = 1;
+			ci.arrayLayers = 1;
+			ci.samples = VK_SAMPLE_COUNT_1_BIT;
+			ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+			ci.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+			ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+			ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			VmaAllocationCreateInfo aci = {};
+			aci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+			if (vmaCreateImage(dev->GetAllocator(), &ci, &aci, &t->depth, &t->depth_alloc, nullptr) != VK_SUCCESS)
+			{
+				t->depth = VK_NULL_HANDLE;
+				return nullptr;
+			}
+			VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+			vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+			vi.image = t->depth;
+			vi.format = DepthWarp::kDepthFormat;
+			vi.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+			if (vkCreateImageView(hd.device, &vi, nullptr, &t->depth_view) != VK_SUCCESS)
+			{
+				t->depth_view = VK_NULL_HANDLE;
+				WarpDestroyTarget(*t);
+				return nullptr;
+			}
+			t->swapchain = sc;
+			t->width = w;
+			t->height = h;
+			for (const auto& im : imgs)
+				t->images.push_back(im.image);
+			t->views.assign(count, VK_NULL_HANDLE);
+			t->fbs.assign(count, VK_NULL_HANDLE);
+			Console.WriteLn("(VR) Depth warp: the pacer draws into an eye swapchain (%ux%u, %u images).", w, h, count);
+			return t;
+		}
+
+		VkFramebuffer WarpFramebuffer(WarpTarget& t, u32 index)
+		{
+			if (index >= t.images.size())
+				return VK_NULL_HANDLE;
+			if (t.fbs[index] != VK_NULL_HANDLE)
+				return t.fbs[index];
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+			vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+			vi.image = t.images[index];
+			vi.format = wp.pipe.colour_format;
+			vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			if (vkCreateImageView(h.device, &vi, nullptr, &t.views[index]) != VK_SUCCESS)
+			{
+				t.views[index] = VK_NULL_HANDLE;
+				return VK_NULL_HANDLE;
+			}
+			const VkImageView att[2] = {t.views[index], t.depth_view};
+			VkFramebufferCreateInfo fi = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+			fi.renderPass = wp.pipe.render_pass;
+			fi.attachmentCount = 2;
+			fi.pAttachments = att;
+			fi.width = t.width;
+			fi.height = t.height;
+			fi.layers = 1;
+			if (vkCreateFramebuffer(h.device, &fi, nullptr, &t.fbs[index]) != VK_SUCCESS)
+				t.fbs[index] = VK_NULL_HANDLE;
+			return t.fbs[index];
+		}
+
+		// Pacer: its command pool, buffers, fences and the timestamp queries, made at its first pass.
+		bool WarpEnsurePacerResources()
+		{
+			if (wp.pool != VK_NULL_HANDLE)
+				return true;
+			if (wp.pacer_failed)
+				return false;
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			VkCommandPoolCreateInfo pci = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+			pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+			pci.queueFamilyIndex = h.queue_family;
+			bool ok = vkCreateCommandPool(h.device, &pci, nullptr, &wp.pool) == VK_SUCCESS;
+			if (ok)
+			{
+				VkCommandBufferAllocateInfo cai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+				cai.commandPool = wp.pool;
+				cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+				cai.commandBufferCount = kWarpCmdBuffers;
+				ok = vkAllocateCommandBuffers(h.device, &cai, wp.cmd) == VK_SUCCESS;
+			}
+			else
+			{
+				wp.pool = VK_NULL_HANDLE;
+			}
+			for (int i = 0; ok && i < kWarpCmdBuffers; i++)
+			{
+				VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+				ok = vkCreateFence(h.device, &fci, nullptr, &wp.fence[i]) == VK_SUCCESS;
+			}
+			if (!ok)
+			{
+				wp.pacer_failed = true;
+				Console.Error("(VR) Depth warp: the pacer's command buffers could not be made; the eyes are not drawn.");
+				return false;
+			}
+			VkPhysicalDeviceProperties props = {};
+			vkGetPhysicalDeviceProperties(h.physical_device, &props);
+			if (props.limits.timestampComputeAndGraphics && props.limits.timestampPeriod > 0.0f)
+			{
+				VkQueryPoolCreateInfo qci = {VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+				qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+				qci.queryCount = 2 * kWarpCmdBuffers;
+				if (vkCreateQueryPool(h.device, &qci, nullptr, &wp.queries) != VK_SUCCESS)
+					wp.queries = VK_NULL_HANDLE;
+				wp.ts_period_ns = props.limits.timestampPeriod;
+			}
+			Console.WriteLn("(VR) Depth warp: the pacer's pass is set up (%s).",
+				wp.queries != VK_NULL_HANDLE ? "GPU timestamps on" : "no GPU timestamps");
+			return true;
+		}
+
+		// Pacer: a finished pass's GPU time into the Warp line.
+		void WarpTakeTiming(u32 ci)
+		{
+			if (!wp.timed[ci] || wp.queries == VK_NULL_HANDLE)
+				return;
+			wp.timed[ci] = false;
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			u64 ts[2] = {};
+			if (vkGetQueryPoolResults(h.device, wp.queries, 2 * ci, 2, sizeof(ts), ts, sizeof(u64), VK_QUERY_RESULT_64_BIT) !=
+				VK_SUCCESS)
+				return;
+			const double ms = static_cast<double>(ts[1] - ts[0]) * wp.ts_period_ns * 1.0e-6;
+			if (ms < 0.0 || ms > 1000.0)
+				return;
+			wp.gpu_sum_ms += ms;
+			wp.gpu_max_ms = std::max(wp.gpu_max_ms, ms);
+			wp.gpu_n++;
+		}
+
+		void WarpMaybeLog()
+		{
+			const u64 now = CameraDriver::SteadyNowMs();
+			if (wp.window_start_ms == 0)
+				wp.window_start_ms = now;
+			if (now < wp.window_start_ms + 5000)
+				return;
+			Console.WriteLn("(VR) Warp: %u frames warped, %u drawn as they are, %u not drawn (pass busy %u, images not back %u); "
+							"GPU %.3f ms mean, %.3f ms max per display frame (all eyes, %u timed); the last eye move since the "
+							"render pose shifts a 1.05 m counter %.1f px.",
+				wp.n_warped, wp.n_flat, wp.n_busy + wp.n_wait, wp.n_busy, wp.n_wait,
+				wp.gpu_n ? wp.gpu_sum_ms / wp.gpu_n : 0.0, wp.gpu_max_ms, wp.gpu_n, wp.last_shift_px);
+			wp.window_start_ms = now;
+			wp.n_warped = wp.n_flat = wp.n_busy = wp.n_wait = 0;
+			wp.gpu_sum_ms = wp.gpu_max_ms = 0.0;
+			wp.gpu_n = 0;
+		}
+
+		void WarpWriteDump(const char* name, const u8* rgba, u32 w, u32 h)
+		{
+			const std::string path = wp.dump_dir + "/" + name;
+			std::FILE* f = std::fopen(path.c_str(), "wb");
+			if (!f)
+				return;
+			std::fprintf(f, "P6\n%u %u\n255\n", w, h);
+			std::vector<u8> row(static_cast<size_t>(w) * 3);
+			for (u32 y = 0; y < h; y++)
+			{
+				const u8* p = rgba + static_cast<size_t>(y) * w * 4;
+				for (u32 x = 0; x < w; x++)
+				{
+					row[x * 3 + 0] = p[x * 4 + 0];
+					row[x * 3 + 1] = p[x * 4 + 1];
+					row[x * 3 + 2] = p[x * 4 + 2];
+				}
+				std::fwrite(row.data(), 1, row.size(), f);
+			}
+			std::fclose(f);
+		}
+
+		// The pacer, under submit_mutex with this frame's set (its Screen entries not yet turned): every Screen entry's eye
+		// swapchain gets the set's ring frame, warped to the eye's position at this frame's display time (head; turn is the
+		// stick turn BuildSubmitArray turns the screen by). Screen entries whose swapchain the pacer never released go out of
+		// the set.
+		void WarpPass(PublishedSet& set, float turn, const XrPosef& head, bool head_ok)
+		{
+			const FpWarp& fw = set.fp_warp;
+			struct Job
+			{
+				XrSwapchain sc = XR_NULL_HANDLE;
+				int eye = -1; // 0 left, 1 right, -1 both (mono: the head's centre)
+				int entry = -1;
+				WarpTarget* t = nullptr;
+				bool warp = false;
+				DepthWarp::Geometry g;
+			};
+			Job jobs[2];
+			int nj = 0;
+			for (u32 i = 0; i < set.count; i++)
+			{
+				const PublishedSet::Entry& e = set.e[i];
+				if (e.role != kRoleScreen || e.parked)
+					continue;
+				const XrSwapchain sc = (e.kind == kKindCylinder) ? e.cyl.subImage.swapchain : e.quad.subImage.swapchain;
+				const XrEyeVisibility vis = (e.kind == kKindCylinder) ? e.cyl.eyeVisibility : e.quad.eyeVisibility;
+				bool seen = false;
+				for (int j = 0; j < nj; j++)
+					seen = seen || jobs[j].sc == sc;
+				if (seen || sc == XR_NULL_HANDLE || nj >= 2)
+					continue;
+				jobs[nj].sc = sc;
+				jobs[nj].eye = (vis == XR_EYE_VISIBILITY_LEFT) ? 0 : (vis == XR_EYE_VISIBILITY_RIGHT) ? 1 : -1;
+				jobs[nj].entry = static_cast<int>(i);
+				nj++;
+			}
+			bool ready = (nj > 0 && fw.valid && fw.slot >= 0 && fw.slot < kWarpSlots && wp.pipe.valid() &&
+			              fw.width == wp.slot_w && fw.height == wp.slot_h && WarpEnsurePacerResources());
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			const u32 ci = wp.next;
+			if (ready && wp.in_flight[ci])
+			{
+				if (vkGetFenceStatus(h.device, wp.fence[ci]) == VK_SUCCESS)
+				{
+					vkResetFences(h.device, 1, &wp.fence[ci]);
+					wp.in_flight[ci] = false;
+					WarpTakeTiming(ci);
+				}
+				else
+				{
+					wp.n_busy++;
+					ready = false;
+				}
+			}
+			int64_t budget = kWarpWaitBudgetNs;
+			for (int j = 0; ready && j < nj; j++)
+			{
+				jobs[j].t = WarpTargetFor(jobs[j].sc, fw.width, fw.height, (j == 1) ? jobs[0].sc : XR_NULL_HANDLE);
+				if (!jobs[j].t)
+					ready = false;
+			}
+			// Both images or neither (as the GS's copies were): one handed back and the other not keeps its for next frame.
+			for (int j = 0; ready && j < nj; j++)
+			{
+				WarpTarget& t = *jobs[j].t;
+				if (!t.acquired)
+				{
+					uint32_t index = 0;
+					if (XR_FAILED(LockedAcquire(t.swapchain, &index)) || index >= t.images.size())
+					{
+						ready = false;
+						break;
+					}
+					t.index = index;
+					t.acquired = true;
+					t.waited = false;
+				}
+				if (!t.waited)
+				{
+					XrSwapchainImageWaitInfo wi = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+					wi.timeout = std::max<int64_t>(0, budget);
+					const s64 t0 = SteadyNowNs();
+					const XrResult wr = xrWaitSwapchainImage(t.swapchain, &wi);
+					budget -= SteadyNowNs() - t0;
+					if (wr == XR_TIMEOUT_EXPIRED || XR_FAILED(wr))
+					{
+						wp.n_wait++;
+						ready = false;
+						break;
+					}
+					t.waited = true;
+				}
+			}
+
+			if (ready)
+			{
+				// Each eye's geometry: the quad as BuildSubmitArray will send it (turned), the eye it was seen from (the
+				// render pose's, turned with it) and the eye now.
+				const float half_ipd = 0.5f * ((fw.ipd_m > 0.0f) ? fw.ipd_m : 0.064f);
+				const char* flat = nullptr;
+				if (!set.fp_screen)
+					flat = "not the first-person screen";
+				else if (!fw.depth)
+					flat = "no depth with this frame";
+				else if (!fw.eyes_placed)
+					flat = "the frame's render eyes are not known";
+				else if (!head_ok)
+					flat = "no head position this display frame";
+				for (int j = 0; j < nj && !flat; j++)
+				{
+					Job& jb = jobs[j];
+					const PublishedSet::Entry& e = set.e[jb.entry];
+					if (e.kind != kKindQuad || e.quad.subImage.imageRect.offset.x != 0 || e.quad.subImage.imageRect.offset.y != 0 ||
+						static_cast<u32>(e.quad.subImage.imageRect.extent.width) != fw.width ||
+						static_cast<u32>(e.quad.subImage.imageRect.extent.height) != fw.height)
+					{
+						flat = "the screen is not one flat quad per eye";
+						break;
+					}
+					PublishedSet::Entry turned = e;
+					if (turn != 0.0f)
+						ApplyTurn(turned, set.fp_head, turn);
+					const float sa = std::sin(turn), ca = std::cos(turn);
+					const XrVector3f o = (jb.eye >= 0) ? fw.eye_offset[jb.eye] : XrVector3f{0.0f, 0.0f, 0.0f};
+					const XrVector3f src_w = {set.fp_head.x + ca * o.x + sa * o.z, set.fp_head.y + o.y,
+						set.fp_head.z - sa * o.x + ca * o.z};
+					const float ex = (jb.eye == 0) ? -half_ipd : (jb.eye == 1) ? half_ipd : 0.0f;
+					const XrVector3f eo = DepthExport::EyeOffset(head.orientation, ex + wp.test_shift_m);
+					const XrVector3f dst_w = {head.position.x + eo.x, head.position.y + eo.y, head.position.z + eo.z};
+					jb.g.width = turned.quad.size.width;
+					jb.g.height = turned.quad.size.height;
+					jb.g.src_eye = DepthWarp::ToQuadLocal(turned.quad.pose, src_w);
+					jb.g.dst_eye = DepthWarp::ToQuadLocal(turned.quad.pose, dst_w);
+					jb.warp = jb.g.src_eye.z > 0.1f && jb.g.dst_eye.z > 0.1f && jb.g.width > 0.0f && jb.g.height > 0.0f;
+					if (!jb.warp)
+					{
+						flat = "an eye is not in front of the screen";
+						break;
+					}
+					if (j == 0)
+					{
+						const double move = jb.g.dst_eye.x - jb.g.src_eye.x;
+						wp.last_shift_px = static_cast<float>(DepthWarp::SidewaysShiftM(move, jb.g.src_eye.z, 1.05) *
+						                                      static_cast<double>(fw.width) / jb.g.width);
+					}
+				}
+				if (flat)
+				{
+					for (int j = 0; j < nj; j++)
+						jobs[j].warp = false;
+				}
+				if (flat != wp.flat_logged || !wp.flat_ever_logged)
+				{
+					wp.flat_logged = flat;
+					wp.flat_ever_logged = true;
+					if (flat)
+						Console.WriteLn("(VR) Depth warp: the eyes are drawn as they are (%s).", flat);
+					else
+						Console.WriteLn("(VR) Depth warp: the eyes are warped to their display-time position.");
+				}
+
+				const bool dump = !wp.dump_dir.empty() && !wp.dump_done && !flat && wp.total_warped > 300;
+				const VkCommandBuffer cmd = wp.cmd[ci];
+				vkResetCommandBuffer(cmd, 0);
+				VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+				bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+				bool ok = vkBeginCommandBuffer(cmd, &bi) == VK_SUCCESS;
+				if (ok && wp.queries != VK_NULL_HANDLE)
+				{
+					vkCmdResetQueryPool(cmd, wp.queries, 2 * ci, 2);
+					vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, wp.queries, 2 * ci);
+				}
+				const WarpSlot& sl = wp.slot[fw.slot];
+				bool dumped = false;
+				for (int j = 0; ok && j < nj; j++)
+				{
+					Job& jb = jobs[j];
+					WarpTarget& t = *jb.t;
+					const VkFramebuffer fb = WarpFramebuffer(t, t.index);
+					if (fb == VK_NULL_HANDLE)
+					{
+						ok = false;
+						break;
+					}
+					const int img = (jb.eye == 1) ? 1 : 0;
+					VkClearValue clear[2] = {};
+					clear[1].depthStencil = {0.0f, 0};
+					VkRenderPassBeginInfo rpi = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+					rpi.renderPass = wp.pipe.render_pass;
+					rpi.framebuffer = fb;
+					rpi.renderArea = {{0, 0}, {t.width, t.height}};
+					rpi.clearValueCount = 2;
+					rpi.pClearValues = clear;
+					vkCmdBeginRenderPass(cmd, &rpi, VK_SUBPASS_CONTENTS_INLINE);
+					const VkViewport vp = {0.0f, 0.0f, static_cast<float>(t.width), static_cast<float>(t.height), 0.0f, 1.0f};
+					const VkRect2D sr = {{0, 0}, {t.width, t.height}};
+					vkCmdSetViewport(cmd, 0, 1, &vp);
+					vkCmdSetScissor(cmd, 0, 1, &sr);
+					vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, wp.pipe.pipeline);
+					Vulkan::DescriptorSetUpdateBuilder dsub;
+					dsub.AddCombinedImageSamplerDescriptorWrite(VK_NULL_HANDLE, 0, sl.view[img], wp.pipe.sampler);
+					dsub.AddBufferDescriptorWrite(VK_NULL_HANDLE, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, sl.depth, 0,
+						static_cast<u32>(static_cast<VkDeviceSize>(fw.width) * fw.height * sizeof(float) * 2));
+					dsub.PushUpdate(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, wp.pipe.layout, 0, false);
+					const DepthWarp::PushConstants pcs = DepthWarp::MakePushConstants(jb.g, jb.warp, fw.fit, fw.units_per_meter,
+						fw.width, fw.height, static_cast<u32>(img) * fw.width * fw.height);
+					vkCmdPushConstants(cmd, wp.pipe.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pcs), &pcs);
+					vkCmdDraw(cmd, DepthWarp::VertexCount(), 1, 0, 0);
+					vkCmdEndRenderPass(cmd);
+					if (dump && j == 0)
+					{
+						const VkDeviceSize bytes = static_cast<VkDeviceSize>(fw.width) * fw.height * 4;
+						GSDeviceVK* const dev = GSDeviceVK::GetInstance();
+						if (wp.dump_buf == VK_NULL_HANDLE && dev)
+						{
+							VkBufferCreateInfo bci = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+							bci.size = bytes * 2;
+							bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+							VmaAllocationCreateInfo aci = {};
+							aci.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
+							aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+							VmaAllocationInfo ai = {};
+							if (vmaCreateBuffer(dev->GetAllocator(), &bci, &aci, &wp.dump_buf, &wp.dump_alloc, &ai) == VK_SUCCESS)
+								wp.dump_map = ai.pMappedData;
+						}
+						if (wp.dump_map)
+						{
+							const VkImage dst_img = t.images[t.index];
+							ImageBarrier(cmd, dst_img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+								VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+								VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+							ImageBarrier(cmd, sl.img[img], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+								VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+								VK_PIPELINE_STAGE_TRANSFER_BIT);
+							VkBufferImageCopy r = {};
+							r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+							r.imageExtent = {fw.width, fw.height, 1};
+							vkCmdCopyImageToBuffer(cmd, sl.img[img], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, wp.dump_buf, 1, &r);
+							r.bufferOffset = bytes;
+							vkCmdCopyImageToBuffer(cmd, dst_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, wp.dump_buf, 1, &r);
+							ImageBarrier(cmd, dst_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+								VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+								VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+							ImageBarrier(cmd, sl.img[img], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+								VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+								VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+							dumped = true;
+						}
+					}
+				}
+				if (ok && wp.queries != VK_NULL_HANDLE)
+					vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, wp.queries, 2 * ci + 1);
+				ok = ok && vkEndCommandBuffer(cmd) == VK_SUCCESS;
+				if (ok)
+				{
+					VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+					si.commandBufferCount = 1;
+					si.pCommandBuffers = &cmd;
+					ok = LockedQueueSubmit(h.queue, si, wp.fence[ci]) == VK_SUCCESS;
+				}
+				if (ok)
+				{
+					wp.in_flight[ci] = true;
+					wp.timed[ci] = (wp.queries != VK_NULL_HANDLE);
+					wp.next = (wp.next + 1) % kWarpCmdBuffers;
+					if (flat)
+						wp.n_flat++;
+					else
+					{
+						wp.n_warped++;
+						wp.total_warped++;
+					}
+				}
+				else if (!wp.warned_pass)
+				{
+					wp.warned_pass = true;
+					Console.Error("(VR) Depth warp: a pass could not be recorded or submitted; the eyes keep their last image.");
+				}
+				// Released even when nothing went in: the image then still holds what it last held.
+				for (int j = 0; j < nj; j++)
+				{
+					WarpTarget& t = *jobs[j].t;
+					const XrResult rr = LockedRelease(t.swapchain);
+					t.acquired = false;
+					t.waited = false;
+					if (XR_SUCCEEDED(rr) && ok)
+						t.released = true;
+				}
+				if (ok && dumped)
+				{
+					wp.dump_done = true;
+					if (vkWaitForFences(h.device, 1, &wp.fence[ci], VK_TRUE, 500000000) == VK_SUCCESS)
+					{
+						GSDeviceVK* const dev = GSDeviceVK::GetInstance();
+						if (dev)
+							vmaInvalidateAllocation(dev->GetAllocator(), wp.dump_alloc, 0, VK_WHOLE_SIZE);
+						const u8* p = static_cast<const u8*>(wp.dump_map);
+						WarpWriteDump("warp_source.ppm", p, fw.width, fw.height);
+						WarpWriteDump("warp_warped.ppm", p + static_cast<size_t>(fw.width) * fw.height * 4, fw.width, fw.height);
+						Console.WriteLn("(VR) Depth warp: dumped the first eye's source and warped image to %s (eye %d; src eye "
+										"%.4f %.4f %.4f, dst eye %.4f %.4f %.4f in the quad's frame, quad %.3f x %.3f m).",
+							wp.dump_dir.c_str(), jobs[0].eye, jobs[0].g.src_eye.x, jobs[0].g.src_eye.y, jobs[0].g.src_eye.z,
+							jobs[0].g.dst_eye.x, jobs[0].g.dst_eye.y, jobs[0].g.dst_eye.z, jobs[0].g.width, jobs[0].g.height);
+					}
+				}
+			}
+
+			// A Screen entry whose swapchain the pacer has never released has no image to show: out of this frame.
+			u32 n = 0;
+			for (u32 i = 0; i < set.count; i++)
+			{
+				const PublishedSet::Entry& e = set.e[i];
+				if (e.role == kRoleScreen)
+				{
+					const XrSwapchain sc = (e.kind == kKindCylinder) ? e.cyl.subImage.swapchain : e.quad.subImage.swapchain;
+					bool released = false;
+					for (const WarpTarget& t : wp.target)
+						released = released || (t.swapchain == sc && t.released);
+					if (!released)
+						continue;
+				}
+				if (n != i)
+					set.e[n] = e;
+				n++;
+			}
+			set.count = n;
+			WarpMaybeLog();
+		}
+
+		// Shutdown, after the pacer is gone: the pacer's warp objects (their passes done first) and the GS's ring and pass.
+		void WarpDestroyAll()
+		{
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			if (h.IsValid())
+			{
+				for (int i = 0; i < kWarpCmdBuffers; i++)
+				{
+					if (wp.in_flight[i])
+						vkWaitForFences(h.device, 1, &wp.fence[i], VK_TRUE, 250000000);
+					wp.in_flight[i] = false;
+					if (wp.fence[i] != VK_NULL_HANDLE)
+						vkDestroyFence(h.device, wp.fence[i], nullptr);
+					wp.fence[i] = VK_NULL_HANDLE;
+				}
+				for (WarpTarget& t : wp.target)
+					WarpDestroyTarget(t);
+				if (wp.pool != VK_NULL_HANDLE)
+					vkDestroyCommandPool(h.device, wp.pool, nullptr);
+				if (wp.queries != VK_NULL_HANDLE)
+					vkDestroyQueryPool(h.device, wp.queries, nullptr);
+				GSDeviceVK* const dev = GSDeviceVK::GetInstance();
+				if (wp.dump_buf != VK_NULL_HANDLE && dev)
+					vmaDestroyBuffer(dev->GetAllocator(), wp.dump_buf, wp.dump_alloc);
+				WarpDestroySlots();
+				DepthWarp::DestroyPipeline(h.device, &wp.pipe);
+			}
+			wp.pool = VK_NULL_HANDLE;
+			wp.queries = VK_NULL_HANDLE;
+			wp.dump_buf = VK_NULL_HANDLE;
+			wp.dump_map = nullptr;
+			wp.pipe = DepthWarp::Pipeline{};
+			wp.pipe_failed = false;
+			wp.pacer_failed = false;
+			wp.claimed = -1;
+			wp.next = 0;
+			wp.no_depth_logged = false;
+			wp.flat_ever_logged = false;
+			wp.dump_done = false;
+			wp.total_warped = 0;
+			wp.on.store(false, std::memory_order_release);
+		}
+
 		void PacerThreadMain(u32 gen)
 		{
 			Threading::SetNameOfCurrentThread("VR Pacer");
@@ -8545,6 +9529,9 @@ namespace VR::XRCompositor
 				bool views_ok = false;
 				bool views_reused = false;
 				HandsNow hands_now;
+				// [VR] DepthWarp: this frame's head (the eyes the warp draws for).
+				XrPosef warp_head = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+				bool warp_head_ok = false;
 				if (!exiting)
 				{
 					XRInput::Update(fs.predictedDisplayTime);
@@ -8565,6 +9552,8 @@ namespace VR::XRCompositor
 						s.pacer_head.position_valid = head_position_valid;
 						s.pacer_head.time = fs.predictedDisplayTime;
 					}
+					warp_head = head;
+					warp_head_ok = head_valid && head_position_valid;
 
 					// The hands for this frame's display time (outside submit_mutex: the input snapshot takes only leaf
 					// locks), for the layers riding on them.
@@ -8620,6 +9609,8 @@ namespace VR::XRCompositor
 						{
 							std::lock_guard<std::mutex> lock(s.publish_mutex);
 							set = s.published;
+							// [VR] DepthWarp: the ring slot this frame reads is not written meanwhile (WarpCopyFrame).
+							wp.claimed = set.fp_warp.valid ? set.fp_warp.slot : -1;
 						}
 						stale = (set.count > 0 && set.publish_ms != 0 && CameraDriver::SteadyNowMs() > set.publish_ms + kStaleMs);
 						// The hands, the gun's laser and the wrist card move with their controllers to this frame's pose
@@ -8636,6 +9627,9 @@ namespace VR::XRCompositor
 								static_cast<double>(fs.predictedDisplayTime - set.publish_display_time) * 1.0e-9, 0.0, 0.1);
 							turn = set.turn_rate * static_cast<float>(dt);
 						}
+						// [VR] DepthWarp: the eyes' images drawn for this frame's eyes (the pacer owns the eye swapchains).
+						if (WarpOn())
+							WarpPass(set, turn, warp_head, warp_head_ok);
 						if (views_ok)
 						{
 							// The edge fill behind the first-person screen while its swapchain holds a fill of this spell.
@@ -9210,7 +10204,47 @@ namespace VR::XRCompositor
 								"fit's range), for the runtime's reprojection; the first-person screen quads otherwise.");
 			}
 		}
-		DepthExport::SetCompositorWants(s.depth_layer);
+		// [VR] DepthWarp, read once like DepthLayer: our own per-eye translation warp in the pacer. It needs the pacer to own
+		// the frames and the GS thread doing the frame copies (PacerCopies off); it takes precedence over DepthLayer (both
+		// would want the eye swapchains' copies).
+		wp.on.store(false, std::memory_order_release);
+		wp.claimed = -1;
+		wp.test_shift_m = 0.0f;
+		wp.dump_dir.clear();
+		if (EmuConfig.VR.DepthWarp)
+		{
+			if (!s.headset_rate)
+				Console.Warning("(VR) Depth warp: off: it needs [VR] HeadsetRateSubmit (the pacer draws every display frame).");
+			else if (pc.on)
+				Console.Warning("(VR) Depth warp: off: it needs [VR] PacerCopies off (the GS thread copies the frame and its "
+								"depth into the warp's ring).");
+			else
+			{
+				if (s.depth_layer)
+				{
+					s.depth_layer = false;
+					Console.Warning("(VR) Depth layer: off: [VR] DepthWarp is on (one or the other; A/B them in turn).");
+				}
+				wp.on.store(true, std::memory_order_release);
+				if (const char* e = std::getenv("PCSX2_VR_DEPTHWARP_TEST_SHIFT"))
+				{
+					wp.test_shift_m = std::clamp(static_cast<float>(std::atof(e)), -0.5f, 0.5f);
+					Console.Warning("(VR) Depth warp: PCSX2_VR_DEPTHWARP_TEST_SHIFT: the warp's eyes are moved %.3f m to the "
+									"head's right (a test aid; the layers do not move).", wp.test_shift_m);
+				}
+				if (const char* e = std::getenv("PCSX2_VR_DEPTHWARP_DUMP"); e && *e)
+					wp.dump_dir = e;
+				Console.WriteLn("(VR) Depth warp: on ([VR] DepthWarp): in first person each eye's image is redrawn every display "
+								"frame from where the eye is now, a %ux%u mesh displaced by the frame's depth; the GS copies each "
+								"frame into a ring of %d slots and the pacer draws the eye swapchains.",
+					DepthWarp::kGridCells, DepthWarp::kGridCells, kWarpSlots);
+			}
+		}
+		else
+		{
+			Console.WriteLn("(VR) Depth warp: off ([VR] DepthWarp).");
+		}
+		DepthExport::SetCompositorWants(s.depth_layer || WarpOn());
 		// [VR] MenuPanel: the panel is copied by the GS thread (as the HUD cards are without PacerCopies); with PacerCopies
 		// on a game screen pulls away as before (CameraDriver reads the refusal).
 		s.panel_disabled = false;
@@ -9332,6 +10366,7 @@ namespace VR::XRCompositor
 		s_present_wait_left_ns = kPresentWaitBudgetNs;
 		// [VR] DepthLayer: set by this present's copy (CopyEyes) when the depth went in with the colour.
 		s.present_depth = FpDepth{};
+		s.present_warp = FpWarp{};
 		PublishFirstPersonScreen();
 
 		// Headset rate: the VR pacer begins and ends a frame every display period; this present only refreshes the
@@ -9550,6 +10585,26 @@ namespace VR::XRCompositor
 				s.swapchain_height = pc.frame.height;
 			}
 		}
+		else if (should_render && current && WarpOn())
+		{
+			// [VR] DepthWarp: the frame (and its depth) into a slot of the warp's ring; the pacer draws it into the eye
+			// swapchains every display frame (WarpPass), so the GS thread never acquires them. Both eyes or neither; the
+			// alternate-eye debug mode goes as mono. ever_released then means "in the ring", as with PacerCopies.
+			GSTextureVK* src = static_cast<GSTextureVK*>(current);
+			const u32 w = static_cast<u32>(src->GetWidth());
+			const u32 h = static_cast<u32>(src->GetHeight());
+			if (w > 0 && h > 0 && EnsureSwapchains(w, h, stereo))
+			{
+				const bool copied = WarpCopyFrame(src, layered);
+				const CopyResult r = copied ? CopyResult::Copied : CopyResult::Skipped;
+				for (u32 l = 0; l < (stereo ? 2u : 1u); l++)
+				{
+					cl_copy[l] = static_cast<int>(r);
+					if (copied)
+						s.chains[l].ever_released = true;
+				}
+			}
+		}
 		else if (should_render && current)
 		{
 			GSTextureVK* src = static_cast<GSTextureVK*>(current);
@@ -9763,6 +10818,18 @@ namespace VR::XRCompositor
 						s.present_depth.eye_offset[k] = {ca * o.x + sa * o.z, o.y, -sa * o.x + ca * o.z};
 					}
 					s.present_depth.eyes_placed = true;
+				}
+				// [VR] DepthWarp: the same eyes, for the pacer's warp of this frame.
+				if (s.present_warp.valid)
+				{
+					const float half_ipd = 0.5f * ((s.present_warp.ipd_m > 0.0f) ? s.present_warp.ipd_m : 0.064f);
+					const float sa = std::sin(turn_yaw), ca = std::cos(turn_yaw);
+					for (int k = 0; k < 2; k++)
+					{
+						const XrVector3f o = DepthExport::EyeOffset(q, (k == 0) ? -half_ipd : half_ipd);
+						s.present_warp.eye_offset[k] = {ca * o.x + sa * o.z, o.y, -sa * o.x + ca * o.z};
+					}
+					s.present_warp.eyes_placed = true;
 				}
 				const float fx = -2.0f * (q.x * q.z + q.w * q.y);
 				const float fy = -2.0f * (q.y * q.z - q.w * q.x);
@@ -10364,6 +11431,13 @@ namespace VR::XRCompositor
 		DestroyBackground();
 		DestroyFillResources();
 		PcDestroy(abandoned);
+		if (!abandoned && vk_alive)
+		{
+			const VR::ScopedXrQueueLock lock;
+			vkQueueWaitIdle(h.queue);
+		}
+		if (!abandoned)
+			WarpDestroyAll();
 
 		for (auto& chain : s.chains)
 		{

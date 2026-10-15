@@ -1494,6 +1494,14 @@ struct Pcsx2Config
 		// quad as before, with no depth swapchain and no depth copy. Needs the runtime to offer the extension (else it
 		// stays off, logged once) and PacerCopies off. Read when VR starts. Render-only: nothing in the game changes.
 		bool DepthLayer = false;
+		// First person: our own translation reprojection of the shown frame, per eye and per display frame, in the VR pacer
+		// (VR/DepthWarp.h): each eye's image is redrawn into its swapchain as seen from where that eye is now, a grid mesh
+		// displaced by the frame's exported depth, so a lean moves near things against far ones instead of moving the
+		// picture; the quad stays at the render pose (rotation corrected by the runtime as before). The pacer then owns the
+		// eye swapchains (the GS thread copies each frame into images of the compositor's own); a frame without depth (not
+		// first person, menus, the first frames) goes as it is. Needs PacerCopies off and HeadsetRateSubmit on; takes
+		// precedence over DepthLayer. Read when VR starts. Render-only: nothing in the game changes.
+		bool DepthWarp = false;
 
 		VROptions();
 		void LoadSave(SettingsWrapper& wrap);
