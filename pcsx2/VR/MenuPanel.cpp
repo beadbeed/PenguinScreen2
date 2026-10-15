@@ -485,7 +485,8 @@ void main()
 			return out;
 		}
 
-		// --- PCSX2_VR_MENUPANEL_DUMP=<dir>[,everyN]: the panel, the room and the finished frame (layer 0) as PNGs ---
+		// --- PCSX2_VR_MENUPANEL_DUMP=<dir>[,everyN]: the panel, the room, the finished frame and the picture as shown (the
+		// room after the presentation lift and the [VR] MenuPanelRoom dim) (layer 0) as PNGs ---
 		struct DumpConfig
 		{
 			bool enabled = false;
@@ -527,6 +528,7 @@ void main()
 		u64 s_dump_fence = 0;
 		u64 s_dump_serial = 0;
 		u32 s_dump_w = 0, s_dump_h = 0;
+		bool s_dump_has_shown = false;
 		u64 s_dump_count = 0;
 		std::atomic<int> s_dump_writes{0};
 
@@ -571,8 +573,29 @@ void main()
 		}
 
 		void WriteDump(std::string dir, u64 serial, u32 w, u32 h, std::vector<u32> panel, std::vector<u32> room,
-			std::vector<u32> frame)
+			std::vector<u32> frame, std::vector<u32> shown, bool has_shown)
 		{
+			// [VR] MenuPanelRoom: the room as shown against its snapshot, over the pixels the panel leaves to the room (and
+			// bright enough to measure): the dim as it reached the picture.
+			double room_sum = 0.0, shown_sum = 0.0;
+			u32 room_px = 0;
+			if (has_shown)
+			{
+				const auto lum = [](u32 c) {
+					return 0.2125 * (c & 0xFF) + 0.7154 * ((c >> 8) & 0xFF) + 0.0721 * ((c >> 16) & 0xFF);
+				};
+				for (size_t i = 0; i < room.size(); i++)
+				{
+					if ((panel[i] >> 24) != 0)
+						continue;
+					const double r = lum(room[i]);
+					if (r < 24.0)
+						continue;
+					room_sum += r;
+					shown_sum += lum(shown[i]);
+					room_px++;
+				}
+			}
 			// The panel's coverage, for the log: how many pixels the screen's draws changed, and where.
 			u32 n = 0;
 			u32 x0 = w, y0 = h, x1 = 0, y1 = 0;
@@ -594,13 +617,24 @@ void main()
 				p |= 0xFF000000u;
 			for (u32& p : frame)
 				p |= 0xFF000000u;
+			for (u32& p : shown)
+				p |= 0xFF000000u;
 			FileSystem::EnsureDirectoryExists(dir.c_str(), true);
 			const std::string base = Path::Combine(dir, fmt::format("menupanel_{:06d}", serial));
 			const RGBA8Image pi(w, h, std::move(panel));
 			const RGBA8Image ri(w, h, std::move(room));
 			const RGBA8Image fi(w, h, std::move(frame));
-			const bool ok = pi.SaveToFile((base + "_panel.png").c_str()) && ri.SaveToFile((base + "_room.png").c_str()) &&
-			                fi.SaveToFile((base + "_frame.png").c_str());
+			bool ok = pi.SaveToFile((base + "_panel.png").c_str()) && ri.SaveToFile((base + "_room.png").c_str()) &&
+			          fi.SaveToFile((base + "_frame.png").c_str());
+			if (has_shown)
+			{
+				const RGBA8Image si(w, h, std::move(shown));
+				ok = si.SaveToFile((base + "_shown.png").c_str()) && ok;
+				if (room_px > 0)
+					Console.WriteLn("(VR) Menu panel dump: %s: the room as shown is %.1f%% of its snapshot's brightness (%u px of "
+									"the room off the panel).",
+						base.c_str(), 100.0 * shown_sum / room_sum, room_px);
+			}
 			if (n > 0)
 				Console.WriteLn("(VR) Menu panel dump: %s (%ux%u): %u px are the screen's (%.1f%%), within %u,%u-%u,%u%s",
 					base.c_str(), w, h, n, 100.0 * n / (static_cast<double>(w) * h), x0, y0, x1 + 1, y1 + 1, ok ? "" : " (write failed)");
@@ -616,21 +650,23 @@ void main()
 				return;
 			s_dump_pending = false;
 			const size_t px = static_cast<size_t>(s_dump_w) * s_dump_h;
-			if (px * 12 > s_dump_size)
+			if (px * 16 > s_dump_size)
 				return;
-			vmaInvalidateAllocation(dev->GetAllocator(), s_dump_alloc, 0, static_cast<VkDeviceSize>(px * 12));
-			std::vector<u32> panel(px), room(px), frame(px);
+			vmaInvalidateAllocation(dev->GetAllocator(), s_dump_alloc, 0, static_cast<VkDeviceSize>(px * 16));
+			std::vector<u32> panel(px), room(px), frame(px), shown(px);
 			std::memcpy(panel.data(), s_dump_map, px * 4);
 			std::memcpy(room.data(), static_cast<const u8*>(s_dump_map) + px * 4, px * 4);
 			std::memcpy(frame.data(), static_cast<const u8*>(s_dump_map) + px * 8, px * 4);
+			if (s_dump_has_shown)
+				std::memcpy(shown.data(), static_cast<const u8*>(s_dump_map) + px * 12, px * 4);
 			s_dump_writes.fetch_add(1, std::memory_order_acq_rel);
 			std::thread(WriteDump, GetDumpConfig().dir, s_dump_serial, s_dump_w, s_dump_h, std::move(panel), std::move(room),
-				std::move(frame))
+				std::move(frame), std::move(shown), s_dump_has_shown)
 				.detach();
 		}
 
 		void MaybeDump(GSDeviceVK* dev, VkCommandBuffer cmd, GSTextureVK* panel, GSTextureVK* room, GSTextureVK* frame,
-			u32 sx, u32 sy, u32 w, u32 h)
+			u32 sx, u32 sy, u32 w, u32 h, GSTextureVK* shown, u32 shown_x, u32 shown_y)
 		{
 			const DumpConfig& cfg = GetDumpConfig();
 			if (!cfg.enabled || !StereoState::DumpAllowed())
@@ -639,7 +675,7 @@ void main()
 			if ((n % cfg.every_n) != 0 || s_dump_pending || s_dump_writes.load(std::memory_order_acquire) >= 2)
 				return;
 			const u64 plane = static_cast<u64>(w) * h * 4u;
-			if (plane * 3 > 0x7FFFFFFFull || !EnsureDumpBuffer(dev, static_cast<u32>(plane * 3)))
+			if (plane * 4 > 0x7FFFFFFFull || !EnsureDumpBuffer(dev, static_cast<u32>(plane * 4)))
 				return;
 			if (room->GetVkFormat() != VK_FORMAT_R8G8B8A8_UNORM || frame->GetVkFormat() != VK_FORMAT_R8G8B8A8_UNORM)
 				return;
@@ -657,6 +693,20 @@ void main()
 			r.bufferOffset = plane * 2;
 			r.imageSubresource.baseArrayLayer = frame->GetBaseArrayLayer();
 			vkCmdCopyImageToBuffer(cmd, frame->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, s_dump_buffer, 1, &r);
+			s_dump_has_shown = shown && shown->GetVkFormat() == VK_FORMAT_R8G8B8A8_UNORM &&
+			                   shown_x + w <= static_cast<u32>(shown->GetWidth()) &&
+			                   shown_y + h <= static_cast<u32>(shown->GetHeight());
+			if (s_dump_has_shown)
+			{
+				if (shown->GetState() == GSTexture::State::Cleared)
+					shown->CommitClear();
+				shown->TransitionToLayout(cmd, GSTextureVK::Layout::TransferSrc);
+				shown->SetUseFenceCounter(dev->GetCurrentFenceCounter());
+				r.bufferOffset = plane * 3;
+				r.imageOffset = {static_cast<s32>(shown_x), static_cast<s32>(shown_y), 0};
+				r.imageSubresource.baseArrayLayer = shown->GetBaseArrayLayer();
+				vkCmdCopyImageToBuffer(cmd, shown->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, s_dump_buffer, 1, &r);
+			}
 			VkBufferMemoryBarrier bb = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
 			bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 			bb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
@@ -741,7 +791,8 @@ void main()
 		return snap;
 	}
 
-	bool ExportPanel(u32 fbp, GSTexture* colour, u32 src_x, u32 src_y, u32 w, u32 h, float u0, float v0, float u1, float v1)
+	bool ExportPanel(u32 fbp, GSTexture* colour, u32 src_x, u32 src_y, u32 w, u32 h, float u0, float v0, float u1, float v1,
+		GSTexture* shown, u32 shown_x, u32 shown_y)
 	{
 		s_latest.valid = false;
 		GSDeviceVK* const dev = VulkanDevice();
@@ -804,7 +855,7 @@ void main()
 		vkCmdDispatch(cmd, (w + 7) / 8, (h + 7) / 8, 1);
 
 		s_serial++;
-		MaybeDump(dev, cmd, panel, room, frame, src_x, src_y, w, h);
+		MaybeDump(dev, cmd, panel, room, frame, src_x, src_y, w, h, static_cast<GSTextureVK*>(shown), shown_x, shown_y);
 		// The compositor copies it out in its own submit after the present's: left as a transfer source.
 		panel->TransitionToLayout(cmd, GSTextureVK::Layout::TransferSrc);
 
@@ -888,7 +939,7 @@ void main()
 	}
 	void TakeSnapshot(GSTexture*) { s_tracker.SnapshotTaken(false); }
 	GSTexture* RoomFor(u32, GSTexture*) { return nullptr; }
-	bool ExportPanel(u32, GSTexture*, u32, u32, u32, u32, float, float, float, float)
+	bool ExportPanel(u32, GSTexture*, u32, u32, u32, u32, float, float, float, float, GSTexture*, u32, u32)
 	{
 		NoPanel("the menu panel is Vulkan only");
 		return false;

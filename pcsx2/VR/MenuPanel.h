@@ -135,8 +135,10 @@ namespace VR::MenuPanel
 	// of this present (the displayed target `colour` against its room snapshot) into the panel image, for the
 	// compositor. src_x/src_y/w/h: the displayed rectangle in the target (scaled texels). False (and the panel image
 	// invalid for this present) when there is no split this present.
-	// u0..v1: where that rectangle shows in the shown picture, as fractions of it.
-	bool ExportPanel(u32 fbp, GSTexture* colour, u32 src_x, u32 src_y, u32 w, u32 h, float u0, float v0, float u1, float v1);
+	// u0..v1: where that rectangle shows in the shown picture, as fractions of it. shown, shown_x, shown_y: that picture
+	// (the present's merged frame, after the presentation lift) and where the rectangle lies in it, for the dump only.
+	bool ExportPanel(u32 fbp, GSTexture* colour, u32 src_x, u32 src_y, u32 w, u32 h, float u0, float v0, float u1, float v1,
+		GSTexture* shown, u32 shown_x, u32 shown_y);
 	// No panel this present (the reason logged once each time it changes).
 	void NoPanel(const char* why);
 	// Every vsync (GS thread), before Merge.

@@ -16,6 +16,10 @@ dump of the frame shown (PCSX2_VR_STEREODUMP), and emulog.txt. Printed per scree
     head turns 40 deg while the screen is up (the camera follows the head: first person kept);
   - game: the game frame counter u8 0x48BF93 rate (212.4/s at 100%: the game keeps running);
   - the emulog's "(VR) Menu panel" and MTRACE summary lines.
+[VR] MenuPanelRoom (2026-10-14, "Calm menus" in the research note): with Freeze the game's view matrix holds while the
+head turns (turned ~0 deg); after the screen closes (the head kept where it turned) "resume" prints how long the view
+took to reach the head again and its largest step between samples; at the end each panel dump's room as shown against
+its own snapshot gives the dim (about MenuPanelRoomBrightness once it is in, 0.25 s after the screen comes up).
 On the item screen the menu pointer then steers the game's cursor to cells 1, 3 and 0 (D-pad presses only, nothing
 confirmed): with no OpenXR runtime through PINE test hits at each cell's rect centre (MsgVRMenuPointer op 1); with --xr
 (SteamVR, the null headset: python null_driver.py on first, off after) with the right hand's ray aimed at the published
@@ -113,6 +117,7 @@ def local_base(p):
 class Run:
     def __init__(self, p):
         self.p = p
+        self.windows = []  # (name, wall time the screen was seen up, wall time it was seen gone)
 
     def armed(self, timeout=8.0):
         t = {}
@@ -189,7 +194,7 @@ class Run:
               "matched to a write: %d" % (span_view, verr, last["matched"] - up[0]["matched"]))
         print("   game counter %.1f/s (212.4/s = 100%%)" % rate)
         lines = [l for l in log_text()[mark:].splitlines() if "(VR) Menu panel" in l or "MTRACE vsync" in l or
-                 "CameraDriver: a game screen" in l]
+                 "CameraDriver: a game screen" in l or "CameraDriver: the room" in l]
         for l in lines[:40]:
             print("   |", l[:220])
 
@@ -251,6 +256,28 @@ class Run:
                 hit.stop()
             fc.clear_hand(RIGHT)
 
+    def resume(self, fc, head_deg, ref_view, mark, seconds=1.5):
+        """The screen just closed with the head turned head_deg from where it was as the screen opened (ref_view: the
+        view matrix's yaw then): how long the view takes to follow the head again, and its largest step."""
+        p = self.p
+        fc.set_head(pose(yaw_deg=head_deg))
+        t0 = time.time()
+        rows = []
+        while time.time() - t0 < seconds:
+            time.sleep(0.03)
+            rows.append((time.time() - t0, view_yaw(p), p.telemetry()["frames_matched"]))
+        want = ref_view + head_deg
+        at = next((t for t, v, _ in rows if abs(wrap(v - want)) < 2.0), None)
+        steps = [abs(wrap(rows[i][1] - rows[i - 1][1])) for i in range(1, len(rows))]
+        print("   resume: the view reached the head (within 2 deg) %s after the screen went; largest step between 30 ms "
+              "samples %.1f deg; off the head by %.1f deg at the first sample, %.1f at the last; render poses matched to "
+              "a write meanwhile: %d" % (
+                  ("%.2f s" % at) if at is not None else "NOT within %.1f s" % seconds, max(steps) if steps else 0.0,
+                  wrap(rows[0][1] - want), wrap(rows[-1][1] - want), rows[-1][2] - rows[0][2]))
+        for l in [l for l in log_text()[mark:].splitlines() if "CameraDriver: the screen is gone" in l or
+                  "CameraDriver: the room" in l or "the room behind it" in l][:6]:
+            print("   |", l[:220])
+
     def baseline(self, fc):
         """The game counter's rate with no screen up, the same way it is sampled under one."""
         rows, rate = self.sample(fc, 2.0, 0.0, 0.0)
@@ -259,9 +286,11 @@ class Run:
     def items(self, fc):
         self.baseline(fc)
         mark = len(log_text())
+        ref_view = view_yaw(self.p)
         self.squeeze_belt(fc)
         if not wait_until(lambda: self.p.read32(OVERLAY) == 1, 4.0):
             raise RuntimeError("the item screen did not open")
+        t_up = time.time()
         time.sleep(0.6)
         rows, rate = self.sample(fc, 4.0, 0.0, 40.0)
         self.report("item screen", rows, rate, mark)
@@ -271,14 +300,18 @@ class Run:
         if not wait_until(lambda: self.p.read32(OVERLAY) == 0, 4.0):
             self.press(fc, "b")
             wait_until(lambda: self.p.read32(OVERLAY) == 0, 3.0)
+        self.windows.append(("item screen", t_up, time.time()))
+        self.resume(fc, 40.0, ref_view, mark)
         fc.set_head(pose(yaw_deg=0.0))
         time.sleep(1.0)
 
     def map(self, fc):
         mark = len(log_text())
+        ref_view = view_yaw(self.p)
         self.press(fc, "y")
         if not wait_until(lambda: self.p.read32(OVERLAY) == 1, 4.0):
             raise RuntimeError("the map did not open")
+        t_up = time.time()
         time.sleep(0.6)
         rows, rate = self.sample(fc, 4.0, 0.0, 40.0)
         self.report("map", rows, rate, mark)
@@ -286,6 +319,8 @@ class Run:
         if not wait_until(lambda: self.p.read32(OVERLAY) == 0, 4.0):
             self.press(fc, "y")
             wait_until(lambda: self.p.read32(OVERLAY) == 0, 3.0)
+        self.windows.append(("map", t_up, time.time()))
+        self.resume(fc, 40.0, ref_view, mark)
         fc.set_head(pose(yaw_deg=0.0))
         time.sleep(1.0)
 
@@ -293,9 +328,11 @@ class Run:
         """Pause (Select, sent as Backspace to the emulator window: Pad 1 needs its keyboard binding). Closed with Select."""
         import drive
         mark = len(log_text())
+        ref_view = view_yaw(self.p)
         drive.press("select")
         if not wait_until(lambda: self.p.read32(OVERLAY) == 1, 4.0):
             raise RuntimeError("pause did not open (Select / Backspace)")
+        t_up = time.time()
         time.sleep(0.6)
         rows, rate = self.sample(fc, 4.0, 0.0, 40.0)
         self.report("pause", rows, rate, mark)
@@ -303,6 +340,8 @@ class Run:
         if not wait_until(lambda: self.p.read32(OVERLAY) == 0, 4.0):
             self.press(fc, "b")
             wait_until(lambda: self.p.read32(OVERLAY) == 0, 3.0)
+        self.windows.append(("pause", t_up, time.time()))
+        self.resume(fc, 40.0, ref_view, mark)
         fc.set_head(pose(yaw_deg=0.0))
         time.sleep(1.0)
 
@@ -321,6 +360,7 @@ class Run:
         self.press(fc, "a")
         if not wait_until(lambda: p.read32(OVERLAY) == 1, 5.0):
             raise RuntimeError("no take-it prompt (heading %.1f)" % wrap(heading))
+        t_up = time.time()
         time.sleep(0.6)
         print("   take-it prompt up: sub-mode u8 0x720BE2 = %d" % p.read8(SUBMODE))
         rows, rate = self.sample(fc, 4.0, -anchor, -anchor + 40.0)
@@ -328,8 +368,21 @@ class Run:
         # Declined: Cross, never Circle.
         self.press(fc, "b")
         wait_until(lambda: p.read32(OVERLAY) == 0, 4.0)
+        self.windows.append(("take-it prompt", t_up, time.time()))
         fc.set_head(pose(yaw_deg=-anchor))
         time.sleep(1.0)
+
+
+def dim_report():
+    """[VR] MenuPanelRoom: each panel dump's room as shown (after the presentation lift and the dim) against its own
+    snapshot, from the emulog (the dump's PNG threads log it): about MenuPanelRoomBrightness under Freeze and Dim once
+    the dim is in (0.25 s), 100% under Live and on a screen's first frame."""
+    rows = re.findall(r"menupanel_(\d+): the room as shown is ([0-9.]+)% of its snapshot's brightness \((\d+) px", log_text())
+    if not rows:
+        print("== dim: no panel dump measured it")
+        return
+    print("== dim (panel dumps, serial: the room as shown / its snapshot): " +
+          ", ".join("%d: %s%%" % (int(n), pct) for n, pct, _ in rows))
 
 
 def main():
@@ -358,6 +411,11 @@ def main():
         require_offline(p)
         time.sleep(8)
         r = Run(p)
+        ini = open(os.environ["PCSX2_INI"], encoding="utf-8", errors="replace").read()
+        m = re.search(r"^MenuPanelRoom\s*=\s*(\S+)", ini, re.M)
+        b = re.search(r"^MenuPanelRoomBrightness\s*=\s*(\S+)", ini, re.M)
+        print("-- [VR] MenuPanelRoom = %s, MenuPanelRoomBrightness = %s (ini)" % (
+            m.group(1) if m else "(default Freeze)", b.group(1) if b else "(default 0.55)"))
         for name in SCENARIOS:
             slot = SLOT or (8 if name == "takeit" else 6)
             p.load_state(slot)
@@ -372,6 +430,8 @@ def main():
                         getattr(r, name)(fc)
                 except RuntimeError as e:
                     print("   FAILED: %s" % e)
+        time.sleep(3)
+        dim_report()
     finally:
         time.sleep(6)  # the dumps' PNG writes finish on their own threads
         try:
