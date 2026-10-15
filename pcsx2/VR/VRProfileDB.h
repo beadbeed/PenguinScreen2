@@ -813,6 +813,39 @@ namespace VR::ProfileDB
 		u32 online_tag_addr = 0;
 		u32 online_tag = 0;
 		u32 online_free = 0;
+		// contact ([VR] PhysicalMeleeMode = Contact; needs override; tools/outbreak-vr/research/2026-10-14-vr-melee.md):
+		// where the game keeps a weapon's hit shape (the weapon-type table, its stride and attack id byte; the attack
+		// parameters, their stride and shape index byte; the shape table of 8-byte entries; the record's u16 weapon type),
+		// the characters' hurt spheres (u8 count, the shape list and the centre list pointers, the kind byte and the
+		// enemies' kind), the hook word that reads hook_on while cave D is in, and the tuning (defaults, then per weapon type).
+		bool has_contact = false;
+		u32 shape_types = 0;
+		u32 shape_type_stride = 0;
+		u32 shape_attack = 0;
+		u32 shape_params = 0;
+		u32 shape_param_stride = 0;
+		u32 shape_index = 0;
+		u32 shape_table = 0;
+		u32 weapon_type_offset = 0;
+		u32 sphere_count = 0;
+		u32 sphere_shapes = 0;
+		u32 sphere_centres = 0;
+		u32 kind_offset = 0;
+		u32 enemy_kind = 0;
+		u32 reaction_offset = 0; // optional (0: not logged): the enemy's u8 reaction class and hit zone of its last hit
+		u32 zone_offset = 0;
+		u32 hook = 0;
+		u32 hook_on = 0;
+		PhysicalMelee::ContactParams contact;
+		std::vector<std::pair<u16, PhysicalMelee::ContactParams>> contact_weapons;
+		// The tuning for a weapon type: its entry in contact_weapons, else contact.
+		const PhysicalMelee::ContactParams& ContactFor(u16 weapon_type) const
+		{
+			for (const auto& w : contact_weapons)
+				if (w.first == weapon_type)
+					return w.second;
+			return contact;
+		}
 		PhysicalMelee::DetectorParams detect;
 		PhysicalMelee::DriverParams drive;
 	};

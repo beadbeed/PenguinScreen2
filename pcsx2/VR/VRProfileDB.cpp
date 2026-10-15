@@ -3531,7 +3531,8 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 {
 	using VR::ProfileDB::MeleeParams;
 	warnUnknownKeys(serial, node, "melee", {"attackButton", "swing", "enemies", "override", "online", "tip", "speed", "rest", "endMs",
-		"travel", "straightness", "strokeMs", "pressMs", "pressMaxMs", "raiseMs", "swingMs", "contactMs", "cooldownMs", "notes"});
+		"travel", "straightness", "strokeMs", "pressMs", "pressMaxMs", "raiseMs", "swingMs", "contactMs", "cooldownMs", "contact",
+		"notes"});
 	MeleeParams mp;
 	if (node.has_child("attackButton"))
 	{
@@ -3651,6 +3652,119 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 							   "overlayTag and free (word aligned, in main RAM, free at most 16 KB below the block); ignoring "
 							   "it, so online the swing stays the game's own.", serial);
 	}
+	// contact: where the game keeps a weapon's hit shape and the characters' hurt spheres (reads only), the hook word that
+	// shows cave D is in, and the tuning; needs the override (the caves' block).
+	if (node.has_child("contact"))
+	{
+		const ryml::ConstNodeRef ct = node["contact"];
+		MeleeParams o = mp;
+		bool ok = ct.is_map() && mp.has_override && ct.has_child("shape") && ct["shape"].is_map() && ct.has_child("spheres") &&
+		          ct["spheres"].is_map() && ct.has_child("hook") && ct["hook"].is_map();
+		if (ok)
+		{
+			warnUnknownKeys(serial, ct, "melee.contact", {"shape", "spheres", "hook", "speed", "rearm", "rearmMs", "leaveMs",
+				"firm", "heavy", "light", "strong", "lead", "cooldownMs", "windowFrames", "weapons", "notes"});
+			const ryml::ConstNodeRef sh = ct["shape"], sp = ct["spheres"], hk = ct["hook"];
+			warnUnknownKeys(serial, sh, "melee.contact.shape", {"types", "typeStride", "attackId", "params", "paramStride",
+				"shapeIndex", "shapes", "weaponType", "notes"});
+			warnUnknownKeys(serial, sp, "melee.contact.spheres", {"count", "shapes", "centres", "kind", "enemyKind", "reaction",
+				"zone", "notes"});
+			warnUnknownKeys(serial, hk, "melee.contact.hook", {"address", "on", "notes"});
+			ok = read_hex(sh, "types", o.shape_types) && read_hex(sh, "typeStride", o.shape_type_stride) &&
+			     read_hex(sh, "attackId", o.shape_attack) && read_hex(sh, "params", o.shape_params) &&
+			     read_hex(sh, "paramStride", o.shape_param_stride) && read_hex(sh, "shapeIndex", o.shape_index) &&
+			     read_hex(sh, "shapes", o.shape_table) && read_hex(sh, "weaponType", o.weapon_type_offset) &&
+			     read_hex(sp, "count", o.sphere_count) && read_hex(sp, "shapes", o.sphere_shapes) &&
+			     read_hex(sp, "centres", o.sphere_centres) && read_hex(sp, "kind", o.kind_offset) &&
+			     read_hex(sp, "enemyKind", o.enemy_kind) && read_hex(hk, "address", o.hook) && read_hex(hk, "on", o.hook_on);
+			// Optional, for the log only: the hit record's reaction class and zone bytes.
+			o.reaction_offset = 0;
+			o.zone_offset = 0;
+			if (ok && (!read_hex(sp, "reaction", o.reaction_offset) || !read_hex(sp, "zone", o.zone_offset) ||
+						  o.reaction_offset >= mp.enemy_stride || o.zone_offset >= mp.enemy_stride))
+				o.reaction_offset = o.zone_offset = 0;
+			ok = ok && o.shape_type_stride >= 1 && o.shape_attack < o.shape_type_stride && o.shape_param_stride >= 1 &&
+			     o.shape_index < o.shape_param_stride && o.shape_types < Ps2MemSize::MainRam &&
+			     o.shape_params < Ps2MemSize::MainRam && o.shape_table < Ps2MemSize::MainRam &&
+			     o.weapon_type_offset < 0x10000 && o.sphere_count < 0x10000 && o.sphere_shapes < 0x10000 &&
+			     o.sphere_centres < 0x10000 && o.kind_offset < 0x10000 && o.enemy_kind <= 0xFF && (o.hook % 4) == 0 &&
+			     o.hook + 4 <= Ps2MemSize::MainRam && o.hook_on != 0 && mp.enemy_count > 0 &&
+			     o.sphere_count < mp.enemy_stride && o.kind_offset < mp.enemy_stride && o.sphere_shapes + 4 <= mp.enemy_stride &&
+			     o.sphere_centres + 4 <= mp.enemy_stride;
+		}
+		if (ok)
+		{
+			// Decimal tuning in the key's unit (milliseconds to seconds); a weapon entry starts from the block's tuning.
+			const auto read_tuning = [&](const ryml::ConstNodeRef& n, const char* where, VR::PhysicalMelee::ContactParams& c) {
+				const auto f = [&](const char* key, float lo, float hi, float scale, float& dst) {
+					if (!n.has_child(key))
+						return;
+					const std::optional<float> v = StringUtil::FromChars<float>(nodeVal(n[key]));
+					if (v.has_value() && std::isfinite(v.value()) && v.value() >= lo && v.value() <= hi)
+						dst = v.value() * scale;
+					else
+						Console.WarningFmt("(VR) ProfileDB: Serial '{}' {}.{} must be from {} to {}; keeping {}.", serial, where,
+							key, lo, hi, dst / scale);
+				};
+				f("speed", 0.3f, 10.0f, 1.0f, c.speed);
+				f("rearm", 0.05f, 10.0f, 1.0f, c.rearm);
+				f("rearmMs", 0.0f, 1000.0f, 0.001f, c.rearm_s);
+				f("leaveMs", 0.0f, 2000.0f, 0.001f, c.leave_s);
+				f("firm", 0.3f, 15.0f, 1.0f, c.firm);
+				f("heavy", 0.3f, 20.0f, 1.0f, c.heavy);
+				f("light", 0.1f, 1.0f, 1.0f, c.light);
+				f("strong", 1.0f, 3.0f, 1.0f, c.strong);
+				f("lead", 0.0f, 50.0f, 1.0f, c.lead_cm);
+				f("cooldownMs", 0.0f, 2000.0f, 0.001f, c.cooldown_s);
+				if (n.has_child("windowFrames"))
+				{
+					const std::optional<s64> v = parseDecOrHex(nodeVal(n["windowFrames"]));
+					if (v.has_value() && v.value() >= 1 && v.value() <= 30)
+						c.window_frames = static_cast<int>(v.value());
+					else
+						Console.WarningFmt("(VR) ProfileDB: Serial '{}' {}.windowFrames must be from 1 to 30; keeping {}.", serial,
+							where, c.window_frames);
+				}
+				if (c.rearm >= c.speed || c.firm < c.speed || c.heavy < c.firm)
+				{
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' {} needs rearm < speed <= firm <= heavy; putting them in order.",
+						serial, where);
+					c = VR::PhysicalMelee::SanitizedContact(c);
+				}
+			};
+			read_tuning(ct, "melee.contact", o.contact);
+			o.contact_weapons.clear();
+			if (ct.has_child("weapons"))
+			{
+				if (!ct["weapons"].is_seq())
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee.contact.weapons is not a list; ignoring it.", serial);
+				else
+				{
+					for (const ryml::ConstNodeRef& w : ct["weapons"].children())
+					{
+						const std::optional<s64> t = (w.is_map() && w.has_child("type")) ? parseDecOrHex(nodeVal(w["type"])) : std::nullopt;
+						if (!t.has_value() || t.value() < 0 || t.value() > 0xFFFF)
+						{
+							Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee.contact.weapons entry needs a type (0-65535); "
+											   "skipping it.", serial);
+							continue;
+						}
+						warnUnknownKeys(serial, w, "melee.contact.weapons", {"type", "speed", "rearm", "rearmMs", "leaveMs", "firm",
+							"heavy", "light", "strong", "lead", "cooldownMs", "windowFrames", "notes"});
+						VR::PhysicalMelee::ContactParams c = o.contact;
+						read_tuning(w, "melee.contact.weapons", c);
+						o.contact_weapons.emplace_back(static_cast<u16>(t.value()), c);
+					}
+				}
+			}
+			o.has_contact = true;
+			mp = o;
+		}
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee contact needs override, enemies and shape, spheres and hook "
+							   "(offsets inside an enemy's record, addresses in main RAM, a non-zero hook word); ignoring it, so "
+							   "PhysicalMeleeMode = Contact uses the press.", serial);
+	}
 	// Decimal tuning in the key's unit, stored scaled (milliseconds to seconds).
 	const auto read_float = [&](const char* key, float lo, float hi, float scale, float& dst) {
 		if (!node.has_child(key))
@@ -3759,6 +3873,52 @@ bool VR::ProfileDB::SelfTestMeleeParse()
 				"  online: { room: 0x3065AC, masters: 0x825810, overlay: 0x820020, overlayTag: 0x6174656E, free: 0xFF040 }\n",
 			  &m) && m.has_value() && !m->has_online,
 		"an online block whose free RAM starts past the block is dropped");
+	{
+		const char* base = "melee:\n"
+						   "  enemies: { table: 0x3FFCA0, stride: 0xD90, count: 64, present: 0x00, hp: 0x544 }\n"
+						   "  override: { block: 0xFF000, magic: 0x4D454C31, counter: 0x48BF93 }\n";
+		const char* where = "  contact:\n"
+							"    shape: { types: 0x6E5940, typeStride: 0x44, attackId: 0x06, params: 0x6E7C90, paramStride: 0x20, "
+							"shapeIndex: 0x0E, shapes: 0x6EBFA0, weaponType: 0xCA8 }\n"
+							"    hook: { address: 0x5CDF64, on: 0x0C03F880 }\n";
+		const char* spheres = "    spheres: { count: 0x1E0, shapes: 0x1D8, centres: 0x1DC, kind: 0x02, enemyKind: 2 }\n";
+		const std::string full = std::string(base) + where + spheres +
+			"    speed: 2.0\n    rearm: 1.0\n    rearmMs: 80\n    leaveMs: 200\n    firm: 3.2\n    heavy: 6.0\n    light: 0.5\n"
+			"    strong: 1.8\n    lead: 6\n    cooldownMs: 150\n    windowFrames: 5\n"
+			"    weapons:\n      - { type: 33, speed: 1.5, heavy: 4.5 }\n      - { type: 44, heavy: 7.0 }\n      - { speed: 1.0 }\n";
+		check(parse(full.c_str(), &m) && m.has_value() && m->has_contact, "contact: a full block parses");
+		if (m.has_value() && m->has_contact)
+		{
+			check(m->shape_types == 0x6E5940 && m->shape_type_stride == 0x44 && m->shape_attack == 6 &&
+					  m->shape_params == 0x6E7C90 && m->shape_param_stride == 0x20 && m->shape_index == 0x0E &&
+					  m->shape_table == 0x6EBFA0 && m->weapon_type_offset == 0xCA8,
+				"contact: the shape addresses");
+			check(m->sphere_count == 0x1E0 && m->sphere_shapes == 0x1D8 && m->sphere_centres == 0x1DC && m->kind_offset == 2 &&
+					  m->enemy_kind == 2 && m->hook == 0x5CDF64 && m->hook_on == 0x0C03F880,
+				"contact: the spheres and the hook");
+			const VR::PhysicalMelee::ContactParams& c = m->contact;
+			check(std::fabs(c.speed - 2.0f) < 1e-6f && std::fabs(c.rearm - 1.0f) < 1e-6f && std::fabs(c.rearm_s - 0.08f) < 1e-6f &&
+					  std::fabs(c.leave_s - 0.2f) < 1e-6f && std::fabs(c.firm - 3.2f) < 1e-6f && std::fabs(c.heavy - 6.0f) < 1e-6f &&
+					  std::fabs(c.light - 0.5f) < 1e-6f && std::fabs(c.strong - 1.8f) < 1e-6f && std::fabs(c.lead_cm - 6.0f) < 1e-6f &&
+					  std::fabs(c.cooldown_s - 0.15f) < 1e-6f && c.window_frames == 5,
+				"contact: the tuning, milliseconds to seconds");
+			check(m->contact_weapons.size() == 2 && std::fabs(m->ContactFor(33).speed - 1.5f) < 1e-6f &&
+					  std::fabs(m->ContactFor(33).heavy - 4.5f) < 1e-6f && std::fabs(m->ContactFor(33).firm - 3.2f) < 1e-6f &&
+					  std::fabs(m->ContactFor(44).heavy - 7.0f) < 1e-6f && std::fabs(m->ContactFor(34).speed - 2.0f) < 1e-6f,
+				"contact: per weapon, from the block's tuning; an entry without a type is skipped");
+		}
+		const std::string no_override = std::string("melee:\n") +
+			"  enemies: { table: 0x3FFCA0, stride: 0xD90, count: 64, present: 0x00, hp: 0x544 }\n" + where + spheres;
+		check(parse(no_override.c_str(), &m) && m.has_value() && !m->has_contact, "contact: without the override it is dropped");
+		const std::string past = std::string(base) + where +
+			"    spheres: { count: 0x1E0, shapes: 0x1D8, centres: 0xD90, kind: 0x02, enemyKind: 2 }\n";
+		check(parse(past.c_str(), &m) && m.has_value() && !m->has_contact && m->has_override,
+			"contact: a centre list offset past the enemy's record is dropped, the override kept");
+		const std::string order = std::string(base) + where + spheres + "    speed: 3.0\n    firm: 2.0\n    windowFrames: 99\n";
+		check(parse(order.c_str(), &m) && m.has_value() && m->has_contact && m->contact.firm >= m->contact.speed &&
+				  m->contact.window_frames == 6,
+			"contact: tuning out of order is put in order, a bad window keeps its default");
+	}
 	check(parse("melee: 3\n", &m) && !m.has_value(), "a block that is not a map is none");
 	if (failed)
 		Console.Error("(VR) Melee profile self-test FAIL: %s", failed);
@@ -4800,7 +4960,7 @@ static int CountMultibandResolveMismatches(bool log)
 
 bool VR::ProfileDB::IsSilenceSettingName(std::string_view name)
 {
-	return name == "SeamlessDoors" || name == "PhysicalMelee";
+	return name == "SeamlessDoors" || name == "PhysicalMelee" || name == "PhysicalMeleeContact";
 }
 
 bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
@@ -4809,6 +4969,10 @@ bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
 		return EmuConfig.VR.SeamlessDoors;
 	if (name == "PhysicalMelee")
 		return EmuConfig.VR.PhysicalMelee;
+	// The contact caves (D, E): PhysicalMelee in its contact mode.
+	if (name == "PhysicalMeleeContact")
+		return EmuConfig.VR.PhysicalMelee &&
+		       EmuConfig.VR.PhysicalMeleeMode == Pcsx2Config::VROptions::PhysicalMeleeModeType::Contact;
 	return false;
 }
 
@@ -4816,6 +4980,8 @@ bool VR::ProfileDB::SilenceSettingCoopLive(std::string_view name)
 {
 	if (name == "PhysicalMelee")
 		return EmuConfig.VR.PhysicalMelee && EmuConfig.VR.PhysicalMeleeOnline && VR::PhysicalMelee::CoopOverrideLive();
+	if (name == "PhysicalMeleeContact")
+		return SilenceSettingOn(name) && EmuConfig.VR.PhysicalMeleeOnline && VR::PhysicalMelee::CoopOverrideLive();
 	return false;
 }
 

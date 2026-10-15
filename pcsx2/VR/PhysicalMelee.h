@@ -7,6 +7,7 @@
 
 #include "VR/VRInputState.h"
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -182,6 +183,103 @@ namespace VR::PhysicalMelee
 	// never starts, a screen, contact inside and after the swing, the cooldown), and GameMatrix on a turned, offset map.
 	// Returns the name of every failed check; empty is a pass.
 	std::vector<std::string> SelfTest();
+
+	// --- Contact mode ([VR] PhysicalMeleeMode = Contact; tools/outbreak-vr/research/2026-10-14-vr-melee.md). Pure. ---
+	//
+	// The VR weapon's own hit shape touching an enemy's hurt spheres makes the game apply a hit through its own code
+	// (cave D calls the attack spawn FUN_005521B0 for the local player, with no attack action, no button pressed); the
+	// strength from the tip's speed scales the game's own critical multiplier (cave E), so a hard swing raises the game's
+	// own reaction class (a flinch becomes a stagger, a stagger a knockdown).
+
+	// Tuning, per weapon type (the profile's melee.contact, its weapons list overriding the defaults).
+	struct ContactParams
+	{
+		float speed = 1.8f;      // m/s at the weapon's far hit point: a touch counts at or above this
+		float rearm = 0.9f;      // m/s: an enemy that was struck is armed again once the tip has been slower than this...
+		float rearm_s = 0.10f;   // ... for this long,
+		float leave_s = 0.15f;   // ... or once the weapon has been off that enemy this long
+		float firm = 3.0f;       // m/s: from here the strength is 1 (the game's own hit)
+		float heavy = 5.5f;      // m/s: from here the strength is strong
+		float light = 0.6f;      // the strength at speed (it rises to 1 at firm): less damage, the weapon's own class
+		float strong = 1.5f;     // the strength from heavy: more damage, and above 1 the game raises the class by one
+		float lead_cm = 8.0f;    // game units added to the summed radii, so the strike is asked for a frame before the touch
+		float cooldown_s = 0.12f; // after a strike the next one waits at least this long
+		int window_frames = 6;   // the strike's attack object lives this many game frames (the node dies at its first hit)
+	};
+	ContactParams SanitizedContact(const ContactParams& in);
+
+	// The strength for a tip speed (m/s): 0 below p.speed (no strike), light rising to 1 by p.firm, 1 to p.heavy, then
+	// p.strong. Never NaN.
+	float Strength(float speed, const ContactParams& p);
+
+	// The game's hit shape for a weapon, in its model's frame (game units): a capsule from p to p + d * length, or a sphere
+	// at p; radius r (FUN_005AAE60 / FUN_005AA9B0, shapes at 0x6EBFA0).
+	struct HitShape
+	{
+		bool valid = false;
+		bool capsule = false;
+		float p[3] = {};
+		float d[3] = {};
+		float length = 0.0f;
+		float radius = 0.0f;
+	};
+	// The shape's two ends (a sphere's are both p) placed by a game matrix (4 x 4 row vectors, rows unit axes, row 3 the
+	// position), in game units. The far one (from the model's origin, the grip) is b.
+	void PlaceShape(const HitShape& s, const float m[16], float a[3], float b[3]);
+
+	// The distance from c to the segment a-b, squared.
+	float SegmentPointDistSq(const float a[3], const float b[3], const float c[3]);
+
+	// One enemy's hurt spheres this poll (game units).
+	struct EnemyVolume
+	{
+		int id = -1;
+		int count = 0;
+		float c[8][3] = {};
+		float r[8] = {};
+	};
+
+	// Whether the weapon's shape (ends a, b, radius r; a sphere has a == b) touches one of the enemy's spheres within
+	// lead; the touched sphere in *sphere. Swept: also the shape at the previous poll (pa, pb, when have_prev) and halfway,
+	// so a fast swing cannot pass through between two polls.
+	bool Touches(const float a[3], const float b[3], float r, bool have_prev, const float pa[3], const float pb[3],
+		const EnemyVolume& e, float lead, int* sphere = nullptr);
+
+	struct StrikeState
+	{
+		struct Enemy
+		{
+			bool struck = false;   // struck this swing: not again until re-armed
+			float off_s = 0.0f;    // since the weapon last touched it
+		};
+		std::array<Enemy, 64> enemies{};
+		float slow_s = 0.0f;       // the tip slower than rearm this long
+		float since_strike_s = 10.0f;
+		void Reset() { *this = StrikeState{}; }
+	};
+
+	struct StrikeIn
+	{
+		float dt = 0.0f;
+		bool usable = false;        // contact may strike now (a melee weapon, first person, no screen, not hurt or grabbed)
+		float speed = 0.0f;         // the tip, m/s
+		bool live = false;          // the game still has the last strike's attack object (the block's frames left)
+		const int* touching = nullptr; // the enemy ids the shape touches this poll
+		int touching_count = 0;
+	};
+
+	struct StrikeOut
+	{
+		int enemy = -1;             // strike this enemy now (-1: none)
+		float strength = 0.0f;
+	};
+
+	// One poll: re-arms enemies (slow tip or off them), then strikes the first armed touched enemy if the tip is fast
+	// enough, nothing is live and the cooldown has passed. One strike per swing per enemy.
+	StrikeOut StrikeStep(const StrikeIn& in, const ContactParams& p, StrikeState& st);
+
+	// Strength, the geometry and the strike logic on scripted swings. Returns the failed checks.
+	std::vector<std::string> SelfTestContact();
 
 	// --- The glue (VRInputSource::PollEvents). ---
 

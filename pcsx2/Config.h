@@ -1350,6 +1350,18 @@ struct Pcsx2Config
 		// everyone); otherwise the game's own swing and hit, exactly. Only this player's pad, its block and the caves in free
 		// RAM are written, never another character. Ini only, off by default; untested online until a co-op session.
 		bool PhysicalMeleeOnline = false;
+		// How PhysicalMelee attacks (tools/outbreak-vr/research/2026-10-14-vr-melee.md). Contact (the default): the VR
+		// weapon's own hit shape touching an enemy makes the game apply a hit through its own code (no attack action, no
+		// button: the character is never locked), stronger the faster the swing; only where the caves may run (offline, or
+		// in private co-op while this console runs the room's enemies), else Press. Press: a swing presses the game's own
+		// attack as before (the canned swing, its hit on the VR weapon). Ini only.
+		enum struct PhysicalMeleeModeType : int
+		{
+			Contact = 0,
+			Press = 1,
+		};
+		static const char* PhysicalMeleeModeNames[];
+		PhysicalMeleeModeType PhysicalMeleeMode = PhysicalMeleeModeType::Contact;
 		// First person, for profiles with a reach block: a light tick in the right hand and a short toast naming the item
 		// (and the button, "Kevin's 45 Auto  (A)") when something on the floor comes within reach of the character's own
 		// Circle press. Only reads the game's memory; shown in the headset only. Ini only for now.

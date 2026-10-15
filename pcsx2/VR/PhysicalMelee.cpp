@@ -329,6 +329,155 @@ namespace VR::PhysicalMelee
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------
+	// Contact mode: strength, geometry, the strike logic.
+	// -----------------------------------------------------------------------------------------------------------------
+
+	ContactParams SanitizedContact(const ContactParams& in)
+	{
+		const ContactParams d{};
+		ContactParams p;
+		p.speed = std::clamp(FiniteOr(in.speed, d.speed), 0.3f, 10.0f);
+		p.rearm = std::clamp(FiniteOr(in.rearm, d.rearm), 0.05f, p.speed * 0.95f);
+		p.rearm_s = std::clamp(FiniteOr(in.rearm_s, d.rearm_s), 0.0f, 1.0f);
+		p.leave_s = std::clamp(FiniteOr(in.leave_s, d.leave_s), 0.0f, 2.0f);
+		p.firm = std::clamp(FiniteOr(in.firm, d.firm), p.speed, 15.0f);
+		p.heavy = std::clamp(FiniteOr(in.heavy, d.heavy), p.firm, 20.0f);
+		p.light = std::clamp(FiniteOr(in.light, d.light), 0.1f, 1.0f);
+		p.strong = std::clamp(FiniteOr(in.strong, d.strong), 1.0f, 3.0f);
+		p.lead_cm = std::clamp(FiniteOr(in.lead_cm, d.lead_cm), 0.0f, 50.0f);
+		p.cooldown_s = std::clamp(FiniteOr(in.cooldown_s, d.cooldown_s), 0.0f, 2.0f);
+		p.window_frames = std::clamp(in.window_frames, 1, 30);
+		return p;
+	}
+
+	float Strength(float speed, const ContactParams& params)
+	{
+		const ContactParams p = SanitizedContact(params);
+		if (!std::isfinite(speed) || speed < p.speed)
+			return 0.0f;
+		if (speed >= p.heavy)
+			return p.strong;
+		if (speed >= p.firm)
+			return 1.0f;
+		const float u = (p.firm > p.speed) ? (speed - p.speed) / (p.firm - p.speed) : 1.0f;
+		return p.light + (1.0f - p.light) * std::clamp(u, 0.0f, 1.0f);
+	}
+
+	void PlaceShape(const HitShape& s, const float m[16], float a[3], float b[3])
+	{
+		const auto place = [&](const float l[3], float out[3]) {
+			for (int c = 0; c < 3; c++)
+				out[c] = m[12 + c] + l[0] * m[c] + l[1] * m[4 + c] + l[2] * m[8 + c];
+		};
+		float p0[3] = {s.p[0], s.p[1], s.p[2]};
+		float p1[3] = {p0[0], p0[1], p0[2]};
+		if (s.capsule)
+		{
+			for (int k = 0; k < 3; k++)
+				p1[k] = s.p[k] + s.d[k] * s.length;
+			// The far end (from the grip) is b.
+			if (Len3(p0[0], p0[1], p0[2]) > Len3(p1[0], p1[1], p1[2]))
+				std::swap(p0, p1);
+		}
+		place(p0, a);
+		place(p1, b);
+	}
+
+	float SegmentPointDistSq(const float a[3], const float b[3], const float c[3])
+	{
+		const float ab[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+		const float ac[3] = {c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+		const float len2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+		float t = 0.0f;
+		if (len2 > 1e-9f)
+			t = std::clamp((ac[0] * ab[0] + ac[1] * ab[1] + ac[2] * ab[2]) / len2, 0.0f, 1.0f);
+		const float d[3] = {ac[0] - ab[0] * t, ac[1] - ab[1] * t, ac[2] - ab[2] * t};
+		return d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+	}
+
+	bool Touches(const float a[3], const float b[3], float r, bool have_prev, const float pa[3], const float pb[3],
+		const EnemyVolume& e, float lead, int* sphere)
+	{
+		if (!Finite3(a) || !Finite3(b) || !std::isfinite(r))
+			return false;
+		// The shape now, halfway from the last poll, and at the last poll.
+		float segs[3][2][3];
+		int n = 1;
+		std::memcpy(segs[0][0], a, sizeof(float) * 3);
+		std::memcpy(segs[0][1], b, sizeof(float) * 3);
+		if (have_prev && Finite3(pa) && Finite3(pb))
+		{
+			for (int k = 0; k < 3; k++)
+			{
+				segs[1][0][k] = 0.5f * (a[k] + pa[k]);
+				segs[1][1][k] = 0.5f * (b[k] + pb[k]);
+				segs[2][0][k] = pa[k];
+				segs[2][1][k] = pb[k];
+			}
+			n = 3;
+		}
+		const int count = std::clamp(e.count, 0, 8);
+		for (int s = 0; s < n; s++)
+		{
+			for (int k = 0; k < count; k++)
+			{
+				if (!Finite3(e.c[k]) || !std::isfinite(e.r[k]) || e.r[k] <= 0.0f)
+					continue;
+				const float reach = r + e.r[k] + lead;
+				if (SegmentPointDistSq(segs[s][0], segs[s][1], e.c[k]) <= reach * reach)
+				{
+					if (sphere)
+						*sphere = k;
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	StrikeOut StrikeStep(const StrikeIn& in, const ContactParams& params, StrikeState& st)
+	{
+		StrikeOut out;
+		const ContactParams p = SanitizedContact(params);
+		const float dt = std::clamp(FiniteOr(in.dt, 0.0f), 0.0f, 0.25f);
+		const float speed = FiniteOr(in.speed, 0.0f);
+		st.since_strike_s = std::min(st.since_strike_s + dt, 10.0f);
+		st.slow_s = (speed < p.rearm) ? std::min(st.slow_s + dt, 10.0f) : 0.0f;
+		const bool slow = st.slow_s >= p.rearm_s;
+		const auto touching = [&](int id) {
+			for (int k = 0; k < in.touching_count && in.touching; k++)
+				if (in.touching[k] == id)
+					return true;
+			return false;
+		};
+		for (int id = 0; id < static_cast<int>(st.enemies.size()); id++)
+		{
+			StrikeState::Enemy& e = st.enemies[id];
+			e.off_s = touching(id) ? 0.0f : std::min(e.off_s + dt, 10.0f);
+			// Re-arm: the weapon slowed (the swing is over) or left this enemy.
+			if (e.struck && (slow || e.off_s >= p.leave_s))
+				e.struck = false;
+		}
+		if (!in.usable || in.live || st.since_strike_s < p.cooldown_s)
+			return out;
+		const float strength = Strength(speed, p);
+		if (strength <= 0.0f)
+			return out;
+		for (int k = 0; k < in.touching_count && in.touching; k++)
+		{
+			const int id = in.touching[k];
+			if (id < 0 || id >= static_cast<int>(st.enemies.size()) || st.enemies[id].struck)
+				continue;
+			st.enemies[id].struck = true;
+			st.since_strike_s = 0.0f;
+			out.enemy = id;
+			out.strength = strength;
+			break;
+		}
+		return out;
+	}
+
+	// -----------------------------------------------------------------------------------------------------------------
 	// Self-test.
 	// -----------------------------------------------------------------------------------------------------------------
 	namespace
@@ -940,6 +1089,301 @@ namespace VR::PhysicalMelee
 			out[1] = v[1] + w * ty + (z * tx - x * tz);
 			out[2] = v[2] + w * tz + (x * ty - y * tx);
 		}
+
+		bool Diag()
+		{
+			static const bool s_diag = [] {
+				const char* e = std::getenv("PCSX2_VR_MELEE_LOG");
+				return e && e[0] == '1';
+			}();
+			return s_diag;
+		}
+
+		// --- Contact mode's state (CPU thread). ---
+		bool s_contact_mode = false;
+		StrikeState s_contact;
+		u32 s_strike_seq = 0;         // the last strike number written to the block (+0x0C)
+		float s_tip_speed = 0.0f;     // the weapon's far hit point, m/s, smoothed
+		float s_tip_prev[3] = {};
+		bool s_tip_have = false;
+		float s_prev_a[3] = {}, s_prev_b[3] = {}; // the shape at the last poll (game units), for the swept test
+		bool s_prev_valid = false;
+		u32 s_shape_weapon = 0xFFFFFFFFu;         // the weapon type s_shape was read for
+		HitShape s_shape;
+		// The last strike, until its enemy's HP drops (the game's hit) or it times out (the game's own test found nothing).
+		int s_pend_enemy = -1;
+		float s_pend_s = 0.0f;
+		s16 s_pend_hp = 0;
+		float s_pend_strength = 0.0f;
+		float s_pend_speed = 0.0f;
+		int s_pend_sphere = -1;
+		u32 s_strikes = 0, s_strike_hits = 0;
+
+		void ResetContact()
+		{
+			s_contact.Reset();
+			s_tip_have = false;
+			s_tip_speed = 0.0f;
+			s_prev_valid = false;
+			s_pend_enemy = -1;
+		}
+
+		bool ReadF(GuestReader reader, u32 address, float* f)
+		{
+			u32 w = 0;
+			if (!Read(reader, address, 4, &w))
+				return false;
+			std::memcpy(f, &w, 4);
+			return std::isfinite(*f);
+		}
+
+		// The game's hit shape for a weapon type, read from its tables (research/2026-10-14-vr-melee.md): the type's attack
+		// id, that attack's shape index, the shape entry (type 3 capsule or 2 sphere) and its data; only shapes on the
+		// attack object's own matrix (bone 0xFFFF), which every melee weapon uses.
+		bool ReadShape(GuestReader reader, const ProfileDB::MeleeParams& mp, u32 type, HitShape* out, std::string* why)
+		{
+			*out = HitShape{};
+			u32 id = 0, index = 0, kind = 0, data = 0;
+			if (type >= 0x100 || !Read(reader, mp.shape_types + type * mp.shape_type_stride + mp.shape_attack, 1, &id) ||
+				!Read(reader, mp.shape_params + id * mp.shape_param_stride + mp.shape_index, 1, &index) ||
+				!Read(reader, mp.shape_table + index * 8u, 4, &kind) || !Read(reader, mp.shape_table + index * 8u + 4u, 4, &data) ||
+				data == 0 || data >= Ps2MemSize::MainRam)
+			{
+				*why = "its shape could not be read";
+				return false;
+			}
+			HitShape s;
+			bool ok = ReadF(reader, data, &s.p[0]) && ReadF(reader, data + 4, &s.p[1]) && ReadF(reader, data + 8, &s.p[2]);
+			u32 r = 0, len = 0, bone = 0;
+			if (kind == 3)
+			{
+				s.capsule = true;
+				ok = ok && ReadF(reader, data + 0x0C, &s.d[0]) && ReadF(reader, data + 0x10, &s.d[1]) &&
+				     ReadF(reader, data + 0x14, &s.d[2]) && Read(reader, data + 0x18, 2, &r) && Read(reader, data + 0x1A, 2, &len) &&
+				     Read(reader, data + 0x1C, 2, &bone);
+				s.length = static_cast<float>(len);
+			}
+			else if (kind == 2)
+				ok = ok && Read(reader, data + 0x0C, 2, &r) && Read(reader, data + 0x0E, 2, &bone);
+			else
+			{
+				*why = fmt::format("its shape is of type {} (not a capsule or a sphere)", kind);
+				return false;
+			}
+			s.radius = static_cast<float>(r);
+			if (!ok || bone != 0xFFFFu || s.radius <= 0.0f || s.radius > 200.0f || s.length > 500.0f)
+			{
+				*why = ok ? "its shape is not on the weapon's own matrix" : "its shape could not be read";
+				return false;
+			}
+			s.valid = true;
+			*out = s;
+			return true;
+		}
+
+		// An enemy's hurt spheres this poll (present, an enemy, alive), false otherwise.
+		bool ReadEnemy(GuestReader reader, const ProfileDB::MeleeParams& mp, u32 i, EnemyVolume* e, s16* hp_out)
+		{
+			const u32 base = mp.enemy_table + i * mp.enemy_stride;
+			u32 present = 0, kind = 0, hp = 0, count = 0, shapes = 0, centres = 0;
+			if (!Read(reader, base + mp.enemy_present, 1, &present) || present == 0 || !Read(reader, base + mp.kind_offset, 1, &kind) ||
+				kind != mp.enemy_kind || !Read(reader, base + mp.enemy_hp, 2, &hp) ||
+				static_cast<s16>(static_cast<u16>(hp)) <= 0 || !Read(reader, base + mp.sphere_count, 1, &count) || count == 0 ||
+				!Read(reader, base + mp.sphere_shapes, 4, &shapes) || !Read(reader, base + mp.sphere_centres, 4, &centres) ||
+				shapes == 0 || centres == 0 || shapes >= Ps2MemSize::MainRam || centres >= Ps2MemSize::MainRam)
+				return false;
+			e->id = static_cast<int>(i);
+			e->count = 0;
+			for (u32 k = 0; k < std::min<u32>(count, 8); k++)
+			{
+				float r = 0.0f;
+				if (!ReadF(reader, shapes + 20u * k + 0x0C, &r) || r <= 0.0f)
+					break; // the list ends at a radius of -1
+				float* c = e->c[e->count];
+				if (!ReadF(reader, centres + 12u * k, &c[0]) || !ReadF(reader, centres + 12u * k + 4, &c[1]) ||
+					!ReadF(reader, centres + 12u * k + 8, &c[2]))
+					break;
+				e->r[e->count] = r;
+				e->count++;
+			}
+			*hp_out = static_cast<s16>(static_cast<u16>(hp));
+			return e->count > 0;
+		}
+
+		const char* ZombieReaction(u32 cls)
+		{
+			switch (cls)
+			{
+				case 0: return "a flinch";
+				case 1: return "a stagger (a flinch the first time)";
+				case 2: return "a knockdown";
+				default: return "?";
+			}
+		}
+
+		// Contact mode, every input poll with the block written this poll (can): the weapon's shape against the enemies'
+		// hurt spheres, a strike asked of cave D on first contact at speed, the cue, and the result logged.
+		void PollContact(GuestReader reader, const ProfileDB::MeleeParams& mp, u32 record, bool can, const float m[16],
+			const float origin[3], const float axes[3][3], u32 counter, float dt)
+		{
+			u32 wt = 0;
+			if (!Read(reader, record + mp.weapon_type_offset, 2, &wt))
+				can = false;
+			if (can && wt != s_shape_weapon)
+			{
+				s_shape_weapon = wt;
+				std::string why;
+				if (ReadShape(reader, mp, wt, &s_shape, &why))
+				{
+					if (s_shape.capsule)
+						Console.WriteLn("(VR) Melee: contact shape for weapon type %u: the game's capsule, %.0f long, radius %.0f.",
+							wt, static_cast<double>(s_shape.length), static_cast<double>(s_shape.radius));
+					else
+						Console.WriteLn("(VR) Melee: contact shape for weapon type %u: the game's sphere, radius %.0f.", wt,
+							static_cast<double>(s_shape.radius));
+				}
+				else
+					Console.WriteLn("(VR) Melee: no contact for weapon type %u: %s.", wt, why.c_str());
+			}
+			const ContactParams cp = SanitizedContact(mp.ContactFor(static_cast<u16>(wt)));
+			can = can && s_shape.valid;
+			u32 hook = 0;
+			const bool hooked = Read(reader, mp.hook, 4, &hook) && hook == mp.hook_on;
+
+			float a[3] = {}, b[3] = {};
+			if (can)
+			{
+				PlaceShape(s_shape, m, a, b);
+				// The far hit point in the headset's space (a model point in centimetres), for the speed.
+				float fm[3] = {s_shape.p[0], s_shape.p[1], s_shape.p[2]};
+				if (s_shape.capsule)
+				{
+					const float e[3] = {s_shape.p[0] + s_shape.d[0] * s_shape.length, s_shape.p[1] + s_shape.d[1] * s_shape.length,
+						s_shape.p[2] + s_shape.d[2] * s_shape.length};
+					if (Len3(e[0], e[1], e[2]) > Len3(fm[0], fm[1], fm[2]))
+						std::memcpy(fm, e, sizeof(fm));
+				}
+				float tip[3];
+				for (int c = 0; c < 3; c++)
+					tip[c] = origin[c] + 0.01f * (fm[0] * axes[0][c] + fm[1] * axes[1][c] + fm[2] * axes[2][c]);
+				if (s_tip_have && dt > 0.0f)
+				{
+					const float v = Len3(tip[0] - s_tip_prev[0], tip[1] - s_tip_prev[1], tip[2] - s_tip_prev[2]) / dt;
+					// A jump of more than a metre in one poll is a tracking glitch, not a swing.
+					if (v * dt < 1.0f)
+						s_tip_speed += (v - s_tip_speed) * (1.0f - std::exp(-dt / 0.02f));
+					else
+						s_tip_speed = 0.0f;
+				}
+				std::memcpy(s_tip_prev, tip, sizeof(tip));
+				s_tip_have = true;
+			}
+			else
+			{
+				s_tip_have = false;
+				s_tip_speed = 0.0f;
+			}
+			const bool sweep = can && s_prev_valid &&
+			                   Len3(a[0] - s_prev_a[0], a[1] - s_prev_a[1], a[2] - s_prev_a[2]) < 200.0f;
+
+			int touching[16];
+			int sphere_of[16];
+			int nt = 0;
+			if (can)
+			{
+				for (u32 i = 0; i < std::min<u32>(mp.enemy_count, static_cast<u32>(s_contact.enemies.size())) && nt < 16; i++)
+				{
+					EnemyVolume e;
+					s16 hp = 0;
+					int sph = -1;
+					if (ReadEnemy(reader, mp, i, &e, &hp) && Touches(a, b, s_shape.radius, sweep, s_prev_a, s_prev_b, e, cp.lead_cm, &sph))
+					{
+						touching[nt] = static_cast<int>(i);
+						sphere_of[nt] = sph;
+						nt++;
+					}
+				}
+			}
+			u32 left = 0;
+			const bool live = Read(reader, mp.block + 0x20, 4, &left) && left != 0 && left <= 30;
+
+			StrikeIn si;
+			si.dt = dt;
+			si.usable = can && hooked;
+			si.speed = s_tip_speed;
+			si.live = live;
+			si.touching = touching;
+			si.touching_count = nt;
+			const StrikeOut so = StrikeStep(si, cp, s_contact);
+			if (so.enemy >= 0)
+			{
+				const u32 blk = mp.block;
+				u32 w;
+				memWrite32(blk + 0x18, static_cast<u32>(cp.window_frames));
+				std::memcpy(&w, &so.strength, 4);
+				memWrite32(blk + 0x1C, w);
+				memWrite32(blk + 0x28, counter & 0xFFu);
+				s_strike_seq++;
+				memWrite32(blk + 0x0C, s_strike_seq);
+				// The weight of it: a firm buzz now, harder for a harder swing (times the Haptic Strength setting).
+				const float k = std::clamp((so.strength - cp.light) / std::max(cp.strong - cp.light, 0.01f), 0.0f, 1.0f);
+				Pulse(SpatialControls::HapticCue{0.65f + 0.35f * k, 0.05f + 0.06f * k});
+				s16 hp = 0;
+				EnemyVolume e;
+				ReadEnemy(reader, mp, static_cast<u32>(so.enemy), &e, &hp);
+				int sph = -1;
+				for (int q = 0; q < nt; q++)
+					if (touching[q] == so.enemy)
+						sph = sphere_of[q];
+				s_pend_enemy = so.enemy;
+				s_pend_s = 0.0f;
+				s_pend_hp = hp;
+				s_pend_strength = so.strength;
+				s_pend_speed = s_tip_speed;
+				s_pend_sphere = sph;
+				s_strikes++;
+				Console.WriteLn("(VR) Melee: strike, enemy %d (sphere %d) at %.1f m/s, strength %.2f.", so.enemy, sph,
+					static_cast<double>(s_tip_speed), static_cast<double>(so.strength));
+			}
+			else if (s_pend_enemy >= 0)
+			{
+				s_pend_s += dt;
+				EnemyVolume e;
+				s16 hp = 0;
+				const u32 base = mp.enemy_table + static_cast<u32>(s_pend_enemy) * mp.enemy_stride;
+				u32 raw = 0;
+				if (Read(reader, base + mp.enemy_hp, 2, &raw))
+					hp = static_cast<s16>(static_cast<u16>(raw));
+				if (hp < s_pend_hp)
+				{
+					u32 cls = 0xFF, zone = 0xFF;
+					if (mp.reaction_offset)
+					{
+						Read(reader, base + mp.reaction_offset, 1, &cls);
+						Read(reader, base + mp.zone_offset, 1, &zone);
+					}
+					s_strike_hits++;
+					Console.WriteLn("(VR) Melee: hit, enemy %d HP %d -> %d, reaction class %u (%s for a zombie), zone %u, %.0f ms "
+									"after the strike (%u of %u strikes landed).",
+						s_pend_enemy, s_pend_hp, hp, cls, ZombieReaction(cls), zone, static_cast<double>(s_pend_s * 1000.0f),
+						s_strike_hits, s_strikes);
+					s_pend_enemy = -1;
+				}
+				else if (s_pend_s > 0.4f)
+				{
+					Console.WriteLn("(VR) Melee: strike on enemy %d made no hit (the game's own test found no touch in %d frames; "
+									"%u of %u strikes landed).",
+						s_pend_enemy, cp.window_frames, s_strike_hits, s_strikes);
+					s_pend_enemy = -1;
+				}
+			}
+			if (Diag() && nt > 0)
+				Console.WriteLn("(VR) Melee diag: touching %d enemy(ies), first %d sphere %d, tip %.2f m/s%s%s.", nt, touching[0],
+					sphere_of[0], static_cast<double>(s_tip_speed), live ? ", a strike live" : "", hooked ? "" : ", cave D not in");
+			std::memcpy(s_prev_a, a, sizeof(a));
+			std::memcpy(s_prev_b, b, sizeof(b));
+			s_prev_valid = can;
+		}
 	}
 
 	const char* ModeName(Mode mode)
@@ -1083,6 +1527,284 @@ namespace VR::PhysicalMelee
 		return c.failures;
 	}
 
+	namespace
+	{
+		// A File #1 zombie standing at (x, 0, z): its hurt spheres as the game places them (head r 25 at 170, chest r 32 at
+		// 120, hips r 30 at 55; game units, centimetres).
+		EnemyVolume TestZombie(int id, float x, float z)
+		{
+			EnemyVolume e;
+			e.id = id;
+			e.count = 3;
+			const float y[3] = {170.0f, 120.0f, 55.0f}, r[3] = {25.0f, 32.0f, 30.0f};
+			for (int k = 0; k < 3; k++)
+			{
+				e.c[k][0] = x;
+				e.c[k][1] = y[k];
+				e.c[k][2] = z;
+				e.r[k] = r[k];
+			}
+			return e;
+		}
+
+		// The iron pipe's capsule (the game's shape 5: from x = +40 to -60 of the model, r 30).
+		HitShape TestPipe()
+		{
+			HitShape s;
+			s.valid = true;
+			s.capsule = true;
+			s.p[0] = 40.0f;
+			s.d[0] = -1.0f;
+			s.length = 100.0f;
+			s.radius = 30.0f;
+			return s;
+		}
+
+		// A game matrix: model -X (the pipe's far end) pointing along angle a (radians) in the x-z plane from a grip at
+		// (gx, gy, gz); rows unit and orthogonal.
+		void TestMatrixAt(float a, float gx, float gy, float gz, float m[16])
+		{
+			const float fx = std::sin(a), fz = std::cos(a); // where the far end points
+			const float mm[16] = {-fx, 0.0f, -fz, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, fz, 0.0f, -fx, 0.0f, gx, gy, gz, 1.0f};
+			std::memcpy(m, mm, sizeof(mm));
+		}
+
+		struct SwingResult
+		{
+			int strikes = 0;
+			int first_enemy = -1;
+			float first_t = -1.0f;
+			float first_strength = 0.0f;
+			std::vector<int> enemies;
+		};
+
+		// A horizontal swing of the pipe about a grip at (0, 120, 0): from angle a0 to a1 (radians) in dur seconds (an
+		// ease in and out), rest_s at rest first and after; polls of dt. Tip speed from the far end's motion (100 game
+		// units a metre). The zombies given; live: whether a strike's object is live (always false here, or always true).
+		SwingResult RunSwing(float a0, float a1, float dur, float dt, const std::vector<EnemyVolume>& zombies,
+			StrikeState& st, const ContactParams& p = ContactParams{}, bool live = false, float rest_s = 0.2f,
+			float grip_y = 120.0f)
+		{
+			SwingResult res;
+			const HitShape pipe = TestPipe();
+			float pa[3] = {}, pb[3] = {};
+			bool have_prev = false;
+			const int n = static_cast<int>((dur + 2.0f * rest_s) / dt);
+			float speed = 0.0f;
+			for (int i = 0; i <= n; i++)
+			{
+				const float t = static_cast<float>(i) * dt;
+				float u = std::clamp((t - rest_s) / dur, 0.0f, 1.0f);
+				u = u * u * (3.0f - 2.0f * u);
+				float m[16], a[3], b[3];
+				TestMatrixAt(a0 + (a1 - a0) * u, 0.0f, grip_y, 0.0f, m);
+				PlaceShape(pipe, m, a, b);
+				if (have_prev)
+				{
+					const float v = Len3(b[0] - pb[0], b[1] - pb[1], b[2] - pb[2]) / dt / 100.0f;
+					speed += (v - speed) * (1.0f - std::exp(-dt / 0.02f));
+				}
+				int touching[8];
+				int nt = 0;
+				for (const EnemyVolume& z : zombies)
+					if (nt < 8 && Touches(a, b, pipe.radius, have_prev, pa, pb, z, p.lead_cm))
+						touching[nt++] = z.id;
+				StrikeIn in;
+				in.dt = dt;
+				in.usable = true;
+				in.speed = speed;
+				in.live = live;
+				in.touching = touching;
+				in.touching_count = nt;
+				const StrikeOut o = StrikeStep(in, p, st);
+				if (o.enemy >= 0)
+				{
+					if (res.strikes == 0)
+					{
+						res.first_enemy = o.enemy;
+						res.first_t = t;
+						res.first_strength = o.strength;
+					}
+					res.strikes++;
+					res.enemies.push_back(o.enemy);
+				}
+				std::memcpy(pa, a, sizeof(pa));
+				std::memcpy(pb, b, sizeof(pb));
+				have_prev = true;
+			}
+			return res;
+		}
+	}
+
+	std::vector<std::string> SelfTestContact()
+	{
+		Checker c;
+		const ContactParams p;
+		// Strength.
+		c(Strength(p.speed - 0.01f, p) == 0.0f, "strength: below the speed nothing");
+		c(std::fabs(Strength(p.speed, p) - p.light) < 1e-5f, "strength: at the speed, light");
+		c(std::fabs(Strength(p.firm, p) - 1.0f) < 1e-5f && std::fabs(Strength(p.heavy - 0.01f, p) - 1.0f) < 1e-5f,
+			"strength: firm to heavy, the game's own hit");
+		c(std::fabs(Strength(p.heavy, p) - p.strong) < 1e-5f && std::fabs(Strength(30.0f, p) - p.strong) < 1e-5f,
+			"strength: heavy and above, strong");
+		{
+			const float mid = Strength(0.5f * (p.speed + p.firm), p);
+			c(mid > p.light && mid < 1.0f, "strength: rises between speed and firm");
+		}
+		c(Strength(std::numeric_limits<float>::quiet_NaN(), p) == 0.0f, "strength: NaN is none");
+		{
+			ContactParams bad;
+			bad.speed = std::numeric_limits<float>::quiet_NaN();
+			bad.firm = 0.1f;
+			bad.heavy = -3.0f;
+			bad.strong = 0.2f;
+			bad.window_frames = 1000;
+			const ContactParams s = SanitizedContact(bad);
+			c(s.speed == p.speed && s.firm >= s.speed && s.heavy >= s.firm && s.strong >= 1.0f && s.window_frames == 30 &&
+				  s.rearm < s.speed,
+				"strength: nonsense tuning is clamped into order");
+		}
+		// Geometry.
+		{
+			const float a[3] = {0, 0, 0}, b[3] = {10, 0, 0}, q[3] = {5, 3, 0}, e[3] = {-4, 0, 3};
+			c(std::fabs(SegmentPointDistSq(a, b, q) - 9.0f) < 1e-4f, "segment: distance to the middle");
+			c(std::fabs(SegmentPointDistSq(a, b, e) - 25.0f) < 1e-4f, "segment: distance past an end");
+			c(std::fabs(SegmentPointDistSq(a, a, q) - 34.0f) < 1e-4f, "segment: a point segment (a sphere)");
+			float m[16], pa[3], pb[3];
+			TestMatrixAt(0.0f, 100.0f, 120.0f, 0.0f, m);
+			PlaceShape(TestPipe(), m, pa, pb);
+			// The far end (-60 along the model's X, which points the far end along +z here) at z = +60, the near end at -40.
+			c(std::fabs(pb[2] - 60.0f) < 1e-3f && std::fabs(pa[2] + 40.0f) < 1e-3f && std::fabs(pb[0] - 100.0f) < 1e-3f &&
+				  std::fabs(pb[1] - 120.0f) < 1e-3f,
+				"shape: the pipe placed, the far end b");
+			HitShape knife;
+			knife.valid = true;
+			knife.p[0] = -10.0f;
+			knife.radius = 30.0f;
+			PlaceShape(knife, m, pa, pb);
+			c(pa[0] == pb[0] && pa[2] == pb[2] && std::fabs(pb[2] - 10.0f) < 1e-3f, "shape: a sphere's ends are its centre");
+			const EnemyVolume z = TestZombie(5, 0.0f, 150.0f);
+			const float k0[3] = {0, 120, 150 - 32 - 30 + 5}, k1[3] = {0, 120, 150 - 32 - 30 - 5};
+			int sph = -1;
+			c(Touches(k0, k0, 30.0f, false, k0, k0, z, 0.0f, &sph) && sph == 1, "touch: a knife sphere at the chest");
+			c(!Touches(k1, k1, 30.0f, false, k1, k1, z, 0.0f) && Touches(k1, k1, 30.0f, false, k1, k1, z, 8.0f),
+				"touch: 5 cm short misses, with the 8 cm lead it touches");
+			const float f0[3] = {-200, 120, 150}, f1[3] = {-150, 120, 150}, g0[3] = {150, 120, 150}, g1[3] = {200, 120, 150};
+			c(!Touches(g0, g1, 30.0f, false, f0, f1, z, 0.0f) && Touches(g0, g1, 30.0f, true, f0, f1, z, 0.0f),
+				"touch: swept, a shape that jumps past the zombie between polls still touches");
+			EnemyVolume none = z;
+			none.count = 0;
+			c(!Touches(k0, k0, 30.0f, false, k0, k0, none, 50.0f), "touch: an enemy without spheres is never touched");
+		}
+		// Swings. The zombie 1.1 m ahead (+z) of a grip at 1.2 m, the pipe swung across in front of it.
+		const std::vector<EnemyVolume> one = {TestZombie(7, 0.0f, 110.0f)};
+		{
+			StrikeState st;
+			const SwingResult r = RunSwing(-1.4f, 1.4f, 0.25f, 1.0f / 72.0f, one, st);
+			c(r.strikes == 1 && r.first_enemy == 7, "swing: a fast side swing strikes the zombie once");
+			c(r.first_strength >= 1.0f, "swing: a fast swing is at least the game's own hit");
+		}
+		{
+			StrikeState st;
+			const SwingResult r = RunSwing(-1.4f, 1.4f, 0.12f, 1.0f / 72.0f, one, st);
+			c(r.strikes == 1 && std::fabs(r.first_strength - p.strong) < 1e-5f, "swing: a very fast swing is strong");
+		}
+		{
+			StrikeState st;
+			const SwingResult r = RunSwing(-1.4f, 1.4f, 0.25f, 1.0f / 20.0f, one, st);
+			c(r.strikes == 1, "swing: at 20 polls a second the swept test still strikes");
+		}
+		{
+			StrikeState st;
+			const SwingResult r = RunSwing(-1.4f, 1.4f, 2.5f, 1.0f / 72.0f, one, st);
+			c(r.strikes == 0, "swing: a slow sweep through the zombie never strikes");
+		}
+		{
+			// Small moves: the pipe resting inside the zombie, waggled 10 degrees each way at 2 Hz.
+			StrikeState st;
+			int strikes = 0;
+			float pa[3] = {}, pb[3] = {}, speed = 0.0f;
+			bool have_prev = false;
+			const float dt = 1.0f / 72.0f;
+			for (int i = 0; i < 72 * 3; i++)
+			{
+				const float t = static_cast<float>(i) * dt;
+				float m[16], a[3], b[3];
+				TestMatrixAt(0.17f * std::sin(2.0f * kPi * 2.0f * t), 0.0f, 120.0f, 0.0f, m);
+				PlaceShape(TestPipe(), m, a, b);
+				if (have_prev)
+					speed += (Len3(b[0] - pb[0], b[1] - pb[1], b[2] - pb[2]) / dt / 100.0f - speed) *
+					         (1.0f - std::exp(-dt / 0.02f));
+				int touching[1];
+				const int nt = Touches(a, b, 30.0f, have_prev, pa, pb, one[0], p.lead_cm) ? 1 : 0;
+				touching[0] = 7;
+				StrikeIn in;
+				in.dt = dt;
+				in.usable = true;
+				in.speed = speed;
+				in.touching = touching;
+				in.touching_count = nt;
+				strikes += StrikeStep(in, p, st).enemy >= 0 ? 1 : 0;
+				std::memcpy(pa, a, sizeof(pa));
+				std::memcpy(pb, b, sizeof(pb));
+				have_prev = true;
+			}
+			c(strikes == 0, "small moves: a waggle inside the zombie never strikes");
+		}
+		{
+			// A swing, then straight back through the zombie without slowing: no second strike; then a rest (re-armed)
+			// and another swing: a second strike.
+			StrikeState st;
+			const SwingResult r1 = RunSwing(-1.4f, 1.4f, 0.25f, 1.0f / 72.0f, one, st, p, false, 0.0f);
+			const SwingResult r2 = RunSwing(1.4f, -1.4f, 0.25f, 1.0f / 72.0f, one, st, p, false, 0.0f);
+			c(r1.strikes == 1 && r2.strikes == 1, "re-arm: the back swing after the weapon left the zombie strikes again");
+			StrikeState st2;
+			const SwingResult s1 = RunSwing(-1.4f, 0.0f, 0.12f, 1.0f / 72.0f, one, st2, p, false, 0.0f);
+			// Stopped inside the zombie at speed, then jabbed on at once: the same swing, so no second strike.
+			const SwingResult s2 = RunSwing(0.0f, 0.15f, 0.03f, 1.0f / 72.0f, one, st2, p, false, 0.0f);
+			c(s1.strikes == 1 && s2.strikes == 0, "re-arm: still inside the zombie at speed is the same swing");
+			StrikeState st3;
+			RunSwing(-1.4f, 1.4f, 0.25f, 1.0f / 72.0f, one, st3);
+			const SwingResult again = RunSwing(-1.4f, 1.4f, 0.25f, 1.0f / 72.0f, one, st3);
+			c(again.strikes == 1, "re-arm: after a rest the next swing strikes");
+		}
+		{
+			// Two zombies side by side, one swing: each struck once, the first before the second.
+			const std::vector<EnemyVolume> two = {TestZombie(3, -60.0f, 100.0f), TestZombie(4, 60.0f, 100.0f)};
+			ContactParams q = p;
+			q.cooldown_s = 0.0f;
+			StrikeState st;
+			const SwingResult r = RunSwing(-1.4f, 1.4f, 0.4f, 1.0f / 72.0f, two, st, q);
+			c(r.strikes == 2 && r.enemies.size() == 2 && r.enemies[0] == 3 && r.enemies[1] == 4,
+				"two enemies: one swing strikes each once, in order");
+		}
+		{
+			StrikeState st;
+			const SwingResult r = RunSwing(-1.4f, 1.4f, 0.25f, 1.0f / 72.0f, one, st, p, true);
+			c(r.strikes == 0, "live: no strike while the last strike's attack object lives");
+			StrikeState st2;
+			StrikeIn in;
+			in.dt = 0.01f;
+			in.usable = false;
+			in.speed = 8.0f;
+			const int t7 = 7;
+			in.touching = &t7;
+			in.touching_count = 1;
+			c(StrikeStep(in, p, st2).enemy < 0 && !st2.enemies[7].struck, "usable: nothing strikes while not usable");
+			const int bad = 99;
+			in.usable = true;
+			in.touching = &bad;
+			c(StrikeStep(in, p, st2).enemy < 0, "an enemy id past the table is ignored");
+		}
+		{
+			// The grip above the zombie's head (the pipe passes over it): no strike.
+			StrikeState st;
+			const SwingResult r = RunSwing(-1.4f, 1.4f, 0.2f, 1.0f / 72.0f, one, st, p, false, 0.2f, 260.0f);
+			c(r.strikes == 0, "a swing over the zombie's head misses");
+		}
+		return c.failures;
+	}
+
 	void OnStateLoaded()
 	{
 		s_enemies_valid = false;
@@ -1090,6 +1812,7 @@ namespace VR::PhysicalMelee
 		s_drive.Reset();
 		// The state's RAM has its own block (zero unless it was saved while armed); write it again before trusting it.
 		s_block_armed = false;
+		ResetContact();
 	}
 
 	Frame Poll(const VRInputSnapshot& snap, GuestReader reader, float dt)
@@ -1220,6 +1943,10 @@ namespace VR::PhysicalMelee
 				          !mi.private_coop   ? "off (online, and not private co-op)" :
 				          !mi.online_setting ? "off (online: [VR] PhysicalMeleeOnline is off)" :
 				                               "off";
+			else if (mode == Mode::Offline && mp->has_contact && mp->has_override &&
+			         EmuConfig.VR.PhysicalMeleeMode == Pcsx2Config::VROptions::PhysicalMeleeModeType::Contact)
+				verdict = "on, contact (the VR weapon touching an enemy at speed hits through the game's own code: no attack "
+				          "action, nothing pressed; harder swings hit harder)";
 			else if (mode == Mode::Offline)
 				verdict = fmt::format("on (swing to attack with {}; the hit {}{})", mp->attack_button,
 					mp->has_override ? "follows the VR weapon" : "stays on the game's own swing (no melee.override)",
@@ -1336,62 +2063,94 @@ namespace VR::PhysicalMelee
 		// The right hand: the detector's point up the handle, and the model's frame for the override.
 		float pos[3] = {}, quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 		const bool hand = env && RightHand(snap, pos, quat);
-		DetectorIn di;
-		di.dt = dt;
-		di.valid = hand;
-		if (hand)
+
+		// Contact mode ([VR] PhysicalMeleeMode = Contact): only where the caves may run (Overrides), with the profile's
+		// melee.contact; otherwise the press (CoopPress online, a profile without it, or the setting).
+		const bool contact = env && Overrides(mode) && mp->has_override && mp->has_contact &&
+		                     EmuConfig.VR.PhysicalMeleeMode == Pcsx2Config::VROptions::PhysicalMeleeModeType::Contact;
+		if (contact != s_contact_mode)
 		{
-			const float up[3] = {0.0f, mp->detect.tip_m, 0.0f};
-			float r[3];
-			RotateByQuat(quat, up, r);
-			for (int k = 0; k < 3; k++)
-				di.tip[k] = pos[k] + r[k];
-		}
-		di.armed = usable && !screen && s_drive.phase == Phase::Idle;
-		const DetectorOut dout = Detect(di, mp ? mp->detect : DetectorParams{}, s_detect);
-		if (dout.swing)
-		{
-			s_swing_speed = dout.speed;
-			s_swing_path = dout.path_m;
+			s_contact_mode = contact;
+			Console.WriteLn("(VR) Melee: %s.", contact ?
+				"contact mode (the VR weapon touching an enemy hits through the game's own code; nothing is pressed)" :
+				"press mode (a swing presses the game's own attack)");
 		}
 
-		DriverIn ri;
-		ri.dt = dt;
-		ri.request = dout.swing;
-		ri.usable = usable;
-		ri.screen = screen;
-		ri.raised = raised;
-		ri.aim_idle = aim_idle;
-		ri.swinging = swinging;
-		ri.hp_drop = hp_drop;
-		const DriverOut o = Step(ri, mp ? mp->drive : DriverParams{}, s_drive);
-		if (o.live)
+		DetectorOut dout;
+		DriverOut o;
+		if (!contact)
 		{
-			Pulse(kTickLive);
-			Console.WriteLn("(VR) Melee: swing at %.1f m/s (%.2f m of stroke); the game's swing started %.0f ms later%s.",
-				static_cast<double>(s_swing_speed), static_cast<double>(s_swing_path), static_cast<double>(o.latency_s * 1000.0f),
-				s_drive.we_raise ? " (raised for it)" : "");
+			DetectorIn di;
+			di.dt = dt;
+			di.valid = hand;
+			if (hand)
+			{
+				const float up[3] = {0.0f, mp->detect.tip_m, 0.0f};
+				float r[3];
+				RotateByQuat(quat, up, r);
+				for (int k = 0; k < 3; k++)
+					di.tip[k] = pos[k] + r[k];
+			}
+			di.armed = usable && !screen && s_drive.phase == Phase::Idle;
+			dout = Detect(di, mp ? mp->detect : DetectorParams{}, s_detect);
+			if (dout.swing)
+			{
+				s_swing_speed = dout.speed;
+				s_swing_path = dout.path_m;
+			}
+
+			DriverIn ri;
+			ri.dt = dt;
+			ri.request = dout.swing;
+			ri.usable = usable;
+			ri.screen = screen;
+			ri.raised = raised;
+			ri.aim_idle = aim_idle;
+			ri.swinging = swinging;
+			ri.hp_drop = hp_drop;
+			o = Step(ri, mp ? mp->drive : DriverParams{}, s_drive);
+			if (o.live)
+			{
+				Pulse(kTickLive);
+				Console.WriteLn("(VR) Melee: swing at %.1f m/s (%.2f m of stroke); the game's swing started %.0f ms later%s.",
+					static_cast<double>(s_swing_speed), static_cast<double>(s_swing_path), static_cast<double>(o.latency_s * 1000.0f),
+					s_drive.we_raise ? " (raised for it)" : "");
+			}
+			if (o.contact)
+			{
+				Pulse(kBuzzContact);
+				Console.WriteLn("(VR) Melee: contact, enemy %d HP %d -> %d.", s_hit_enemy, s_hit_from, s_hit_to);
+			}
+			if (o.finished && o.result != Result::Swung)
+				Console.WriteLn("(VR) Melee: swing not made: %s.", ResultName(o.result));
 		}
-		if (o.contact)
+		else
 		{
-			Pulse(kBuzzContact);
-			Console.WriteLn("(VR) Melee: contact, enemy %d HP %d -> %d.", s_hit_enemy, s_hit_from, s_hit_to);
+			// Nothing is pressed in contact mode; a press attempt in flight lets go.
+			s_drive.Reset();
+			s_detect.Reset();
 		}
-		if (o.finished && o.result != Result::Swung)
-			Console.WriteLn("(VR) Melee: swing not made: %s.", ResultName(o.result));
 
 		// The override block: where the VR weapon is, in the game's space, every poll it can be known; cleared otherwise.
 		bool wrote = false;
+		float m[16] = {};
+		float origin[3] = {}, axes[3][3] = {};
+		u32 counter = 0;
 		if (usable && Overrides(mode) && mp->has_override && hand && attach.valid)
 		{
 			CameraDriver::Mapping map;
-			float origin[3], axes[3][3], m[16];
-			u32 counter = 0;
 			if (CameraDriver::GetMapping(&map) &&
 				HandModel::ModelFrame(attach, HandModel::Held::Melee, pos, quat, origin, axes) &&
 				GameMatrix(origin, axes, MapPoint, &map, m) && Read(reader, mp->counter, 1, &counter))
 			{
 				const u32 b = mp->block;
+				if (!s_block_armed)
+				{
+					// A fresh block: the strike fields (and the caves' own) start from zero, whatever RAM held.
+					for (u32 off = 0x0C; off < 0x40; off += 4)
+						memWrite32(b + off, 0);
+					s_strike_seq = 0;
+				}
 				for (int k = 0; k < 16; k++)
 				{
 					u32 w;
@@ -1415,24 +2174,26 @@ namespace VR::PhysicalMelee
 		if (!wrote)
 			ClearBlock();
 
+		if (contact)
+			PollContact(reader, *mp, record, wrote && !screen && !swinging, m, origin, axes, counter, dt);
+		else
+			s_contact.Reset();
+
 		// PCSX2_VR_MELEE_LOG=1 (tuning, debugging): twice a second, why a swing would or would not attack, and the fastest
 		// the measured point moved since the last line.
-		static const bool s_diag = [] {
-			const char* e = std::getenv("PCSX2_VR_MELEE_LOG");
-			return e && e[0] == '1';
-		}();
-		if (s_diag && profile)
+		if (Diag() && profile)
 		{
 			static float s_diag_s = 0.0f;
 			static float s_diag_peak = 0.0f;
-			s_diag_peak = std::max(s_diag_peak, dout.speed);
+			s_diag_peak = std::max(s_diag_peak, contact ? s_tip_speed : dout.speed);
 			s_diag_s += dt;
 			if (s_diag_s >= 0.5f)
 			{
-				Console.WriteLn("(VR) Melee diag: %s | env %d melee %d (item %u) raised %d normal %d aim idle %d swinging %d "
+				Console.WriteLn("(VR) Melee diag: %s%s | env %d melee %d (item %u) raised %d normal %d aim idle %d swinging %d "
 								"screen %d hand %d | peak %.2f m/s, stroke %d | %s | block %s",
-					ModeName(mode), env, melee, static_cast<unsigned>(item_id), raised, normal, aim_idle, swinging, screen,
-					hand, static_cast<double>(s_diag_peak), dout.in_stroke, PhaseName(s_drive.phase), wrote ? "written" : "clear");
+					ModeName(mode), contact ? ", contact" : "", env, melee, static_cast<unsigned>(item_id), raised, normal,
+					aim_idle, swinging, screen, hand, static_cast<double>(s_diag_peak), dout.in_stroke,
+					PhaseName(s_drive.phase), wrote ? "written" : "clear");
 				s_diag_s = 0.0f;
 				s_diag_peak = 0.0f;
 			}

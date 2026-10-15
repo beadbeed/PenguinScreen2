@@ -43,8 +43,10 @@
 #include "common/Path.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
@@ -174,13 +176,16 @@ namespace
 	}
 
 	// [VR] PhysicalMelee's caves, run as the EE would run them: the File #1 profile's camera.silence words in a small
-	// interpreter of just the instructions they use (lui, ori, addiu, sltiu, subu, lw, lbu, sw, lwc1, swc1, beq, bne,
-	// bgez, bgtz, j, jr, with delay slots; the FPU loads and stores only move bits).
+	// interpreter of just the instructions they use (lui, ori, addiu, sltiu, subu, lw, lbu, sw, sh, sd, lwc1, swc1, mul.s,
+	// beq, bne, bgez, bgtz, blez, j, jal, jr, with delay slots; the FPU loads and stores only move bits). A stub stands in
+	// for game code the caves call or jump to: Run asks it where control goes on from an address outside the cave.
 	struct MiniEE
 	{
 		std::map<u32, u32> mem; // word address -> word
 		u32 r[32] = {};
 		u32 f[32] = {};
+		// Game code outside the cave: true and *next to run it (a call returns to *next), false to stop there.
+		bool (*stub)(MiniEE& ee, u32 pc, u32* next) = nullptr;
 
 		u32 Load32(u32 a) const
 		{
@@ -188,6 +193,23 @@ namespace
 			return it == mem.end() ? 0u : it->second;
 		}
 		void Store32(u32 a, u32 v) { mem[a & ~3u] = v; }
+		void Store16(u32 a, u16 v)
+		{
+			const u32 sh = (a & 2u) * 8u;
+			Store32(a, (Load32(a) & ~(0xFFFFu << sh)) | (static_cast<u32>(v) << sh));
+		}
+		static float F(u32 bits)
+		{
+			float x;
+			std::memcpy(&x, &bits, 4);
+			return x;
+		}
+		static u32 Bits(float x)
+		{
+			u32 b;
+			std::memcpy(&b, &x, 4);
+			return b;
+		}
 		void Store8(u32 a, u8 v)
 		{
 			const u32 sh = (a & 3u) * 8u;
@@ -227,11 +249,15 @@ namespace
 					*target = bt;
 					break;
 				case 0x02:
+				case 0x03:
 					*branch = *taken = true;
 					*target = (pc & 0xF0000000u) | ((i & 0x3FFFFFFu) << 2);
+					if (op == 0x03)
+						r[31] = pc + 8u;
 					break;
 				case 0x04: *branch = true; *taken = r[rs] == r[rt]; *target = bt; break;
 				case 0x05: *branch = true; *taken = r[rs] != r[rt]; *target = bt; break;
+				case 0x06: *branch = true; *taken = static_cast<s32>(r[rs]) <= 0; *target = bt; break;
 				case 0x07: *branch = true; *taken = static_cast<s32>(r[rs]) > 0; *target = bt; break;
 				case 0x09: r[rt] = r[rs] + simm; break;
 				case 0x0B: r[rt] = r[rs] < simm ? 1u : 0u; break;
@@ -240,6 +266,14 @@ namespace
 				case 0x23: r[rt] = Load32(r[rs] + simm); break;
 				case 0x24: r[rt] = (Load32(r[rs] + simm) >> (((r[rs] + simm) & 3u) * 8u)) & 0xFFu; break;
 				case 0x2B: Store32(r[rs] + simm, r[rt]); break;
+				case 0x29: Store16(r[rs] + simm, static_cast<u16>(r[rt])); break;
+				case 0x3F: Store32(r[rs] + simm, r[rt]); Store32(r[rs] + simm + 4u, 0); break; // sd: these values are 32-bit
+				case 0x11:
+					// mul.s fd, fs, ft only
+					if (((i >> 21) & 31u) != 0x10 || fn != 0x02)
+						return false;
+					f[(i >> 6) & 31u] = Bits(F(f[rd]) * F(f[rt]));
+					break;
 				case 0x31: f[rt] = Load32(r[rs] + simm); break;
 				case 0x39: Store32(r[rs] + simm, f[rt]); break;
 				default: return false;
@@ -256,7 +290,15 @@ namespace
 			for (int n = 0; n < 500; n++)
 			{
 				if (pc < lo || pc >= hi)
+				{
+					u32 next = 0;
+					if (stub && stub(*this, pc, &next))
+					{
+						pc = next;
+						continue;
+					}
 					return pc;
+				}
 				bool br = false, tk = false, br2 = false, tk2 = false;
 				u32 tg = 0, tg2 = 0;
 				if (!Exec(pc, &br, &tk, &tg))
@@ -367,6 +409,233 @@ namespace
 		       ee.r[31] == 0x56950C && ee.r[16] == record;
 	}
 
+	// Contact mode's caves D and E (the File #1 profile's PhysicalMeleeContact words) in the same interpreter. The block
+	// and the game around them are scripted: the attack spawn FUN_005521B0 (a stub that appends a node and an attack
+	// object owned by a0, when told to), the node list's tail, and FUN_00636990's own body (a stub returning 2.0).
+	constexpr u32 kBlock = 0xFF000, kTail = 0x23BD9C, kNode = 0x3B9450, kObject = 0x3C4FC0, kItem = 11;
+	struct ContactCaveRun
+	{
+		bool spawned = false;   // the stub ran
+		u32 a[4] = {};          // its arguments
+	};
+	ContactCaveRun s_contact_run;
+	bool s_contact_spawn_ok = true; // the stub appends a node (else the game refused: no weapon object)
+	struct CaveECall
+	{
+		bool called = false;
+		u32 sp = 0, ra = 0, a0 = 0, a1 = 0;
+	};
+	CaveECall s_cave_e; // what FUN_00636990's body (the stub) was entered with
+
+	bool ContactStub(MiniEE& ee, u32 pc, u32* next)
+	{
+		if (pc == 0x5521B0)
+		{
+			s_contact_run.spawned = true;
+			for (int k = 0; k < 4; k++)
+				s_contact_run.a[k] = ee.r[4 + k];
+			if (s_contact_spawn_ok)
+			{
+				ee.Store32(kTail, kNode);
+				ee.Store32(kNode + 0x08, kObject);
+				ee.Store32(kObject + 0x28, ee.r[4]);
+				ee.Store32(kObject + 0x10, 0xFFFF0000u); // +0x12 life -1, as the game leaves it
+			}
+			for (int k : {1, 2, 3, 8, 9, 10, 11, 12, 13})
+				ee.r[k] = 0xDEAD0000u + static_cast<u32>(k); // the callee may clobber any temporary
+			*next = ee.r[31];
+			return true;
+		}
+		if (pc == 0x636998)
+		{
+			// FUN_00636990 after its first two words (in cave E's trampoline): returns its multiplier.
+			s_cave_e.called = true;
+			s_cave_e.sp = ee.r[29];
+			s_cave_e.ra = ee.Load32(ee.r[29] + 0x20);
+			s_cave_e.a0 = ee.r[4];
+			s_cave_e.a1 = ee.r[5];
+			ee.f[0] = MiniEE::Bits(2.0f);
+			ee.r[31] = ee.Load32(ee.r[29] + 0x20);
+			ee.r[29] += 48;
+			*next = ee.r[31];
+			return true;
+		}
+		return false;
+	}
+
+	bool ContactCaveMemory(MiniEE& ee)
+	{
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		if (!p || !p->camera.has_value())
+			return false;
+		int words = 0;
+		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
+		{
+			if (sil.when_setting == "PhysicalMeleeContact" && sil.ee_address >= 0xFE000u && sil.ee_address < 0xFF000u)
+			{
+				ee.Store32(sil.ee_address, sil.value_on);
+				words++;
+			}
+		}
+		ee.stub = ContactStub;
+		ee.r[29] = 0x01F00000; // sp
+		return words > 0;
+	}
+
+	struct CaveDCase
+	{
+		bool magic = true;
+		u8 counter = 30, stamp = 29, strike_stamp = 28;
+		u32 seq = 1, served = 0, left = 0, live_obj = 0;
+		u8 stance = 1, sub = 0;
+		bool spawn_ok = true;
+	};
+	struct CaveDResult
+	{
+		bool ok = false; // left for FUN_005A9DB0 with ra and sp kept
+		bool spawned = false;
+		u32 served = 0, left = 0, obj = 0, made = 0;
+		u16 life = 0;
+		u32 args[4] = {};
+	};
+	CaveDResult RunCaveD(const CaveDCase& c)
+	{
+		CaveDResult res;
+		MiniEE ee;
+		if (!ContactCaveMemory(ee))
+			return res;
+		s_contact_run = {};
+		s_contact_spawn_ok = c.spawn_ok;
+		ee.Store32(kBlock, c.magic ? 0x4D454C31u : 0u);
+		ee.Store8(kBlock + 0x04, c.stamp);
+		ee.Store32(kBlock + 0x08, kLocalRecord);
+		ee.Store32(kBlock + 0x0C, c.seq);
+		ee.Store32(kBlock + 0x10, c.served);
+		ee.Store32(kBlock + 0x14, c.live_obj);
+		ee.Store32(kBlock + 0x18, 6);
+		ee.Store32(kBlock + 0x20, c.left);
+		ee.Store8(kBlock + 0x28, c.strike_stamp);
+		ee.Store8(0x48BF93, c.counter);
+		ee.Store8(kLocalRecord + 0x08, c.stance);
+		ee.Store8(kLocalRecord + 0x09, c.sub);
+		ee.Store8(kLocalRecord + 0xC7C, kItem);
+		ee.Store32(kTail, 0x3B0000); // the tail before the spawn
+		ee.r[31] = 0x5CDF6C;
+		const u32 sp = ee.r[29];
+		ee.r[16] = 0x11111111;
+		const u32 out = ee.Run(0xFE200, 0xFE200, 0xFE400);
+		res.ok = out == 0x5A9DB0 && ee.r[31] == 0x5CDF6C && ee.r[29] == sp && ee.r[16] == 0x11111111;
+		res.spawned = s_contact_run.spawned;
+		for (int k = 0; k < 4; k++)
+			res.args[k] = s_contact_run.a[k];
+		res.served = ee.Load32(kBlock + 0x10);
+		res.obj = ee.Load32(kBlock + 0x14);
+		res.left = ee.Load32(kBlock + 0x20);
+		res.made = ee.Load32(kBlock + 0x24);
+		res.life = static_cast<u16>(ee.Load32(kObject + 0x10) >> 16);
+		return res;
+	}
+
+	// Cave E for a node: the multiplier it returns (f0), and whether the game's own body ran as if called directly
+	// (*original: its frame made by its own first two words, returning straight to the caller) or inside cave E.
+	bool RunCaveE(bool magic, u32 live_obj, u32 node_obj, float strength, float* f0, bool* original)
+	{
+		MiniEE ee;
+		if (!ContactCaveMemory(ee))
+			return false;
+		s_cave_e = {};
+		ee.Store32(kBlock, magic ? 0x4D454C31u : 0u);
+		ee.Store32(kBlock + 0x14, live_obj);
+		ee.Store32(kBlock + 0x1C, MiniEE::Bits(strength));
+		ee.Store32(kNode + 0x08, node_obj);
+		ee.r[4] = kLocalRecord;
+		ee.r[5] = kNode;
+		ee.r[31] = kReturn;
+		const u32 sp = ee.r[29];
+		const u32 out = ee.Run(0xFE400, 0xFE400, 0xFE500);
+		*f0 = MiniEE::F(ee.f[0]);
+		*original = s_cave_e.sp == sp - 48 && s_cave_e.ra == kReturn;
+		return out == kReturn && ee.r[29] == sp && s_cave_e.called && s_cave_e.a0 == kLocalRecord && s_cave_e.a1 == kNode;
+	}
+
+	bool MeleeContactCaves()
+	{
+		bool ok = true;
+		const auto check = [&ok](bool c) { ok = ok && c; };
+		{
+			// A fresh request, the record idle: the game's spawn with (record, +0x50, +0x38, its item), the object's life the
+			// window, the strike noted.
+			const CaveDResult r = RunCaveD(CaveDCase{});
+			check(r.ok && r.spawned && r.args[0] == kLocalRecord && r.args[1] == kLocalRecord + 0x50 &&
+				  r.args[2] == kLocalRecord + 0x38 && r.args[3] == kItem && r.served == 1 && r.obj == kObject && r.left == 6 &&
+				  r.made == 1 && r.life == 6);
+		}
+		{
+			CaveDCase c;
+			c.served = 1; // already served
+			const CaveDResult r = RunCaveD(c);
+			check(r.ok && !r.spawned && r.obj == 0 && r.made == 0);
+		}
+		{
+			CaveDCase c;
+			c.stance = 2;
+			c.sub = 3; // the canned swing runs: consumed, not spawned
+			const CaveDResult r = RunCaveD(c);
+			check(r.ok && !r.spawned && r.served == 1);
+			c.sub = 1; // aim idle: spawned
+			check(RunCaveD(c).spawned);
+		}
+		{
+			CaveDCase c;
+			c.strike_stamp = 20; // 10 frames old: consumed, not spawned
+			const CaveDResult r = RunCaveD(c);
+			check(r.ok && !r.spawned && r.served == 1);
+			c.counter = 2;
+			c.stamp = 1;
+			c.strike_stamp = 58; // 4 frames old across the wrap: spawned
+			check(RunCaveD(c).spawned);
+		}
+		{
+			CaveDCase c;
+			c.magic = false;
+			const CaveDResult r = RunCaveD(c);
+			check(r.ok && !r.spawned && r.served == 0);
+			c.magic = true;
+			c.stamp = 10; // the block itself stale (20 frames): nothing taken
+			const CaveDResult s = RunCaveD(c);
+			check(s.ok && !s.spawned && s.served == 0);
+		}
+		{
+			CaveDCase c;
+			c.left = 3;
+			c.live_obj = kObject; // a strike live: counted down, the new request consumed but not spawned
+			const CaveDResult r = RunCaveD(c);
+			check(r.ok && !r.spawned && r.left == 2 && r.obj == kObject && r.served == 1);
+			c.left = 1;
+			c.served = 1; // the last frame: the strike is over
+			const CaveDResult s = RunCaveD(c);
+			check(s.ok && s.left == 0 && s.obj == 0);
+			c.stamp = 0; // ... even with a stale block
+			const CaveDResult t = RunCaveD(c);
+			check(t.ok && t.left == 0 && t.obj == 0);
+		}
+		{
+			CaveDCase c;
+			c.spawn_ok = false; // the game made no node (no weapon object): nothing noted
+			const CaveDResult r = RunCaveD(c);
+			check(r.ok && r.spawned && r.obj == 0 && r.left == 0 && r.made == 0);
+		}
+		{
+			float f0 = 0.0f;
+			bool original = true;
+			check(RunCaveE(true, kObject, kObject, 1.5f, &f0, &original) && !original && std::fabs(f0 - 3.0f) < 1e-6f);
+			check(RunCaveE(true, kObject, kObject + 0x200, 1.5f, &f0, &original) && original && f0 == 2.0f);
+			check(RunCaveE(false, kObject, kObject, 1.5f, &f0, &original) && original && f0 == 2.0f);
+			check(RunCaveE(true, 0, 0, 1.5f, &f0, &original) && original && f0 == 2.0f);
+		}
+		return ok;
+	}
+
 	void RunGamepad()
 	{
 		Begin("Gamepad (SpatialControls::SelfTestGamepad)");
@@ -473,7 +742,7 @@ int main(int argc, char* argv[])
 		int gated = 0, kept = 0;
 		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
 		{
-			if (sil.when_setting.empty() || sil.when_setting == "PhysicalMelee")
+			if (sil.when_setting.empty() || sil.when_setting == "PhysicalMelee" || sil.when_setting == "PhysicalMeleeContact")
 			{
 				if (sil.keep_through_disarm)
 					return false;
@@ -578,6 +847,67 @@ int main(int argc, char* argv[])
 		               MeleeCaveC(kLocalRecord, true, 14, 8, true) && MeleeCaveC(kLocalRecord, true, 15, 8, false);
 		return a && b && c;
 	});
+	// Contact mode ([VR] PhysicalMeleeMode = Contact; tools/outbreak-vr/research/2026-10-14-vr-melee.md): the pure parts
+	// (strength from speed, the shape against hurt spheres, the strike and re-arm logic on scripted swings), File #1's
+	// melee.contact and its PhysicalMeleeContact entries (three sites, each guarded by its cave's first and last non-zero
+	// word, before caves D and E in free RAM), and the two caves run on the profile's words.
+	{
+		Begin("Physical melee contact (PhysicalMelee::SelfTestContact)");
+		const std::vector<std::string> failed = VR::PhysicalMelee::SelfTestContact();
+		Record("Physical melee contact", failed.empty(),
+			failed.empty() ? std::string("passed (it names the failed checks only, no check count)") :
+							 "FAIL: " + std::to_string(failed.size()) + " check(s), first: " + failed.front());
+	}
+	RunSilent("Physical melee contact (File #1 profile, melee.contact and camera.silence whenSetting)", +[]() {
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		if (!p || !p->melee.has_value() || !p->camera.has_value() || !VR::ProfileDB::IsSilenceSettingName("PhysicalMeleeContact"))
+			return false;
+		const VR::ProfileDB::MeleeParams& m = p->melee.value();
+		if (!m.has_contact || m.shape_types != 0x6E5940 || m.shape_type_stride != 0x44 || m.shape_attack != 0x06 ||
+			m.shape_params != 0x6E7C90 || m.shape_param_stride != 0x20 || m.shape_index != 0x0E || m.shape_table != 0x6EBFA0 ||
+			m.weapon_type_offset != 0xCA8 || m.sphere_count != 0x1E0 || m.sphere_shapes != 0x1D8 || m.sphere_centres != 0x1DC ||
+			m.kind_offset != 0x02 || m.enemy_kind != 2 || m.reaction_offset != 0x140 || m.zone_offset != 0x13E ||
+			m.hook != 0x5CDF64 || m.hook_on != 0x0C03F880)
+			return false;
+		// The knives have their own (lower) speeds; the pipe takes the block's.
+		if (!(m.ContactFor(33).speed < m.ContactFor(34).speed) || m.ContactFor(34).speed != m.contact.speed)
+			return false;
+		int sites = 0, cave_d = 0, cave_e = 0;
+		size_t first_cave = 0, last_site = 0;
+		bool any_cave = false;
+		for (size_t i = 0; i < p->camera->silence.size(); i++)
+		{
+			const VR::ProfileDB::CameraSilence& sil = p->camera->silence[i];
+			if (sil.when_setting != "PhysicalMeleeContact")
+				continue;
+			if (!sil.offline_only || sil.keep_through_disarm || sil.when.empty())
+				return false;
+			const u32 a = sil.ee_address;
+			if (a >= 0xFE200u && a < 0xFE360u)
+				cave_d++;
+			else if (a >= 0xFE400u && a < 0xFE470u)
+				cave_e++;
+			else if ((a == 0x5CDF64u && sil.value_off == 0x0C16A76Cu && sil.value_on == 0x0C03F880u) ||
+					 (a == 0x636990u && sil.value_off == 0x27BDFFD0u && sil.value_on == 0x0803F900u) ||
+					 (a == 0x636994u && sil.value_off == 0xFFBF0020u && sil.value_on == 0))
+			{
+				if (sil.when.size() != 3)
+					return false; // the overlay and its cave's first and last non-zero word
+				sites++;
+				last_site = i;
+				continue;
+			}
+			else
+				return false; // nothing else
+			if (sil.value_off != 0)
+				return false;
+			if (!any_cave)
+				first_cave = i;
+			any_cave = true;
+		}
+		return sites == 3 && cave_d == 87 && cave_e == 25 && last_site < first_cave;
+	});
+	RunSilent("Physical melee contact caves (D, E: File #1 profile words, interpreted)", MeleeContactCaves);
 	RunGamepad();
 	RunSilent("CameraDriver::SelfTestAssembler (hook)", VR::CameraDriver::SelfTestAssembler);
 	RunSilent("CameraDriver::SelfTestMath (math, predict, comfort, FOV)", VR::CameraDriver::SelfTestMath);
