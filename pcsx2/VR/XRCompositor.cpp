@@ -11317,14 +11317,28 @@ namespace VR::XRCompositor
 					// like the screens (4:3; the 512x448 buffer is not square-pixelled).
 					quad.size = {kPanelHeightM * ComputeAspect(), kPanelHeightM};
 					layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
-					// The menu pointer aims at the panel (its u, v are the shown picture's: the panel covers it all).
+					// The menu pointer aims at the panel. Its u, v are the shown picture's, and the panel is the displayed
+					// rectangle u0..u1, v0..v1 of that picture (MenuPanel::PanelInfo), so the transform published is the whole
+					// picture's, laid out around the panel so that the panel's part of it is where the panel is (a7). With the
+					// rectangle the whole picture (File #1) it is the panel itself.
+					const float du = std::clamp(pinfo.u1 - pinfo.u0, 0.05f, 1.0f);
+					const float dv = std::clamp(pinfo.v1 - pinfo.v0, 0.05f, 1.0f);
+					const float full_w = quad.size.width / du;
+					const float full_h = quad.size.height / dv;
+					// The picture's centre from the panel's, in the panel's own frame (+X right, +Y up; v runs down).
+					const XrVector3f off = {(0.5f - 0.5f * (pinfo.u0 + pinfo.u1)) * full_w, -(0.5f - 0.5f * (pinfo.v0 + pinfo.v1)) * full_h, 0.0f};
+					const XrQuaternionf& pq = quad.pose.orientation;
+					// off rotated by pq: v + 2w (q x v) + 2 q x (q x v).
+					const XrVector3f c1 = {pq.y * off.z - pq.z * off.y, pq.z * off.x - pq.x * off.z, pq.x * off.y - pq.y * off.x};
+					const XrVector3f c2 = {pq.y * c1.z - pq.z * c1.y, pq.z * c1.x - pq.x * c1.z, pq.x * c1.y - pq.y * c1.x};
+					const XrVector3f rot = {off.x + 2.0f * (pq.w * c1.x + c2.x), off.y + 2.0f * (pq.w * c1.y + c2.y),
+						off.z + 2.0f * (pq.w * c1.z + c2.z)};
 					pub = VRScreenTransform{};
-					pub.center.orientation_xyzw = {quad.pose.orientation.x, quad.pose.orientation.y, quad.pose.orientation.z,
-						quad.pose.orientation.w};
-					pub.center.position_xyz = {quad.pose.position.x, quad.pose.position.y, quad.pose.position.z};
+					pub.center.orientation_xyzw = {pq.x, pq.y, pq.z, pq.w};
+					pub.center.position_xyz = {quad.pose.position.x + rot.x, quad.pose.position.y + rot.y, quad.pose.position.z + rot.z};
 					pub.center.valid = true;
-					pub.half_width = 0.5f * quad.size.width;
-					pub.half_height = 0.5f * quad.size.height;
+					pub.half_width = 0.5f * full_w;
+					pub.half_height = 0.5f * full_h;
 					pub.tablet = false;
 					pub.valid = true;
 					if (s_pub_logged != 3)
