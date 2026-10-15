@@ -9305,6 +9305,17 @@ namespace VR::XRCompositor
 					vkCmdResetQueryPool(cmd, wp.queries, 2 * ci, 2);
 					vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, wp.queries, 2 * ci);
 				}
+				if (ok)
+				{
+					// m5: the eye depth images are shared by the passes in flight (the render pass clears them from
+					// UNDEFINED with only the implicit external dependency): every earlier pass's depth writes come before
+					// this pass's clear and tests (ALL_COMMANDS so the render pass's layout transition is ordered too).
+					VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+					mb.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+					mb.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+					vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+						VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+				}
 				const WarpSlot& sl = wp.slot[fw.slot];
 				bool dumped = false;
 				for (int j = 0; ok && j < nj; j++)
