@@ -1108,6 +1108,32 @@ namespace VR::XRCompositor
 		// drops the published entries that show it, then destroys it. Bounded like the queue lock: a pacer stuck in
 		// xrEndFrame for 500 ms means the runtime stopped answering, so VR is abandoned and the swapchain left alive.
 		// With the compositor abandoned the handle is only forgotten.
+		// c4: the swapchains this compositor holds, counted at every create and destroy (any thread), for the log when the
+		// runtime's limit is reached (SteamVR: 16 a session). Forgotten handles (an abandoned compositor) are not uncounted.
+		std::atomic<int> s_live_swapchains{0};
+
+		XrResult CountedCreateSwapchain(const XrSwapchainCreateInfo& ci, XrSwapchain* out)
+		{
+			const XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, out);
+			if (XR_SUCCEEDED(res))
+				s_live_swapchains.fetch_add(1, std::memory_order_relaxed);
+			else if (res == XR_ERROR_LIMIT_REACHED)
+				Console.Warning("(VR) The runtime's swapchain limit was reached (%d held by the compositor; a %ux%u swapchain asked for).",
+					s_live_swapchains.load(std::memory_order_relaxed), ci.width, ci.height);
+			return res;
+		}
+
+		void CountedDestroySwapchain(XrSwapchain swapchain)
+		{
+			if (swapchain != XR_NULL_HANDLE && XR_SUCCEEDED(xrDestroySwapchain(swapchain)))
+				s_live_swapchains.fetch_sub(1, std::memory_order_relaxed);
+		}
+
+		// [VR] DepthWarp: an eye swapchain the pacer draws into is going (submit_mutex held): its passes still in flight are
+		// waited for and its WarpTarget dropped, so neither the GPU nor a later target writes into freed images (M3, M4).
+		// Defined after the warp's state.
+		void WarpForgetSwapchain(XrSwapchain swapchain);
+
 		void DestroySwapchainSynced(XrSwapchain swapchain)
 		{
 			if (swapchain == XR_NULL_HANDLE || s.abandoned.load(std::memory_order_acquire))
@@ -1130,7 +1156,8 @@ namespace VR::XRCompositor
 				std::lock_guard<std::mutex> publish(s.publish_mutex);
 				ForgetPublishedSwapchain(swapchain);
 			}
-			xrDestroySwapchain(swapchain);
+			WarpForgetSwapchain(swapchain);
+			CountedDestroySwapchain(swapchain);
 		}
 
 		// SteamVR gives a session 16 swapchains (a 17th xrCreateSwapchain returns XR_ERROR_LIMIT_REACHED). With
@@ -1139,12 +1166,17 @@ namespace VR::XRCompositor
 		// the edge fill gives its swapchain up for the session (the background stays black) and the creation is retried
 		// once. GS thread. Defined after the edge fill's state.
 		bool YieldEdgeFillSwapchain(const char* who);
+		// c4: [VR] DepthLayer's two depth swapchains count against the limit too: with the edge fill already given up,
+		// the depth layer goes for the session (the frames go as quads) and its swapchains are freed. Defined after it.
+		bool YieldDepthLayerSwapchains(const char* who);
 
 		XrResult CreateSwapchainYielding(const XrSwapchainCreateInfo& ci, XrSwapchain* out, const char* who)
 		{
-			XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, out);
+			XrResult res = CountedCreateSwapchain(ci, out);
 			if (res == XR_ERROR_LIMIT_REACHED && YieldEdgeFillSwapchain(who))
-				res = xrCreateSwapchain(XRSession::GetSession(), &ci, out);
+				res = CountedCreateSwapchain(ci, out);
+			if (res == XR_ERROR_LIMIT_REACHED && YieldDepthLayerSwapchains(who))
+				res = CountedCreateSwapchain(ci, out);
 			return res;
 		}
 
@@ -1212,7 +1244,7 @@ namespace VR::XRCompositor
 			ci.arraySize = 1;
 			ci.mipCount = 1;
 
-			XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &chain.swapchain);
+			XrResult res = CountedCreateSwapchain(ci, &chain.swapchain);
 			if (XR_FAILED(res))
 			{
 				chain.swapchain = XR_NULL_HANDLE;
@@ -1261,7 +1293,7 @@ namespace VR::XRCompositor
 			ci.faceCount = 1;
 			ci.arraySize = 1;
 			ci.mipCount = 1;
-			const XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &chain.swapchain);
+			const XrResult res = CountedCreateSwapchain(ci, &chain.swapchain);
 			uint32_t count = 0;
 			if (XR_FAILED(res) ||
 				!CheckXR(xrEnumerateSwapchainImages(chain.swapchain, 0, &count, nullptr), "xrEnumerateSwapchainImages (depth)") ||
@@ -1271,7 +1303,7 @@ namespace VR::XRCompositor
 							  "layer is off for this session.",
 					eye, w, h, static_cast<int>(res));
 				if (XR_SUCCEEDED(res))
-					xrDestroySwapchain(chain.swapchain);
+					CountedDestroySwapchain(chain.swapchain);
 				chain.swapchain = XR_NULL_HANDLE;
 				return false;
 			}
@@ -1280,7 +1312,7 @@ namespace VR::XRCompositor
 							 reinterpret_cast<XrSwapchainImageBaseHeader*>(chain.images.data())),
 					"xrEnumerateSwapchainImages (depth)"))
 			{
-				xrDestroySwapchain(chain.swapchain);
+				CountedDestroySwapchain(chain.swapchain);
 				chain.swapchain = XR_NULL_HANDLE;
 				chain.images.clear();
 				return false;
@@ -1293,14 +1325,43 @@ namespace VR::XRCompositor
 			return true;
 		}
 
+		bool WarpOn(); // [VR] DepthWarp, defined with its state
+
 		void DepthLayerOff(const char* why)
 		{
 			if (!s.depth_layer)
 				return;
 			s.depth_layer = false;
 			s.present_depth = FpDepth{};
-			DepthExport::SetCompositorWants(false);
+			DepthExport::SetCompositorWants(WarpOn()); // m10: still wanted while the warp uses it
 			Console.Warning("(VR) Depth layer: off for this session: %s; the first-person screen goes as quads.", why);
+		}
+
+		bool YieldDepthLayerSwapchains(const char* who)
+		{
+			if (s.abandoned.load(std::memory_order_acquire))
+				return false;
+			bool any = false;
+			for (const auto& chain : s.depth_chains)
+				any = any || (chain.swapchain != XR_NULL_HANDLE);
+			if (!any)
+				return false;
+			DepthLayerOff("its depth swapchains were given up (the runtime's swapchain limit was reached)");
+			// The GS's copies into the depth images are done first (as DestroySwapchains).
+			WaitAllFences();
+			for (auto& chain : s.depth_chains)
+			{
+				if (chain.swapchain != XR_NULL_HANDLE)
+					DestroySwapchainSynced(chain.swapchain);
+				chain.swapchain = XR_NULL_HANDLE;
+				chain.images.clear();
+				chain.ever_released = false;
+				chain.wait_pending = false;
+				chain.waited = false;
+				chain.release_pending = false;
+			}
+			Console.Warning("(VR) Depth layer: its 2 depth swapchains given to %s.", who);
+			return true;
 		}
 
 		bool EnsureSwapchains(u32 w, u32 h, bool stereo)
@@ -1832,7 +1893,7 @@ namespace VR::XRCompositor
 			ci.faceCount = 1;
 			ci.arraySize = 1;
 			ci.mipCount = 1;
-			const XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &lc.swapchain);
+			const XrResult res = CountedCreateSwapchain(ci, &lc.swapchain);
 			if (XR_FAILED(res))
 			{
 				lc.swapchain = XR_NULL_HANDLE;
@@ -3196,7 +3257,7 @@ namespace VR::XRCompositor
 				ci.faceCount = 1;
 				ci.arraySize = 1;
 				ci.mipCount = 1;
-				XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &hc.swapchain);
+				XrResult res = CountedCreateSwapchain(ci, &hc.swapchain);
 				if (XR_FAILED(res))
 				{
 					hc.swapchain = XR_NULL_HANDLE;
@@ -3947,7 +4008,7 @@ namespace VR::XRCompositor
 				ci.faceCount = 1;
 				ci.arraySize = 1;
 				ci.mipCount = 1;
-				XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &zc.swapchain);
+				XrResult res = CountedCreateSwapchain(ci, &zc.swapchain);
 				if (XR_FAILED(res))
 				{
 					zc.swapchain = XR_NULL_HANDLE;
@@ -5114,7 +5175,7 @@ namespace VR::XRCompositor
 			}
 			s_fill.fence_submitted = false;
 			if (s_fill.swapchain != XR_NULL_HANDLE && !s.abandoned.load(std::memory_order_acquire))
-				xrDestroySwapchain(s_fill.swapchain);
+				CountedDestroySwapchain(s_fill.swapchain);
 			s_fill.swapchain = XR_NULL_HANDLE;
 			s_fill.images.clear();
 			s_fill.wait_pending = false;
@@ -5279,7 +5340,7 @@ namespace VR::XRCompositor
 				ci.faceCount = 1;
 				ci.arraySize = 1;
 				ci.mipCount = 1;
-				XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &s_fill.swapchain);
+				XrResult res = CountedCreateSwapchain(ci, &s_fill.swapchain);
 				if (XR_FAILED(res))
 				{
 					s_fill.swapchain = XR_NULL_HANDLE;
@@ -5928,7 +5989,7 @@ namespace VR::XRCompositor
 		void DestroyBackground()
 		{
 			if (s.bg_swapchain != XR_NULL_HANDLE && !s.abandoned.load(std::memory_order_acquire))
-				xrDestroySwapchain(s.bg_swapchain);
+				CountedDestroySwapchain(s.bg_swapchain);
 			s.bg_swapchain = XR_NULL_HANDLE;
 			s.bg_ready = false;
 		}
@@ -5959,7 +6020,7 @@ namespace VR::XRCompositor
 			ci.faceCount = 1;
 			ci.arraySize = 1;
 			ci.mipCount = 1;
-			XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &s.bg_swapchain);
+			XrResult res = CountedCreateSwapchain(ci, &s.bg_swapchain);
 			if (XR_FAILED(res))
 			{
 				s.bg_swapchain = XR_NULL_HANDLE;
@@ -6638,6 +6699,16 @@ namespace VR::XRCompositor
 				}
 				submitted_depth_failed();
 				s.present_depth.valid = false;
+				// m1 (addendum 3): a deferred set published above already carries this present's depth: it goes without
+				// it too (the image was not released, so the runtime has nothing of it to show).
+				{
+					std::lock_guard<std::mutex> publish(s.publish_mutex);
+					for (int k = 0; k < 2; k++)
+					{
+						if (s.published.fp_depth.valid && s.published.fp_depth.depth[k] == dchain.swapchain)
+							s.published.fp_depth.valid = false;
+					}
+				}
 			}
 			for (int i = 0; i < kHandSlots; i++)
 			{
@@ -7269,7 +7340,7 @@ namespace VR::XRCompositor
 					if (pc.last_valid[slot] && pc.last_entry[slot].quad.subImage.swapchain == ch.swapchain)
 						pc.last_valid[slot] = false;
 				}
-				xrDestroySwapchain(ch.swapchain);
+				CountedDestroySwapchain(ch.swapchain);
 				ch.swapchain = XR_NULL_HANDLE;
 			}
 			ch.images.clear();
@@ -7288,7 +7359,7 @@ namespace VR::XRCompositor
 			ci.arraySize = 1;
 			ci.mipCount = 1;
 			uint32_t count = 0;
-			XrResult res = xrCreateSwapchain(XRSession::GetSession(), &ci, &ch.swapchain);
+			XrResult res = CountedCreateSwapchain(ci, &ch.swapchain);
 			if (XR_SUCCEEDED(res))
 				res = xrEnumerateSwapchainImages(ch.swapchain, 0, &count, nullptr);
 			if (XR_SUCCEEDED(res) && count > 0)
@@ -7300,7 +7371,7 @@ namespace VR::XRCompositor
 			if (XR_FAILED(res) || count == 0)
 			{
 				if (ch.swapchain != XR_NULL_HANDLE)
-					xrDestroySwapchain(ch.swapchain);
+					CountedDestroySwapchain(ch.swapchain);
 				ch.swapchain = XR_NULL_HANDLE;
 				ch.images.clear();
 				// The eyes are tried again next frame (the screen is the game); a card or a hand stays off this session.
@@ -8461,8 +8532,8 @@ namespace VR::XRCompositor
 			std::vector<VkImage> images;
 			std::vector<VkImageView> views;
 			std::vector<VkFramebuffer> fbs;
-			VkImage depth = VK_NULL_HANDLE;
-			VmaAllocation depth_alloc = VK_NULL_HANDLE;
+			// A view of the GS thread's wp.eye_depth[this target's index] (c1: the pacer makes no VMA call; the GS
+			// allocates the depth images with the ring and drops these views, under submit_mutex, before it frees them).
 			VkImageView depth_view = VK_NULL_HANDLE;
 			bool acquired = false;
 			bool waited = false;
@@ -8477,6 +8548,10 @@ namespace VR::XRCompositor
 			DepthWarp::Pipeline pipe;
 			bool pipe_failed = false;
 			WarpSlot slot[kWarpSlots];
+			// The pass's D16 depth attachment for each WarpTarget (one per eye), at the ring's size, made and freed with the
+			// ring on the GS thread (c1: the GS's VMA allocator is externally synchronised, so only the GS thread uses it).
+			VkImage eye_depth[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+			VmaAllocation eye_depth_alloc[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
 			u32 slot_w = 0, slot_h = 0;
 			VkFormat slot_format = VK_FORMAT_UNDEFINED;
 			int claimed = -1;
@@ -8486,6 +8561,12 @@ namespace VR::XRCompositor
 			bool warned_ring = false;
 			// The pacer's:
 			WarpTarget target[2];
+			// c3: the set whose Screen entries the eye images last released were drawn for (their quad poses, fp_head and
+			// turn clock). A display frame whose pass does not run submits those instead of the newer set's, so an image
+			// never goes out at a pose it was not drawn for. Invalid once one of its swapchains is destroyed.
+			PublishedSet last_drawn;
+			bool last_drawn_valid = false;
+			u32 n_held = 0; // display frames that showed last_drawn's poses (the Warp line)
 			VkCommandPool pool = VK_NULL_HANDLE;
 			VkCommandBuffer cmd[kWarpCmdBuffers] = {};
 			VkFence fence[kWarpCmdBuffers] = {};
@@ -8509,6 +8590,7 @@ namespace VR::XRCompositor
 			// PCSX2_VR_DEPTHWARP_DUMP=<dir>: the source and warped left eye read back once, as PPM (offline aid).
 			std::string dump_dir;
 			bool dump_done = false;
+			// Made with the ring on the GS thread (c1), host-coherent, for one eye pair at the ring's size.
 			VkBuffer dump_buf = VK_NULL_HANDLE;
 			VmaAllocation dump_alloc = VK_NULL_HANDLE;
 			void* dump_map = nullptr;
@@ -8531,10 +8613,55 @@ namespace VR::XRCompositor
 				Console.WriteLn("(VR) Depth warp: frames have depth again; the eyes are warped.");
 		}
 
-		void WarpDestroySlots()
+		// The pacer's views and framebuffers of each WarpTarget (its colour views and framebuffers and its depth view), so
+		// that the GS can free the depth images under them; WarpFramebuffer and WarpTargetDepthView make them again. The
+		// swapchain, its images and the acquire state are kept. Only with the pacer shut out (submit_mutex held, or the
+		// pacer gone) and no pass in flight.
+		void WarpDropTargetViews()
+		{
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			if (!h.IsValid())
+				return;
+			for (WarpTarget& t : wp.target)
+			{
+				for (VkFramebuffer& fb : t.fbs)
+				{
+					if (fb != VK_NULL_HANDLE)
+						vkDestroyFramebuffer(h.device, fb, nullptr);
+					fb = VK_NULL_HANDLE;
+				}
+				for (VkImageView& v : t.views)
+				{
+					if (v != VK_NULL_HANDLE)
+						vkDestroyImageView(h.device, v, nullptr);
+					v = VK_NULL_HANDLE;
+				}
+				if (t.depth_view != VK_NULL_HANDLE)
+					vkDestroyImageView(h.device, t.depth_view, nullptr);
+				t.depth_view = VK_NULL_HANDLE;
+			}
+		}
+
+		// GS thread (every VMA call of the warp is here, c1). drop_target_views: the pacer's views of the depth images go
+		// first (only with the pacer shut out, see WarpDropTargetViews).
+		void WarpDestroySlots(bool drop_target_views)
 		{
 			GSDeviceVK* const dev = GSDeviceVK::GetInstance();
 			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			if (drop_target_views)
+				WarpDropTargetViews();
+			for (int e = 0; e < 2; e++)
+			{
+				if (wp.eye_depth[e] != VK_NULL_HANDLE && dev)
+					vmaDestroyImage(dev->GetAllocator(), wp.eye_depth[e], wp.eye_depth_alloc[e]);
+				wp.eye_depth[e] = VK_NULL_HANDLE;
+				wp.eye_depth_alloc[e] = VK_NULL_HANDLE;
+			}
+			if (wp.dump_buf != VK_NULL_HANDLE && dev)
+				vmaDestroyBuffer(dev->GetAllocator(), wp.dump_buf, wp.dump_alloc);
+			wp.dump_buf = VK_NULL_HANDLE;
+			wp.dump_alloc = VK_NULL_HANDLE;
+			wp.dump_map = nullptr;
 			for (WarpSlot& sl : wp.slot)
 			{
 				for (int e = 0; e < 2; e++)
@@ -8576,7 +8703,7 @@ namespace VR::XRCompositor
 					const VR::ScopedXrQueueLock lock;
 					vkQueueWaitIdle(hd.queue);
 				}
-				WarpDestroySlots();
+				WarpDestroySlots(true);
 			}
 			const VkDeviceSize plane = static_cast<VkDeviceSize>(w) * h * sizeof(float);
 			for (WarpSlot& sl : wp.slot)
@@ -8599,7 +8726,7 @@ namespace VR::XRCompositor
 					if (vmaCreateImage(dev->GetAllocator(), &ci, &aci, &sl.img[e], &sl.alloc[e], nullptr) != VK_SUCCESS)
 					{
 						sl.img[e] = VK_NULL_HANDLE;
-						WarpDestroySlots();
+						WarpDestroySlots(false);
 						return false;
 					}
 					VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -8610,7 +8737,7 @@ namespace VR::XRCompositor
 					if (vkCreateImageView(hd.device, &vi, nullptr, &sl.view[e]) != VK_SUCCESS)
 					{
 						sl.view[e] = VK_NULL_HANDLE;
-						WarpDestroySlots();
+						WarpDestroySlots(false);
 						return false;
 					}
 				}
@@ -8623,9 +8750,50 @@ namespace VR::XRCompositor
 				if (vmaCreateBuffer(dev->GetAllocator(), &bci, &aci, &sl.depth, &sl.depth_alloc, nullptr) != VK_SUCCESS)
 				{
 					sl.depth = VK_NULL_HANDLE;
-					WarpDestroySlots();
+					WarpDestroySlots(false);
 					return false;
 				}
+			}
+			// The pass's depth attachments, one per eye target (c1: here, not on the pacer).
+			for (int e = 0; e < 2; e++)
+			{
+				VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+				ci.imageType = VK_IMAGE_TYPE_2D;
+				ci.format = DepthWarp::kDepthFormat;
+				ci.extent = {w, h, 1};
+				ci.mipLevels = 1;
+				ci.arrayLayers = 1;
+				ci.samples = VK_SAMPLE_COUNT_1_BIT;
+				ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+				ci.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+				ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+				ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+				VmaAllocationCreateInfo aci = {};
+				aci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+				if (vmaCreateImage(dev->GetAllocator(), &ci, &aci, &wp.eye_depth[e], &wp.eye_depth_alloc[e], nullptr) != VK_SUCCESS)
+				{
+					wp.eye_depth[e] = VK_NULL_HANDLE;
+					wp.eye_depth_alloc[e] = VK_NULL_HANDLE;
+					WarpDestroySlots(false);
+					return false;
+				}
+			}
+			// PCSX2_VR_DEPTHWARP_DUMP: the readback buffer for one source/warped pair, host-coherent (the pacer reads it with
+			// no VMA call). Not having it only skips the dump.
+			if (!wp.dump_dir.empty() && !wp.dump_done)
+			{
+				VkBufferCreateInfo bci = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+				bci.size = static_cast<VkDeviceSize>(w) * h * 4 * 2;
+				bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+				VmaAllocationCreateInfo aci = {};
+				aci.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
+				aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+				aci.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+				VmaAllocationInfo ai = {};
+				if (vmaCreateBuffer(dev->GetAllocator(), &bci, &aci, &wp.dump_buf, &wp.dump_alloc, &ai) == VK_SUCCESS)
+					wp.dump_map = ai.pMappedData;
+				else
+					wp.dump_buf = VK_NULL_HANDLE;
 			}
 			wp.slot_w = w;
 			wp.slot_h = h;
@@ -8647,6 +8815,8 @@ namespace VR::XRCompositor
 				{
 					wp.pipe_failed = true;
 					wp.on.store(false, std::memory_order_release);
+					// m10: the depth export is no longer wanted for the warp (still for the depth layer, if that is on).
+					DepthExport::SetCompositorWants(s.depth_layer);
 					Console.Error("(VR) Depth warp: the mesh pass could not be built; off for this session (frames as before).");
 					return false;
 				}
@@ -8776,10 +8946,11 @@ namespace VR::XRCompositor
 			return true;
 		}
 
+		// Pacer (or with the pacer gone): a target's views and framebuffers, and the target forgotten. The depth image under
+		// its depth view is the GS's (wp.eye_depth), not freed here (c1).
 		void WarpDestroyTarget(WarpTarget& t)
 		{
 			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
-			GSDeviceVK* const dev = GSDeviceVK::GetInstance();
 			if (h.IsValid())
 			{
 				for (VkFramebuffer fb : t.fbs)
@@ -8791,19 +8962,74 @@ namespace VR::XRCompositor
 				if (t.depth_view != VK_NULL_HANDLE)
 					vkDestroyImageView(h.device, t.depth_view, nullptr);
 			}
-			if (t.depth != VK_NULL_HANDLE && dev)
-				vmaDestroyImage(dev->GetAllocator(), t.depth, t.depth_alloc);
 			t = WarpTarget{};
 		}
 
+		void WarpForgetSwapchain(XrSwapchain swapchain)
+		{
+			// c3: the held set must not name a destroyed swapchain.
+			if (wp.last_drawn_valid)
+			{
+				for (u32 i = 0; i < wp.last_drawn.count; i++)
+				{
+					const PublishedSet::Entry& e = wp.last_drawn.e[i];
+					const XrSwapchain sc = (e.kind == kKindCylinder) ? e.cyl.subImage.swapchain : e.quad.subImage.swapchain;
+					if (e.role == kRoleScreen && sc == swapchain)
+						wp.last_drawn_valid = false;
+				}
+			}
+			bool any = false;
+			for (const WarpTarget& t : wp.target)
+				any = any || (t.swapchain == swapchain);
+			if (!any)
+				return;
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			if (h.IsValid())
+			{
+				for (int i = 0; i < kWarpCmdBuffers; i++)
+				{
+					// The pacer finds the fence signalled at its next pass and takes it back as usual.
+					if (wp.in_flight[i] && vkWaitForFences(h.device, 1, &wp.fence[i], VK_TRUE, ONE_SECOND_NS) != VK_SUCCESS)
+						Console.Warning("(VR) Depth warp: a pass still busy after 1 s as its eye swapchain goes.");
+				}
+			}
+			for (WarpTarget& t : wp.target)
+			{
+				if (t.swapchain == swapchain)
+					WarpDestroyTarget(t);
+			}
+		}
+
+		// Pacer: the depth view of target t over the GS's depth image for it (made again after the GS re-made the ring).
+		bool WarpTargetDepthView(WarpTarget& t)
+		{
+			if (t.depth_view != VK_NULL_HANDLE)
+				return true;
+			const int idx = static_cast<int>(&t - wp.target);
+			if (idx < 0 || idx >= 2 || wp.eye_depth[idx] == VK_NULL_HANDLE || t.width != wp.slot_w || t.height != wp.slot_h)
+				return false;
+			const Internal::VulkanHandles& hd = Internal::GetVulkanHandles();
+			VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+			vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+			vi.image = wp.eye_depth[idx];
+			vi.format = DepthWarp::kDepthFormat;
+			vi.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+			if (vkCreateImageView(hd.device, &vi, nullptr, &t.depth_view) != VK_SUCCESS)
+			{
+				t.depth_view = VK_NULL_HANDLE;
+				return false;
+			}
+			return true;
+		}
+
 		// Pacer: the target for swapchain sc (a Screen entry's w x h eye chain), made when it is new; `keep` is the other
-		// eye's, which it must not take. An old one's swapchain was destroyed (under submit_mutex, after its entries were
-		// dropped): its views and framebuffers go once the passes that used them are done.
+		// eye's, which it must not take. A destroyed eye swapchain's target was already dropped there
+		// (WarpForgetSwapchain, under submit_mutex), so a handle the runtime hands out again starts a new target (M4).
 		WarpTarget* WarpTargetFor(XrSwapchain sc, u32 w, u32 h, XrSwapchain keep)
 		{
 			for (WarpTarget& t : wp.target)
 				if (t.swapchain == sc && t.width == w && t.height == h)
-					return &t;
+					return WarpTargetDepthView(t) ? &t : nullptr;
 			// The one already on sc (made again at a new size), else an empty one, else any not holding the other eye's.
 			WarpTarget* t = nullptr;
 			for (WarpTarget& c : wp.target)
@@ -8817,10 +9043,12 @@ namespace VR::XRCompositor
 					t = &c;
 			if (!t)
 				return nullptr;
+			// Its views and framebuffers may still be in use by a pass in flight: wait for them, and give up this display
+			// frame (rather than destroy them under the GPU) if one is not done in 100 ms (m6).
 			const Internal::VulkanHandles& hd = Internal::GetVulkanHandles();
 			for (int i = 0; i < kWarpCmdBuffers; i++)
-				if (wp.in_flight[i])
-					vkWaitForFences(hd.device, 1, &wp.fence[i], VK_TRUE, 100000000);
+				if (wp.in_flight[i] && vkWaitForFences(hd.device, 1, &wp.fence[i], VK_TRUE, 100000000) != VK_SUCCESS)
+					return nullptr;
 			WarpDestroyTarget(*t);
 			uint32_t count = 0;
 			if (XR_FAILED(xrEnumerateSwapchainImages(sc, 0, &count, nullptr)) || count == 0)
@@ -8828,38 +9056,6 @@ namespace VR::XRCompositor
 			std::vector<XrSwapchainImageVulkan2KHR> imgs(count, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
 			if (XR_FAILED(xrEnumerateSwapchainImages(sc, count, &count, reinterpret_cast<XrSwapchainImageBaseHeader*>(imgs.data()))))
 				return nullptr;
-			GSDeviceVK* const dev = GSDeviceVK::GetInstance();
-			if (!dev)
-				return nullptr;
-			VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-			ci.imageType = VK_IMAGE_TYPE_2D;
-			ci.format = DepthWarp::kDepthFormat;
-			ci.extent = {w, h, 1};
-			ci.mipLevels = 1;
-			ci.arrayLayers = 1;
-			ci.samples = VK_SAMPLE_COUNT_1_BIT;
-			ci.tiling = VK_IMAGE_TILING_OPTIMAL;
-			ci.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-			ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-			ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-			VmaAllocationCreateInfo aci = {};
-			aci.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-			if (vmaCreateImage(dev->GetAllocator(), &ci, &aci, &t->depth, &t->depth_alloc, nullptr) != VK_SUCCESS)
-			{
-				t->depth = VK_NULL_HANDLE;
-				return nullptr;
-			}
-			VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-			vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
-			vi.image = t->depth;
-			vi.format = DepthWarp::kDepthFormat;
-			vi.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
-			if (vkCreateImageView(hd.device, &vi, nullptr, &t->depth_view) != VK_SUCCESS)
-			{
-				t->depth_view = VK_NULL_HANDLE;
-				WarpDestroyTarget(*t);
-				return nullptr;
-			}
 			t->swapchain = sc;
 			t->width = w;
 			t->height = h;
@@ -8867,6 +9063,11 @@ namespace VR::XRCompositor
 				t->images.push_back(im.image);
 			t->views.assign(count, VK_NULL_HANDLE);
 			t->fbs.assign(count, VK_NULL_HANDLE);
+			if (!WarpTargetDepthView(*t))
+			{
+				WarpDestroyTarget(*t);
+				return nullptr;
+			}
 			Console.WriteLn("(VR) Depth warp: the pacer draws into an eye swapchain (%ux%u, %u images).", w, h, count);
 			return t;
 		}
@@ -8877,16 +9078,22 @@ namespace VR::XRCompositor
 				return VK_NULL_HANDLE;
 			if (t.fbs[index] != VK_NULL_HANDLE)
 				return t.fbs[index];
-			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
-			VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-			vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
-			vi.image = t.images[index];
-			vi.format = wp.pipe.colour_format;
-			vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-			if (vkCreateImageView(h.device, &vi, nullptr, &t.views[index]) != VK_SUCCESS)
-			{
-				t.views[index] = VK_NULL_HANDLE;
+			if (!WarpTargetDepthView(t))
 				return VK_NULL_HANDLE;
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			// The colour view is kept from an earlier try whose framebuffer failed (not made again: no leak).
+			if (t.views[index] == VK_NULL_HANDLE)
+			{
+				VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+				vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+				vi.image = t.images[index];
+				vi.format = wp.pipe.colour_format;
+				vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+				if (vkCreateImageView(h.device, &vi, nullptr, &t.views[index]) != VK_SUCCESS)
+				{
+					t.views[index] = VK_NULL_HANDLE;
+					return VK_NULL_HANDLE;
+				}
 			}
 			const VkImageView att[2] = {t.views[index], t.depth_view};
 			VkFramebufferCreateInfo fi = {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
@@ -8978,13 +9185,13 @@ namespace VR::XRCompositor
 				wp.window_start_ms = now;
 			if (now < wp.window_start_ms + 5000)
 				return;
-			Console.WriteLn("(VR) Warp: %u frames warped, %u drawn as they are, %u not drawn (pass busy %u, images not back %u); "
-							"GPU %.3f ms mean, %.3f ms max per display frame (all eyes, %u timed); the last eye move since the "
+			Console.WriteLn("(VR) Warp: %u frames warped, %u drawn as they are, %u not drawn (pass busy %u, images not back %u; %u at the "
+							"poses last drawn for); GPU %.3f ms mean, %.3f ms max per display frame (all eyes, %u timed); the last eye move since the "
 							"render pose shifts a 1.05 m counter %.1f px.",
-				wp.n_warped, wp.n_flat, wp.n_busy + wp.n_wait, wp.n_busy, wp.n_wait,
+				wp.n_warped, wp.n_flat, wp.n_busy + wp.n_wait, wp.n_busy, wp.n_wait, wp.n_held,
 				wp.gpu_n ? wp.gpu_sum_ms / wp.gpu_n : 0.0, wp.gpu_max_ms, wp.gpu_n, wp.last_shift_px);
 			wp.window_start_ms = now;
-			wp.n_warped = wp.n_flat = wp.n_busy = wp.n_wait = 0;
+			wp.n_warped = wp.n_flat = wp.n_busy = wp.n_wait = wp.n_held = 0;
 			wp.gpu_sum_ms = wp.gpu_max_ms = 0.0;
 			wp.gpu_n = 0;
 		}
@@ -9015,8 +9222,49 @@ namespace VR::XRCompositor
 		// swapchain gets the set's ring frame, warped to the eye's position at this frame's display time (head; turn is the
 		// stick turn BuildSubmitArray turns the screen by). Screen entries whose swapchain the pacer never released go out of
 		// the set.
-		void WarpPass(PublishedSet& set, float turn, const XrPosef& head, bool head_ok)
+		// c3: the eye images were not drawn this display frame, so they hold what was drawn for wp.last_drawn: its Screen
+		// entries, head and turn clock go out instead of the newer set's (as keep_screen does for the GS's copies), and the
+		// screen turn is worked out again from its clock. Only when it shows the same number of Screen entries.
+		void WarpHoldLastDrawn(PublishedSet& set, float& turn, XrTime display_time)
 		{
+			if (!wp.last_drawn_valid || wp.last_drawn.serial == set.serial)
+				return;
+			const PublishedSet& last = wp.last_drawn;
+			u32 n_set = 0, n_last = 0;
+			for (u32 i = 0; i < set.count; i++)
+				n_set += (set.e[i].role == kRoleScreen) ? 1u : 0u;
+			for (u32 i = 0; i < last.count; i++)
+				n_last += (last.e[i].role == kRoleScreen) ? 1u : 0u;
+			if (n_set == 0 || n_set != n_last)
+				return;
+			u32 k = 0;
+			for (u32 i = 0; i < set.count; i++)
+			{
+				if (set.e[i].role != kRoleScreen)
+					continue;
+				while (k < last.count && last.e[k].role != kRoleScreen)
+					k++;
+				set.e[i] = last.e[k++];
+			}
+			set.fp_screen = last.fp_screen;
+			set.fp_head = last.fp_head;
+			set.publish_display_time = last.publish_display_time;
+			set.turn_rate = last.turn_rate;
+			set.fp_image = last.fp_image;
+			set.fp_warp = last.fp_warp;
+			set.fp_depth = last.fp_depth;
+			turn = 0.0f;
+			if (set.fp_screen && set.turn_rate != 0.0f && set.publish_display_time != 0)
+			{
+				const double dt = std::clamp(static_cast<double>(display_time - set.publish_display_time) * 1.0e-9, 0.0, 0.1);
+				turn = set.turn_rate * static_cast<float>(dt);
+			}
+			wp.n_held++;
+		}
+
+		void WarpPass(PublishedSet& set, float& turn, XrTime display_time, const XrPosef& head, bool head_ok)
+		{
+			bool drew = false;
 			const FpWarp& fw = set.fp_warp;
 			struct Job
 			{
@@ -9182,6 +9430,17 @@ namespace VR::XRCompositor
 					vkCmdResetQueryPool(cmd, wp.queries, 2 * ci, 2);
 					vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, wp.queries, 2 * ci);
 				}
+				if (ok)
+				{
+					// m5: the eye depth images are shared by the passes in flight (the render pass clears them from
+					// UNDEFINED with only the implicit external dependency): every earlier pass's depth writes come before
+					// this pass's clear and tests (ALL_COMMANDS so the render pass's layout transition is ordered too).
+					VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+					mb.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+					mb.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+					vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+						VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+				}
 				const WarpSlot& sl = wp.slot[fw.slot];
 				bool dumped = false;
 				for (int j = 0; ok && j < nj; j++)
@@ -9222,20 +9481,8 @@ namespace VR::XRCompositor
 					if (dump && j == 0)
 					{
 						const VkDeviceSize bytes = static_cast<VkDeviceSize>(fw.width) * fw.height * 4;
-						GSDeviceVK* const dev = GSDeviceVK::GetInstance();
-						if (wp.dump_buf == VK_NULL_HANDLE && dev)
-						{
-							VkBufferCreateInfo bci = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-							bci.size = bytes * 2;
-							bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-							VmaAllocationCreateInfo aci = {};
-							aci.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
-							aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-							VmaAllocationInfo ai = {};
-							if (vmaCreateBuffer(dev->GetAllocator(), &bci, &aci, &wp.dump_buf, &wp.dump_alloc, &ai) == VK_SUCCESS)
-								wp.dump_map = ai.pMappedData;
-						}
-						if (wp.dump_map)
+						// The buffer is the GS thread's, made with the ring at this size (c1: no VMA call here).
+						if (wp.dump_map && wp.dump_buf != VK_NULL_HANDLE)
 						{
 							const VkImage dst_img = t.images[t.index];
 							ImageBarrier(cmd, dst_img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -9288,8 +9535,11 @@ namespace VR::XRCompositor
 					wp.warned_pass = true;
 					Console.Error("(VR) Depth warp: a pass could not be recorded or submitted; the eyes keep their last image.");
 				}
-				// Released even when nothing went in: the image then still holds what it last held.
-				for (int j = 0; j < nj; j++)
+				// m4: on a failed record or submit nothing went in, so the images are not released (that would show an older
+				// frame): they stay acquired and waited, and the next display frame's pass draws into them. The runtime keeps
+				// showing the last image released.
+				bool all_released = ok;
+				for (int j = 0; ok && j < nj; j++)
 				{
 					WarpTarget& t = *jobs[j].t;
 					const XrResult rr = LockedRelease(t.swapchain);
@@ -9297,15 +9547,21 @@ namespace VR::XRCompositor
 					t.waited = false;
 					if (XR_SUCCEEDED(rr) && ok)
 						t.released = true;
+					else
+						all_released = false;
+				}
+				if (all_released)
+				{
+					drew = true;
+					wp.last_drawn = set;
+					wp.last_drawn_valid = true;
 				}
 				if (ok && dumped)
 				{
 					wp.dump_done = true;
 					if (vkWaitForFences(h.device, 1, &wp.fence[ci], VK_TRUE, 500000000) == VK_SUCCESS)
 					{
-						GSDeviceVK* const dev = GSDeviceVK::GetInstance();
-						if (dev)
-							vmaInvalidateAllocation(dev->GetAllocator(), wp.dump_alloc, 0, VK_WHOLE_SIZE);
+						// Host-coherent memory: no invalidate (that would be a VMA call on the pacer, c1).
 						const u8* p = static_cast<const u8*>(wp.dump_map);
 						WarpWriteDump("warp_source.ppm", p, fw.width, fw.height);
 						WarpWriteDump("warp_warped.ppm", p + static_cast<size_t>(fw.width) * fw.height * 4, fw.width, fw.height);
@@ -9316,6 +9572,9 @@ namespace VR::XRCompositor
 					}
 				}
 			}
+
+			if (!drew)
+				WarpHoldLastDrawn(set, turn, display_time);
 
 			// A Screen entry whose swapchain the pacer has never released has no image to show: out of this frame.
 			u32 n = 0;
@@ -9360,10 +9619,7 @@ namespace VR::XRCompositor
 					vkDestroyCommandPool(h.device, wp.pool, nullptr);
 				if (wp.queries != VK_NULL_HANDLE)
 					vkDestroyQueryPool(h.device, wp.queries, nullptr);
-				GSDeviceVK* const dev = GSDeviceVK::GetInstance();
-				if (wp.dump_buf != VK_NULL_HANDLE && dev)
-					vmaDestroyBuffer(dev->GetAllocator(), wp.dump_buf, wp.dump_alloc);
-				WarpDestroySlots();
+				WarpDestroySlots(true); // the depth images and the dump buffer too
 				DepthWarp::DestroyPipeline(h.device, &wp.pipe);
 			}
 			wp.pool = VK_NULL_HANDLE;
@@ -9379,6 +9635,7 @@ namespace VR::XRCompositor
 			wp.flat_ever_logged = false;
 			wp.dump_done = false;
 			wp.total_warped = 0;
+			wp.last_drawn_valid = false;
 			wp.on.store(false, std::memory_order_release);
 		}
 
@@ -9629,7 +9886,7 @@ namespace VR::XRCompositor
 						}
 						// [VR] DepthWarp: the eyes' images drawn for this frame's eyes (the pacer owns the eye swapchains).
 						if (WarpOn())
-							WarpPass(set, turn, warp_head, warp_head_ok);
+							WarpPass(set, turn, fs.predictedDisplayTime, warp_head, warp_head_ok);
 						if (views_ok)
 						{
 							// The edge fill behind the first-person screen while its swapchain holds a fill of this spell.
@@ -9799,7 +10056,7 @@ namespace VR::XRCompositor
 				for (PcChain& ch : pc.chains)
 				{
 					if (ch.swapchain != XR_NULL_HANDLE)
-						xrDestroySwapchain(ch.swapchain);
+						CountedDestroySwapchain(ch.swapchain);
 					ch = PcChain{};
 				}
 				if (h.IsValid())
@@ -11198,14 +11455,28 @@ namespace VR::XRCompositor
 					// like the screens (4:3; the 512x448 buffer is not square-pixelled).
 					quad.size = {kPanelHeightM * ComputeAspect(), kPanelHeightM};
 					layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
-					// The menu pointer aims at the panel (its u, v are the shown picture's: the panel covers it all).
+					// The menu pointer aims at the panel. Its u, v are the shown picture's, and the panel is the displayed
+					// rectangle u0..u1, v0..v1 of that picture (MenuPanel::PanelInfo), so the transform published is the whole
+					// picture's, laid out around the panel so that the panel's part of it is where the panel is (a7). With the
+					// rectangle the whole picture (File #1) it is the panel itself.
+					const float du = std::clamp(pinfo.u1 - pinfo.u0, 0.05f, 1.0f);
+					const float dv = std::clamp(pinfo.v1 - pinfo.v0, 0.05f, 1.0f);
+					const float full_w = quad.size.width / du;
+					const float full_h = quad.size.height / dv;
+					// The picture's centre from the panel's, in the panel's own frame (+X right, +Y up; v runs down).
+					const XrVector3f off = {(0.5f - 0.5f * (pinfo.u0 + pinfo.u1)) * full_w, -(0.5f - 0.5f * (pinfo.v0 + pinfo.v1)) * full_h, 0.0f};
+					const XrQuaternionf& pq = quad.pose.orientation;
+					// off rotated by pq: v + 2w (q x v) + 2 q x (q x v).
+					const XrVector3f c1 = {pq.y * off.z - pq.z * off.y, pq.z * off.x - pq.x * off.z, pq.x * off.y - pq.y * off.x};
+					const XrVector3f c2 = {pq.y * c1.z - pq.z * c1.y, pq.z * c1.x - pq.x * c1.z, pq.x * c1.y - pq.y * c1.x};
+					const XrVector3f rot = {off.x + 2.0f * (pq.w * c1.x + c2.x), off.y + 2.0f * (pq.w * c1.y + c2.y),
+						off.z + 2.0f * (pq.w * c1.z + c2.z)};
 					pub = VRScreenTransform{};
-					pub.center.orientation_xyzw = {quad.pose.orientation.x, quad.pose.orientation.y, quad.pose.orientation.z,
-						quad.pose.orientation.w};
-					pub.center.position_xyz = {quad.pose.position.x, quad.pose.position.y, quad.pose.position.z};
+					pub.center.orientation_xyzw = {pq.x, pq.y, pq.z, pq.w};
+					pub.center.position_xyz = {quad.pose.position.x + rot.x, quad.pose.position.y + rot.y, quad.pose.position.z + rot.z};
 					pub.center.valid = true;
-					pub.half_width = 0.5f * quad.size.width;
-					pub.half_height = 0.5f * quad.size.height;
+					pub.half_width = 0.5f * full_w;
+					pub.half_height = 0.5f * full_h;
 					pub.tablet = false;
 					pub.valid = true;
 					if (s_pub_logged != 3)
@@ -11452,6 +11723,19 @@ namespace VR::XRCompositor
 			chain.waited = false;
 			chain.release_pending = false;
 		}
+		// m7 (addendum 3): [VR] DepthLayer's depth swapchains go with their eyes (they were only forgotten before).
+		for (auto& chain : s.depth_chains)
+		{
+			if (chain.swapchain != XR_NULL_HANDLE)
+				DestroySwapchainSynced(chain.swapchain);
+			chain.swapchain = XR_NULL_HANDLE;
+			chain.images.clear();
+			chain.ever_released = false;
+			chain.wait_pending = false;
+			chain.waited = false;
+			chain.release_pending = false;
+		}
+		s.present_depth = FpDepth{};
 		s.swapchain_width = 0;
 		s.swapchain_height = 0;
 

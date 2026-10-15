@@ -492,6 +492,16 @@ namespace VR::DepthExport
 		// The snapshot: a depth texture like the depth target, holding the finished frame's depth.
 		GSTexture* s_snap = nullptr;
 		GSDeviceVK* s_snap_device = nullptr;
+		// [VR] MenuPanel's room depth per MenuPanel slot (TakeRoomSnapshot): taken with the room's colour snapshot.
+		struct RoomDepth
+		{
+			GSTexture* tex = nullptr;
+			GSDeviceVK* device = nullptr;
+			bool valid = false;
+			u32 fbp = 0;
+			u32 zbp = 0;
+		};
+		RoomDepth s_room_depth[kRoomSlots];
 
 		// The probe's pending readback: the export it copies, and the GS fence it waits for (never waited on).
 		bool s_probe_pending = false;
@@ -646,6 +656,56 @@ namespace VR::DepthExport
 		return true;
 	}
 
+	bool TakeRoomSnapshot(u32 slot, u32 fbp, u32 zbp, GSTexture* depth)
+	{
+		GSDeviceVK* const dev = VulkanDevice();
+		if (slot >= kRoomSlots)
+			return false;
+		RoomDepth& r = s_room_depth[slot];
+		r.valid = false;
+		if (!dev || !depth || !depth->IsDepthStencil())
+			return false;
+		if (r.tex && (r.device != dev || r.tex->GetSize() != depth->GetSize() ||
+						 r.tex->GetArrayLayers() != depth->GetArrayLayers() || r.tex->GetFormat() != depth->GetFormat()))
+		{
+			if (r.device == dev)
+				g_gs_device->Recycle(r.tex);
+			r.tex = nullptr;
+		}
+		if (!r.tex)
+		{
+			r.tex = g_gs_device->CreateDepthStencil(depth->GetWidth(), depth->GetHeight(), false, false, depth->GetArrayLayers());
+			r.device = dev;
+			if (!r.tex)
+				return false;
+		}
+		// Recorded in draw order like TakeSnapshot: the room's depth as its last draw left it, before the screen's first.
+		g_gs_device->CopyRect(depth, r.tex, GSVector4i(0, 0, depth->GetWidth(), depth->GetHeight()), 0, 0);
+		r.valid = true;
+		r.fbp = fbp;
+		r.zbp = zbp;
+		return true;
+	}
+
+	void DropRoomSnapshot(u32 slot)
+	{
+		if (slot < kRoomSlots)
+			s_room_depth[slot].valid = false;
+	}
+
+	bool HasRoomSnapshot(u32 slot, u32 fbp)
+	{
+		if (slot >= kRoomSlots)
+			return false;
+		const RoomDepth& r = s_room_depth[slot];
+		return r.valid && r.tex && r.fbp == fbp && r.device == VulkanDevice();
+	}
+
+	u32 RoomSnapshotZbp(u32 slot)
+	{
+		return (slot < kRoomSlots && s_room_depth[slot].valid) ? s_room_depth[slot].zbp : 0u;
+	}
+
 	void* LatestBuffer()
 	{
 		return s_latest.valid ? reinterpret_cast<void*>(s_export.buffer) : nullptr;
@@ -655,7 +715,12 @@ namespace VR::DepthExport
 	{
 		s_latest.valid = false;
 		GSDeviceVK* const dev = VulkanDevice();
-		GSTexture* const src_tex = req.use_snapshot ? ((s_snap_device == dev) ? s_snap : nullptr) : req.depth;
+		GSTexture* src_tex = req.use_snapshot ? ((s_snap_device == dev) ? s_snap : nullptr) : req.depth;
+		if (req.room_slot >= 0)
+		{
+			const u32 rs = static_cast<u32>(req.room_slot);
+			src_tex = HasRoomSnapshot(rs, req.colour_bp) ? s_room_depth[rs].tex : nullptr;
+		}
 		if (!dev || !src_tex || !src_tex->IsDepthStencil())
 		{
 			NoExport("no depth texture");
@@ -722,8 +787,20 @@ namespace VR::DepthExport
 		s_latest.serial = ++s_serial;
 		s_latest.src_bp = req.src_bp;
 		s_latest.colour_bp = req.colour_bp;
-		s_latest.snapshot = req.use_snapshot;
+		s_latest.snapshot = req.use_snapshot || req.room_slot >= 0;
 		s_noexport_logged = nullptr;
+		{
+			// Once each time it begins: a game screen's frames taking their room's depth ([VR] MenuPanel).
+			static bool s_room_logged = false;
+			const bool room = (req.room_slot >= 0);
+			if (room != s_room_logged)
+			{
+				s_room_logged = room;
+				if (room)
+					Console.WriteLn("(VR) Depth export: a game screen is up; the shown room takes the depth taken with its "
+									"colour snapshot (before the screen's own depth clear), depth target 0x%x.", req.src_bp);
+			}
+		}
 		if (!s_first_logged)
 		{
 			s_first_logged = true;
@@ -932,12 +1009,22 @@ namespace VR::DepthExport
 			g_gs_device->Recycle(s_snap);
 		s_snap = nullptr;
 		s_snap_device = nullptr;
+		for (RoomDepth& r : s_room_depth)
+		{
+			if (r.tex && r.device == GSDeviceVK::GetInstance() && g_gs_device)
+				g_gs_device->Recycle(r.tex);
+			r = RoomDepth{};
+		}
 		s_probe_pending = false;
 		s_latest = ExportInfo{};
 		s_tracker = DepthTracker{};
 	}
 #else
 	bool TakeSnapshot(GSTexture*) { return false; }
+	bool TakeRoomSnapshot(u32, u32, u32, GSTexture*) { return false; }
+	void DropRoomSnapshot(u32) {}
+	bool HasRoomSnapshot(u32, u32) { return false; }
+	u32 RoomSnapshotZbp(u32) { return 0; }
 	void* LatestBuffer() { return nullptr; }
 	bool Export(const ExportRequest&)
 	{

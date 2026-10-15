@@ -125,12 +125,17 @@ namespace VR::MenuPanel
 	// lines each time a screen comes up or goes, and again 1.5 s after it came up. GSRendererHW passes its extra fields
 	// only while this is true.
 	bool Tracing();
-	void TakeSnapshot(GSTexture* colour);
+	// Returns the slot the snapshot went into (SplitTracker::slot), -1 when it could not be taken.
+	int TakeSnapshot(GSTexture* colour);
 	// GSRendererHW::GetOutput, every vsync while the switch is on: the displayed colour target (it ends that frame).
 	void NoteShown(u32 fbp);
 	// GSRendererHW::GetOutput, as Merge looks up the displayed colour target: the room snapshot to show instead of
 	// `colour` (same size, format and layers), or null to show the target as drawn.
 	GSTexture* RoomFor(u32 fbp, GSTexture* colour);
+	// After GetOutput, this present: the slot whose room snapshot Merge showed for colour target fbp (RoomFor gave it
+	// this vsync), -1 when the frame shows as drawn. The depth export then takes that slot's room depth
+	// (DepthExport::TakeRoomSnapshot, taken with the colour), so [VR] DepthWarp keeps its parallax behind a game screen.
+	int ShownRoomSlot(u32 fbp);
 	// GSRendererHW, right after Merge (in the GS command buffer, before the present's submit): the screen's own pixels
 	// of this present (the displayed target `colour` against its room snapshot) into the panel image, for the
 	// compositor. src_x/src_y/w/h: the displayed rectangle in the target (scaled texels). False (and the panel image
