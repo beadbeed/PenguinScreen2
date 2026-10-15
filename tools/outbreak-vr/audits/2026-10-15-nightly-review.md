@@ -322,7 +322,23 @@ offline):
 - restored afterwards: `null_driver.py off` (settings md5 identical to the backup, no `forcedDriver`), and SteamVR's
   processes closed.
 
-**Not done (time):**
-- c3 (the one-frame pose jolt when the pass does not run);
-- c4 (DepthLayer's depth chains in the 16-swapchain fallback);
-- addendum 3's m1, m7-m12.
+**Second pass (2026-10-15, same branch; built, 39 of 39 self-tests; no null-headset run, because another pcsx2-qt.exe
+was running):**
+- **c3** (403bac4). The pacer keeps a copy of the set its eye images were last drawn for. When the pass does not run
+  (busy, an image late, no target, a failed record), that set's Screen entries, head and turn clock go out instead of
+  the newer set's, as keep_screen does, and the turn is worked out again.
+  - Only when both sets have the same number of Screen entries.
+  - The copy is dropped when one of its swapchains is destroyed.
+  - The Warp line counts these frames ("at the poses last drawn for").
+- **c4** (943f154).
+  - Every swapchain create and destroy is counted, and a LIMIT_REACHED logs how many the compositor holds.
+  - `CreateSwapchainYielding`, after the edge fill, now gives up DepthLayer's two depth swapchains: the depth layer
+    goes off for the session, the GS's copies are waited first, and the published depth is dropped. Then it retries.
+- **m10** (c02eb94). The compositor's want follows what is still on: the warp's pipeline failure keeps the want for
+  the depth layer, and `DepthLayerOff` keeps it for the warp.
+- **m1** (dc3898e). A depth release that fails also invalidates `s.published.fp_depth` when it names that swapchain
+  (the deferred set was published before the releases).
+- **m7** (e5bbffa), partly. Shutdown destroys the depth swapchains. `DepthLayerOff` still leaves them to the next
+  resize or Shutdown, because it runs inside copy paths.
+
+**Still open:** addendum 3's m8, m9, m11, m12. None was refuted.
