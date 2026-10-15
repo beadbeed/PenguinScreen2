@@ -1167,13 +1167,19 @@ namespace VR::CameraDriver
 		// are ever restored, except for a one-shot repair of guarded entries after a savestate load.
 		// An entry with activeWhen (checks on the base record) or offlineOnly is only patched while those
 		// hold; otherwise the word is put back at once (e.g. the aim servo runs again when the gun is lowered).
-		// whenSetting entries ([VR] SeamlessDoors): the switch on, and strictly offline (no network adapter at all, so not
-		// private co-op either, and not online-safe). Entries without whenSetting always pass.
+		// whenSetting entries ([VR] SeamlessDoors, PhysicalMelee): the switch on and never online-safe; strictly offline (no
+		// network adapter at all), or in private co-op only where the switch allows it now (ProfileDB::SilenceSettingCoopLive:
+		// PhysicalMelee's caves with [VR] PhysicalMeleeOnline while this console runs the room's enemies; SeamlessDoors
+		// never). Entries without whenSetting always pass.
 		bool SilenceSettingGateOpen(const ProfileDB::CameraSilence& sil)
 		{
 			if (sil.when_setting.empty())
 				return true;
-			return ProfileDB::SilenceSettingOn(sil.when_setting) && !EmuConfig.DEV9.EthEnable && !EmuConfig.VR.OnlineSafe;
+			if (!ProfileDB::SilenceSettingOn(sil.when_setting) || EmuConfig.VR.OnlineSafe)
+				return false;
+			if (!EmuConfig.DEV9.EthEnable)
+				return true;
+			return s_net_mode == NetMode::PrivateCoop && ProfileDB::SilenceSettingCoopLive(sil.when_setting);
 		}
 
 		void ApplySilence(const ProfileDB::CameraProfile& cam, u32 crc, const std::optional<u32>& base)
@@ -3924,6 +3930,11 @@ namespace VR::CameraDriver
 	bool NetworkOffline()
 	{
 		return s_net_mode == NetMode::Offline;
+	}
+
+	bool PrivateCoop()
+	{
+		return s_net_mode == NetMode::PrivateCoop;
 	}
 
 	bool GetMapping(Mapping* out)

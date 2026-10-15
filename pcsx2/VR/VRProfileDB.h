@@ -803,6 +803,16 @@ namespace VR::ProfileDB
 		u32 block = 0;
 		u32 magic = 0;
 		u32 counter = 0;
+		// online ([VR] PhysicalMeleeOnline, private co-op; needs override): the u16 room the local player is in, the network
+		// overlay's table of each room's players (4 bytes a room, rooms 0-127; the first is the slot whose console runs the
+		// room's enemies), a word of that overlay's header and what it must read (else no console is taken as the master),
+		// and where the caves' free RAM starts (it runs to block + 0x90 and must read zero before the caves go in online).
+		bool has_online = false;
+		u32 online_room = 0;
+		u32 online_masters = 0;
+		u32 online_tag_addr = 0;
+		u32 online_tag = 0;
+		u32 online_free = 0;
 		PhysicalMelee::DetectorParams detect;
 		PhysicalMelee::DriverParams drive;
 	};
@@ -907,4 +917,7 @@ namespace VR::ProfileDB
 	// camera.silence whenSetting: the VR switch names an entry may be gated on, and whether that switch is on now.
 	bool IsSilenceSettingName(std::string_view name);
 	bool SilenceSettingOn(std::string_view name);
+	// ... and whether its entries may be in now in private co-op (they are otherwise strictly offline): PhysicalMelee with
+	// [VR] PhysicalMeleeOnline while its last poll decided CoopFull; SeamlessDoors never.
+	bool SilenceSettingCoopLive(std::string_view name);
 }

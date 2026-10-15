@@ -3530,7 +3530,7 @@ static std::optional<VR::ProfileDB::BreakoutParams> parseBreakout(const std::str
 static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_view serial, const ryml::ConstNodeRef& node)
 {
 	using VR::ProfileDB::MeleeParams;
-	warnUnknownKeys(serial, node, "melee", {"attackButton", "swing", "enemies", "override", "tip", "speed", "rest", "endMs",
+	warnUnknownKeys(serial, node, "melee", {"attackButton", "swing", "enemies", "override", "online", "tip", "speed", "rest", "endMs",
 		"travel", "straightness", "strokeMs", "pressMs", "pressMaxMs", "raiseMs", "swingMs", "contactMs", "cooldownMs", "notes"});
 	MeleeParams mp;
 	if (node.has_child("attackButton"))
@@ -3624,6 +3624,33 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee override needs block (16-byte aligned, in main RAM), a "
 							   "non-zero magic and counter; ignoring it, so the hit stays on the game's own swing.", serial);
 	}
+	// online: only reads (the room, its master, the overlay's tag, the free RAM); needs the override (the caves' block).
+	if (node.has_child("online"))
+	{
+		const ryml::ConstNodeRef on = node["online"];
+		MeleeParams o = mp;
+		bool ok = on.is_map() && mp.has_override;
+		if (ok)
+		{
+			warnUnknownKeys(serial, on, "melee.online", {"room", "masters", "overlay", "overlayTag", "free", "notes"});
+			ok = read_hex(on, "room", o.online_room) && read_hex(on, "masters", o.online_masters) &&
+			     read_hex(on, "overlay", o.online_tag_addr) && read_hex(on, "overlayTag", o.online_tag) &&
+			     read_hex(on, "free", o.online_free) && o.online_tag != 0 && (o.online_room % 2) == 0 &&
+			     (o.online_tag_addr % 4) == 0 && (o.online_free % 4) == 0 &&
+			     o.online_room + 2 <= Ps2MemSize::MainRam && o.online_tag_addr + 4 <= Ps2MemSize::MainRam &&
+			     static_cast<u64>(o.online_masters) + 128u * 4u <= Ps2MemSize::MainRam && o.online_free < o.block &&
+			     o.block - o.online_free <= 0x4000;
+		}
+		if (ok)
+		{
+			o.has_online = true;
+			mp = o;
+		}
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee online needs override and room, masters, overlay, a non-zero "
+							   "overlayTag and free (word aligned, in main RAM, free at most 16 KB below the block); ignoring "
+							   "it, so online the swing stays the game's own.", serial);
+	}
 	// Decimal tuning in the key's unit, stored scaled (milliseconds to seconds).
 	const auto read_float = [&](const char* key, float lo, float hi, float scale, float& dst) {
 		if (!node.has_child(key))
@@ -3682,6 +3709,7 @@ bool VR::ProfileDB::SelfTestMeleeParse()
 	check(parse("melee:\n  attackButton: Circle\n  swing: { sub: 0x09, idle: 1, attack: 3, normalStance: 1 }\n"
 				"  enemies: { table: 0x3FFCA0, stride: 0xD90, count: 64, present: 0x00, hp: 0x544 }\n"
 				"  override: { block: 0xFF000, magic: 0x4D454C31, counter: 0x48BF93 }\n"
+				"  online: { room: 0x3065AC, masters: 0x825810, overlay: 0x820020, overlayTag: 0x6174656E, free: 0xFE000 }\n"
 				"  tip: 0.45\n  speed: 2.5\n  rest: 0.9\n  travel: 0.25\n  straightness: 0.5\n  pressMs: 120\n  raiseMs: 800\n"
 				"  contactMs: 300\n  cooldownMs: 200\n",
 			  &m) && m.has_value(),
@@ -3695,6 +3723,9 @@ bool VR::ProfileDB::SelfTestMeleeParse()
 				  m->enemy_hp == 0x544,
 			"enemies (hex offsets, a decimal count)");
 		check(m->has_override && m->block == 0xFF000 && m->magic == 0x4D454C31 && m->counter == 0x48BF93, "override");
+		check(m->has_online && m->online_room == 0x3065AC && m->online_masters == 0x825810 &&
+				  m->online_tag_addr == 0x820020 && m->online_tag == 0x6174656E && m->online_free == 0xFE000,
+			"online");
 		check(std::fabs(m->detect.tip_m - 0.45f) < 1e-6f && std::fabs(m->detect.speed_on - 2.5f) < 1e-6f &&
 				  std::fabs(m->detect.speed_off - 0.9f) < 1e-6f && std::fabs(m->detect.travel_m - 0.25f) < 1e-6f &&
 				  std::fabs(m->detect.straightness - 0.5f) < 1e-6f,
@@ -3717,6 +3748,17 @@ bool VR::ProfileDB::SelfTestMeleeParse()
 				"  override: { block: 0xFF000, magic: 0, counter: 0x48BF93 }\n",
 			  &m) && m.has_value() && m->enemy_count == 0 && !m->has_override,
 		"an enemy table running past main RAM and a zero magic are dropped");
+	check(parse("melee:\n  online: { room: 0x3065AC, masters: 0x825810, overlay: 0x820020, overlayTag: 0x6174656E, free: 0xFE000 }\n",
+			  &m) && m.has_value() && !m->has_online,
+		"an online block without the override is dropped");
+	check(parse("melee:\n  override: { block: 0xFF000, magic: 0x4D454C31, counter: 0x48BF93 }\n"
+				"  online: { room: 0x3065AC, masters: 0x825810, overlay: 0x820020, overlayTag: 0, free: 0xFE000 }\n",
+			  &m) && m.has_value() && m->has_override && !m->has_online,
+		"an online block with a zero tag is dropped, the override kept");
+	check(parse("melee:\n  override: { block: 0xFF000, magic: 0x4D454C31, counter: 0x48BF93 }\n"
+				"  online: { room: 0x3065AC, masters: 0x825810, overlay: 0x820020, overlayTag: 0x6174656E, free: 0xFF040 }\n",
+			  &m) && m.has_value() && !m->has_online,
+		"an online block whose free RAM starts past the block is dropped");
 	check(parse("melee: 3\n", &m) && !m.has_value(), "a block that is not a map is none");
 	if (failed)
 		Console.Error("(VR) Melee profile self-test FAIL: %s", failed);
@@ -4767,6 +4809,13 @@ bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
 		return EmuConfig.VR.SeamlessDoors;
 	if (name == "PhysicalMelee")
 		return EmuConfig.VR.PhysicalMelee;
+	return false;
+}
+
+bool VR::ProfileDB::SilenceSettingCoopLive(std::string_view name)
+{
+	if (name == "PhysicalMelee")
+		return EmuConfig.VR.PhysicalMelee && EmuConfig.VR.PhysicalMeleeOnline && VR::PhysicalMelee::CoopOverrideLive();
 	return false;
 }
 

@@ -42,8 +42,10 @@
 #include "common/FileSystem.h"
 #include "common/Path.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -169,6 +171,200 @@ namespace
 	{
 		const std::string line = FindLine(mark, summary);
 		Record(name, line.starts_with(std::string(summary) + ": passed"), Detail(line));
+	}
+
+	// [VR] PhysicalMelee's caves, run as the EE would run them: the File #1 profile's camera.silence words in a small
+	// interpreter of just the instructions they use (lui, ori, addiu, sltiu, subu, lw, lbu, sw, lwc1, swc1, beq, bne,
+	// bgez, bgtz, j, jr, with delay slots; the FPU loads and stores only move bits).
+	struct MiniEE
+	{
+		std::map<u32, u32> mem; // word address -> word
+		u32 r[32] = {};
+		u32 f[32] = {};
+
+		u32 Load32(u32 a) const
+		{
+			const auto it = mem.find(a & ~3u);
+			return it == mem.end() ? 0u : it->second;
+		}
+		void Store32(u32 a, u32 v) { mem[a & ~3u] = v; }
+		void Store8(u32 a, u8 v)
+		{
+			const u32 sh = (a & 3u) * 8u;
+			Store32(a, (Load32(a) & ~(0xFFu << sh)) | (static_cast<u32>(v) << sh));
+		}
+
+		// One instruction at pc. False for one it does not know. A branch or jump sets *branch, and *target when taken.
+		bool Exec(u32 pc, bool* branch, bool* taken, u32* target)
+		{
+			const u32 i = Load32(pc);
+			const u32 op = i >> 26, rs = (i >> 21) & 31u, rt = (i >> 16) & 31u, rd = (i >> 11) & 31u, fn = i & 63u;
+			const u32 imm = i & 0xFFFFu;
+			const u32 simm = static_cast<u32>(static_cast<s32>(static_cast<s16>(imm)));
+			const u32 bt = pc + 4u + (simm << 2);
+			*branch = false;
+			*taken = false;
+			switch (op)
+			{
+				case 0x00:
+					if (i == 0)
+						break;
+					if (fn == 0x23)
+						r[rd] = r[rs] - r[rt];
+					else if (fn == 0x08)
+					{
+						*branch = *taken = true;
+						*target = r[rs];
+					}
+					else
+						return false;
+					break;
+				case 0x01:
+					if (rt != 1)
+						return false;
+					*branch = true;
+					*taken = static_cast<s32>(r[rs]) >= 0;
+					*target = bt;
+					break;
+				case 0x02:
+					*branch = *taken = true;
+					*target = (pc & 0xF0000000u) | ((i & 0x3FFFFFFu) << 2);
+					break;
+				case 0x04: *branch = true; *taken = r[rs] == r[rt]; *target = bt; break;
+				case 0x05: *branch = true; *taken = r[rs] != r[rt]; *target = bt; break;
+				case 0x07: *branch = true; *taken = static_cast<s32>(r[rs]) > 0; *target = bt; break;
+				case 0x09: r[rt] = r[rs] + simm; break;
+				case 0x0B: r[rt] = r[rs] < simm ? 1u : 0u; break;
+				case 0x0D: r[rt] = r[rs] | imm; break;
+				case 0x0F: r[rt] = imm << 16; break;
+				case 0x23: r[rt] = Load32(r[rs] + simm); break;
+				case 0x24: r[rt] = (Load32(r[rs] + simm) >> (((r[rs] + simm) & 3u) * 8u)) & 0xFFu; break;
+				case 0x2B: Store32(r[rs] + simm, r[rt]); break;
+				case 0x31: f[rt] = Load32(r[rs] + simm); break;
+				case 0x39: Store32(r[rs] + simm, f[rt]); break;
+				default: return false;
+			}
+			r[0] = 0;
+			return true;
+		}
+
+		// From entry until control leaves [lo, hi) (after a branch's delay slot): where it went, or 0 on an unknown
+		// instruction, a branch in a delay slot or more than 500 steps.
+		u32 Run(u32 entry, u32 lo, u32 hi)
+		{
+			u32 pc = entry;
+			for (int n = 0; n < 500; n++)
+			{
+				if (pc < lo || pc >= hi)
+					return pc;
+				bool br = false, tk = false, br2 = false, tk2 = false;
+				u32 tg = 0, tg2 = 0;
+				if (!Exec(pc, &br, &tk, &tg))
+					return 0;
+				if (!br)
+				{
+					pc += 4;
+					continue;
+				}
+				if (!Exec(pc + 4, &br2, &tk2, &tg2) || br2)
+					return 0;
+				pc = tk ? tg : pc + 8;
+			}
+			return 0;
+		}
+	};
+
+	// The caves' memory: the profile's cave words, the host's block (magic, the stamp, the local record, the VR weapon's
+	// matrix and position), the game counter, and a weapon object (the canned pose) with its own matrix and position.
+	constexpr u32 kLocalRecord = 0x476DD0, kPartnerRecord = 0x476DD0 + 0x10E0, kWeapon = 0x500000, kAttack = 0x600000;
+	constexpr u32 kReturn = 0x00ABC0, kSpawnEvent = 0x565C80;
+	bool MeleeCaveMemory(MiniEE& ee, bool magic, u8 counter, u8 stamp)
+	{
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		if (!p || !p->camera.has_value())
+			return false;
+		int words = 0;
+		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
+		{
+			if (sil.when_setting == "PhysicalMelee" && sil.ee_address >= 0xFE000u && sil.ee_address < 0xFF000u)
+			{
+				ee.Store32(sil.ee_address, sil.value_on);
+				words++;
+			}
+		}
+		ee.Store32(0xFF000, magic ? 0x4D454C31u : 0u);
+		ee.Store8(0xFF004, stamp);
+		ee.Store32(0xFF008, kLocalRecord);
+		for (u32 k = 0; k < 16; k++)
+		{
+			ee.Store32(0xFF040 + 4 * k, 0x1000 + k);      // the VR weapon's matrix
+			ee.Store32(kWeapon + 0x1C0 + 4 * k, 0x4000 + k); // the canned one
+		}
+		for (u32 k = 0; k < 3; k++)
+		{
+			ee.Store32(0xFF080 + 4 * k, 0x2000 + k);
+			ee.Store32(kWeapon + 0x200 + 4 * k, 0x3000 + k);
+		}
+		ee.Store8(0x48BF93, counter);
+		return words == 39 + 23 + 22;
+	}
+
+	// Cave A (every frame of the swing): the attack object's position and matrix come from the VR weapon (from_vr) or
+	// from the weapon object, exactly as the game copies them.
+	bool MeleeCaveA(u32 owner, bool magic, u8 counter, u8 stamp, bool from_vr)
+	{
+		MiniEE ee;
+		if (!MeleeCaveMemory(ee, magic, counter, stamp))
+			return false;
+		ee.r[4] = kAttack;  // a0: the attack object
+		ee.r[6] = owner;    // a2: its owner (the delay slot of the game's own branch set it)
+		ee.r[8] = kWeapon;  // t0: the weapon object
+		ee.r[31] = kReturn;
+		ee.r[16] = 0x11111111;
+		if (ee.Run(0xFE000, 0xFE000, 0xFE0A0) != kReturn || ee.r[16] != 0x11111111)
+			return false;
+		const u32 pos = from_vr ? 0x2000 : 0x3000, mat = from_vr ? 0x1000 : 0x4000;
+		for (u32 k = 0; k < 3; k++)
+			if (ee.Load32(kAttack + 0x38 + 4 * k) != pos + k)
+				return false;
+		for (u32 k = 0; k < 16; k++)
+			if (ee.Load32(kAttack + 0x50 + 4 * k) != mat + k)
+				return false;
+		return true;
+	}
+
+	// Cave B (the attack object is built): v1 the object to copy from, and its +0x200 already in f2.
+	bool MeleeCaveB(u32 owner, bool magic, bool from_vr)
+	{
+		MiniEE ee;
+		if (!MeleeCaveMemory(ee, magic, 10, 9))
+			return false;
+		ee.Store32(0x700000, kWeapon);
+		ee.r[16] = 0x700000; // s0: the item's weapon object pointer
+		ee.r[21] = owner;    // s5: the record that swings
+		ee.r[31] = kReturn;
+		if (ee.Run(0xFE0A0, 0xFE0A0, 0xFE100) != kReturn)
+			return false;
+		const u32 obj = from_vr ? 0xFEE80u : kWeapon;
+		return ee.r[3] == obj && ee.f[2] == (from_vr ? 0x2000u : 0x3000u);
+	}
+
+	// Cave C (the spawn event of a melee motion): on to FUN_00565C80 with the frame (a0) 2 or as the game had it.
+	bool MeleeCaveC(u32 record, bool magic, u8 counter, u8 stamp, bool early)
+	{
+		MiniEE ee;
+		if (!MeleeCaveMemory(ee, magic, counter, stamp))
+			return false;
+		ee.r[4] = 16;      // a0: the motion's spawn frame (a pipe's)
+		ee.r[5] = record;  // a1: the record
+		ee.r[6] = 2;       // a2: the event code (spawn the attack)
+		ee.r[7] = 0;
+		ee.r[31] = 0x56950C;
+		ee.r[16] = record;
+		if (ee.Run(0xFE100, 0xFE100, 0xFE160) != kSpawnEvent)
+			return false;
+		return ee.r[4] == (early ? 2u : 16u) && ee.r[5] == record && ee.r[6] == 2 && ee.r[7] == 0 &&
+		       ee.r[31] == 0x56950C && ee.r[16] == record;
 	}
 
 	void RunGamepad()
@@ -304,9 +500,10 @@ int main(int argc, char* argv[])
 							 "FAIL: " + std::to_string(failed.size()) + " check(s), first: " + failed.front());
 	}
 	RunLogged("Melee profile parser", VR::ProfileDB::SelfTestMeleeParse, "(VR) Melee profile self-test");
-	// [VR] PhysicalMelee: File #1's melee block, and its camera.silence entries: the five sites (each guarded by its cave's
-	// first word), the two caves in free RAM and the seven spawn frames, all strictly offline
-	// (tools/outbreak-vr/research/2026-10-14-melee.md).
+	// [VR] PhysicalMelee: File #1's melee block (with melee.online), and its camera.silence entries: the five cave A/B
+	// sites and the seven spawn-event calls (each guarded by its cave's first word), then the three caves in free RAM; no
+	// shared word changes for anyone but the local player any more (the spawn frames themselves stay stock)
+	// (tools/outbreak-vr/research/2026-10-14-melee.md, 2026-10-14-melee-coop.md).
 	RunSilent("Physical melee (File #1 profile, melee and camera.silence whenSetting)", +[]() {
 		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
 		if (!p || !p->melee.has_value() || !p->camera.has_value() || !VR::ProfileDB::IsSilenceSettingName("PhysicalMelee"))
@@ -316,7 +513,11 @@ int main(int argc, char* argv[])
 			m.stance_normal != 1 || m.enemy_table != 0x3FFCA0 || m.enemy_stride != 0xD90 || m.enemy_count != 64 ||
 			m.enemy_hp != 0x544 || !m.has_override || m.block != 0xFF000 || m.magic != 0x4D454C31 || m.counter != 0x48BF93)
 			return false;
-		int sites = 0, cave = 0, frames = 0;
+		if (!m.has_online || m.online_room != 0x3065AC || m.online_masters != 0x825810 || m.online_tag_addr != 0x820020 ||
+			m.online_tag != 0x6174656E || m.online_free != 0xFE000)
+			return false;
+		static constexpr u32 kSpawnCalls[] = {0x568544, 0x5694E8, 0x569560, 0x5695F4, 0x5696B0, 0x56973C, 0x5697B4};
+		int sites = 0, calls = 0, cave = 0;
 		size_t first_cave = 0, last_site = 0;
 		for (size_t i = 0; i < p->camera->silence.size(); i++)
 		{
@@ -326,7 +527,8 @@ int main(int argc, char* argv[])
 			if (!sil.offline_only || sil.keep_through_disarm || sil.when.empty())
 				return false;
 			const u32 a = sil.ee_address;
-			if (a >= 0xFE000u && a < 0xFE100u)
+			const bool call = std::find(std::begin(kSpawnCalls), std::end(kSpawnCalls), a) != std::end(kSpawnCalls);
+			if (a >= 0xFE000u && a < 0xFE160u)
 			{
 				if (sil.value_off != 0)
 					return false;
@@ -340,12 +542,41 @@ int main(int argc, char* argv[])
 				sites++;
 				last_site = i;
 			}
-			else if (sil.value_on == 0x24040002u && (sil.value_off & 0xFFFF0000u) == 0x24040000u)
-				frames++;
+			else if (call)
+			{
+				// jal FUN_00565C80 -> jal 0xFE100 (cave C), only with cave C in place.
+				if (sil.value_off != 0x0C159720u || sil.value_on != 0x0C03F840u || sil.when.size() != 2 ||
+					sil.when[1].ee_address != 0xFE100u || sil.when[1].equals != 0x3C0B0010u)
+					return false;
+				calls++;
+				last_site = i;
+			}
 			else
-				return false;
+				return false; // nothing else, the shared spawn frames above all
 		}
-		return sites == 5 && cave == 39 + 23 && frames == 7 && last_site < first_cave;
+		return sites == 5 && calls == 7 && cave == 39 + 23 + 22 && last_site < first_cave;
+	});
+	{
+		Begin("Physical melee online (PhysicalMelee::SelfTestOnline)");
+		const std::vector<std::string> failed = VR::PhysicalMelee::SelfTestOnline();
+		Record("Physical melee online", failed.empty(),
+			failed.empty() ? std::string("passed (it names the failed checks only, no check count)") :
+							 "FAIL: " + std::to_string(failed.size()) + " check(s), first: " + failed.front());
+	}
+	// The caves themselves, run on the profile's words: only the local record, with the magic and a fresh stamp, takes the
+	// VR weapon's pose (A, B) and the early hit window (C); every other record (an AI partner offline, another player
+	// online) runs exactly what the game's own code does.
+	RunSilent("Physical melee caves (File #1 profile words, interpreted)", +[]() {
+		const bool a = MeleeCaveA(kLocalRecord, true, 10, 8, true) && MeleeCaveA(kPartnerRecord, true, 10, 8, false) &&
+		               MeleeCaveA(kLocalRecord, false, 10, 8, false) && MeleeCaveA(kLocalRecord, true, 20, 8, false) &&
+		               MeleeCaveA(kLocalRecord, true, 2, 58, true);
+		const bool b = MeleeCaveB(kLocalRecord, true, true) && MeleeCaveB(kPartnerRecord, true, false) &&
+		               MeleeCaveB(kLocalRecord, false, false);
+		const bool c = MeleeCaveC(kLocalRecord, true, 10, 8, true) && MeleeCaveC(kPartnerRecord, true, 10, 8, false) &&
+		               MeleeCaveC(kPartnerRecord + 0x10E0, true, 10, 8, false) && MeleeCaveC(kLocalRecord, false, 10, 8, false) &&
+		               MeleeCaveC(kLocalRecord, true, 20, 8, false) && MeleeCaveC(kLocalRecord, true, 2, 58, true) &&
+		               MeleeCaveC(kLocalRecord, true, 14, 8, true) && MeleeCaveC(kLocalRecord, true, 15, 8, false);
+		return a && b && c;
 	});
 	RunGamepad();
 	RunSilent("CameraDriver::SelfTestAssembler (hook)", VR::CameraDriver::SelfTestAssembler);

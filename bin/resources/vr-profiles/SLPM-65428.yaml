@@ -315,20 +315,33 @@ SLPM-65428:
       - { address: 0x5569D8, on: 0x00000000, off: 0xA6230BC8, when: [{ address: 0x540004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: sh v1, 0xBC8(s1)
       - { address: 0x5569E4, on: 0x00000000, off: 0xA6230BC8, when: [{ address: 0x540004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: sh v1, 0xBC8(s1)
       - { address: 0x5569E8, on: 0x00000000, off: 0xA6200BC8, when: [{ address: 0x540004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: sh zero, 0xBC8(s1)
-      # Physical melee (VR setting PhysicalMelee, off by default; tools/outbreak-vr/research/2026-10-14-melee.md). A melee
-      # swing's attack object (FUN_005521B0 builds it, FUN_00552CF0 moves it every frame) copies the weapon object's matrix
-      # (+0x1C0) and position (+0x200), and the game's hit test (a capsule along a pipe, a sphere on a knife) runs on that.
-      # Two caves in free RAM (0xFE000, zero in every File #1 dump) make the LOCAL player's attack object copy them from the
-      # host's block at 0xFF000 instead (laid out as a fake object at 0xFEE80): only while it holds the magic 0x4D454C31,
-      # names the attack object's owner as the local record and was stamped within 6 frames of the game counter 0x48BF93.
-      # Otherwise, and for everyone else, the original copy runs. The host (VR::PhysicalMelee) writes the VR weapon's pose
-      # there each input poll. The sites first (each checks that its cave is in place), then the caves, so a disarm puts the
-      # sites back before the caves go. Strictly offline (whenSetting); checked offline over PINE, slot 5's zombie.
+      # Physical melee (VR setting PhysicalMelee, off by default; tools/outbreak-vr/research/2026-10-14-melee.md and
+      # 2026-10-14-melee-coop.md). A melee swing's attack object (FUN_005521B0 builds it, FUN_00552CF0 moves it every
+      # frame) copies the weapon object's matrix (+0x1C0) and position (+0x200), and the game's hit test (a capsule along a
+      # pipe, a sphere on a knife) runs on that. Three caves in free RAM (0xFE000, zero in every File #1 dump) act for the
+      # LOCAL player only: A and B make its attack object copy them from the host's block at 0xFF000 instead (laid out as a
+      # fake object at 0xFEE80), C opens its hit window at motion frame 2: each only while the block holds the magic
+      # 0x4D454C31, names the record as the local one and was stamped within 6 frames of the game counter 0x48BF93.
+      # Otherwise, and for every other character (AI partners offline, the other players online), the original code runs
+      # exactly. The host (VR::PhysicalMelee) writes the VR weapon's pose there each input poll. The sites first (each checks
+      # that its cave is in place), then the caves, so a disarm puts the sites back before the caves go. Offline, and online
+      # only with [VR] PhysicalMeleeOnline in private co-op while this console runs the room's enemies (CameraDriver's
+      # whenSetting gate, VR::PhysicalMelee::CoopOverrideLive); checked offline over PINE, slot 5's zombie.
       - { address: 0x552D8C, on: 0x0803F800, off: 0xC5020200, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE000, equals: 0x3C0B0010 }], offlineOnly: true, whenSetting: PhysicalMelee }   # attack object, every frame: j 0xFE000 (cave A)
       - { address: 0x552D90, on: 0x00000000, off: 0x24860050, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE000, equals: 0x3C0B0010 }], offlineOnly: true, whenSetting: PhysicalMelee }   # ... its delay slot (addiu a2,a0,80, done in the cave)
       - { address: 0x5523C4, on: 0x0C03F828, off: 0x8E030000, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE0A0, equals: 0x8E030000 }], offlineOnly: true, whenSetting: PhysicalMelee }   # attack object built: jal 0xFE0A0 (cave B) over lw v1,0(s0)
       - { address: 0x5523C8, on: 0x00000000, off: 0xC4620200, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE0A0, equals: 0x8E030000 }], offlineOnly: true, whenSetting: PhysicalMelee }   # ... its delay slot (lwc1 f2,0x200(v1), done in the cave)
       - { address: 0x5523E0, on: 0x00000000, off: 0x8E030000, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE0A0, equals: 0x8E030000 }], offlineOnly: true, whenSetting: PhysicalMelee }   # ... the second lw v1,0(s0): v1 already holds cave B's choice
+      # The hit window: the spawn event of each melee motion in the event script FUN_005661C0 (addiu a0,zero,<frame>; a1 the
+      # record; jal FUN_00565C80) calls cave C instead, which sets the frame to 2 for the local record only (about 70 ms after
+      # the press, so the VR weapon is live when your swing arrives) and jumps on to FUN_00565C80. The frame words stay stock.
+      - { address: 0x568544, on: 0x0C03F840, off: 0x0C159720, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE100, equals: 0x3C0B0010 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn event, motion 265 knife (spawn frame 14 at 0x568534): jal 0xFE100 (cave C)
+      - { address: 0x5694E8, on: 0x0C03F840, off: 0x0C159720, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE100, equals: 0x3C0B0010 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn event, motion 596 pipe, wooden pole (frame 16 at 0x5694D8): jal 0xFE100 (cave C)
+      - { address: 0x569560, on: 0x0C03F840, off: 0x0C159720, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE100, equals: 0x3C0B0010 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn event, motion 597 (frame 16 at 0x569550): jal 0xFE100 (cave C)
+      - { address: 0x5695F4, on: 0x0C03F840, off: 0x0C159720, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE100, equals: 0x3C0B0010 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn event, motion 598 (frame 22 at 0x5695E4): jal 0xFE100 (cave C)
+      - { address: 0x5696B0, on: 0x0C03F840, off: 0x0C159720, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE100, equals: 0x3C0B0010 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn event, motion 602 brush, spear (frame 32 at 0x5696A0): jal 0xFE100 (cave C)
+      - { address: 0x56973C, on: 0x0C03F840, off: 0x0C159720, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE100, equals: 0x3C0B0010 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn event, motion 603 (frame 38 at 0x56972C): jal 0xFE100 (cave C)
+      - { address: 0x5697B4, on: 0x0C03F840, off: 0x0C159720, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE100, equals: 0x3C0B0010 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn event, motion 604 (frame 40 at 0x5697A4): jal 0xFE100 (cave C)
       - { address: 0x0FE000, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # cave A
       - { address: 0x0FE004, on: 0x8D69F000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
       - { address: 0x0FE008, on: 0x3C0A4D45, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
@@ -391,16 +404,28 @@ SLPM-65428:
       - { address: 0x0FE0F0, on: 0x2563EE80, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
       - { address: 0x0FE0F4, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
       - { address: 0x0FE0F8, on: 0xC4620200, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
-      # The hit window opens at motion frame 2 instead of 14-32 (the spawn event's frame in the event script FUN_005661C0:
-      # knife 265, pipe and wooden pole 596, 597, 598, brush and spear 602, 603, 604), about 70 ms after the press, so the
-      # VR weapon is live when your swing arrives. Shared by everyone playing those motions (AI partners swing sooner too).
-      - { address: 0x568534, on: 0x24040002, off: 0x2404000E, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn frame, motion 265 knife
-      - { address: 0x5694D8, on: 0x24040002, off: 0x24040010, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn frame, motion 596 pipe, wooden pole
-      - { address: 0x569550, on: 0x24040002, off: 0x24040010, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn frame, motion 597
-      - { address: 0x5695E4, on: 0x24040002, off: 0x24040016, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn frame, motion 598
-      - { address: 0x5696A0, on: 0x24040002, off: 0x24040020, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn frame, motion 602 brush, spear
-      - { address: 0x56972C, on: 0x24040002, off: 0x24040026, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn frame, motion 603
-      - { address: 0x5697A4, on: 0x24040002, off: 0x24040028, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn frame, motion 604
+      - { address: 0x0FE100, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # cave C: magic, owner == local record (0xFF008), stamp fresh -> addiu a0,zero,2; then j 0x565C80
+      - { address: 0x0FE104, on: 0x8D69F000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE108, on: 0x3C0A4D45, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE10C, on: 0x354A4C31, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE110, on: 0x152A000F, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE114, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE118, on: 0x8D69F008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE11C, on: 0x1525000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE120, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE124, on: 0x3C0A0049, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE128, on: 0x914ABF93, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE12C, on: 0x9169F004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE130, on: 0x01494823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE134, on: 0x05210002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE138, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE13C, on: 0x2529003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE140, on: 0x2D290007, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE144, on: 0x11200002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE148, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE14C, on: 0x24040002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE150, on: 0x08159720, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE154, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
     lookAt:
       eye: 0x306338
       target: 0x306344
@@ -526,12 +551,20 @@ SLPM-65428:
   # speed / rest: m/s there to start and end a stroke; travel: metres of stroke before it counts; straightness: the stroke's
   # straight-line distance over its path (a waggle never counts). pressMs: how long Circle is held; raiseMs: how long R1 may
   # take to bring the weapon up; contactMs: an HP drop this long after the swing still buzzes; cooldownMs: the gap before
-  # the next swing. Never while a game screen is up, grabbed or hurt; strictly offline.
+  # the next swing. Never while a game screen is up, grabbed or hurt. Offline in full; online only with the separate
+  # [VR] PhysicalMeleeOnline in private co-op (tools/outbreak-vr/research/2026-10-14-melee-coop.md): the swing presses the
+  # game's own attack there too (partners see the game's own swing), and the hit follows the VR weapon only while this
+  # console runs the room's enemies. online: how that is read (only reads): room, the u16 room the local player is in;
+  # masters, NETAQ.BIN's table of each room's players (4 bytes a room, the first the console that runs its enemies, read by
+  # FUN_0060EF30 through 0x1AF440); overlay / overlayTag, a word of NETAQ.BIN's header that must read so (its name,
+  # "neta"), else no console is taken as ours; free, the start of the free RAM the caves use (up to the block's end), which
+  # must read zero before the caves go in online.
   melee:
     attackButton: Circle
     swing: { sub: 0x09, idle: 1, attack: 3, normalStance: 1 }
     enemies: { table: 0x3FFCA0, stride: 0xD90, count: 64, present: 0x00, hp: 0x544 }
     override: { block: 0xFF000, magic: 0x4D454C31, counter: 0x48BF93 }
+    online: { room: 0x3065AC, masters: 0x825810, overlay: 0x820020, overlayTag: 0x6174656E, free: 0xFE000 }
     tip: 0.40
     speed: 2.2
     rest: 0.8

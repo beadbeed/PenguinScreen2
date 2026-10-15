@@ -23,8 +23,13 @@
 //     profile installs (camera.silence entries with whenSetting: PhysicalMelee) makes the local player's attack object
 //     follow that block instead of the canned swing, so the game's own hit test runs where your hand holds the weapon;
 //   - a short tick when the game's swing starts, a firmer buzz when an enemy's HP drops during it.
-// Never while a game screen is up, while grabbed or hurt, and never online (not even private co-op): the block and the
-// cave are offline only, and so are the presses. Only the player's own pad and that block are ever written.
+// Never while a game screen is up, while grabbed or hurt. Offline in full. Online only with the separate [VR]
+// PhysicalMeleeOnline, only in private co-op (tools/outbreak-vr/research/2026-10-14-melee-coop.md): there every console
+// runs every character's swing from the state partners send, and the console that runs a room's enemies (its master)
+// decides their HP and reactions and sends them to the others. So online the swing presses the game's own attack (the
+// partners see the game's own swing) and the hit follows the VR weapon only while this console is the room's master;
+// otherwise the code is the game's own, exactly. Only the player's own pad, that block and the caves are ever written;
+// never another character's record.
 namespace VR::PhysicalMelee
 {
 	// --- The swing detector: pure, so the self-test can run it on scripted hands. ---
@@ -128,7 +133,7 @@ namespace VR::PhysicalMelee
 	{
 		float dt = 0.0f;
 		bool request = false;   // Detect's swing this poll; taken in Idle only
-		bool usable = false;    // first person, a melee weapon, the setting on, offline, stance normal or raised
+		bool usable = false;    // first person, a melee weapon, the setting on, Presses(mode), stance normal or raised
 		bool screen = false;    // a game screen is up
 		bool raised = false;    // stance raised (the game's attack works from here)
 		bool aim_idle = false;  // ... and its sub-action is aim idle (Circle starts a swing now)
@@ -191,9 +196,56 @@ namespace VR::PhysicalMelee
 	};
 
 	// CPU thread, every input poll, after ReloadDriver::Poll and before the controls compose. reader reads guest memory
-	// (null: main RAM); dt in seconds. Writes the override block (main RAM, offline only), plays the cues, logs.
+	// (null: main RAM); dt in seconds. Writes the override block (main RAM, while Overrides(mode)), plays the cues, logs.
 	Frame Poll(const VRInputSnapshot& snap, GuestReader reader, float dt);
 
 	// CPU thread: a loaded state has its own enemies; the HP baseline starts again.
 	void OnStateLoaded();
+
+	// --- Where it may act (pure, on the settings and what the game says). ---
+
+	enum class Mode : u8
+	{
+		Off,
+		Offline,    // strictly offline (no network adapter, not online-safe): presses, the block and the caves
+		CoopPress,  // private co-op with PhysicalMeleeOnline: the presses and the cues only; the game's own swing and hit
+		CoopFull,   // ... and this console runs the room's enemies: the block and the caves too
+	};
+	const char* ModeName(Mode mode);
+
+	struct ModeIn
+	{
+		bool setting = false;          // [VR] PhysicalMelee
+		bool online_setting = false;   // [VR] PhysicalMeleeOnline
+		bool strictly_offline = false; // no network adapter and [VR] OnlineSafe off
+		bool private_coop = false;     // CameraDriver's network mode is private co-op
+		bool online_safe = false;      // [VR] OnlineSafe
+		bool has_online = false;       // the profile's melee.online (and melee.override)
+		bool room_master = false;      // this console runs the enemies of the room the local player is in
+		bool free_clear = false;       // the caves' free RAM read zero before they went in online
+	};
+	Mode Decide(const ModeIn& in);
+	inline bool Presses(Mode mode) { return mode != Mode::Off; }
+	inline bool Overrides(Mode mode) { return mode == Mode::Offline || mode == Mode::CoopFull; }
+
+	// Online: who runs the room's enemies, as the game decides an enemy's death (FUN_0060EF30 through 0x1AF440 and
+	// NETAQ.BIN's per-room table): only while the network overlay's tag word reads tag, the u16 at room is below 128, and
+	// then masters[room * 4] is the slot. -1 when any of that fails (no console is taken as the master).
+	struct OnlineParams
+	{
+		u32 room = 0;
+		u32 masters = 0;
+		u32 tag_addr = 0;
+		u32 tag = 0;
+	};
+	int RoomMasterSlot(GuestReader reader, const OnlineParams& params, u32* room_out = nullptr);
+	// The words from lo up to hi all read zero (lo and hi word aligned); *busy_addr (optional) the first that does not.
+	bool RegionZero(GuestReader reader, u32 lo, u32 hi, u32* busy_addr = nullptr);
+
+	// CPU thread: CameraDriver's whenSetting gate asks, in private co-op, whether the caves may be in: true only while the
+	// last input poll decided CoopFull.
+	bool CoopOverrideLive();
+
+	// Decide, RoomMasterSlot and RegionZero on scripted inputs and a scripted memory. Returns the failed checks.
+	std::vector<std::string> SelfTestOnline();
 }

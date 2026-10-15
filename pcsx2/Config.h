@@ -1341,8 +1341,15 @@ struct Pcsx2Config
 		// attack (Circle; R1 too if the weapon is down), and while the game's swing is live its hit test is run on the VR
 		// weapon, where your hand holds it, instead of on the character's canned swing (a code cave; the game's own damage,
 		// stagger and hit reaction follow). A tick when the attack goes live, a firmer buzz when it lands. Never presses
-		// anything while a game screen is up or while grabbed. Never online (not even private co-op). Ini only for now.
+		// anything while a game screen is up or while grabbed. Online only with PhysicalMeleeOnline below. Ini only for now.
 		bool PhysicalMelee = false;
+		// PhysicalMelee online, in private co-op only (first person armed there, never online-safe; the profile's
+		// melee.online; tools/outbreak-vr/research/2026-10-14-melee-coop.md). Off: PhysicalMelee does nothing while the
+		// network adapter is on. On: a swing presses the game's own attack (partners see the game's own swing), and the hit
+		// follows the VR weapon only while this console runs the room's enemies (it decides their HP and reactions for
+		// everyone); otherwise the game's own swing and hit, exactly. Only this player's pad, its block and the caves in free
+		// RAM are written, never another character. Ini only, off by default; untested online until a co-op session.
+		bool PhysicalMeleeOnline = false;
 		// First person, for profiles with a reach block: a light tick in the right hand and a short toast naming the item
 		// (and the button, "Kevin's 45 Auto  (A)") when something on the floor comes within reach of the character's own
 		// Circle press. Only reads the game's memory; shown in the headset only. Ini only for now.

@@ -129,6 +129,10 @@ namespace VR::CameraDriver
 	// play); false in private co-op and when restricted. Hand targeting runs only offline.
 	bool NetworkOffline();
 
+	// CPU thread: true while the network mode Apply last resolved is private co-op (the adapter on, our private server,
+	// [VR] PrivateCoopFirstPerson on). [VR] PhysicalMeleeOnline acts only then.
+	bool PrivateCoop();
+
 	// --- The headset's space against the game's (hand targeting; reads only, nothing here writes the game) ---
 	//
 	// What camera.lookAt does to place the eye, as numbers a hand position can be mapped with. ApplyLookAt publishes one

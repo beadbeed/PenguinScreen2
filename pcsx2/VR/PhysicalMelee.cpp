@@ -831,7 +831,9 @@ namespace VR::PhysicalMelee
 		// go cleanly.
 		int s_pad_port = -1;
 		std::string s_attack_button;
-		// The override block: whether it holds the magic now (so it is cleared once when the override stops).
+		// The override block: whether it holds the magic now (so it is cleared once when the override stops), and its size
+		// (magic, stamp, record, the matrix at +0x40, the position at +0x80).
+		constexpr u32 kBlockBytes = 0x90;
 		bool s_block_armed = false;
 		u32 s_block_addr = 0;
 		// The enemies' HP last poll (present, value), for the contact buzz.
@@ -850,6 +852,18 @@ namespace VR::PhysicalMelee
 		float s_swing_path = 0.0f;
 		int s_hit_enemy = -1;
 		s16 s_hit_from = 0, s_hit_to = 0;
+		// Online (private co-op): whether the last poll decided CoopFull (CameraDriver's gate reads it), the line it logged,
+		// and whether the caves' free RAM read zero before they first went in (Unknown until it is read while eligible).
+		bool s_coop_live = false;
+		std::string s_mode_line;
+		enum class FreeRam : u8
+		{
+			Unknown,
+			Clear,
+			Busy,
+		};
+		FreeRam s_free = FreeRam::Unknown;
+		u32 s_free_crc = 0;
 
 		bool DefaultRead(u32 address, u8 width, u32* value)
 		{
@@ -883,10 +897,14 @@ namespace VR::PhysicalMelee
 			return !EmuConfig.DEV9.EthEnable && !EmuConfig.VR.OnlineSafe;
 		}
 
+		// The whole block back to zero (the magic first), so the caves see nothing and the free RAM reads as it was.
 		void ClearBlock()
 		{
-			if (s_block_armed && VMManager::HasValidVM() && s_block_addr + 4 <= Ps2MemSize::MainRam)
-				memWrite32(s_block_addr, 0);
+			if (s_block_armed && VMManager::HasValidVM() && s_block_addr + kBlockBytes <= Ps2MemSize::MainRam)
+			{
+				for (u32 off = 0; off < kBlockBytes; off += 4)
+					memWrite32(s_block_addr + off, 0);
+			}
 			s_block_armed = false;
 		}
 
@@ -922,6 +940,147 @@ namespace VR::PhysicalMelee
 			out[1] = v[1] + w * ty + (z * tx - x * tz);
 			out[2] = v[2] + w * tz + (x * ty - y * tx);
 		}
+	}
+
+	const char* ModeName(Mode mode)
+	{
+		switch (mode)
+		{
+			case Mode::Offline: return "offline";
+			case Mode::CoopPress: return "private co-op, the game's own swing";
+			case Mode::CoopFull: return "private co-op, the hit on the VR weapon";
+			default: return "off";
+		}
+	}
+
+	Mode Decide(const ModeIn& in)
+	{
+		if (!in.setting)
+			return Mode::Off;
+		if (in.strictly_offline)
+			return Mode::Offline;
+		// Online: only the separate setting, only private co-op, never online-safe.
+		if (!in.online_setting || !in.private_coop || in.online_safe)
+			return Mode::Off;
+		return (in.has_online && in.room_master && in.free_clear) ? Mode::CoopFull : Mode::CoopPress;
+	}
+
+	int RoomMasterSlot(GuestReader reader, const OnlineParams& p, u32* room_out)
+	{
+		u32 tag = 0, room = 0, slot = 0;
+		if (!Read(reader, p.tag_addr, 4, &tag) || tag != p.tag || !Read(reader, p.room, 2, &room) || room >= 128)
+			return -1;
+		if (room_out)
+			*room_out = room;
+		if (!Read(reader, p.masters + room * 4u, 1, &slot) || slot >= 4)
+			return -1; // 0xFF: the room has nobody listed
+		return static_cast<int>(slot);
+	}
+
+	bool RegionZero(GuestReader reader, u32 lo, u32 hi, u32* busy_addr)
+	{
+		for (u32 a = lo & ~3u; a < hi; a += 4)
+		{
+			u32 w = 0;
+			if (!Read(reader, a, 4, &w) || w != 0)
+			{
+				if (busy_addr)
+					*busy_addr = a;
+				return false;
+			}
+		}
+		return true;
+	}
+
+	bool CoopOverrideLive()
+	{
+		return s_coop_live;
+	}
+
+	namespace
+	{
+		// A scripted guest memory for SelfTestOnline (word granular, little endian like the EE).
+		std::array<u32, 64> s_test_mem{};
+		u32 s_test_base = 0;
+		bool TestRead(u32 address, u8 width, u32* value)
+		{
+			if (address < s_test_base || address + width > s_test_base + s_test_mem.size() * 4)
+				return false;
+			const u32 off = address - s_test_base;
+			const u32 w = s_test_mem[off / 4] >> ((off % 4) * 8);
+			*value = width == 1 ? (w & 0xFFu) : width == 2 ? (w & 0xFFFFu) : w;
+			return true;
+		}
+	}
+
+	std::vector<std::string> SelfTestOnline()
+	{
+		Checker c;
+		ModeIn in;
+		c(Decide(in) == Mode::Off, "mode: the setting off is off");
+		in.setting = true;
+		in.strictly_offline = true;
+		c(Decide(in) == Mode::Offline, "mode: strictly offline is offline, the online setting not needed");
+		in.strictly_offline = false;
+		c(Decide(in) == Mode::Off, "mode: online without PhysicalMeleeOnline is off");
+		in.online_setting = true;
+		c(Decide(in) == Mode::Off, "mode: online, not private co-op (obsrv, restricted) is off");
+		in.private_coop = true;
+		c(Decide(in) == Mode::CoopPress, "mode: private co-op, no master: presses only");
+		in.room_master = true;
+		c(Decide(in) == Mode::CoopPress, "mode: master, but no melee.online: presses only");
+		in.has_online = true;
+		c(Decide(in) == Mode::CoopPress, "mode: master, free RAM not read clear: presses only");
+		in.free_clear = true;
+		c(Decide(in) == Mode::CoopFull, "mode: master, free RAM clear: the hit on the VR weapon");
+		in.online_safe = true;
+		c(Decide(in) == Mode::Off, "mode: online-safe is off online");
+		in.online_safe = false;
+		in.room_master = false;
+		c(Decide(in) == Mode::CoopPress, "mode: the partner is master: presses only");
+		in.setting = false;
+		c(Decide(in) == Mode::Off, "mode: PhysicalMelee off wins over the online setting");
+		c(!Overrides(Mode::CoopPress) && Overrides(Mode::CoopFull) && Overrides(Mode::Offline) && !Overrides(Mode::Off) &&
+			  Presses(Mode::CoopPress) && !Presses(Mode::Off),
+			"mode: what each mode does");
+
+		// The room table: tag word at base, the room u16 at base + 8, four rows of 4 bytes from base + 0x10.
+		s_test_base = 0x820000;
+		s_test_mem.fill(0);
+		OnlineParams op;
+		op.tag_addr = 0x820000;
+		op.tag = 0x6174656E;
+		op.room = 0x820008;
+		op.masters = 0x820010;
+		s_test_mem[0] = 0x6174656E;
+		s_test_mem[2] = 0x00000002;             // room 2
+		s_test_mem[4 + 2] = 0xFFFF0201;         // room 2: slot 1 first, then 2
+		u32 room = 99;
+		c(RoomMasterSlot(TestRead, op, &room) == 1 && room == 2, "master: the first slot of the room's row");
+		s_test_mem[4 + 2] = 0xFFFFFF00;
+		c(RoomMasterSlot(TestRead, op) == 0, "master: slot 0");
+		s_test_mem[4 + 2] = 0xFFFFFFFF;
+		c(RoomMasterSlot(TestRead, op) == -1, "master: an empty row is nobody");
+		s_test_mem[4 + 2] = 0x00000003;
+		s_test_mem[0] = 0x6C676E69; // "ingl": SINGLE.BIN's header word, not NETAQ's
+		c(RoomMasterSlot(TestRead, op) == -1, "master: another overlay resident is nobody");
+		s_test_mem[0] = 0x6174656E;
+		s_test_mem[2] = 0x00000080; // room 128
+		c(RoomMasterSlot(TestRead, op) == -1, "master: a room past the table is nobody");
+		s_test_mem[2] = 0x00000002;
+		OnlineParams far = op;
+		far.masters = 0x8200F8; // room 2's row at 0x820100, past the scripted memory
+		c(RoomMasterSlot(TestRead, far) == -1, "master: a row that cannot be read is nobody");
+		c(RoomMasterSlot(TestRead, op) == 3, "master: slot 3");
+
+		u32 busy = 0;
+		s_test_mem.fill(0);
+		c(RegionZero(TestRead, 0x820000, 0x820100), "free RAM: all zero");
+		s_test_mem[0x20] = 1;
+		c(!RegionZero(TestRead, 0x820000, 0x820100, &busy) && busy == 0x820080, "free RAM: a word in use is found");
+		c(RegionZero(TestRead, 0x820000, 0x820080), "free RAM: the range ends before it");
+		c(!RegionZero(TestRead, 0x820000, 0x820200), "free RAM: unreadable memory is not clear");
+		return c.failures;
 	}
 
 	void OnStateLoaded()
@@ -988,6 +1147,61 @@ namespace VR::PhysicalMelee
 		}
 		const bool setting = EmuConfig.VR.PhysicalMelee;
 		const bool offline = StrictlyOffline();
+		// The local slot (the profile's camera.base index byte).
+		u32 slot = 0;
+		const bool slot_known = profile && profile->camera.has_value() && profile->camera->base.has_value() &&
+		                        profile->camera->base->is_indexed && Read(reader, profile->camera->base->index_addr, 1, &slot);
+
+		// Where it may act (tools/outbreak-vr/research/2026-10-14-melee-coop.md). Offline in full. Online only with
+		// PhysicalMeleeOnline in private co-op: every console runs every character's swing from the state partners send,
+		// and the console that runs the room's enemies (the first in NETAQ.BIN's list for the room) decides their HP,
+		// deaths and reactions and sends them; so the presses (the game's own swing, which partners see) always, and the
+		// block and the caves only while that console is this one and the caves' free RAM read zero before they went in.
+		ModeIn mi;
+		mi.setting = setting;
+		mi.online_setting = EmuConfig.VR.PhysicalMeleeOnline;
+		mi.strictly_offline = offline;
+		mi.private_coop = EmuConfig.DEV9.EthEnable && CameraDriver::PrivateCoop();
+		mi.online_safe = EmuConfig.VR.OnlineSafe;
+		mi.has_online = mp && mp->has_online && mp->has_override;
+		const bool coop_eligible = mi.setting && mi.online_setting && mi.private_coop && !mi.online_safe && mi.has_online &&
+		                           fb && gamepad && slot_known;
+		{
+			const u32 crc = VMManager::GetDiscCRC();
+			if (!coop_eligible || crc != s_free_crc)
+			{
+				s_free = FreeRam::Unknown;
+				s_free_crc = crc;
+			}
+		}
+		int master = -1;
+		u32 room = 0;
+		if (coop_eligible)
+		{
+			OnlineParams op;
+			op.room = mp->online_room;
+			op.masters = mp->online_masters;
+			op.tag_addr = mp->online_tag_addr;
+			op.tag = mp->online_tag;
+			master = RoomMasterSlot(reader, op, &room);
+			mi.room_master = master >= 0 && static_cast<u32>(master) == slot;
+			if (mi.room_master && s_free == FreeRam::Unknown)
+			{
+				u32 busy = 0, word = 0;
+				if (RegionZero(reader, mp->online_free, mp->block + kBlockBytes, &busy))
+					s_free = FreeRam::Clear;
+				else
+				{
+					s_free = FreeRam::Busy;
+					Read(reader, busy, 4, &word);
+					Console.WriteLn("(VR) Melee: online, the caves' free RAM is in use (0x%08X at 0x%X), so the hit stays on "
+									"the game's own swing.", word, busy);
+				}
+			}
+		}
+		mi.free_clear = s_free == FreeRam::Clear;
+		const Mode mode = (mp && fb && gamepad) ? Decide(mi) : Mode::Off;
+		s_coop_live = mode == Mode::CoopFull;
 
 		// The arm-time line: once per game, and again whenever the verdict changes.
 		if (profile)
@@ -1001,11 +1215,19 @@ namespace VR::PhysicalMelee
 				verdict = fmt::format("off (no VR Gamepad control is bound to {})", mp->attack_button);
 			else if (!setting)
 				verdict = "off (the VR PhysicalMelee setting)";
-			else if (!offline)
-				verdict = "off (online: PhysicalMelee runs strictly offline)";
-			else
+			else if (mode == Mode::Off)
+				verdict = mi.online_safe     ? "off (online-safe)" :
+				          !mi.private_coop   ? "off (online, and not private co-op)" :
+				          !mi.online_setting ? "off (online: [VR] PhysicalMeleeOnline is off)" :
+				                               "off";
+			else if (mode == Mode::Offline)
 				verdict = fmt::format("on (swing to attack with {}; the hit {}{})", mp->attack_button,
 					mp->has_override ? "follows the VR weapon" : "stays on the game's own swing (no melee.override)",
+					mp->enemy_count ? "; a buzz when it lands" : "");
+			else
+				verdict = fmt::format("on online, private co-op (swing to attack with {}; partners see the game's own swing; the "
+									  "hit follows the VR weapon only while this console runs the room's enemies{}{})",
+					mp->attack_button, mi.has_online ? "" : ", so never: the profile has no melee.online",
 					mp->enemy_count ? "; a buzz when it lands" : "");
 			const u32 crc = VMManager::GetDiscCRC();
 			if (verdict != s_verdict || crc != s_verdict_crc)
@@ -1014,9 +1236,25 @@ namespace VR::PhysicalMelee
 				s_verdict_crc = crc;
 				Console.WriteLn("(VR) Physical melee: %s.", verdict.c_str());
 			}
+			// Online: who runs this room's enemies, whenever that changes.
+			std::string line;
+			if (mode == Mode::CoopFull)
+				line = fmt::format("room {}: this console (slot {}) runs its enemies, so the hit follows the VR weapon", room, slot);
+			else if (mode == Mode::CoopPress && master >= 0)
+				line = fmt::format("room {}: the console of slot {} runs its enemies (this is slot {}), so the hit is the game's "
+								   "own swing (press only)", room, master, slot);
+			else if (mode == Mode::CoopPress)
+				line = "no room master is known (the network overlay or its table is not read), so the hit is the game's own "
+				       "swing (press only)";
+			if (line != s_mode_line)
+			{
+				s_mode_line = line;
+				if (!line.empty())
+					Console.WriteLn("(VR) Melee: online, %s.", line.c_str());
+			}
 		}
 
-		const bool env = mp && fb && gamepad && setting && offline;
+		const bool env = mp && fb && gamepad && Presses(mode);
 		// A melee weapon in hand: the local record's equipped item record, behind the same checks the weapon reader makes
 		// (present, its own index, owned by the local slot), read here so it works with or without a headset session; how
 		// the game attaches its model, from the weapon reader (or the scenario's item table).
@@ -1025,9 +1263,7 @@ namespace VR::PhysicalMelee
 		HandModel::GameAttach attach;
 		if (env)
 		{
-			u32 eq = 0, present = 0, index = 0, owner = 0, id = 0, slot = 0;
-			const bool slot_known = profile->camera.has_value() && profile->camera->base.has_value() &&
-			                        profile->camera->base->is_indexed && Read(reader, profile->camera->base->index_addr, 1, &slot);
+			u32 eq = 0, present = 0, index = 0, owner = 0, id = 0;
 			if (slot_known && Read(reader, record + fb->weapon_equipped_offset, 1, &eq) && eq != 0)
 			{
 				const u64 r = static_cast<u64>(fb->weapon_table) + static_cast<u64>(eq) * fb->weapon_stride;
@@ -1146,7 +1382,7 @@ namespace VR::PhysicalMelee
 
 		// The override block: where the VR weapon is, in the game's space, every poll it can be known; cleared otherwise.
 		bool wrote = false;
-		if (usable && mp->has_override && hand && attach.valid)
+		if (usable && Overrides(mode) && mp->has_override && hand && attach.valid)
 		{
 			CameraDriver::Mapping map;
 			float origin[3], axes[3][3], m[16];
@@ -1193,10 +1429,10 @@ namespace VR::PhysicalMelee
 			s_diag_s += dt;
 			if (s_diag_s >= 0.5f)
 			{
-				Console.WriteLn("(VR) Melee diag: env %d melee %d (item %u) raised %d normal %d aim idle %d swinging %d screen %d hand %d "
-								"| peak %.2f m/s, stroke %d | %s | block %s",
-					env, melee, static_cast<unsigned>(item_id), raised, normal, aim_idle, swinging, screen, hand,
-					static_cast<double>(s_diag_peak), dout.in_stroke, PhaseName(s_drive.phase), wrote ? "written" : "clear");
+				Console.WriteLn("(VR) Melee diag: %s | env %d melee %d (item %u) raised %d normal %d aim idle %d swinging %d "
+								"screen %d hand %d | peak %.2f m/s, stroke %d | %s | block %s",
+					ModeName(mode), env, melee, static_cast<unsigned>(item_id), raised, normal, aim_idle, swinging, screen,
+					hand, static_cast<double>(s_diag_peak), dout.in_stroke, PhaseName(s_drive.phase), wrote ? "written" : "clear");
 				s_diag_s = 0.0f;
 				s_diag_peak = 0.0f;
 			}
