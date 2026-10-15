@@ -42,6 +42,15 @@ opened with the switch on is not yet).
 Since 2026-10-14 21:15 `run-playtest-models` (and `Playtest\Slot*.cmd`) runs branch `melee` (handmodels + `PhysicalMelee`, off),
 an LTO build with 30 of 30 self-tests; its `resources` junction points at the `melee` worktree.
 
+**2026-10-15 overnight build: branch `nightly`** = `vrmelee` (contact-driven melee: `PhysicalMeleeMode = Contact`, the game's own
+attack spawn called on the VR weapon's contact, strength from swing speed; `meleecoop`'s local-only caves and
+`PhysicalMeleeOnline`; `BeltPouches` off) + `panelfeel` (`MenuPanelRoom = Freeze`: the room holds still and dims behind a
+menu). Local LTO build, 36 of 36 self-tests, profile check passes. `run-playtest-models` (and `D:\Games\PS2\Playtest\Slot*.cmd`)
+runs it, with `PhysicalMelee = true`; its `resources` junction points at the `nightly` worktree. Everything new is checked
+offline (and the menus on the null headset) only. Next headset check: melee in slot 5 (equip a pipe or knife yourself: hard
+swings knock down, light ones flinch, nothing on small moves; `PhysicalMeleeMode = Press` to compare), and menus (is Freeze
+calm, is 0.55 dim right, try `Dim` / `Live`).
+
 ## Where things are
 
 | | |
