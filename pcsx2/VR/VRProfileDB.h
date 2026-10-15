@@ -883,6 +883,7 @@ namespace VR::ProfileDB
 		u32 jolt_bones = 0;
 		u32 jolt_bone_table = 0;
 		u32 jolt_bone_count = 0;
+		u32 jolt_bone_real = 0; // the model's own u16 bone count (*(enemy + jolt_bones) + this; 0: not read), review d10
 		PhysicalMelee::JoltParams jolt;
 		PhysicalMelee::DetectorParams detect;
 		PhysicalMelee::DriverParams drive;

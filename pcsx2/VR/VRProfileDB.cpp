@@ -3910,7 +3910,7 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 				"minFrames", "maxFrames", "chains", "notes"});
 			const ryml::ConstNodeRef hk = jt["hook"], bn = jt["bones"];
 			warnUnknownKeys(serial, hk, "melee.jolt.hook", {"address", "on", "notes"});
-			warnUnknownKeys(serial, bn, "melee.jolt.bones", {"pointer", "table", "count", "notes"});
+			warnUnknownKeys(serial, bn, "melee.jolt.bones", {"pointer", "table", "count", "real", "notes"});
 			ok = read_hex(jt, "block", o.jolt_block) && read_hex(jt, "magic", o.jolt_magic) && read_hex(hk, "address", o.jolt_hook) &&
 			     read_hex(hk, "on", o.jolt_hook_on) && read_hex(bn, "pointer", o.jolt_bones) && read_hex(bn, "table", o.jolt_bone_table) &&
 			     bn.has_child("count");
@@ -3920,6 +3920,10 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 				ok = c.has_value() && c.value() >= 1 && c.value() <= 255;
 				if (ok)
 					o.jolt_bone_count = static_cast<u32>(c.value());
+				// real (optional): where the model keeps its own u16 bone count; a jolt bone must be below it too.
+				if (ok && bn.has_child("real"))
+					ok = read_hex(bn, "real", o.jolt_bone_real) && o.jolt_bone_real >= 0x10 && o.jolt_bone_real < 0x10000 &&
+					     (o.jolt_bone_real % 2) == 0;
 			}
 			ok = ok && o.jolt_magic != 0 && (o.jolt_block % 16) == 0 &&
 			     static_cast<u64>(o.jolt_block) + VR::PhysicalMelee::kJoltBlockBytes <= Ps2MemSize::MainRam &&
@@ -4203,7 +4207,7 @@ bool VR::ProfileDB::SelfTestMeleeParse()
 			"    spheres: { count: 0x1E0, shapes: 0x1D8, centres: 0x1DC, kind: 0x02, enemyKind: 2 }\n";
 		const std::string head = "  jolt:\n    block: 0xFF100\n    magic: 0x4A4C5431\n"
 								 "    hook: { address: 0x6644D0, on: 0x0C03FA00 }\n"
-								 "    bones: { pointer: 0x34, table: 0x820, count: 36 }\n";
+								 "    bones: { pointer: 0x34, table: 0x820, count: 36, real: 0x816 }\n";
 		const std::string full = contact + head +
 			"    slow: 2.0\n    fast: 7.0\n    minDeg: 5\n    maxDeg: 30\n    minFrames: 8\n    maxFrames: 24\n"
 			"    chains:\n"
@@ -4218,7 +4222,7 @@ bool VR::ProfileDB::SelfTestMeleeParse()
 			const VR::PhysicalMelee::JoltParams& j = m->jolt;
 			check(m->jolt_block == 0xFF100 && m->jolt_magic == 0x4A4C5431 && m->jolt_hook == 0x6644D0 &&
 					  m->jolt_hook_on == 0x0C03FA00 && m->jolt_bones == 0x34 && m->jolt_bone_table == 0x820 &&
-					  m->jolt_bone_count == 36,
+					  m->jolt_bone_count == 36 && m->jolt_bone_real == 0x816,
 				"jolt: the block, hook and bones");
 			check(std::fabs(j.slow - 2.0f) < 1e-6f && std::fabs(j.fast - 7.0f) < 1e-6f && std::fabs(j.min_deg - 5.0f) < 1e-6f &&
 					  std::fabs(j.max_deg - 30.0f) < 1e-6f && j.min_frames == 8 && j.max_frames == 24,
@@ -4237,7 +4241,7 @@ bool VR::ProfileDB::SelfTestMeleeParse()
 			"jolt: without contact it is dropped");
 		check(parse((contact + "  jolt:\n    block: 0xFF104\n    magic: 0x4A4C5431\n"
 								 "    hook: { address: 0x6644D0, on: 0x0C03FA00 }\n"
-								 "    bones: { pointer: 0x34, table: 0x820, count: 36 }\n" + one)
+								 "    bones: { pointer: 0x34, table: 0x820, count: 36, real: 0x816 }\n" + one)
 						.c_str(),
 				  &m) && m.has_value() && !m->has_jolt && m->has_contact,
 			"jolt: a misaligned block is dropped, contact kept");

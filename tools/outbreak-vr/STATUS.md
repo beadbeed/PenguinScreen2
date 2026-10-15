@@ -43,7 +43,8 @@ Since 2026-10-14 21:15 `run-playtest-models` (and `Playtest\Slot*.cmd`) runs bra
 an LTO build with 30 of 30 self-tests; its `resources` junction points at the `melee` worktree.
 
 **Morning of 2026-10-15, for Alex:** `D:\Games\PS2\Playtest\Slot5/6/7/9.cmd` run `nightly` (local LTO build, 39 of 39 self-tests),
-in `D:\dev\PenguinScreen2-buildun-playtest-models` with its own settings. On there: `PhysicalMelee` (Contact), `MeleeHitJolt`,
+in `D:\dev\PenguinScreen2-build
+un-playtest-models` with its own settings. On there: `PhysicalMelee` (Contact), `MeleeHitJolt`,
 `SeamlessDoors`, `MenuPanel` (+ `MenuPanelRoom = Freeze`), `HandTargeting`, `ReloadGesture`, the game weapon models;
 off: `BeltPouches`, `DepthLayer`, `DepthWarp`, `PhysicalMeleeOnline`. A/B for leaning (slot 7, lean 10-20 cm at the counter):
 `DepthWarp = true` (our own warp: the review's critical fix is in, and it ran clean on the null headset after the merge:
@@ -284,7 +285,7 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 **Night polish (`nightpolish`, from `nightly`), checked offline headset-free on 2026-10-15** (run-npolish, local build,
 38 of 38 self-tests):
 - **Hit jolt on the hit's update** (`MeleeHitJolt`; `research/2026-10-14-vr-melee.md` section 9, "Latency, fixed"): the
-  jolt is written at the strike with a wait byte, and cave G (49 words) starts it when the enemy's own hit counter
+  jolt is written at the strike with a wait byte, and cave G (54 words) starts it when the enemy's own hit counter
   `+0x13F` is set, the same update the HP drops. Slot 5, the poked pipe, scripted 120 deg swings, 4 hits (head and belly,
   class 1 and 2): in all 4 the struck bone turned 0 deg on the update before and 11-23 deg on the HP-drop update itself,
   and the entry's wait byte went 1 -> 0 on that update (it was 1-2 updates later). The angles are now exact for the

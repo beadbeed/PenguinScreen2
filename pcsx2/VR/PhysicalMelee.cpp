@@ -1193,6 +1193,14 @@ namespace VR::PhysicalMelee
 		u32 s_jolt_magic = 0; // as s_block_magic / s_block_crc (review d4)
 		u32 s_jolt_crc = 0;
 		int s_jolt_wait_zone = -1; // the sphere the pending strike's jolt was armed for (waiting in cave G for the hit), or -1
+		// Review d10: cave G counts an entry down only on its enemy's update through 0x6644D0, so an entry for an enemy
+		// that never passes there (another kind-2 enemy's update, or one gone) would keep its slot. Game frames counted
+		// from the counter (0x48BF93, 0-59) while the jolt is on, and when each entry was written: an entry older than
+		// kJoltExpireFrames is free again (a jolt lasts at most maxFrames updates, 2 game frames each).
+		constexpr u32 kJoltExpireFrames = 60;
+		u32 s_jolt_frames = 0;
+		int s_jolt_last_counter = -1;
+		u32 s_jolt_written[kJoltEntries] = {};
 
 		void ClearJolt()
 		{
@@ -1203,6 +1211,7 @@ namespace VR::PhysicalMelee
 					memWrite32(s_jolt_addr + off, 0);
 			}
 			s_jolt_armed = false;
+			s_jolt_last_counter = -1;
 		}
 
 		void ResetContact()
@@ -1270,10 +1279,20 @@ namespace VR::PhysicalMelee
 			u32 model = 0;
 			if (!Read(reader, base + mp.jolt_bones, 4, &model) || model == 0 || model + mp.jolt_bone_table + 4u * 256u > Ps2MemSize::MainRam)
 				return false;
+			// The model's own bone count (review d10): a smaller model's table holds stale pointers past it (seen: 23 bones,
+			// 36 pointers). Cave G checks the same before each apply.
+			u32 bones_real = mp.jolt_bone_count;
+			if (mp.jolt_bone_real != 0)
+			{
+				u32 n = 0;
+				if (!Read(reader, model + mp.jolt_bone_real, 2, &n))
+					return false;
+				bones_real = std::min(bones_real, n);
+			}
 			// The bone's world matrix (4 x 4 row vectors, row 3 its joint).
 			const auto bone_world = [&](u32 bone, float w[16]) {
 				u32 ptr = 0;
-				if (bone >= mp.jolt_bone_count || !Read(reader, model + mp.jolt_bone_table + 4u * bone, 4, &ptr) || ptr == 0 ||
+				if (bone >= bones_real || !Read(reader, model + mp.jolt_bone_table + 4u * bone, 4, &ptr) || ptr == 0 ||
 					ptr + 64u > Ps2MemSize::MainRam)
 					return false;
 				for (u32 k = 0; k < 16; k++)
@@ -1293,7 +1312,8 @@ namespace VR::PhysicalMelee
 				Read(reader, e, 4, &who);
 				Read(reader, e + 4, 4, &bf);
 				frames_left[k] = static_cast<u8>(bf >> 8);
-				if (!s_jolt_armed || who == base || ((bf >> 16) & 0xFFu) != 0)
+				const bool expired = s_jolt_frames - s_jolt_written[k] > kJoltExpireFrames;
+				if (!s_jolt_armed || who == base || ((bf >> 16) & 0xFFu) != 0 || (expired && frames_left[k] != 0))
 				{
 					memWrite32(e + 4, 0);
 					frames_left[k] = 0;
@@ -1319,6 +1339,7 @@ namespace VR::PhysicalMelee
 				for (int k = 0; k < 6; k++)
 					memWrite32(e + 4u * static_cast<u32>(k), w[k]);
 				frames_left[slot] = je.frames;
+				s_jolt_written[slot] = s_jolt_frames;
 				line += fmt::format(" bone {} ({}, {}, {})", ch->bones[i], ang[0], ang[1], ang[2]);
 			}
 			if (line.empty())
@@ -2785,6 +2806,16 @@ namespace VR::PhysicalMelee
 		const bool jolt = contact && mode == Mode::Offline && EmuConfig.VR.MeleeHitJolt && mp->has_jolt;
 		if (!jolt)
 			ClearJolt();
+		else
+		{
+			u32 c = 0;
+			if (Read(reader, mp->counter, 1, &c))
+			{
+				if (s_jolt_last_counter >= 0)
+					s_jolt_frames += (c + 60u - static_cast<u32>(s_jolt_last_counter)) % 60u;
+				s_jolt_last_counter = static_cast<int>(c);
+			}
+		}
 		if (contact)
 			PollContact(reader, *mp, record, wrote && !screen && !swinging, m, origin, axes, counter, dt, jolt);
 		else

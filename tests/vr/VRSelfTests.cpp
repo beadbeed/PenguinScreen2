@@ -1304,7 +1304,7 @@ int main(int argc, char* argv[])
 				first_cave = i;
 			any_cave = true;
 		}
-		return sites == 3 && cave_d == 92 && cave_e == 25 && cave_f == 178 && last_site < first_cave;
+		return sites == 3 && cave_d == 101 && cave_e == 28 && cave_f == 183 && last_site < first_cave;
 	});
 	RunSilent("Physical melee contact caves (D, E, F: File #1 profile words, interpreted)", MeleeContactCaves);
 	// [VR] MeleeHitJolt (a prototype; tools/outbreak-vr/research/2026-10-14-vr-melee.md sections 8 and 9): the pure parts
@@ -1324,7 +1324,7 @@ int main(int argc, char* argv[])
 			return false;
 		const VR::ProfileDB::MeleeParams& m = p->melee.value();
 		if (!m.has_jolt || m.jolt_block != 0xFF100 || m.jolt_magic != 0x4A4C5431 || m.jolt_hook != 0x6644D0 ||
-			m.jolt_hook_on != 0x0C03FA00 || m.jolt_bones != 0x34 || m.jolt_bone_table != 0x820 || m.jolt_bone_count != 36 ||
+			m.jolt_hook_on != 0x0C03FA00 || m.jolt_bones != 0x34 || m.jolt_bone_table != 0x820 || m.jolt_bone_count != 36 || m.jolt_bone_real != 0x816 ||
 			m.jolt.chains.size() != 3)
 			return false;
 		const VR::PhysicalMelee::JoltChain* head = VR::PhysicalMelee::JoltChainFor(m.jolt, 21);
@@ -1332,7 +1332,7 @@ int main(int argc, char* argv[])
 		if (!head || head->bones[0] != 20 || head->parents[0] != 11 || !belly || belly->bones[0] != 10 || belly->parents[0] != 2 ||
 			!VR::PhysicalMelee::JoltChainFor(m.jolt, 3))
 			return false;
-		// The entries: the site, then the cave (49 words at 0xFE800, clear of cave F and of the melee block's 0x90 bytes).
+		// The entries: the site, then the cave (54 words at 0xFE800, clear of cave F and of the melee block's 0x90 bytes).
 		MiniEE ee;
 		int site = -1, first_cave = -1, words = 0;
 		for (size_t i = 0; i < p->camera->silence.size(); i++)
@@ -1356,7 +1356,7 @@ int main(int argc, char* argv[])
 			ee.Store32(sil.ee_address, sil.value_on);
 			words++;
 		}
-		if (site < 0 || words != 49)
+		if (site < 0 || words != 54)
 			return false;
 		// Cave G with the game around it scripted: FUN_00577870 (the game's own jolt) and FUN_0055C450 (the apply) record
 		// their arguments and clobber the temporaries.
@@ -1384,7 +1384,10 @@ int main(int argc, char* argv[])
 			*next = e.r[31];
 			return true;
 		};
-		constexpr u32 kEnemy = 0x429530, kOther = 0x42A2C0, kBlk = 0xFF100;
+		constexpr u32 kEnemy = 0x429530, kOther = 0x42A2C0, kBlk = 0xFF100, kModel = 0x4308C8;
+		// The enemy's model (+0x34) and its own bone count (u16 +0x816; review d10: cave G applies only below it).
+		ee.Store32(kEnemy + 0x34, kModel);
+		ee.Store16(kModel + 0x816, 36);
 		const auto entry = [&](int k, u32 enemy, u8 bone, u8 frames, s16 x, s16 y, s16 z) {
 			const s16 ang[3] = {x, y, z};
 			VR::PhysicalMelee::JoltEntry je = VR::PhysicalMelee::MakeJoltEntry(enemy, bone, ang, frames > 0 ? frames : 1);
@@ -1456,7 +1459,23 @@ int main(int argc, char* argv[])
 			return false;
 		ee.Store32(kEnemy + 0x13C, 0); // the counter clear again: it no longer waits
 		s_calls.clear();
-		return run() && s_calls.size() == 2 && s_calls[1].x == 400 && frames_wait() == 0x0001;
+		if (!run() || s_calls.size() != 2 || s_calls[1].x != 400 || frames_wait() != 0x0001)
+			return false;
+		// Review d10: a bone at or past the model's own count (a 23-bone model whose table holds stale pointers past it)
+		// is not applied, but its frames still run out; with no model (+0x34 0) nothing is applied.
+		for (u32 off = 0x10; off < 0x70; off += 4)
+			ee.Store32(kBlk + off, 0);
+		entry(0, kEnemy, 20, 2, 300, 0, 0);
+		entry(1, kEnemy, 19, 2, 300, 0, 0);
+		ee.Store16(kModel + 0x816, 20);
+		s_calls.clear();
+		if (!run() || s_calls.size() != 2 || s_calls[1].a1 != 19 || ((ee.Load32(kBlk + 0x14) >> 8) & 0xFF) != 1 ||
+			((ee.Load32(kBlk + 0x2C) >> 8) & 0xFF) != 1)
+			return false;
+		ee.Store32(kEnemy + 0x34, 0);
+		s_calls.clear();
+		return run() && s_calls.size() == 1 && ((ee.Load32(kBlk + 0x14) >> 8) & 0xFF) == 0 &&
+			   ((ee.Load32(kBlk + 0x2C) >> 8) & 0xFF) == 0;
 	});
 	RunGamepad();
 	RunSilent("CameraDriver::SelfTestAssembler (hook)", VR::CameraDriver::SelfTestAssembler);
