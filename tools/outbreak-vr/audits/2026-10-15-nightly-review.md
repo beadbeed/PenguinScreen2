@@ -309,3 +309,58 @@ normal speed (`review_test.py` in the session scratchpad).
 | m1 / a9 | fixed | cb9236f | Pressing ends with Lost when the weapon is lowered, and `hold_attack` requires the raised stance (driver self-test). |
 | m2, m3, m7 | not done (time) | | m7 stays as documented: the arrival words are patched while the switch is on, not only while armed. |
 | a1-a5, a8, b3-b5, b8, b9, d6-d13 | not done (time) | | b3 is partly covered: a cave whose overlay guard fails now drains instead of staying in, so its words are no longer orphaned. |
+
+## Fixed on branch `nightfix` (2026-10-15)
+
+Each item was checked against the code before the fix; none was refuted. All are built locally, 39 of 39 self-tests
+passed, and DepthWarp-off behaviour is unchanged (no WarpTarget exists then; a7 is a no-op when the panel is the
+whole picture).
+
+- **c1** (2f9f4e6). The CRITICAL is confirmed: `GSDeviceVK.cpp:858` sets `VMA_ALLOCATOR_CREATE_EXTERNALLY_SYNCHRONIZED_BIT`.
+  - The warp's two D16 depth images and the dump buffer are now made and freed with the ring, on the GS thread
+    (`WarpEnsureSlots` / `WarpDestroySlots`). The dump buffer is host-coherent, so the pacer no longer calls
+    `vmaInvalidateAllocation`.
+  - The pacer only makes views and framebuffers (`WarpTargetDepthView`, `WarpFramebuffer`).
+  - A ring re-make (under `submit_mutex`, queue idle) drops the pacer's views first and keeps each target's swapchain
+    and acquire state.
+  - No VMA call is left on the pacer.
+  - Includes **m6** (`WarpTargetFor` gives up on a fence timeout instead of destroying views) and addendum 3's m6 (the
+    colour view leak in `WarpFramebuffer`).
+- **M3 / M4 = c2** (d940b9e). `DestroySwapchainSynced` (with `submit_mutex` held) calls `WarpForgetSwapchain`. For an
+  eye swapchain a WarpTarget draws into, it waits on every in-flight `wp.fence[]` (1 s, logged on a timeout) and
+  destroys the target, before `xrDestroySwapchain`.
+- **m5** (7584f5f). A memory barrier at the start of each warp pass: earlier passes' depth writes, then ALL_COMMANDS,
+  so the render pass's UNDEFINED transition and clear are ordered after them.
+- **m4** (202c9ba). On a failed record or submit, the eye images stay acquired and waited for the next pass instead of
+  being released stale.
+- **a7** (3a149a1). The published pointer transform is the whole picture laid out around the panel through u0..v1.
+
+**Null-headset check** (SteamVR 2.17.10 null HMD, started before the emulator; run-nightfix, slot 7, DepthWarp on,
+offline):
+- the frame-size change ran: eye swapchains 1920x1344 re-made at 1536x1344, the ring re-made, and the pacer
+  re-targeting both eyes;
+- then 300 frames warped every 5 s, with no pass busy, no image not back, and 0.062 ms GPU mean;
+- no Vulkan or XR error in the log;
+- restored afterwards: `null_driver.py off` (settings md5 identical to the backup, no `forcedDriver`), and SteamVR's
+  processes closed.
+
+**Second pass (2026-10-15, same branch; built, 39 of 39 self-tests; no null-headset run, because another pcsx2-qt.exe
+was running):**
+- **c3** (403bac4). The pacer keeps a copy of the set its eye images were last drawn for. When the pass does not run
+  (busy, an image late, no target, a failed record), that set's Screen entries, head and turn clock go out instead of
+  the newer set's, as keep_screen does, and the turn is worked out again.
+  - Only when both sets have the same number of Screen entries.
+  - The copy is dropped when one of its swapchains is destroyed.
+  - The Warp line counts these frames ("at the poses last drawn for").
+- **c4** (943f154).
+  - Every swapchain create and destroy is counted, and a LIMIT_REACHED logs how many the compositor holds.
+  - `CreateSwapchainYielding`, after the edge fill, now gives up DepthLayer's two depth swapchains: the depth layer
+    goes off for the session, the GS's copies are waited first, and the published depth is dropped. Then it retries.
+- **m10** (c02eb94). The compositor's want follows what is still on: the warp's pipeline failure keeps the want for
+  the depth layer, and `DepthLayerOff` keeps it for the warp.
+- **m1** (dc3898e). A depth release that fails also invalidates `s.published.fp_depth` when it names that swapchain
+  (the deferred set was published before the releases).
+- **m7** (e5bbffa), partly. Shutdown destroys the depth swapchains. `DepthLayerOff` still leaves them to the next
+  resize or Shutdown, because it runs inside copy paths.
+
+**Still open:** addendum 3's m8, m9, m11, m12. None was refuted.
