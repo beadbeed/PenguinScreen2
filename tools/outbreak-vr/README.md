@@ -545,6 +545,17 @@ person armed, offline,
 1.5 m first-person screen gives a floor of 1 - 1.5/1.0 = -0.5 at strength 1; the sidecar's `near_floor` is the value to
 expect for other settings, -1 for the old 0.75 m).
 
+Depth warp (`VR/DepthWarp`, research note `research/2026-10-13-depth-export.md`, section "Our own warp"). `[VR] DepthWarp`
+(off by default, read when VR starts; needs `PacerCopies` off and `HeadsetRateSubmit` on; turns `DepthLayer` off): the GS
+thread copies each frame (both eyes) and its exported depth into a ring of three compositor images instead of the eye
+swapchains, and the VR pacer redraws each eye's swapchain every display frame through a 128 x 128 mesh displaced by the
+depth, from the eye's display-time position onto the same render-pose quad. Logs `(VR) Depth warp: on ...`, `mesh pass
+ready`, `source ring made`, `the pacer draws into an eye swapchain`, `the eyes are warped ...` or `drawn as they are
+(<why>)`, and `frames go unwarped (<why>)` once per change, and every 5 s `(VR) Warp: N frames warped, M drawn as they
+are, ...; GPU x ms mean, y ms max per display frame`. Offline test aids: `PCSX2_VR_DEPTHWARP_TEST_SHIFT=<metres>` moves
+the warp's eyes to the head's right (the layers stay), `PCSX2_VR_DEPTHWARP_DUMP=<dir>` writes one `warp_source.ppm` /
+`warp_warped.ppm` pair of the first eye (never commit them).
+
 Depth layer and depth probe (`VR/DepthExport`, research note `research/2026-10-13-depth-export.md`). `[VR] DepthLayer`
 (off by default, read when VR starts): in first person the shown frame goes to the runtime as one projection layer at
 the pose it was rendered from instead of the two screen quads, with its depth chained to each view

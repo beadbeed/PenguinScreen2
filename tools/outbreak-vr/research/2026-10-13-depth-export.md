@@ -171,3 +171,60 @@ Assumed or not checked:
    render eye to the current eye, into the projection layer it already submits. That moves the work off the runtime and
    works on any runtime. The export, the conversion and the per-eye view geometry here are its inputs. The warp also
    needs a hole fill (the edge fill's blur, or the other eye's image) and the HUD's depth.
+
+## Our own warp: `[VR] DepthWarp` (2026-10-15, branch `eyewarp`)
+
+**Method** (`VR/DepthWarp.*`, and `WarpCopyFrame` / `WarpPass` in `XRCompositor.cpp`):
+- **The GS thread:**
+  - each present copies both eyes of the frame into a slot of a ring of three compositor images (the swapchain's
+    format), and this present's export buffer (both planes) into the slot's buffer;
+  - one submit on the session's queue, as the swapchain copy was. It never acquires an eye swapchain;
+  - the publish names the slot (`PublishedSet::fp_warp`), kept with the Screen entries when they are kept, and the
+    render eyes (`fp_head` plus `EyeOffset`, turned like the screen);
+  - it writes only a slot that is neither published, deferred, nor claimed by the pacer. All copies and passes are on
+    one queue, ordered by barriers.
+- **The pacer**, every display frame under `submit_mutex`:
+  - acquires and waits each Screen swapchain (both or neither, 2 ms budget), draws the slot into it with one render pass
+    per eye, then releases;
+  - the pass is a 128 x 128 cell grid (98 304 vertices, no vertex buffer), reaching 6% past each edge, where the edge
+    texels stretch;
+  - each vertex takes the nearest depth within 6 texels and is moved from the render eye E to the display-time eye F,
+    in the quad's own frame: `X = E + (Q - E) d / E.z`, `Q' = F + (X - F) F.z / (F.z - X.z)`;
+  - a D16 test keeps the nearer surface where the mesh folds;
+  - triangles across a depth edge stretch, so a disocclusion shows a stretched band of background, never black.
+- **Translation only:** the quad stays at the render pose, so the runtime still corrects rotation. For a sideways move D
+  the shift on the quad is `D (1 - 1.5 m / d)`. The far plane (the cleared z, read as 500 m) keeps its direction.
+- **Fallback:** a frame without depth draws undisplaced, exactly the frame as before, and the reason is logged once per
+  change. That covers not first person, a menu, the first frames, no fit, no head position and a split screen.
+- **Swapchains:** no new swapchain; the eye swapchains only change owner.
+
+**Checked:**
+- **Self-tests passed:** `vr_selftests` 39 of 39 (38 before). The new Depth warp suite has 21 checks:
+  - the quad frame and the round trip;
+  - parallax at known depths for 10 cm sideways: the 1.045 m counter -14.0 px, a 4 m wall +20.1 px, the far plane
+    +32.1 px (1536 px over 4.77 m);
+  - any lean (12 cm forward plus sideways) against the direct projection;
+  - the two eyes shift alike;
+  - the shader's float depth reading against `LinearDepthM` (0.06-400 m, within 0.02%);
+  - the grid on a synthetic counter-in-a-room plane: at an edge the footprint takes the nearer depth, and the margin
+    covers a 15 cm lean.
+- **Checked offline** (a CPU reference of the same per-pixel displacement on the captured slot-7 pair from 10-13,
+  `depth_000361_L0.pfm` and its colour, 10 cm to the right):
+  - the counter front (0.77 m) moves -31 px and the back room (7.3 m) +26 px, 57 px between them;
+  - the Handgun on the counter top (about 1.05 m) moves -14 px;
+  - the hanging lamp and the beer taps move against the back wall;
+  - a per-pixel scatter would leave 4.6% holes, which the mesh stretches over instead.
+- **Not checked:** the GPU pass in a session. Both null-headset launches failed inside SteamVR before any frame
+  (`xrGetVulkanGraphicsDevice2KHR`: `XR_ERROR_RUNTIME_FAILURE`; xrclient: "failed to find VkPhysicalDevice matching
+  adapter UUID"). The emulator ran flat. The settings were restored (`null_driver.py off`, `forcedDriver` gone) and no
+  SteamVR process was left. So the GPU pass, the change of swapchain owner and the timing are built, not run.
+- **GPU cost:** the timestamps are in place (the `(VR) Warp:` line). Estimated well under the 1.5 ms target: two eyes of
+  98k vertices with 9 depth reads each, and 2 x 2 Mpx of fill. To be measured.
+
+**Limits:**
+- HUD sprites and translucent effects without depth move with the surface behind them.
+- `MenuPanelRoom Freeze` goes unwarped: the frozen room has no export, so it takes the "no depth" path. Warping it needs
+  the depth kept with the frozen snapshot.
+- Below the stereo's near floor (0.5 m) the image's disparity is clamped, but the warp uses the true depth.
+- A frame-size change re-makes the ring (a queue idle under `submit_mutex`).
+- A GS device restart without a VR restart is not handled.
