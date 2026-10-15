@@ -1108,6 +1108,11 @@ namespace VR::XRCompositor
 		// drops the published entries that show it, then destroys it. Bounded like the queue lock: a pacer stuck in
 		// xrEndFrame for 500 ms means the runtime stopped answering, so VR is abandoned and the swapchain left alive.
 		// With the compositor abandoned the handle is only forgotten.
+		// [VR] DepthWarp: an eye swapchain the pacer draws into is going (submit_mutex held): its passes still in flight are
+		// waited for and its WarpTarget dropped, so neither the GPU nor a later target writes into freed images (M3, M4).
+		// Defined after the warp's state.
+		void WarpForgetSwapchain(XrSwapchain swapchain);
+
 		void DestroySwapchainSynced(XrSwapchain swapchain)
 		{
 			if (swapchain == XR_NULL_HANDLE || s.abandoned.load(std::memory_order_acquire))
@@ -1130,6 +1135,7 @@ namespace VR::XRCompositor
 				std::lock_guard<std::mutex> publish(s.publish_mutex);
 				ForgetPublishedSwapchain(swapchain);
 			}
+			WarpForgetSwapchain(swapchain);
 			xrDestroySwapchain(swapchain);
 		}
 
@@ -8884,6 +8890,30 @@ namespace VR::XRCompositor
 					vkDestroyImageView(h.device, t.depth_view, nullptr);
 			}
 			t = WarpTarget{};
+		}
+
+		void WarpForgetSwapchain(XrSwapchain swapchain)
+		{
+			bool any = false;
+			for (const WarpTarget& t : wp.target)
+				any = any || (t.swapchain == swapchain);
+			if (!any)
+				return;
+			const Internal::VulkanHandles& h = Internal::GetVulkanHandles();
+			if (h.IsValid())
+			{
+				for (int i = 0; i < kWarpCmdBuffers; i++)
+				{
+					// The pacer finds the fence signalled at its next pass and takes it back as usual.
+					if (wp.in_flight[i] && vkWaitForFences(h.device, 1, &wp.fence[i], VK_TRUE, ONE_SECOND_NS) != VK_SUCCESS)
+						Console.Warning("(VR) Depth warp: a pass still busy after 1 s as its eye swapchain goes.");
+				}
+			}
+			for (WarpTarget& t : wp.target)
+			{
+				if (t.swapchain == swapchain)
+					WarpDestroyTarget(t);
+			}
 		}
 
 		// Pacer: the depth view of target t over the GS's depth image for it (made again after the GS re-made the ring).
