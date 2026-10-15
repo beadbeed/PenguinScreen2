@@ -7,6 +7,7 @@
 #include "VR/HandModel.h"
 #include "VR/ItemData.h"
 #include "VR/ItemReach.h"
+#include "VR/PhysicalMelee.h"
 #include "VR/SpatialControls.h"
 #include "VR/VRInput.h"
 #include "VR/VRProfileDB.h"
@@ -955,6 +956,7 @@ namespace VR::GameFeedback
 	void OnStateLoaded()
 	{
 		ItemReach::OnStateLoaded();
+		PhysicalMelee::OnStateLoaded();
 		s_cues = CueState{};
 		ResetWeaponBaseline(s_weapon);
 		s_weapon.trigger_down = true;

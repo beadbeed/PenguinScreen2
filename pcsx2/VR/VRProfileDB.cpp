@@ -4,6 +4,7 @@
 #include "VR/VRProfileDB.h"
 
 #include "Config.h"
+#include "MemoryTypes.h"
 
 #include "common/Console.h"
 #include "common/Error.h"
@@ -3523,6 +3524,207 @@ static std::optional<VR::ProfileDB::BreakoutParams> parseBreakout(const std::str
 }
 
 
+// melee: [VR] PhysicalMelee. Its presses are the player's own pad input and its writes go only to the host's block, so a
+// bad tuning number keeps its default (with a warning); an enemies or override block missing a key drops only that part
+// (no contact buzz, or no hit on the VR weapon: the swing still presses the game's own attack).
+static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_view serial, const ryml::ConstNodeRef& node)
+{
+	using VR::ProfileDB::MeleeParams;
+	warnUnknownKeys(serial, node, "melee", {"attackButton", "swing", "enemies", "override", "tip", "speed", "rest", "endMs",
+		"travel", "straightness", "strokeMs", "pressMs", "pressMaxMs", "raiseMs", "swingMs", "contactMs", "cooldownMs", "notes"});
+	MeleeParams mp;
+	if (node.has_child("attackButton"))
+	{
+		const std::string_view b = nodeVal(node["attackButton"]);
+		if (b.empty())
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee attackButton is empty; keeping {}.", serial, mp.attack_button);
+		else
+			mp.attack_button.assign(b.data(), b.size());
+	}
+	// Small whole numbers (bytes the game compares, a record offset) in decimal or 0x hex.
+	const auto read_small = [&](const ryml::ConstNodeRef& n, const char* key, u32 hi, u32& dst) {
+		if (!n.has_child(key))
+			return;
+		const std::optional<s64> v = parseDecOrHex(nodeVal(n[key]));
+		if (v.has_value() && v.value() >= 0 && static_cast<u64>(v.value()) <= hi)
+			dst = static_cast<u32>(v.value());
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee swing.{} must be a whole number from 0 to {}; keeping {}.",
+				serial, key, hi, dst);
+	};
+	if (node.has_child("swing"))
+	{
+		const ryml::ConstNodeRef sw = node["swing"];
+		if (sw.is_map())
+		{
+			warnUnknownKeys(serial, sw, "melee.swing", {"sub", "idle", "attack", "normalStance", "notes"});
+			read_small(sw, "sub", 0x10DF, mp.sub_offset);
+			read_small(sw, "idle", 0xFF, mp.sub_idle);
+			read_small(sw, "attack", 0xFF, mp.sub_attack);
+			read_small(sw, "normalStance", 0xFF, mp.stance_normal);
+		}
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee swing is not a map; keeping the defaults.", serial);
+	}
+	// Addresses and record offsets: hex (with or without 0x), as everywhere in the profiles.
+	const auto read_hex = [&](const ryml::ConstNodeRef& n, const char* key, u32& dst) {
+		if (!n.has_child(key))
+			return false;
+		const std::optional<u32> v = parseHexU32(nodeVal(n[key]));
+		if (!v.has_value())
+			return false;
+		dst = v.value();
+		return true;
+	};
+	if (node.has_child("enemies"))
+	{
+		const ryml::ConstNodeRef en = node["enemies"];
+		MeleeParams e = mp;
+		bool ok = en.is_map();
+		if (ok)
+		{
+			warnUnknownKeys(serial, en, "melee.enemies", {"table", "stride", "count", "present", "hp", "notes"});
+			ok = read_hex(en, "table", e.enemy_table) && read_hex(en, "stride", e.enemy_stride) &&
+			     read_hex(en, "present", e.enemy_present) && read_hex(en, "hp", e.enemy_hp) && en.has_child("count");
+			if (ok)
+			{
+				const std::optional<s64> c = parseDecOrHex(nodeVal(en["count"]));
+				ok = c.has_value() && c.value() >= 1 && c.value() <= 256;
+				if (ok)
+					e.enemy_count = static_cast<u32>(c.value());
+			}
+			ok = ok && e.enemy_table < Ps2MemSize::MainRam && e.enemy_stride >= 2 && e.enemy_present < e.enemy_stride &&
+			     e.enemy_hp + 2 <= e.enemy_stride &&
+			     static_cast<u64>(e.enemy_table) + static_cast<u64>(e.enemy_stride) * e.enemy_count <= Ps2MemSize::MainRam;
+		}
+		if (ok)
+			mp = e;
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee enemies needs table, stride, count (1-256), present and hp "
+							   "inside main RAM; ignoring it, so a swing that lands gives no contact buzz.", serial);
+	}
+	if (node.has_child("override"))
+	{
+		const ryml::ConstNodeRef ov = node["override"];
+		MeleeParams o = mp;
+		bool ok = ov.is_map();
+		if (ok)
+		{
+			warnUnknownKeys(serial, ov, "melee.override", {"block", "magic", "counter", "notes"});
+			ok = read_hex(ov, "block", o.block) && read_hex(ov, "magic", o.magic) && read_hex(ov, "counter", o.counter) &&
+			     o.magic != 0 && (o.block % 16) == 0 && static_cast<u64>(o.block) + 0x90 <= Ps2MemSize::MainRam &&
+			     o.counter < Ps2MemSize::MainRam;
+		}
+		if (ok)
+		{
+			o.has_override = true;
+			mp = o;
+		}
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee override needs block (16-byte aligned, in main RAM), a "
+							   "non-zero magic and counter; ignoring it, so the hit stays on the game's own swing.", serial);
+	}
+	// Decimal tuning in the key's unit, stored scaled (milliseconds to seconds).
+	const auto read_float = [&](const char* key, float lo, float hi, float scale, float& dst) {
+		if (!node.has_child(key))
+			return;
+		const std::optional<float> v = StringUtil::FromChars<float>(nodeVal(node[key]));
+		if (v.has_value() && std::isfinite(v.value()) && v.value() >= lo && v.value() <= hi)
+			dst = v.value() * scale;
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee {} must be from {} to {}; keeping {}.", serial, key, lo, hi,
+				dst / scale);
+	};
+	VR::PhysicalMelee::DetectorParams& d = mp.detect;
+	read_float("tip", 0.0f, 1.5f, 1.0f, d.tip_m);
+	read_float("speed", 0.5f, 10.0f, 1.0f, d.speed_on);
+	read_float("rest", 0.1f, 5.0f, 1.0f, d.speed_off);
+	read_float("endMs", 10.0f, 500.0f, 0.001f, d.end_s);
+	read_float("travel", 0.02f, 2.0f, 1.0f, d.travel_m);
+	read_float("straightness", 0.0f, 1.0f, 1.0f, d.straightness);
+	read_float("strokeMs", 100.0f, 3000.0f, 0.001f, d.stroke_max_s);
+	if (d.speed_off >= d.speed_on)
+	{
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee rest {} is not below speed {}; using half of it.", serial,
+			d.speed_off, d.speed_on);
+		d.speed_off = d.speed_on * 0.5f;
+	}
+	VR::PhysicalMelee::DriverParams& r = mp.drive;
+	read_float("pressMs", 20.0f, 500.0f, 0.001f, r.press_s);
+	read_float("pressMaxMs", 50.0f, 1000.0f, 0.001f, r.press_max_s);
+	read_float("raiseMs", 100.0f, 3000.0f, 0.001f, r.raise_max_s);
+	read_float("swingMs", 200.0f, 6000.0f, 0.001f, r.swing_max_s);
+	read_float("contactMs", 0.0f, 1000.0f, 0.001f, r.contact_s);
+	read_float("cooldownMs", 0.0f, 2000.0f, 0.001f, r.cooldown_s);
+	if (r.press_max_s < r.press_s)
+		r.press_max_s = r.press_s;
+	return mp;
+}
+
+bool VR::ProfileDB::SelfTestMeleeParse()
+{
+	const char* failed = nullptr;
+	const auto parse = [](const char* text, std::optional<MeleeParams>* out) {
+		Error error;
+		std::optional<ryml::Tree> tree =
+			ParseYAMLFromString(ryml::to_csubstr(text), ryml::to_csubstr("melee-selftest"), &error, true);
+		if (!tree.has_value() || !tree->rootref().has_child("melee"))
+			return false;
+		const ryml::ConstNodeRef n = tree->rootref()["melee"];
+		*out = n.is_map() ? parseMelee("MELEE-TEST", n) : std::nullopt;
+		return true;
+	};
+	const auto check = [&failed](bool ok, const char* name) {
+		if (!ok && !failed)
+			failed = name;
+	};
+	std::optional<MeleeParams> m;
+	check(parse("melee:\n  attackButton: Circle\n  swing: { sub: 0x09, idle: 1, attack: 3, normalStance: 1 }\n"
+				"  enemies: { table: 0x3FFCA0, stride: 0xD90, count: 64, present: 0x00, hp: 0x544 }\n"
+				"  override: { block: 0xFF000, magic: 0x4D454C31, counter: 0x48BF93 }\n"
+				"  tip: 0.45\n  speed: 2.5\n  rest: 0.9\n  travel: 0.25\n  straightness: 0.5\n  pressMs: 120\n  raiseMs: 800\n"
+				"  contactMs: 300\n  cooldownMs: 200\n",
+			  &m) && m.has_value(),
+		"a full block parses");
+	if (m.has_value())
+	{
+		check(m->attack_button == "Circle" && m->sub_offset == 0x09 && m->sub_idle == 1 && m->sub_attack == 3 &&
+				  m->stance_normal == 1,
+			"swing bytes");
+		check(m->enemy_table == 0x3FFCA0 && m->enemy_stride == 0xD90 && m->enemy_count == 64 && m->enemy_present == 0 &&
+				  m->enemy_hp == 0x544,
+			"enemies (hex offsets, a decimal count)");
+		check(m->has_override && m->block == 0xFF000 && m->magic == 0x4D454C31 && m->counter == 0x48BF93, "override");
+		check(std::fabs(m->detect.tip_m - 0.45f) < 1e-6f && std::fabs(m->detect.speed_on - 2.5f) < 1e-6f &&
+				  std::fabs(m->detect.speed_off - 0.9f) < 1e-6f && std::fabs(m->detect.travel_m - 0.25f) < 1e-6f &&
+				  std::fabs(m->detect.straightness - 0.5f) < 1e-6f,
+			"detector tuning");
+		check(std::fabs(m->drive.press_s - 0.12f) < 1e-6f && std::fabs(m->drive.raise_max_s - 0.8f) < 1e-6f &&
+				  std::fabs(m->drive.contact_s - 0.3f) < 1e-6f && std::fabs(m->drive.cooldown_s - 0.2f) < 1e-6f,
+			"driver tuning, milliseconds to seconds");
+	}
+	const VR::PhysicalMelee::DetectorParams dd{};
+	const VR::PhysicalMelee::DriverParams rd{};
+	check(parse("melee:\n  speed: 99\n  rest: 5\n  pressMs: nope\n  tip: -1\n", &m) && m.has_value() &&
+			  m->detect.speed_on == dd.speed_on && m->detect.speed_off == dd.speed_on * 0.5f &&
+			  m->drive.press_s == rd.press_s && m->detect.tip_m == dd.tip_m && !m->has_override && m->enemy_count == 0,
+		"bad numbers keep their defaults, a rest not below speed is halved");
+	check(parse("melee:\n  enemies: { table: 0x3FFCA0, stride: 0xD90, present: 0, hp: 0x544 }\n"
+				"  override: { block: 0xFF001, magic: 0x4D454C31, counter: 0x48BF93 }\n",
+			  &m) && m.has_value() && m->enemy_count == 0 && m->enemy_table == 0 && !m->has_override,
+		"an enemies block without a count and a misaligned override block are dropped, the rest kept");
+	check(parse("melee:\n  enemies: { table: 0x1FFF000, stride: 0xD90, count: 64, present: 0, hp: 0x544 }\n"
+				"  override: { block: 0xFF000, magic: 0, counter: 0x48BF93 }\n",
+			  &m) && m.has_value() && m->enemy_count == 0 && !m->has_override,
+		"an enemy table running past main RAM and a zero magic are dropped");
+	check(parse("melee: 3\n", &m) && !m.has_value(), "a block that is not a map is none");
+	if (failed)
+		Console.Error("(VR) Melee profile self-test FAIL: %s", failed);
+	else
+		Console.WriteLn("(VR) Melee profile self-test: passed.");
+	return failed == nullptr;
+}
+
 bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::NodeRef& node, Profile& out)
 {
 	out.serial.assign(serial.data(), serial.size());
@@ -3909,6 +4111,16 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 	}
 	else if (node.has_child("breakout"))
 		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a breakout that is not a map; ignoring it.", serial);
+
+	if (node.has_child("melee") && node["melee"].is_map())
+	{
+		out.melee = parseMelee(serial, node["melee"]);
+		if (out.melee.has_value() && !(out.camera.has_value() && out.camera->base.has_value()))
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a melee block but no camera.base; the swing is read from that "
+							   "record, so a swing never attacks here.", serial);
+	}
+	else if (node.has_child("melee"))
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a melee that is not a map; ignoring it.", serial);
 
 	if (node.has_child("controls"))
 	{
@@ -4546,13 +4758,15 @@ static int CountMultibandResolveMismatches(bool log)
 
 bool VR::ProfileDB::IsSilenceSettingName(std::string_view name)
 {
-	return name == "SeamlessDoors";
+	return name == "SeamlessDoors" || name == "PhysicalMelee";
 }
 
 bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
 {
 	if (name == "SeamlessDoors")
 		return EmuConfig.VR.SeamlessDoors;
+	if (name == "PhysicalMelee")
+		return EmuConfig.VR.PhysicalMelee;
 	return false;
 }
 

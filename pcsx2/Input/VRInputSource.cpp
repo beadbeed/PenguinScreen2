@@ -645,6 +645,29 @@ void VRInputSource::ApplyReload(Instance& in, SC::ControlValues& values, const V
 	}
 }
 
+// [VR] PhysicalMelee (VR::PhysicalMelee) on this instance, if it is the Gamepad on the melee driver's pad: while the
+// driver holds the attack every control bound to the attack button reads 1, and while it holds the raise every control
+// bound to R1 reads 1; otherwise the player's own values go out untouched. Only ever presses those two, never lets go of
+// one the player holds.
+void VRInputSource::ApplyMelee(Instance& in, SC::ControlValues& values, const VR::PhysicalMelee::Frame& melee)
+{
+	if (melee.pad_port < 0 || in.kind != SC::DeviceKind::Gamepad || in.spec.usb_port >= 0 ||
+		in.spec.pad_port != static_cast<u32>(melee.pad_port) || (!melee.hold_attack && !melee.hold_raise))
+		return;
+	const size_t count = std::min(in.spec.bind.size(), in.bind_ids.size());
+	for (size_t k = 0; k < count; ++k)
+	{
+		const u32 i = in.bind_ids[k];
+		if (i >= SC::kControlCount)
+			continue;
+		const std::string& target = in.spec.bind[k].target;
+		if (melee.hold_attack && !melee.attack_button.empty() && target == melee.attack_button)
+			values[i] = 1.0f;
+		else if (melee.hold_raise && target == VR::ReloadDriver::kRaiseButton)
+			values[i] = 1.0f;
+	}
+}
+
 VRInputSource::VRInputSource() = default;
 
 VRInputSource::~VRInputSource()
@@ -855,6 +878,9 @@ void VRInputSource::PollEvents()
 	// way to the gun) neither the pouches nor the zones see that hand, and its squeeze at the hip opens no item screen;
 	// and before the instances compose, so this poll's R1 hold-back and reload press go out with them.
 	const VR::ReloadDriver::Frame reload = VR::ReloadDriver::Poll(snap, hands, reader, dt);
+	// [VR] PhysicalMelee: a swing of the right controller to the game's own attack, and the VR weapon's pose for the game's
+	// hit test; before the instances compose, so this poll's presses go out with them.
+	const VR::PhysicalMelee::Frame melee = VR::PhysicalMelee::Poll(snap, reader, dt);
 
 	// Belt pouches: before the menu pointer, so a pouch squeeze's cell request and the pouch hands' grips reach it this
 	// poll, and before the instances compose, so the zones see a hand in a pouch as gone and an open press goes out now.
@@ -1043,6 +1069,7 @@ void VRInputSource::PollEvents()
 				break;
 		}
 		ApplyReload(in, values, reload);
+		ApplyMelee(in, values, melee);
 		QueueHapticCues(in, hands_before, at_stop_before);
 		Emit(in, values);
 		publish_cards(values, true);

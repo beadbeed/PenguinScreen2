@@ -6,6 +6,7 @@
 #include "common/Pcsx2Defs.h"
 
 #include "VR/GrabBreakout.h"
+#include "VR/PhysicalMelee.h"
 #include "VR/SpatialControls.h"
 
 #include <limits>
@@ -282,7 +283,7 @@ namespace VR::ProfileDB
 		// change what the game sends to partners.
 		bool coop_only = false;
 		// Optional (whenSetting: <name>): only patched while that VR switch is on, and only offline (no network adapter,
-		// not online-safe; private co-op excluded too). Known names: SeamlessDoors. Off: a word we patched is put back.
+		// not online-safe; private co-op excluded too). Known names: SeamlessDoors, PhysicalMelee. Off: a word we patched is put back.
 		std::string when_setting;
 		// Optional (keepThroughDisarm: true, needs whenSetting): patched while the switch is on, the profile's `when`
 		// guard passes and the game is offline, whether first person is armed or not (e.g. code that runs during a room
@@ -779,6 +780,33 @@ namespace VR::ProfileDB
 		GrabBreakout::Params shake;
 	};
 
+	// melee: [VR] PhysicalMelee (VR::PhysicalMelee; tools/outbreak-vr/research/2026-10-14-melee.md). Where the local record
+	// says the game's swing runs, where the enemies' HP is (the contact buzz reads it, nothing more), where the host's block
+	// for the code cave is (the cave itself is camera.silence entries with whenSetting: PhysicalMelee), and the swing and
+	// press tuning. The stance offset and its raised value come from feedback.weapon, the pad from the VR Gamepad control.
+	struct MeleeParams
+	{
+		std::string attack_button = "Circle";
+		u32 sub_offset = 0x09;  // the local record's sub-action byte
+		u32 sub_idle = 1;       // ... aim idle (with the stance raised)
+		u32 sub_attack = 3;     // ... the melee swing
+		u32 stance_normal = 1;  // the stance byte with the weapon down
+		// enemies: the table, its stride and count, the present byte and the s16 HP, record offsets.
+		u32 enemy_table = 0;
+		u32 enemy_stride = 0;
+		u32 enemy_count = 0;
+		u32 enemy_present = 0;
+		u32 enemy_hp = 0;
+		// override: the host's block (magic at +0, the counter stamp at +4, the local record at +8, the 4 x 4 matrix at
+		// +0x40, the position at +0x80), the magic it writes while armed, and the game's u8 frame counter it stamps.
+		bool has_override = false;
+		u32 block = 0;
+		u32 magic = 0;
+		u32 counter = 0;
+		PhysicalMelee::DetectorParams detect;
+		PhysicalMelee::DriverParams drive;
+	};
+
 	struct Profile
 	{
 		std::string serial;
@@ -811,6 +839,7 @@ namespace VR::ProfileDB
 		std::optional<SplitParams> split;
 		std::vector<SpatialControlSpec> controls;
 		std::optional<BreakoutParams> breakout;
+		std::optional<MeleeParams> melee;
 		std::string notes;
 	};
 
@@ -870,6 +899,11 @@ namespace VR::ProfileDB
 	void Reset();
 
 	bool SelfTestMultibandResolve();
+	// melee: the block's parser on inline profiles (good values, a bad number kept at its default, an incomplete enemies
+	// or override block dropping just that part, a block that is not a map). Logs "(VR) Melee profile self-test: passed."
+	// or "... FAIL: <check>"; returns the pass.
+	bool SelfTestMeleeParse();
+
 	// camera.silence whenSetting: the VR switch names an entry may be gated on, and whether that switch is on now.
 	bool IsSilenceSettingName(std::string_view name);
 	bool SilenceSettingOn(std::string_view name);

@@ -1336,6 +1336,13 @@ struct Pcsx2Config
 		// The door, its locks and keys, the load and partners are unchanged. Never online (not even private co-op).
 		// Ini only for now.
 		bool SeamlessDoors = false;
+		// First person, File #1 offline only (profiles with a melee block and camera.silence entries marked whenSetting:
+		// PhysicalMelee): with a melee weapon equipped, a deliberate swing of the right controller presses the game's own
+		// attack (Circle; R1 too if the weapon is down), and while the game's swing is live its hit test is run on the VR
+		// weapon, where your hand holds it, instead of on the character's canned swing (a code cave; the game's own damage,
+		// stagger and hit reaction follow). A tick when the attack goes live, a firmer buzz when it lands. Never presses
+		// anything while a game screen is up or while grabbed. Never online (not even private co-op). Ini only for now.
+		bool PhysicalMelee = false;
 		// First person, for profiles with a reach block: a light tick in the right hand and a short toast naming the item
 		// (and the button, "Kevin's 45 Auto  (A)") when something on the floor comes within reach of the character's own
 		// Circle press. Only reads the game's memory; shown in the headset only. Ini only for now.

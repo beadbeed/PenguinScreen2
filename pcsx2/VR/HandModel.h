@@ -183,6 +183,15 @@ namespace VR::HandModel
 	// would draw the placeholder for it (no model, no attach, or no muzzle in its entry): use LaserFrom then.
 	bool ModelLaserFrom(const HandState& gun_hand, float gap_m, float out_origin[3], float out_dir[3]);
 
+	// Where the game model of the weapon a right hand at pos / quat (the grip position and pointing frame, as HandState
+	// takes them) holds sits, exactly as the hand draws it with [VR] GameWeaponModels (PlaceModel: the game's attach on
+	// the hand model): out_origin the model's origin in metres, out_axes[k] the model's axis k (x, y, z) as a unit vector,
+	// both in the XR base space. A model point m (centimetres) is then out_origin + sum_k m[k] * 0.01 * out_axes[k]
+	// ([VR] PhysicalMelee maps this into the game to put the game's own hit test on the VR weapon). False, with nothing
+	// written, for an invalid attach or a pose that is not finite or usable. Pure: any thread.
+	bool ModelFrame(const GameAttach& attach, Held held, const float pos[3], const float quat[4], float out_origin[3],
+		float out_axes[3][3]);
+
 	// Whether this hand image is drawn with the hand model and the game's weapon model ([VR] GameWeaponModels): h.mesh,
 	// and for a weapon in the right hand its model decoded and its attach known. A weapon that falls back to the
 	// placeholder is logged once per item. Any thread.

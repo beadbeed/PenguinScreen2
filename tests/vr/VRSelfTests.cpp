@@ -28,6 +28,7 @@
 #include "VR/MenuPanel.h"
 #include "VR/MenuPointer.h"
 #include "VR/MeshRaster.h"
+#include "VR/PhysicalMelee.h"
 #include "VR/ReloadGesture.h"
 #include "VR/SpatialControls.h"
 #include "VR/StereoAuto.h"
@@ -276,7 +277,7 @@ int main(int argc, char* argv[])
 		int gated = 0, kept = 0;
 		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
 		{
-			if (sil.when_setting.empty())
+			if (sil.when_setting.empty() || sil.when_setting == "PhysicalMelee")
 			{
 				if (sil.keep_through_disarm)
 					return false;
@@ -294,6 +295,57 @@ int main(int argc, char* argv[])
 			}
 		}
 		return gated == 15 && kept == 3;
+	});
+	{
+		Begin("Physical melee (PhysicalMelee::SelfTest)");
+		const std::vector<std::string> failed = VR::PhysicalMelee::SelfTest();
+		Record("Physical melee", failed.empty(),
+			failed.empty() ? std::string("passed (it names the failed checks only, no check count)") :
+							 "FAIL: " + std::to_string(failed.size()) + " check(s), first: " + failed.front());
+	}
+	RunLogged("Melee profile parser", VR::ProfileDB::SelfTestMeleeParse, "(VR) Melee profile self-test");
+	// [VR] PhysicalMelee: File #1's melee block, and its camera.silence entries: the five sites (each guarded by its cave's
+	// first word), the two caves in free RAM and the seven spawn frames, all strictly offline
+	// (tools/outbreak-vr/research/2026-10-14-melee.md).
+	RunSilent("Physical melee (File #1 profile, melee and camera.silence whenSetting)", +[]() {
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		if (!p || !p->melee.has_value() || !p->camera.has_value() || !VR::ProfileDB::IsSilenceSettingName("PhysicalMelee"))
+			return false;
+		const VR::ProfileDB::MeleeParams& m = p->melee.value();
+		if (m.attack_button != "Circle" || m.sub_offset != 0x09 || m.sub_idle != 1 || m.sub_attack != 3 ||
+			m.stance_normal != 1 || m.enemy_table != 0x3FFCA0 || m.enemy_stride != 0xD90 || m.enemy_count != 64 ||
+			m.enemy_hp != 0x544 || !m.has_override || m.block != 0xFF000 || m.magic != 0x4D454C31 || m.counter != 0x48BF93)
+			return false;
+		int sites = 0, cave = 0, frames = 0;
+		size_t first_cave = 0, last_site = 0;
+		for (size_t i = 0; i < p->camera->silence.size(); i++)
+		{
+			const VR::ProfileDB::CameraSilence& sil = p->camera->silence[i];
+			if (sil.when_setting != "PhysicalMelee")
+				continue;
+			if (!sil.offline_only || sil.keep_through_disarm || sil.when.empty())
+				return false;
+			const u32 a = sil.ee_address;
+			if (a >= 0xFE000u && a < 0xFE100u)
+			{
+				if (sil.value_off != 0)
+					return false;
+				if (cave++ == 0)
+					first_cave = i;
+			}
+			else if (a == 0x552D8Cu || a == 0x552D90u || a == 0x5523C4u || a == 0x5523C8u || a == 0x5523E0u)
+			{
+				if (sil.when.size() != 2)
+					return false; // the overlay and its cave in place
+				sites++;
+				last_site = i;
+			}
+			else if (sil.value_on == 0x24040002u && (sil.value_off & 0xFFFF0000u) == 0x24040000u)
+				frames++;
+			else
+				return false;
+		}
+		return sites == 5 && cave == 39 + 23 && frames == 7 && last_site < first_cave;
 	});
 	RunGamepad();
 	RunSilent("CameraDriver::SelfTestAssembler (hook)", VR::CameraDriver::SelfTestAssembler);

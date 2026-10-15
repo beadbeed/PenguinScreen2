@@ -1946,6 +1946,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(MenuTablet);
 	SettingsWrapEntry(MenuPanel);
 	SettingsWrapEntry(SeamlessDoors);
+	SettingsWrapEntry(PhysicalMelee);
 	SettingsWrapEntry(PickupCue);
 	SettingsWrapEntry(HandTargeting);
 	SettingsWrapEntry(GameWeaponModels);
@@ -2000,7 +2001,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 
 bool Pcsx2Config::VROptions::operator==(const VROptions& right) const
 {
-	// SnapTurn, ComfortBlink, LaserSight, ZoneMarkers, MenuPointer, MenuTablet, MenuPanel, SeamlessDoors, PickupCue, HandTargeting, GameWeaponModels, ComfortVignette,
+	// SnapTurn, ComfortBlink, LaserSight, ZoneMarkers, MenuPointer, MenuTablet, MenuPanel, SeamlessDoors, PhysicalMelee, PickupCue, HandTargeting, GameWeaponModels, ComfortVignette,
 	// VignetteStrength, OnlineSafe, FirstPersonAutoStereo, FirstPersonStereoStrength, FirstPersonFov,
 	// FirstPersonFovMarginDeg, Brightness, GameRumble and HapticStrength are read from EmuConfig every vsync (ReloadGesture every input poll; EdgeFill,
 	// HeadsetRateSubmit, OpaqueBackground, HandsDisplayRate, PacerCopies and DepthLayer when VR starts, DedicatedXrQueue when the GS

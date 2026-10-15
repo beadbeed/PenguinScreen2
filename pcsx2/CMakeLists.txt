@@ -1085,6 +1085,7 @@ set(pcsx2VRSources
 	VR/MemWatch.cpp
 	VR/MeshRaster.cpp
 	VR/PadLook.cpp
+	VR/PhysicalMelee.cpp
 	VR/ReloadDriver.cpp
 	VR/ReloadGesture.cpp
 	VR/StereoDump.cpp
@@ -1124,6 +1125,7 @@ set(pcsx2VRHeaders
 	VR/MemWatch.h
 	VR/MeshRaster.h
 	VR/PadLook.h
+	VR/PhysicalMelee.h
 	VR/ReloadDriver.h
 	VR/ReloadGesture.h
 	VR/StereoDump.h

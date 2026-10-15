@@ -315,6 +315,92 @@ SLPM-65428:
       - { address: 0x5569D8, on: 0x00000000, off: 0xA6230BC8, when: [{ address: 0x540004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: sh v1, 0xBC8(s1)
       - { address: 0x5569E4, on: 0x00000000, off: 0xA6230BC8, when: [{ address: 0x540004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: sh v1, 0xBC8(s1)
       - { address: 0x5569E8, on: 0x00000000, off: 0xA6200BC8, when: [{ address: 0x540004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: sh zero, 0xBC8(s1)
+      # Physical melee (VR setting PhysicalMelee, off by default; tools/outbreak-vr/research/2026-10-14-melee.md). A melee
+      # swing's attack object (FUN_005521B0 builds it, FUN_00552CF0 moves it every frame) copies the weapon object's matrix
+      # (+0x1C0) and position (+0x200), and the game's hit test (a capsule along a pipe, a sphere on a knife) runs on that.
+      # Two caves in free RAM (0xFE000, zero in every File #1 dump) make the LOCAL player's attack object copy them from the
+      # host's block at 0xFF000 instead (laid out as a fake object at 0xFEE80): only while it holds the magic 0x4D454C31,
+      # names the attack object's owner as the local record and was stamped within 6 frames of the game counter 0x48BF93.
+      # Otherwise, and for everyone else, the original copy runs. The host (VR::PhysicalMelee) writes the VR weapon's pose
+      # there each input poll. The sites first (each checks that its cave is in place), then the caves, so a disarm puts the
+      # sites back before the caves go. Strictly offline (whenSetting); checked offline over PINE, slot 5's zombie.
+      - { address: 0x552D8C, on: 0x0803F800, off: 0xC5020200, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE000, equals: 0x3C0B0010 }], offlineOnly: true, whenSetting: PhysicalMelee }   # attack object, every frame: j 0xFE000 (cave A)
+      - { address: 0x552D90, on: 0x00000000, off: 0x24860050, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE000, equals: 0x3C0B0010 }], offlineOnly: true, whenSetting: PhysicalMelee }   # ... its delay slot (addiu a2,a0,80, done in the cave)
+      - { address: 0x5523C4, on: 0x0C03F828, off: 0x8E030000, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE0A0, equals: 0x8E030000 }], offlineOnly: true, whenSetting: PhysicalMelee }   # attack object built: jal 0xFE0A0 (cave B) over lw v1,0(s0)
+      - { address: 0x5523C8, on: 0x00000000, off: 0xC4620200, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE0A0, equals: 0x8E030000 }], offlineOnly: true, whenSetting: PhysicalMelee }   # ... its delay slot (lwc1 f2,0x200(v1), done in the cave)
+      - { address: 0x5523E0, on: 0x00000000, off: 0x8E030000, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE0A0, equals: 0x8E030000 }], offlineOnly: true, whenSetting: PhysicalMelee }   # ... the second lw v1,0(s0): v1 already holds cave B's choice
+      - { address: 0x0FE000, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # cave A
+      - { address: 0x0FE004, on: 0x8D69F000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE008, on: 0x3C0A4D45, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE00C, on: 0x354A4C31, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE010, on: 0x152A000F, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE014, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE018, on: 0x8D69F008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE01C, on: 0x1526000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE020, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE024, on: 0x3C0A0049, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE028, on: 0x914ABF93, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE02C, on: 0x9169F004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE030, on: 0x01494823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE034, on: 0x05210002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE038, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE03C, on: 0x2529003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE040, on: 0x2D290007, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE044, on: 0x11200002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE048, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE04C, on: 0x2568EE80, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE050, on: 0xC5020200, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE054, on: 0xC5010204, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE058, on: 0xC5000208, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE05C, on: 0xE4820038, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE060, on: 0xE481003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE064, on: 0xE4800040, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE068, on: 0x24860050, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE06C, on: 0x250701C0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE070, on: 0x24050008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE074, on: 0x8CE90000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE078, on: 0x8CEA0004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE07C, on: 0x24A5FFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE080, on: 0xACC90000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE084, on: 0xACCA0004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE088, on: 0x24E70008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE08C, on: 0x1CA0FFF9, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE090, on: 0x24C60008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE094, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE098, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0A0, on: 0x8E030000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # cave B
+      - { address: 0x0FE0A4, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0A8, on: 0x8D69F000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0AC, on: 0x3C0A4D45, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0B0, on: 0x354A4C31, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0B4, on: 0x152A000F, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0B8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0BC, on: 0x8D69F008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0C0, on: 0x1535000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0C4, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0C8, on: 0x3C0A0049, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0CC, on: 0x914ABF93, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0D0, on: 0x9169F004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0D4, on: 0x01494823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0D8, on: 0x05210002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0DC, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0E0, on: 0x2529003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0E4, on: 0x2D290007, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0E8, on: 0x11200002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0EC, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0F0, on: 0x2563EE80, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0F4, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      - { address: 0x0FE0F8, on: 0xC4620200, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }
+      # The hit window opens at motion frame 2 instead of 14-32 (the spawn event's frame in the event script FUN_005661C0:
+      # knife 265, pipe and wooden pole 596, 597, 598, brush and spear 602, 603, 604), about 70 ms after the press, so the
+      # VR weapon is live when your swing arrives. Shared by everyone playing those motions (AI partners swing sooner too).
+      - { address: 0x568534, on: 0x24040002, off: 0x2404000E, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn frame, motion 265 knife
+      - { address: 0x5694D8, on: 0x24040002, off: 0x24040010, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn frame, motion 596 pipe, wooden pole
+      - { address: 0x569550, on: 0x24040002, off: 0x24040010, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn frame, motion 597
+      - { address: 0x5695E4, on: 0x24040002, off: 0x24040016, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn frame, motion 598
+      - { address: 0x5696A0, on: 0x24040002, off: 0x24040020, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn frame, motion 602 brush, spear
+      - { address: 0x56972C, on: 0x24040002, off: 0x24040026, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn frame, motion 603
+      - { address: 0x5697A4, on: 0x24040002, off: 0x24040028, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMelee }   # spawn frame, motion 604
     lookAt:
       eye: 0x306338
       target: 0x306344
@@ -430,6 +516,31 @@ SLPM-65428:
     pressMs: 60
     buzz: 0.35
     buzzMs: 20
+  # Physical melee (VR setting PhysicalMelee, off by default; tools/outbreak-vr/research/2026-10-14-melee.md). With a melee
+  # weapon equipped, a deliberate swing of the right controller presses Circle on your own pad (R1 too, first, if the weapon
+  # is down: the game swings only from the raised stance, 0.6 s later), and the camera.silence entries above put the game's
+  # own hit test on the VR weapon. swing: the local record's sub-action byte (+0x09: 1 aim idle, 3 the melee swing) and the
+  # stance with the weapon down (the raised one is feedback.weapon's). enemies: the enemy table (0x3FFCA0, 0xD90 a slot, 64
+  # slots; byte +0x00 present, s16 HP +0x544), read only for the contact buzz. override: the host's block for the caves, the
+  # magic and the game's frame counter it stamps. tip: the point whose speed is measured, metres up the controller's handle;
+  # speed / rest: m/s there to start and end a stroke; travel: metres of stroke before it counts; straightness: the stroke's
+  # straight-line distance over its path (a waggle never counts). pressMs: how long Circle is held; raiseMs: how long R1 may
+  # take to bring the weapon up; contactMs: an HP drop this long after the swing still buzzes; cooldownMs: the gap before
+  # the next swing. Never while a game screen is up, grabbed or hurt; strictly offline.
+  melee:
+    attackButton: Circle
+    swing: { sub: 0x09, idle: 1, attack: 3, normalStance: 1 }
+    enemies: { table: 0x3FFCA0, stride: 0xD90, count: 64, present: 0x00, hp: 0x544 }
+    override: { block: 0xFF000, magic: 0x4D454C31, counter: 0x48BF93 }
+    tip: 0.40
+    speed: 2.2
+    rest: 0.8
+    travel: 0.20
+    straightness: 0.6
+    pressMs: 100
+    raiseMs: 900
+    contactMs: 250
+    cooldownMs: 250
   # VR controllers (only when launched with --vr; flat play is untouched).
   # A pad bound in Settings -> Controllers (e.g. a DualSense) keeps working alongside;
   # when both touch the same button, the latest change wins.

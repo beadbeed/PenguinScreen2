@@ -1768,6 +1768,26 @@ namespace VR::HandModel
 		return true;
 	}
 
+	bool ModelFrame(const GameAttach& attach, Held held, const float pos[3], const float quat[4], float out_origin[3],
+		float out_axes[3][3])
+	{
+		if (!attach.valid || !Finite(pos, 3) || !Finite(quat, 4) || !Finite(attach.grip_cm, 3) || !Finite(attach.rot_rad, 3))
+			return false;
+		HandState h;
+		for (int k = 0; k < 4; k++)
+			h.quat[k] = quat[k];
+		const float n2 = quat[0] * quat[0] + quat[1] * quat[1] + quat[2] * quat[2] + quat[3] * quat[3];
+		if (!std::isfinite(n2) || n2 < 1.0e-6f)
+			return false;
+		float q[4];
+		NormalizedQuat(h, q);
+		const Placement p = PlaceModel(attach, held);
+		Store(Add(Load(pos), Rotate(q, Mul(p.T, 0.01f))), out_origin);
+		for (int k = 0; k < 3; k++)
+			Store(Normalize(Rotate(q, p.L.c[k])), out_axes[k]);
+		return true;
+	}
+
 	WeaponHeld HeldFor(bool raised, bool item_known, u16 item_id)
 	{
 		WeaponHeld w;

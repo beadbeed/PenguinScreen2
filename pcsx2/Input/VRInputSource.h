@@ -5,6 +5,7 @@
 
 #include "Input/InputSource.h"
 
+#include "VR/PhysicalMelee.h"
 #include "VR/ReloadDriver.h"
 #include "VR/SpatialControls.h"
 #include "VR/VRProfileDB.h"
@@ -130,6 +131,7 @@ private:
 	void Announce(Instance& in, bool present);
 	void QueueHapticCues(Instance& in, const std::array<int, 2>& hands_before, const std::array<bool, 2>& at_stop_before);
 	static void ApplyReload(Instance& in, VR::SpatialControls::ControlValues& values, const VR::ReloadDriver::Frame& reload);
+	static void ApplyMelee(Instance& in, VR::SpatialControls::ControlValues& values, const VR::PhysicalMelee::Frame& melee);
 
 	std::mutex m_mutex;
 	std::vector<Instance> m_instances;
