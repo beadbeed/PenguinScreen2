@@ -1011,6 +1011,11 @@ namespace VR::PhysicalMelee
 		constexpr u32 kBlockBytes = 0x90;
 		bool s_block_armed = false;
 		u32 s_block_addr = 0;
+		// What the armed block holds at +0x00 and the game it was written for: ClearBlock zeroes only a block that still
+		// reads our magic in that game, never RAM of a VM started since (review d4) or a state's own block (d5).
+		u32 s_block_magic = 0;
+		u32 s_block_crc = 0;
+		bool s_block_stale = false; // after a state load: the next write starts the strike fields from zero
 		// The enemies' HP last poll (present, value), for the contact buzz.
 		struct EnemySeen
 		{
@@ -1075,7 +1080,8 @@ namespace VR::PhysicalMelee
 		// The whole block back to zero (the magic first), so the caves see nothing and the free RAM reads as it was.
 		void ClearBlock()
 		{
-			if (s_block_armed && VMManager::HasValidVM() && s_block_addr + kBlockBytes <= Ps2MemSize::MainRam)
+			if (s_block_armed && VMManager::HasValidVM() && s_block_addr + kBlockBytes <= Ps2MemSize::MainRam &&
+				VMManager::GetDiscCRC() == s_block_crc && static_cast<u32>(memRead32(s_block_addr)) == s_block_magic)
 			{
 				for (u32 off = 0; off < kBlockBytes; off += 4)
 					memWrite32(s_block_addr + off, 0);
@@ -1162,11 +1168,14 @@ namespace VR::PhysicalMelee
 		u32 s_pend_bone = 0;
 		bool s_jolt_armed = false; // cave G's block holds the magic (cleared once when the jolt may not run)
 		u32 s_jolt_addr = 0;
+		u32 s_jolt_magic = 0; // as s_block_magic / s_block_crc (review d4)
+		u32 s_jolt_crc = 0;
 		int s_jolt_wait_zone = -1; // the sphere the pending strike's jolt was armed for (waiting in cave G for the hit), or -1
 
 		void ClearJolt()
 		{
-			if (s_jolt_armed && VMManager::HasValidVM() && s_jolt_addr + kJoltBlockBytes <= Ps2MemSize::MainRam)
+			if (s_jolt_armed && VMManager::HasValidVM() && s_jolt_addr + kJoltBlockBytes <= Ps2MemSize::MainRam &&
+				VMManager::GetDiscCRC() == s_jolt_crc && static_cast<u32>(memRead32(s_jolt_addr)) == s_jolt_magic)
 			{
 				for (u32 off = 0; off < kJoltBlockBytes; off += 4)
 					memWrite32(s_jolt_addr + off, 0);
@@ -1295,6 +1304,8 @@ namespace VR::PhysicalMelee
 			memWrite32(blk, mp.jolt_magic);
 			s_jolt_armed = true;
 			s_jolt_addr = blk;
+			s_jolt_magic = mp.jolt_magic;
+			s_jolt_crc = VMManager::GetDiscCRC();
 			Console.WriteLn("(VR) Melee: jolt%s, enemy %d struck on bone %u at %.1f m/s, %.1f deg over %d frames:%s (1/65536 turn, "
 							"about the parent's x y z); swing (%.0f, %.0f, %.0f) cm/s at (%.0f, %.0f, %.0f).",
 				wait ? " armed at the strike (starts on the hit's update)" : " after the hit", enemy, s_pend_bone, static_cast<double>(s_pend_speed), static_cast<double>(size.deg), size.frames, line.c_str(),
@@ -2347,9 +2358,12 @@ namespace VR::PhysicalMelee
 		s_enemies_valid = false;
 		s_detect.Reset();
 		s_drive.Reset();
-		// The state's RAM has its own block (zero unless it was saved while armed); write it again before trusting it.
-		s_block_armed = false;
-		s_jolt_armed = false;
+		// The state's RAM has its own block (zero unless it was saved while armed): a block saved armed (our magic, this
+		// game) is zeroed by the next poll that does not write it (review d5), anything else is left alone; either way it
+		// is written afresh before the caves trust it.
+		s_block_armed = s_block_addr != 0;
+		s_block_stale = true;
+		s_jolt_armed = s_jolt_addr != 0;
 		ResetContact();
 	}
 
@@ -2705,8 +2719,9 @@ namespace VR::PhysicalMelee
 				GameMatrix(origin, axes, MapPoint, &map, m) && Read(reader, mp->counter, 1, &counter))
 			{
 				const u32 b = mp->block;
-				if (!s_block_armed)
+				if (!s_block_armed || s_block_stale)
 				{
+					s_block_stale = false;
 					// A fresh block: the strike fields (and the caves' own) start from zero, whatever RAM held.
 					for (u32 off = 0x0C; off < 0x40; off += 4)
 						memWrite32(b + off, 0);
@@ -2732,6 +2747,8 @@ namespace VR::PhysicalMelee
 				memWrite32(b, mp->magic);
 				s_block_armed = true;
 				s_block_addr = b;
+				s_block_magic = mp->magic;
+				s_block_crc = VMManager::GetDiscCRC();
 				wrote = true;
 			}
 		}
