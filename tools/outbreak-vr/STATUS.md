@@ -39,6 +39,8 @@ mean, 60 frames/s submitted), and the run found SteamVR's 16-swapchain limit sta
 edge fill gives its swapchain up and the creation is retried), also on `playtest`. It also has `doors` (`SeamlessDoors`, off:
 your own door opening keeps first person; 15 camera-shot calls NOP'd, offline only; the words are checked offline, a door
 opened with the switch on is not yet).
+Since 2026-10-14 21:15 `run-playtest-models` (and `Playtest\Slot*.cmd`) runs branch `melee` (handmodels + `PhysicalMelee`, off),
+an LTO build with 30 of 30 self-tests; its `resources` junction points at the `melee` worktree.
 
 ## Where things are
 
