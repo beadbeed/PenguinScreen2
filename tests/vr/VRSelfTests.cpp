@@ -720,6 +720,7 @@ int main(int argc, char* argv[])
 	}
 	RunLogged("Depth export", VR::DepthExport::SelfTest, "(VR) Depth export self-test");
 	RunLogged("Menu panel", VR::MenuPanel::SelfTest, "(VR) Menu panel self-test");
+	RunLogged("Menu panel room and placement", VR::MenuPanel::FeelSelfTest, "(VR) Menu panel feel self-test");
 	// [VR] GameWeaponModels: File #1's profile names the game's weapon-type table and the scenario's item table, with the
 	// layout the weapon models are placed by (tools/outbreak-vr/research/2026-10-14-weapon-models-in-hand.md).
 	RunSilent("Weapon hold (File #1 profile, feedback.weapon.hold)", +[]() {

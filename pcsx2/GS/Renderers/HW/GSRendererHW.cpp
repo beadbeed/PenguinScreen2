@@ -461,7 +461,8 @@ void GSRendererHW::VRBeforeEndOfFrame(GSTexture* current)
 			const float cw = static_cast<float>(current->GetWidth());
 			const float ch = static_cast<float>(current->GetHeight());
 			VR::MenuPanel::ExportPanel(m_vr_shown.tbp, rt->m_texture, static_cast<u32>(sx), static_cast<u32>(sy),
-				static_cast<u32>(sw), static_cast<u32>(sh), dx / cw, dy / ch, (dx + dw) / cw, (dy + dh) / ch);
+				static_cast<u32>(sw), static_cast<u32>(sh), dx / cw, dy / ch, (dx + dw) / cw, (dy + dh) / ch, current,
+				static_cast<u32>(dx), static_cast<u32>(dy));
 		}
 	}
 	else if (EmuConfig.VR.MenuPanel)

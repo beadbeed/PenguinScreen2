@@ -4,6 +4,7 @@
 #include "VR/VRManager.h"
 #include "VR/CameraDriver.h"
 #include "VR/HeadPose.h"
+#include "VR/MenuPanel.h"
 #include "VR/StereoAuto.h"
 #include "VR/StereoState.h"
 #include "VR/VRProfileDB.h"
@@ -554,25 +555,40 @@ namespace VR
 
 	bool PresentationLift(GSVector4* params)
 	{
+		// [VR] MenuPanelRoom: the room behind a game screen's panel dimmed (and a little greyed), eased in and out. Only
+		// while first person splits a screen off ([VR] MenuPanel), so also headset-free (the desktop window shows the room
+		// alone then anyway), never in flat play. Called once per present: it keeps the ease.
+		MenuPanel::RoomLook room;
+		const bool room_dim = MenuPanel::RoomLookNow(&room);
+
 		// Neutral without a running session, so flat play stays bit-identical.
-		if (!XRSession::IsSessionRunning())
+		const bool session = XRSession::IsSessionRunning();
+		if (!session && !room_dim)
 			return false;
 
 		// The VR Brightness setting scales gamma everywhere in the headset; the profile's own lift applies
 		// only in first person unless it says firstPersonOnly: false.
-		float gamma = s_lift_user_gamma.load(std::memory_order_relaxed);
+		float gamma = session ? s_lift_user_gamma.load(std::memory_order_relaxed) : 1.0f;
 		float brightness = 1.0f;
-		if (s_lift_has_profile.load(std::memory_order_acquire) &&
+		if (session && s_lift_has_profile.load(std::memory_order_acquire) &&
 			(!s_lift_fp_only.load(std::memory_order_relaxed) || CameraDriver::LookAtActive()))
 		{
 			gamma *= s_lift_gamma.load(std::memory_order_relaxed);
 			brightness = s_lift_brightness.load(std::memory_order_relaxed);
 		}
+		gamma = std::clamp(gamma, 0.5f, 3.0f);
+		float saturation = 1.0f;
+		if (room_dim)
+		{
+			// The shader dims before its gamma: dim^gamma there is dim after it.
+			brightness *= MenuPanel::DimBeforeGamma(room.brightness, gamma);
+			saturation = room.saturation;
+		}
 
-		if (std::abs(gamma - 1.0f) < 0.001f && std::abs(brightness - 1.0f) < 0.001f)
+		if (std::abs(gamma - 1.0f) < 0.001f && std::abs(brightness - 1.0f) < 0.001f && std::abs(saturation - 1.0f) < 0.001f)
 			return false;
 
-		*params = GSVector4(brightness, 1.0f, 1.0f, std::clamp(gamma, 0.5f, 3.0f));
+		*params = GSVector4(brightness, 1.0f, saturation, gamma);
 		return true;
 	}
 

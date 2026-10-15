@@ -655,9 +655,13 @@ namespace VR::XRCompositor
 			VkFence panel_fence = VK_NULL_HANDLE;
 			bool panel_fence_submitted = false;
 			bool panel_disabled = false;
-			// Where the panel stands: placed in front of the head as it appears, held there while the screen stays up.
+			// Where the panel stands: placed in front of the head as it appears, held there in the world while the screen
+			// stays up, brought round only by a turn far away from it (MenuPanel::PanelPlacer).
 			bool panel_shown = false;
 			XrPosef panel_pose = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+			MenuPanel::PanelPlacer panel_place;
+			s64 panel_place_ns = 0;
+			u32 panel_replaced = 0;
 			u64 panel_copies = 0;
 
 			XrSpace view_space = XR_NULL_HANDLE;
@@ -2864,10 +2868,12 @@ namespace VR::XRCompositor
 		// --- [VR] MenuPanel -------------------------------------------------------------------------------------------
 		// The panel: 1.0 m ahead of the eyes, 0.12 m below them, 0.80 m tall (about 44 deg; 1.07 m wide at 4:3), tilted to
 		// face the eyes, placed where the head looks as the screen comes up. Large enough to point at a cell, near enough to
-		// read, and inside the first-person screen's 1.5 m so it sits in front of the room.
-		constexpr float kPanelDistanceM = 1.0f;
-		constexpr float kPanelHeightM = 0.80f;
-		constexpr float kPanelDropM = 0.12f;
+		// read, and inside the first-person screen's 1.5 m so it sits in front of the room. The constants and the placement
+		// are MenuPanel's (pure, self-tested): it stays put in the world and comes round only after a turn of more than
+		// kPanelReplaceDeg away from it.
+		using MenuPanel::kPanelDistanceM;
+		using MenuPanel::kPanelHeightM;
+		using MenuPanel::kPanelDropM;
 
 		void DestroyPanelResources()
 		{
@@ -2895,6 +2901,7 @@ namespace VR::XRCompositor
 			s.panel_fence = VK_NULL_HANDLE;
 			s.panel_cmd = VK_NULL_HANDLE;
 			s.panel_shown = false;
+			s.panel_place.Hide();
 		}
 
 		bool EnsurePanelResources(u32 w, u32 h_px)
@@ -9213,9 +9220,16 @@ namespace VR::XRCompositor
 			if (pc.on)
 				Console.Warning("(VR) Menu panel: off: it needs [VR] PacerCopies off (game screens pull away as before).");
 			else
+			{
+				const Pcsx2Config::VROptions::MenuPanelRoomMode room = EmuConfig.VR.MenuPanelRoom;
+				const char* const room_line =
+					(room == Pcsx2Config::VROptions::MenuPanelRoomMode::Freeze) ? "Freeze: the camera holds, the room dimmed" :
+					(room == Pcsx2Config::VROptions::MenuPanelRoomMode::Dim)    ? "Dim: the camera follows the head, the room dimmed" :
+					                                                              "Live: the camera follows the head";
 				Console.WriteLn("(VR) Menu panel: on ([VR] MenuPanel): a game screen keeps first person; its own draws go on a "
-								"panel %.2f m ahead, %.2f m tall.",
-					kPanelDistanceM, kPanelHeightM);
+								"panel %.2f m ahead, %.2f m tall; the room behind it: %s (MenuPanelRoom, brightness %.2f).",
+					kPanelDistanceM, kPanelHeightM, room_line, EmuConfig.VR.MenuPanelRoomBrightness);
+			}
 		}
 
 		s.warned_pacer = false;
@@ -10054,30 +10068,53 @@ namespace VR::XRCompositor
 				if (panel_want)
 					CopyPanel(pinfo);
 				const bool panel_on = panel_want && s.panel.ever_released && s.panel.width > 0 && layer_count < kLayerCapacity;
-				if (panel_on && !s.panel_shown)
+				if (panel_on)
 				{
-					// Placed in front of the head as it appears: anchor + R(yaw) * (0, -drop, -distance), turned to face the
-					// eyes (Rx(-tilt), the menu tablet's convention).
-					const XrQuaternionf& q = s.head_pose.orientation;
-					const float fx = -2.0f * (q.w * q.y + q.z * q.x);
-					const float fz = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
-					const float yaw = ((fx * fx + fz * fz) > 1.0e-4f) ? std::atan2(-fx, -fz) : 0.0f;
+					// Placed in front of the head as it appears (along the yaw it looks, MenuPanel::PlacePanel), then held in
+					// the world; a turn of more than kPanelReplaceDeg away from it brings it round, gliding.
+					const XrQuaternionf& hq = s.head_pose.orientation;
+					const float q4[4] = {hq.x, hq.y, hq.z, hq.w};
 					const XrVector3f eye = s.head_position_valid ? s.head_pose.position : XrVector3f{0.0f, 0.0f, 0.0f};
-					const float tilt = std::atan2(kPanelDropM, kPanelDistanceM);
-					const float th = -0.5f * tilt, ts = std::sin(th), tc = std::cos(th);
-					const float ys = std::sin(yaw * 0.5f), yc = std::cos(yaw * 0.5f);
-					s.panel_pose.orientation = {yc * ts, ys * tc, -ys * ts, yc * tc};
-					s.panel_pose.position = {eye.x - kPanelDistanceM * std::sin(yaw), eye.y - kPanelDropM,
-						eye.z - kPanelDistanceM * std::cos(yaw)};
-					s.panel_shown = true;
-					Console.WriteLn("(VR) Menu panel: shown %.2f m ahead, %.2f m below the eyes, %.2f x %.2f m, at (%.2f, %.2f, %.2f).",
-						kPanelDistanceM, kPanelDropM, kPanelHeightM * ComputeAspect(), kPanelHeightM, s.panel_pose.position.x,
-						s.panel_pose.position.y, s.panel_pose.position.z);
+					const float eye3[3] = {eye.x, eye.y, eye.z};
+					const s64 now_ns = SteadyNowNs();
+					const float head_yaw = MenuPanel::PanelYawOf(q4, s.panel_shown ? s.panel_place.yaw : 0.0f);
+					bool replaced = false;
+					if (!s.panel_shown)
+						s.panel_place.Show(eye3, head_yaw);
+					else
+					{
+						const float dt = (s.panel_place_ns != 0 && now_ns > s.panel_place_ns) ?
+						                     static_cast<float>(static_cast<double>(now_ns - s.panel_place_ns) * 1.0e-9) :
+						                     0.0f;
+						replaced = s.panel_place.Update(eye3, head_yaw, std::min(dt, 0.1f));
+					}
+					s.panel_place_ns = now_ns;
+					float pos[3], quat[4];
+					MenuPanel::PlacePanel(s.panel_place.eye, s.panel_place.yaw, pos, quat);
+					s.panel_pose.orientation = {quat[0], quat[1], quat[2], quat[3]};
+					s.panel_pose.position = {pos[0], pos[1], pos[2]};
+					if (!s.panel_shown)
+					{
+						s.panel_shown = true;
+						s.panel_replaced = 0;
+						Console.WriteLn("(VR) Menu panel: shown %.2f m ahead, %.2f m below the eyes, %.2f x %.2f m, at (%.2f, %.2f, %.2f); "
+										"held in the world, brought round after a turn of more than %.0f deg.",
+							kPanelDistanceM, kPanelDropM, kPanelHeightM * ComputeAspect(), kPanelHeightM, s.panel_pose.position.x,
+							s.panel_pose.position.y, s.panel_pose.position.z, MenuPanel::kPanelReplaceDeg);
+					}
+					else if (replaced)
+					{
+						s.panel_replaced++;
+						Console.WriteLn("(VR) Menu panel: the head turned more than %.0f deg away; the panel comes round to %.1f deg.",
+							MenuPanel::kPanelReplaceDeg, s.panel_place.target_yaw * (180.0f / 3.14159265f));
+					}
 				}
-				else if (!panel_on && s.panel_shown)
+				else if (s.panel_shown)
 				{
 					s.panel_shown = false;
-					Console.WriteLn("(VR) Menu panel: hidden (%llu images copied).", static_cast<unsigned long long>(s.panel_copies));
+					s.panel_place.Hide();
+					Console.WriteLn("(VR) Menu panel: hidden (%llu images copied, brought round %u time(s)).",
+						static_cast<unsigned long long>(s.panel_copies), s.panel_replaced);
 				}
 				if (panel_on)
 				{
@@ -10177,8 +10214,12 @@ namespace VR::XRCompositor
 				pc.fill_live = false;
 			}
 		}
-		else if (fill_geo && should_render && current)
+		else if (fill_geo && should_render && current && !(EmuConfig.VR.MenuPanel && MenuPanel::RoomFrozen()))
 		{
+			// [VR] MenuPanelRoom = Freeze: no fill while the camera holds for a game screen. The fill is head-locked, a
+			// continuation of the picture where the screen would be had the head stayed where the frame was rendered from;
+			// with the room held still the head moves away from it, and the fill would swim with the head, the very thing
+			// the hold is for. Black around the held room instead.
 			UpdateEdgeFill(static_cast<GSTextureVK*>(current), fill_distance, fill_width, fill_height);
 		}
 		else

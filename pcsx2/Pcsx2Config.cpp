@@ -1926,6 +1926,12 @@ const char* Pcsx2Config::VROptions::PhysicalMeleeModeNames[] = {
 	"Press",
 	nullptr};
 
+const char* Pcsx2Config::VROptions::MenuPanelRoomModeNames[] = {
+	"Freeze",
+	"Dim",
+	"Live",
+	nullptr};
+
 Pcsx2Config::VROptions::VROptions() = default;
 
 void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
@@ -1950,6 +1956,8 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(MenuPointer);
 	SettingsWrapEntry(MenuTablet);
 	SettingsWrapEntry(MenuPanel);
+	SettingsWrapEnumEx(MenuPanelRoom, "MenuPanelRoom", MenuPanelRoomModeNames);
+	SettingsWrapEntry(MenuPanelRoomBrightness);
 	SettingsWrapEntry(SeamlessDoors);
 	SettingsWrapEntry(PhysicalMelee);
 	SettingsWrapEntry(PhysicalMeleeOnline);
@@ -2001,6 +2009,9 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 		                              DEFAULT_FP_FOV_MARGIN_DEG;
 		Brightness = std::clamp(Brightness, MIN_BRIGHTNESS, MAX_BRIGHTNESS);
 		HapticStrength = std::clamp(HapticStrength, 0.0f, 1.0f);
+		MenuPanelRoomBrightness = std::isfinite(MenuPanelRoomBrightness) ?
+		                              std::clamp(MenuPanelRoomBrightness, MIN_MENU_PANEL_ROOM_BRIGHTNESS, MAX_MENU_PANEL_ROOM_BRIGHTNESS) :
+		                              DEFAULT_MENU_PANEL_ROOM_BRIGHTNESS;
 		VignetteStrength = std::isfinite(VignetteStrength) ?
 		                       std::clamp(VignetteStrength, MIN_VIGNETTE_STRENGTH, MAX_VIGNETTE_STRENGTH) :
 		                       DEFAULT_VIGNETTE_STRENGTH;
@@ -2009,7 +2020,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 
 bool Pcsx2Config::VROptions::operator==(const VROptions& right) const
 {
-	// SnapTurn, ComfortBlink, LaserSight, ZoneMarkers, MenuPointer, MenuTablet, MenuPanel, SeamlessDoors, PhysicalMelee, PhysicalMeleeOnline, PhysicalMeleeMode, PickupCue, BeltPouches, HandTargeting, GameWeaponModels, ComfortVignette,
+	// SnapTurn, ComfortBlink, LaserSight, ZoneMarkers, MenuPointer, MenuTablet, MenuPanel, MenuPanelRoom, MenuPanelRoomBrightness, SeamlessDoors, PhysicalMelee, PhysicalMeleeOnline, PhysicalMeleeMode, PickupCue, BeltPouches, HandTargeting, GameWeaponModels, ComfortVignette,
 	// VignetteStrength, OnlineSafe, FirstPersonAutoStereo, FirstPersonStereoStrength, FirstPersonFov,
 	// FirstPersonFovMarginDeg, Brightness, GameRumble and HapticStrength are read from EmuConfig every vsync (ReloadGesture every input poll; EdgeFill,
 	// HeadsetRateSubmit, OpaqueBackground, HandsDisplayRate, PacerCopies and DepthLayer when VR starts, DedicatedXrQueue when the GS

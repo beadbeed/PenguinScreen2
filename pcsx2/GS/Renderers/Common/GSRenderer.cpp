@@ -241,7 +241,8 @@ bool GSRenderer::Merge(int field)
 	else if (g_gs_device->GetCurrent())
 	{
 		// Headset-only dark-room lift through the same shader, before VR::EndOfFrame takes the frame.
-		// PresentationLift is false without a running VR session, so flat play is untouched.
+		// PresentationLift is false without a running VR session, so flat play is untouched (the one exception, the
+		// [VR] MenuPanelRoom dim, needs first person splitting a game screen off).
 		GSVector4 lift = GSVector4::cxpr(1.0f);
 		if (VR::PresentationLift(&lift))
 			g_gs_device->ShadeBoost(lift);
