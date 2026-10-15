@@ -6929,7 +6929,22 @@ namespace VR::XRCompositor
 			if (background)
 				out[n++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(background);
 			// [VR] DepthLayer: the first-person screen's quads go as one projection layer, in the first one's position.
-			const bool depth_proj = set.fp_screen && set.fp_depth.valid;
+			// m8: only with one Screen quad per eye (or one for both). A split-screen first person has several viewports
+			// per eye, and one projection view per eye would drop all but the first: those go as quads, without depth.
+			bool depth_proj = set.fp_screen && set.fp_depth.valid;
+			if (depth_proj)
+			{
+				u32 per_eye[2] = {0, 0};
+				for (u32 i = 0; i < set.count; i++)
+				{
+					const PublishedSet::Entry& e = set.e[i];
+					if (e.role != kRoleScreen || e.kind != kKindQuad || e.parked)
+						continue;
+					per_eye[0] += (e.quad.eyeVisibility != XR_EYE_VISIBILITY_RIGHT) ? 1u : 0u;
+					per_eye[1] += (e.quad.eyeVisibility != XR_EYE_VISIBILITY_LEFT) ? 1u : 0u;
+				}
+				depth_proj = (per_eye[0] <= 1 && per_eye[1] <= 1);
+			}
 			int proj_at = -1;
 			const XrCompositionLayerQuad* eye_quad[2] = {nullptr, nullptr};
 			for (u32 i = 0; i < set.count && n < kLayerCapacity + 1; i++)
