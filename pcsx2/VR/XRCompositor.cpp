@@ -137,6 +137,42 @@ namespace VR::XRCompositor
 			s_present_wait_left_ns -= std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
 			return res;
 		}
+
+		// m12: whether a wait on an image we keep acquired (wait_pending / acquired) gave up on it, so the caller drops
+		// that acquire and the next frame acquires afresh, instead of waiting on it every frame for the rest of the
+		// session. A success or XR_TIMEOUT_EXPIRED keeps it (and clears the swapchain's count). XR_ERROR_CALL_ORDER_INVALID
+		// drops it at once: the runtime holds no image acquired and not waited for us, so the acquire we keep is stale.
+		// Any other failure (a lost session or instance, a destroyed handle: the loss teardown's) drops it after
+		// kWaitFailDrop in a row. Each swapchain is waited on one thread only (GS or pacer), so the counts are per thread.
+		constexpr u32 kWaitFailDrop = 30;
+		bool WaitDropsAcquire(XrSwapchain swapchain, XrResult res)
+		{
+			thread_local std::vector<std::pair<XrSwapchain, u32>> fails;
+			auto it = std::find_if(fails.begin(), fails.end(), [swapchain](const auto& f) { return f.first == swapchain; });
+			if (res == XR_TIMEOUT_EXPIRED || XR_SUCCEEDED(res))
+			{
+				if (it != fails.end())
+					fails.erase(it);
+				return false;
+			}
+			if (it == fails.end())
+			{
+				if (fails.size() >= 32)
+					fails.erase(fails.begin());
+				fails.emplace_back(swapchain, 0u);
+				it = fails.end() - 1;
+			}
+			if (res != XR_ERROR_CALL_ORDER_INVALID && ++it->second < kWaitFailDrop)
+				return false;
+			thread_local u64 drops = 0;
+			if ((drops++ % 600) == 0)
+				Console.Warning("(VR) xrWaitSwapchainImage failed (%d)%s: the image is given up and the next frame acquires "
+								"again (%llu so far).",
+					static_cast<int>(res), (res == XR_ERROR_CALL_ORDER_INVALID) ? "" : " repeatedly",
+					static_cast<unsigned long long>(drops));
+			fails.erase(it);
+			return true;
+		}
 		constexpr u32 NUM_CMD_BUFFERS = 2;
 		// First-person hands: one impostor quad per hand (HandModel::kLeft / kRight).
 		constexpr int kHandSlots = 2;
@@ -1566,6 +1602,8 @@ namespace VR::XRCompositor
 			}
 
 			const XrResult wait_res = BudgetedWaitSwapchainImage(chain.swapchain, kSwapchainWaitNs);
+			if (WaitDropsAcquire(chain.swapchain, wait_res))
+				chain.wait_pending = false;
 			if (wait_res == XR_TIMEOUT_EXPIRED)
 			{
 				// The image stays acquired (wait_pending); the next present waits on it again.
@@ -2018,6 +2056,8 @@ namespace VR::XRCompositor
 				}
 				// XR_TIMEOUT_EXPIRED is a success code: the image isn't ours yet, so wait again next frame.
 				const XrResult lwr = BudgetedWaitSwapchainImage(lc.swapchain, kSwapchainWaitNs);
+				if (WaitDropsAcquire(lc.swapchain, lwr))
+					lc.wait_pending = false;
 				if (lwr == XR_TIMEOUT_EXPIRED || XR_FAILED(lwr))
 					continue;
 				lc.wait_pending = false;
@@ -2572,6 +2612,8 @@ namespace VR::XRCompositor
 				}
 				// XR_TIMEOUT_EXPIRED is a success code: the image is not ours yet, so wait again next frame.
 				const XrResult wr = BudgetedWaitSwapchainImage(hc.swapchain, kHandWaitNs);
+				if (WaitDropsAcquire(hc.swapchain, wr))
+					hc.wait_pending = false;
 				if (wr == XR_TIMEOUT_EXPIRED || XR_FAILED(wr))
 					continue;
 				hc.wait_pending = false;
@@ -3096,6 +3138,8 @@ namespace VR::XRCompositor
 				pc_chain.wait_pending = true;
 			}
 			const XrResult wr = BudgetedWaitSwapchainImage(pc_chain.swapchain, kSwapchainWaitNs);
+			if (WaitDropsAcquire(pc_chain.swapchain, wr))
+				pc_chain.wait_pending = false;
 			if (wr == XR_TIMEOUT_EXPIRED || XR_FAILED(wr))
 				return;
 			pc_chain.wait_pending = false;
@@ -3687,6 +3731,8 @@ namespace VR::XRCompositor
 				}
 				// XR_TIMEOUT_EXPIRED is a success code: the image is not ours yet, so wait again next frame.
 				const XrResult wr = BudgetedWaitSwapchainImage(hc.swapchain, kSwapchainWaitNs);
+				if (WaitDropsAcquire(hc.swapchain, wr))
+					hc.wait_pending = false;
 				if (wr == XR_TIMEOUT_EXPIRED || XR_FAILED(wr))
 					continue;
 				hc.wait_pending = false;
@@ -4327,6 +4373,8 @@ namespace VR::XRCompositor
 				}
 				// XR_TIMEOUT_EXPIRED is a success code: the image is not ours yet, so wait again next frame.
 				const XrResult wr = BudgetedWaitSwapchainImage(zc.swapchain, kSwapchainWaitNs);
+				if (WaitDropsAcquire(zc.swapchain, wr))
+					zc.wait_pending = false;
 				if (wr == XR_TIMEOUT_EXPIRED || XR_FAILED(wr))
 					continue;
 				zc.wait_pending = false;
@@ -7419,6 +7467,8 @@ namespace VR::XRCompositor
 				const s64 start_ns = SteadyNowNs();
 				const XrResult wr = xrWaitSwapchainImage(ch.swapchain, &wi);
 				*budget_ns -= SteadyNowNs() - start_ns;
+				if (WaitDropsAcquire(ch.swapchain, wr))
+					ch.acquired = false;
 				// XR_TIMEOUT_EXPIRED is a success code: the image is not ours yet.
 				if (wr == XR_TIMEOUT_EXPIRED || XR_FAILED(wr))
 					return false;
@@ -9342,6 +9392,8 @@ namespace VR::XRCompositor
 					const s64 t0 = SteadyNowNs();
 					const XrResult wr = xrWaitSwapchainImage(t.swapchain, &wi);
 					budget -= SteadyNowNs() - t0;
+					if (WaitDropsAcquire(t.swapchain, wr))
+						t.acquired = false;
 					if (wr == XR_TIMEOUT_EXPIRED || XR_FAILED(wr))
 					{
 						wp.n_wait++;
