@@ -1268,7 +1268,7 @@ namespace VR::PhysicalMelee
 				float bw[16], pw[16];
 				s16 ang[3];
 				if (!bone_world(ch->bones[i], bw) || !bone_world(ch->parents[i], pw) ||
-					!JoltAngles(s_pend_contact, &bw[12], s_pend_vel, pw, size.deg * ch->weights[i], ang))
+					!JoltAngles(s_pend_contact, &bw[12], s_pend_vel, pw, size.deg * ch->weights[i], ang, (ch->below >> i) & 1))
 					continue;
 				while (slot < kJoltEntries && frames_left[slot] != 0)
 					slot++;
@@ -2040,7 +2040,8 @@ namespace VR::PhysicalMelee
 		return nullptr;
 	}
 
-	bool JoltAngles(const float contact[3], const float pivot[3], const float vel[3], const float pw[16], float deg, s16 out[3])
+	bool JoltAngles(const float contact[3], const float pivot[3], const float vel[3], const float pw[16], float deg, s16 out[3],
+		bool below)
 	{
 		out[0] = out[1] = out[2] = 0;
 		const float vl = Len3(vel[0], vel[1], vel[2]);
@@ -2048,6 +2049,9 @@ namespace VR::PhysicalMelee
 			return false;
 		const float v[3] = {vel[0] / vl, vel[1] / vl, vel[2] / vl};
 		float r[3] = {contact[0] - pivot[0], contact[1] - pivot[1], contact[2] - pivot[2]};
+		// A hit on the far side of the joint from the part it moves (a belly hit below the waist) would fold that part
+		// toward the hitter; mirrored, the part recoils with the swing (the twist, from the lever's level part, stays).
+		r[1] = below ? -std::fabs(r[1]) : std::fabs(r[1]);
 		const float rl = Len3(r[0], r[1], r[2]);
 		if (!std::isfinite(rl))
 			return false;
@@ -2061,7 +2065,7 @@ namespace VR::PhysicalMelee
 		// A short lever, or one along the swing, says nothing about the turn: the part above the joint goes with the swing.
 		if (rl < 8.0f || Len3(ax[0], ax[1], ax[2]) < 0.2f * rl)
 		{
-			const float up[3] = {0.0f, 1.0f, 0.0f};
+			const float up[3] = {0.0f, below ? -1.0f : 1.0f, 0.0f};
 			cross(up, v, ax);
 		}
 		float al = Len3(ax[0], ax[1], ax[2]);
@@ -2176,10 +2180,17 @@ namespace VR::PhysicalMelee
 			c(30.0f * std::sin(th) < -4.0f, "angles: the head goes the swing's way (-z)");
 		}
 		{
-			// A low hit (below the joint) folds the part above over it: (0, -15, 0) x (0, 0, -1) = (15, 0, 0).
+			// A low hit (a belly hit below the waist): mirrored, so the body above recoils with the swing (tips back, -x)
+			// rather than folding toward the hitter; for the legs (below) the legs go with the swing: (0, -72, 25) x (0, 0, -1)
+			// = (72, 0, 0), and (0, -72, 0) turned about +x goes to -z.
 			const float pivot[3] = {0.0f, 105.0f, 0.0f}, hit[3] = {0.0f, 90.0f, 25.0f}, vel[3] = {0.0f, 0.0f, -400.0f};
 			s16 a[3];
-			c(JoltAngles(hit, pivot, vel, id, 10.0f, a) && a[0] > 1800, "angles: a hit below the joint folds the body over it");
+			c(JoltAngles(hit, pivot, vel, id, 10.0f, a) && a[0] < -1800 && a[1] == 0 && a[2] == 0,
+				"angles: a hit below the joint pushes the body above it back");
+			const float knee[3] = {0.0f, 32.0f, 25.0f};
+			c(JoltAngles(knee, pivot, vel, id, 10.0f, a, true) && a[0] > 1800, "angles: the legs go with the swing");
+			const float th = static_cast<float>(a[0]) * (6.2831853f / 65536.0f);
+			c(-72.0f * std::sin(th) < -10.0f, "angles: a point below the joint moves along the swing");
 		}
 		{
 			// The parent turned 90 deg about y (its x axis is the world's -z): a world axis of -z is its +x.

@@ -967,11 +967,12 @@ SLPM-65428:
     # cave G's (4 entries of 24 bytes from +0x10); hook: the zombie's update word while cave G is in; bones: an enemy's
     # pointer to its model (+0x34), the model's table of bone pointers (+0x820, each to a 4 x 4 world matrix) and the bone
     # count. The turn: minDeg at slow (m/s at the weapon's far hit point) and below, maxDeg at fast and above, and back to
-    # nothing over minFrames to maxFrames game frames (linear). chains: per struck sphere's bone, the bones that turn, each
-    # bone's parent (the frame the turn is given in) and its share. File #1's zombie: head (sphere bone 21) -> neck 20,
+    # nothing over minFrames to maxFrames of the enemy's updates (30 a second; linear). chains: per struck sphere's bone,
+    # the bones that turn, each bone's parent (the frame the turn is given in), its share, and (below) the bones that
+    # move the body below their joint (the legs). File #1's zombie: head (sphere bone 21) -> neck 20,
     # chest 11, waist 10; belly (10) -> waist 10, chest 11; knees (3) -> the legs' root 3 and the waist 10. Each bone's
-    # turn is about (joint -> contact) x swing, so a hit above a joint pushes what is above it along the swing and a hit
-    # below folds it over the blow.
+    # turn is about (joint -> contact) x swing, the lever's height mirrored to the side the bone moves, so the part it
+    # moves goes with the swing (a belly hit below the waist tips the body back, it does not fold it toward you).
     jolt:
       block: 0xFF100
       magic: 0x4A4C5431
@@ -981,12 +982,12 @@ SLPM-65428:
       fast: 6.0
       minDeg: 8
       maxDeg: 24
-      minFrames: 10
-      maxFrames: 20
+      minFrames: 5
+      maxFrames: 10
       chains:
         - { sphere: 21, bones: [20, 11, 10], parents: [11, 10, 2], weights: [1.0, 0.45, 0.2] }   # head
         - { sphere: 10, bones: [10, 11], parents: [2, 10], weights: [1.0, 0.5] }                 # belly
-        - { sphere: 3, bones: [3, 10], parents: [2, 2], weights: [0.6, 0.3] }                    # knees
+        - { sphere: 3, bones: [3, 10], parents: [2, 2], weights: [0.6, 0.3], below: [3] }        # knees
 
   # VR controllers (only when launched with --vr; flat play is untouched).
   # A pad bound in Settings -> Controllers (e.g. a DualSense) keeps working alongside;

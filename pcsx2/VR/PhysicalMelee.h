@@ -303,6 +303,7 @@ namespace VR::PhysicalMelee
 		u8 bones[4] = {};
 		u8 parents[4] = {};
 		float weights[4] = {};
+		u8 below = 0; // bit i: bones[i] moves the body below its joint (the legs), not above it
 	};
 	struct JoltParams
 	{
@@ -310,8 +311,8 @@ namespace VR::PhysicalMelee
 		float fast = 6.0f;    // m/s: max_deg and max_frames here and above (linear between)
 		float min_deg = 8.0f;
 		float max_deg = 24.0f;
-		int min_frames = 10;  // game frames from the full angle back to nothing (linear)
-		int max_frames = 20;
+		int min_frames = 5;   // updates of the enemy (30 a second) from the full angle back to nothing (linear)
+		int max_frames = 10;
 		std::vector<JoltChain> chains;
 	};
 	struct JoltSize
@@ -323,13 +324,14 @@ namespace VR::PhysicalMelee
 	JoltSize JoltMagnitude(float speed, const JoltParams& p);
 	// The chain for the struck sphere's bone, null when none.
 	const JoltChain* JoltChainFor(const JoltParams& p, u32 hit_bone);
-	// One bone's rotation: about the axis (pivot -> contact) x velocity (so the struck point moves along the velocity),
+	// One bone's rotation: about the axis (pivot -> contact) x velocity, with the lever's vertical part turned to the side
+	// of the joint the bone moves (above it, or below it for the legs: below), so the part it moves goes with the swing,
 	// moved into the parent's frame (parent_world: its 4 x 4 row-vector world matrix; only the 3 x 3 is used, inverted, so
 	// its scale does not matter), deg degrees, as the three angles FUN_0055C450 applies (65536 a turn, about the parent's
 	// x, y, z). A lever shorter than 8 game units, or one along the velocity, uses straight up instead; false when the
 	// velocity is too slow (under 1 game unit a second), the parent's matrix is singular or nothing is left.
 	bool JoltAngles(const float contact[3], const float pivot[3], const float vel[3], const float parent_world[16], float deg,
-		s16 out[3]);
+		s16 out[3], bool below = false);
 	// One entry of cave G's block (24 bytes at block + 0x10 + 24 * k): the enemy, the bone, the frames left, the angles
 	// now and what is taken off them after each frame (angle / frames, toward zero).
 	struct JoltEntry

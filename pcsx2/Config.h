@@ -1383,8 +1383,8 @@ struct Pcsx2Config
 		PhysicalMeleeModeType PhysicalMeleeMode = PhysicalMeleeModeType::Contact;
 		// A prototype on top of PhysicalMelee's contact mode, File #1 strictly offline (tools/outbreak-vr/research/
 		// 2026-10-14-vr-melee.md section 9): a contact hit also pushes the zombie's struck body part the way the swing went
-		// (head, belly or legs, and the bones next to them), a turn of 8 to 24 degrees that eases back over 10 to 20 game
-		// frames, on top of the game's own reaction. Only how this console draws the enemy (its bone matrices, rebuilt every
+		// (head, belly or legs, and the bones next to them), a turn of 8 to 24 degrees that eases back over 5 to 10 of its
+		// updates (0.17-0.33 s), on top of the game's own reaction. Only how this console draws the enemy (its bone matrices, rebuilt every
 		// frame); never its position, HP or AI. Ini only, off by default.
 		bool MeleeHitJolt = false;
 		// First person, for profiles with a reach block: a light tick in the right hand and a short toast naming the item

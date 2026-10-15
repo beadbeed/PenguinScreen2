@@ -3847,7 +3847,7 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 					            c.has_child("weights") && c["bones"].is_seq() && c["parents"].is_seq() && c["weights"].is_seq();
 					if (good)
 					{
-						warnUnknownKeys(serial, c, "melee.jolt.chains", {"sphere", "bones", "parents", "weights", "notes"});
+						warnUnknownKeys(serial, c, "melee.jolt.chains", {"sphere", "bones", "parents", "weights", "below", "notes"});
 						const std::optional<s64> hb = parseDecOrHex(nodeVal(c["sphere"]));
 						good = hb.has_value() && hb.value() >= 0 && hb.value() < o.jolt_bone_count;
 						if (good)
@@ -3878,6 +3878,17 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 						}
 						good = good && nb >= 1 && nb == np && nb == nw;
 						ch.count = good ? nb : 0;
+						// below (optional): the chain's bones that move the body below their joint (the legs).
+						if (good && c.has_child("below"))
+						{
+							u8 lb[4] = {};
+							const int nl = c["below"].is_seq() ? bone_list(c["below"], lb) : -1;
+							good = nl >= 0;
+							for (int q = 0; q < nl; q++)
+								for (int k = 0; k < nb; k++)
+									if (ch.bones[k] == lb[q])
+										ch.below |= static_cast<u8>(1u << k);
+						}
 					}
 					if (good)
 						j.chains.push_back(ch);
@@ -4069,6 +4080,7 @@ bool VR::ProfileDB::SelfTestMeleeParse()
 			"      - { sphere: 21, bones: [20, 11, 10], parents: [11, 10, 2], weights: [1.0, 0.45, 0.2] }\n"
 			"      - { sphere: 10, bones: [10, 11], parents: [2, 10], weights: [1.0, -0.5] }\n"
 			"      - { sphere: 3, bones: [3, 40], parents: [2, 2], weights: [0.6, 0.3] }\n"
+			"      - { sphere: 4, bones: [3, 10], parents: [2, 2], weights: [0.6, 0.3], below: [3] }\n"
 			"      - { sphere: 5, bones: [5, 6], parents: [4], weights: [1, 1] }\n";
 		check(parse(full.c_str(), &m) && m.has_value() && m->has_jolt, "jolt: a full block parses");
 		if (m.has_value() && m->has_jolt)
@@ -4081,7 +4093,7 @@ bool VR::ProfileDB::SelfTestMeleeParse()
 			check(std::fabs(j.slow - 2.0f) < 1e-6f && std::fabs(j.fast - 7.0f) < 1e-6f && std::fabs(j.min_deg - 5.0f) < 1e-6f &&
 					  std::fabs(j.max_deg - 30.0f) < 1e-6f && j.min_frames == 8 && j.max_frames == 24,
 				"jolt: the tuning");
-			check(j.chains.size() == 2 && j.chains[0].hit_bone == 21 && j.chains[0].count == 3 && j.chains[0].bones[0] == 20 &&
+			check(j.chains.size() == 3 && j.chains[2].below == 1 && j.chains[0].below == 0 && j.chains[0].hit_bone == 21 && j.chains[0].count == 3 && j.chains[0].bones[0] == 20 &&
 					  j.chains[0].parents[2] == 2 && std::fabs(j.chains[0].weights[1] - 0.45f) < 1e-6f && j.chains[1].count == 2 &&
 					  std::fabs(j.chains[1].weights[1] + 0.5f) < 1e-6f,
 				"jolt: chains; one with a bone past the count and one with lists of different lengths are skipped");
