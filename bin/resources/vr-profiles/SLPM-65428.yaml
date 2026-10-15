@@ -735,12 +735,15 @@ SLPM-65428:
       # 2026-10-14-vr-melee.md section 9): a contact hit pushes the zombie's struck body part the way the swing went. Cave G
       # (0xFE800) is called from the zombie's update instead of the game's own per-bone jolt FUN_00577870 (same arguments),
       # runs it, then, while the block at 0xFF100 reads "JLT1", every entry there naming this enemy with frames left (4
-      # entries of 24 bytes from 0xFF110: u32 enemy, u8 bone, u8 frames, then s16 x, y, z angles and s16 x, y, z rates, 65536
-      # a turn): one frame fewer, the game's own apply FUN_0055C450(enemy, bone, angles) (the bone's local matrix rotated about
-      # its parent's axes, so its children follow), then the angles less their rates. Only the matrices the game rebuilds
+      # entries of 24 bytes from 0xFF110: u32 enemy, u8 bone, u8 frames, u8 wait, then s16 x, y, z angles and s16 x, y, z
+      # rates, 65536 a turn): an entry still waiting (armed at the strike) holds until the enemy's own hit counter +0x13F is
+      # set (the game's hit test sets it; the zombie's update reads it just before, in the update its HP drops), so the
+      # jolt starts on the hit's own update; then one frame fewer, the game's own apply FUN_0055C450(enemy, bone, angles)
+      # (the bone's local matrix rotated about its parent's axes, x then y then z, so its children follow), then the angles
+      # less their rates. Only the matrices the game rebuilds
       # from the animation every frame; never the enemy's position, HP or AI. The site first (it checks the cave's first and
       # last words), then the cave.
-      - { address: 0x6644D0, on: 0x0C03FA00, off: 0x0C15DE1C, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE800, equals: 0x27BDFFE0 }, { address: 0xFE8A8, equals: 0x27BD0020 }], offlineOnly: true, whenSetting: MeleeHitJolt }   # the zombie's update: jal 0xFE800 (cave G) over jal FUN_00577870
+      - { address: 0x6644D0, on: 0x0C03FA00, off: 0x0C15DE1C, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE800, equals: 0x27BDFFE0 }, { address: 0xFE8C0, equals: 0x27BD0020 }], offlineOnly: true, whenSetting: MeleeHitJolt }   # the zombie's update: jal 0xFE800 (cave G) over jal FUN_00577870
       - { address: 0x0FE800, on: 0x27BDFFE0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }   # cave G
       - { address: 0x0FE804, on: 0xAFBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
       - { address: 0x0FE808, on: 0x0C15DE1C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
@@ -749,41 +752,47 @@ SLPM-65428:
       - { address: 0x0FE814, on: 0x8D69F100, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
       - { address: 0x0FE818, on: 0x3C0A4A4C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
       - { address: 0x0FE81C, on: 0x354A5431, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE820, on: 0x152A001F, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE820, on: 0x152A0025, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
       - { address: 0x0FE824, on: 0x2568F110, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
       - { address: 0x0FE828, on: 0xAFA80008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
       - { address: 0x0FE82C, on: 0x8D090000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
       - { address: 0x0FE830, on: 0x8FAA0004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE834, on: 0x152A0015, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE834, on: 0x152A001B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
       - { address: 0x0FE838, on: 0x91090005, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE83C, on: 0x11200013, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE840, on: 0x2529FFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE844, on: 0xA1090005, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE848, on: 0x01402021, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE84C, on: 0x91050004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE850, on: 0x0C157114, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE854, on: 0x25060008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE858, on: 0x8FA80008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE85C, on: 0x85090008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE860, on: 0x850A0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE864, on: 0x012A4823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE868, on: 0xA5090008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE86C, on: 0x8509000A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE870, on: 0x850A0012, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE874, on: 0x012A4823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE878, on: 0xA509000A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE87C, on: 0x8509000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE880, on: 0x850A0014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE884, on: 0x012A4823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE888, on: 0xA509000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE88C, on: 0x25080018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE890, on: 0x3C090010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE894, on: 0x2529F170, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE898, on: 0x1509FFE3, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE89C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE8A0, on: 0x8FBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE8A4, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE8A8, on: 0x27BD0020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE83C, on: 0x11200019, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE840, on: 0x910B0006, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE844, on: 0x11600004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE848, on: 0x914B013F, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE84C, on: 0x11600015, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE850, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE854, on: 0xA1000006, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE858, on: 0x2529FFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE85C, on: 0xA1090005, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE860, on: 0x01402021, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE864, on: 0x91050004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE868, on: 0x0C157114, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE86C, on: 0x25060008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE870, on: 0x8FA80008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE874, on: 0x85090008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE878, on: 0x850A0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE87C, on: 0x012A4823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE880, on: 0xA5090008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE884, on: 0x8509000A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE888, on: 0x850A0012, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE88C, on: 0x012A4823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE890, on: 0xA509000A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE894, on: 0x8509000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE898, on: 0x850A0014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE89C, on: 0x012A4823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE8A0, on: 0xA509000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE8A4, on: 0x25080018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE8A8, on: 0x3C090010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE8AC, on: 0x2529F170, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE8B0, on: 0x1509FFDD, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE8B4, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE8B8, on: 0x8FBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE8BC, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE8C0, on: 0x27BD0020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
     lookAt:
       eye: 0x306338
       target: 0x306344

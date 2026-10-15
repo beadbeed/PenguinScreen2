@@ -1162,6 +1162,7 @@ namespace VR::PhysicalMelee
 		u32 s_pend_bone = 0;
 		bool s_jolt_armed = false; // cave G's block holds the magic (cleared once when the jolt may not run)
 		u32 s_jolt_addr = 0;
+		int s_jolt_wait_zone = -1; // the sphere the pending strike's jolt was armed for (waiting in cave G for the hit), or -1
 
 		void ClearJolt()
 		{
@@ -1182,20 +1183,25 @@ namespace VR::PhysicalMelee
 			s_pend_enemy = -1;
 			s_vel_have = false;
 			s_pend_jolt = false;
+			s_jolt_wait_zone = -1;
 		}
 
 		bool ReadF(GuestReader reader, u32 address, float* f);
 
-		// A landed hit's jolt: the chain for the struck sphere's bone, each bone's turn from the strike's contact and
-		// velocity in its parent's frame (the game's bone matrices, read now), written into free entries of cave G's block.
-		void WriteJolt(GuestReader reader, const ProfileDB::MeleeParams& mp, int enemy)
+		// A strike's jolt: the chain for the struck sphere's bone, each bone's turn from the strike's contact and velocity
+		// in its parent's frame (the game's bone matrices, read now), written into free entries of cave G's block. At the
+		// strike (wait, zone_in the sphere the VR weapon touched) the entries wait in cave G for the enemy's hit counter, so
+		// the jolt starts on the update the hit lands in; after a hit (zone_in -1: the hit's zone +0x13E) they start at the
+		// next update. Entries still waiting from an earlier strike go. True when something was written.
+		bool WriteJolt(GuestReader reader, const ProfileDB::MeleeParams& mp, int enemy, int zone_in, bool wait)
 		{
-			// The struck sphere: the hit's zone (the game's own nearest sphere), its centre and radius now, its bone; the
-			// contact is its point nearest the weapon's shape at the strike.
+			// The struck sphere: the hit's zone (the game's own nearest sphere) or the one touched, its centre and radius
+			// now, its bone; the contact is its point nearest the weapon's shape at the strike.
 			const u32 ebase = mp.enemy_table + static_cast<u32>(enemy) * mp.enemy_stride;
-			u32 zone = 0, count = 0, shapes = 0, centres = 0;
+			u32 zone = zone_in >= 0 ? static_cast<u32>(zone_in) : 0u, count = 0, shapes = 0, centres = 0;
 			float cc[3], rad = 0.0f;
-			if (!mp.zone_offset || !Read(reader, ebase + mp.zone_offset, 1, &zone) || !Read(reader, ebase + mp.sphere_count, 1, &count) ||
+			if (!mp.zone_offset || (zone_in < 0 && !Read(reader, ebase + mp.zone_offset, 1, &zone)) ||
+				!Read(reader, ebase + mp.sphere_count, 1, &count) ||
 				zone >= count || zone >= 8 || !Read(reader, ebase + mp.sphere_shapes, 4, &shapes) ||
 				!Read(reader, ebase + mp.sphere_centres, 4, &centres) || shapes == 0 || centres == 0 ||
 				shapes + 20u * 8u > Ps2MemSize::MainRam || centres + 12u * 8u > Ps2MemSize::MainRam ||
@@ -1204,7 +1210,7 @@ namespace VR::PhysicalMelee
 				!ReadF(reader, centres + 12u * zone + 8u, &cc[2]) || rad <= 0.0f)
 			{
 				Console.WriteLn("(VR) Melee: no jolt: the hit's sphere could not be read.");
-				return;
+				return false;
 			}
 			{
 				const float* a = s_pend_a;
@@ -1221,18 +1227,18 @@ namespace VR::PhysicalMelee
 			if (!ch)
 			{
 				Console.WriteLn("(VR) Melee: no jolt for a hit on bone %u (no chain in the profile).", s_pend_bone);
-				return;
+				return false;
 			}
 			u32 hook = 0;
 			if (!Read(reader, mp.jolt_hook, 4, &hook) || hook != mp.jolt_hook_on)
 			{
 				Console.WriteLn("(VR) Melee: no jolt: cave G is not in.");
-				return;
+				return false;
 			}
 			const u32 base = mp.enemy_table + static_cast<u32>(enemy) * mp.enemy_stride;
 			u32 model = 0;
 			if (!Read(reader, base + mp.jolt_bones, 4, &model) || model == 0 || model + mp.jolt_bone_table + 4u * 256u > Ps2MemSize::MainRam)
-				return;
+				return false;
 			// The bone's world matrix (4 x 4 row vectors, row 3 its joint).
 			const auto bone_world = [&](u32 bone, float w[16]) {
 				u32 ptr = 0;
@@ -1246,7 +1252,8 @@ namespace VR::PhysicalMelee
 			};
 			const JoltSize size = JoltMagnitude(s_pend_speed, mp.jolt);
 			const u32 blk = mp.jolt_block;
-			// This enemy's old entries go; then the free ones are taken in order.
+			// This enemy's old entries go, and any still waiting for an earlier strike's hit; then the free ones are taken
+			// in order.
 			u8 frames_left[kJoltEntries] = {};
 			for (int k = 0; k < kJoltEntries; k++)
 			{
@@ -1255,7 +1262,7 @@ namespace VR::PhysicalMelee
 				Read(reader, e, 4, &who);
 				Read(reader, e + 4, 4, &bf);
 				frames_left[k] = static_cast<u8>(bf >> 8);
-				if (!s_jolt_armed || who == base)
+				if (!s_jolt_armed || who == base || ((bf >> 16) & 0xFFu) != 0)
 				{
 					memWrite32(e + 4, 0);
 					frames_left[k] = 0;
@@ -1274,7 +1281,7 @@ namespace VR::PhysicalMelee
 					slot++;
 				if (slot >= kJoltEntries)
 					break;
-				const JoltEntry je = MakeJoltEntry(base, ch->bones[i], ang, size.frames);
+				const JoltEntry je = MakeJoltEntry(base, ch->bones[i], ang, size.frames, wait);
 				u32 w[6];
 				PackJoltEntry(je, w);
 				const u32 e = blk + 0x10u + 24u * static_cast<u32>(slot);
@@ -1284,15 +1291,46 @@ namespace VR::PhysicalMelee
 				line += fmt::format(" bone {} ({}, {}, {})", ch->bones[i], ang[0], ang[1], ang[2]);
 			}
 			if (line.empty())
-				return;
+				return false;
 			memWrite32(blk, mp.jolt_magic);
 			s_jolt_armed = true;
 			s_jolt_addr = blk;
-			Console.WriteLn("(VR) Melee: jolt, enemy %d struck on bone %u at %.1f m/s, %.1f deg over %d frames:%s (1/65536 turn, "
+			Console.WriteLn("(VR) Melee: jolt%s, enemy %d struck on bone %u at %.1f m/s, %.1f deg over %d frames:%s (1/65536 turn, "
 							"about the parent's x y z); swing (%.0f, %.0f, %.0f) cm/s at (%.0f, %.0f, %.0f).",
-				enemy, s_pend_bone, static_cast<double>(s_pend_speed), static_cast<double>(size.deg), size.frames, line.c_str(),
+				wait ? " armed at the strike (starts on the hit's update)" : " after the hit", enemy, s_pend_bone, static_cast<double>(s_pend_speed), static_cast<double>(size.deg), size.frames, line.c_str(),
 				static_cast<double>(s_pend_vel[0]), static_cast<double>(s_pend_vel[1]), static_cast<double>(s_pend_vel[2]),
 				static_cast<double>(s_pend_contact[0]), static_cast<double>(s_pend_contact[1]), static_cast<double>(s_pend_contact[2]));
+			return true;
+		}
+
+		// Entries still waiting for a hit (a strike that made none) go, so a later hit on that enemy cannot start them.
+		void DisarmJolt(GuestReader reader, const ProfileDB::MeleeParams& mp)
+		{
+			s_jolt_wait_zone = -1;
+			if (!s_jolt_armed)
+				return;
+			for (int k = 0; k < kJoltEntries; k++)
+			{
+				const u32 e = mp.jolt_block + 0x10u + 24u * static_cast<u32>(k);
+				u32 bf = 0;
+				if (Read(reader, e + 4, 4, &bf) && ((bf >> 16) & 0xFFu) != 0)
+					memWrite32(e + 4, 0);
+			}
+		}
+
+		// How many of this enemy's entries cave G has started (wait cleared, frames left) and how many still wait.
+		void JoltStarted(GuestReader reader, const ProfileDB::MeleeParams& mp, int enemy, int* started, int* waiting)
+		{
+			*started = *waiting = 0;
+			const u32 base = mp.enemy_table + static_cast<u32>(enemy) * mp.enemy_stride;
+			for (int k = 0; k < kJoltEntries; k++)
+			{
+				const u32 e = mp.jolt_block + 0x10u + 24u * static_cast<u32>(k);
+				u32 who = 0, bf = 0;
+				if (!Read(reader, e, 4, &who) || !Read(reader, e + 4, 4, &bf) || who != base || ((bf >> 8) & 0xFFu) == 0)
+					continue;
+				(((bf >> 16) & 0xFFu) != 0 ? *waiting : *started) += 1;
+			}
 		}
 
 		bool ReadF(GuestReader reader, u32 address, float* f)
@@ -1535,6 +1573,12 @@ namespace VR::PhysicalMelee
 				s_strikes++;
 				Console.WriteLn("(VR) Melee: strike, enemy %d (sphere %d) at %.1f m/s, strength %.2f.", so.enemy, sph,
 					static_cast<double>(s_tip_speed), static_cast<double>(so.strength));
+				// Armed now, on the sphere touched: cave G starts it on the update the hit lands in.
+				s_jolt_wait_zone = -1;
+				if (s_pend_jolt && sph >= 0 && WriteJolt(reader, mp, so.enemy, sph, true))
+					s_jolt_wait_zone = sph;
+				else if (jolt)
+					DisarmJolt(reader, mp);
 			}
 			else if (s_pend_enemy >= 0)
 			{
@@ -1559,12 +1603,31 @@ namespace VR::PhysicalMelee
 						s_pend_enemy, s_pend_hp, hp, cls, ZombieReaction(cls), zone, static_cast<double>(s_pend_s * 1000.0f),
 						s_strike_hits, s_strikes);
 					if (jolt && s_pend_jolt)
-						WriteJolt(reader, mp, s_pend_enemy);
+					{
+						// Armed on the sphere the game hit: cave G has started it on the hit's update. Otherwise (another
+						// sphere, or not armed) it is written now and starts at the next update.
+						int started = 0, waiting = 0;
+						if (s_jolt_wait_zone >= 0)
+							JoltStarted(reader, mp, s_pend_enemy, &started, &waiting);
+						if (s_jolt_wait_zone >= 0 && zone == static_cast<u32>(s_jolt_wait_zone) && started > 0)
+							Console.WriteLn("(VR) Melee: jolt started on the hit's own update (%d bone(s), armed at the strike).", started);
+						else
+						{
+							if (s_jolt_wait_zone >= 0)
+								Console.WriteLn("(VR) Melee: jolt armed for sphere %d, the hit is on sphere %u (%d started, %d waiting): "
+												"written again for the hit.",
+									s_jolt_wait_zone, zone, started, waiting);
+							WriteJolt(reader, mp, s_pend_enemy, -1, false);
+						}
+					}
+					s_jolt_wait_zone = -1;
 					s_pend_jolt = false;
 					s_pend_enemy = -1;
 				}
 				else if (s_pend_s > 0.4f)
 				{
+					if (s_jolt_wait_zone >= 0)
+						DisarmJolt(reader, mp);
 					Console.WriteLn("(VR) Melee: strike on enemy %d made no hit (the game's own test found no touch in %d frames; "
 									"%u of %u strikes landed).",
 						s_pend_enemy, cp.window_frames, s_strike_hits, s_strikes);
@@ -2087,23 +2150,32 @@ namespace VR::PhysicalMelee
 		al = Len3(ap[0], ap[1], ap[2]);
 		if (!(al > 1e-6f))
 			return false;
-		// Small angles: x, y and z in turn about the parent's axes are close to one turn about the axis.
-		const float units = deg * (65536.0f / 360.0f);
+		// The turn about that axis as FUN_001903E0 composes it: x, then y, then z about the parent's axes, R = Rz * Ry * Rx
+		// (column vectors). The small-angle split (x, y, z = the axis times the angle) leaned a slanted 20 deg turn's axis
+		// by about 5 deg; this is exact (the decay, all three taken down together, stays close to the same axis).
+		const float u[3] = {ap[0] / al, ap[1] / al, ap[2] / al};
+		const float th = deg * (3.14159265358979f / 180.0f);
+		const float cs = std::cos(th), sn = std::sin(th), vc = 1.0f - cs;
+		const float r00 = cs + u[0] * u[0] * vc, r10 = u[1] * u[0] * vc + u[2] * sn, r20 = u[2] * u[0] * vc - u[1] * sn;
+		const float r21 = u[2] * u[1] * vc + u[0] * sn, r22 = cs + u[2] * u[2] * vc;
+		const float eul[3] = {std::atan2(r21, r22), std::asin(std::clamp(-r20, -1.0f, 1.0f)), std::atan2(r10, r00)};
+		const float units = 65536.0f / (2.0f * 3.14159265358979f);
 		bool any = false;
 		for (int k = 0; k < 3; k++)
 		{
-			const float u = std::clamp(units * ap[k] / al, -16384.0f, 16384.0f);
-			out[k] = static_cast<s16>(std::lround(u));
+			const float v = std::isfinite(eul[k]) ? std::clamp(units * eul[k], -16384.0f, 16384.0f) : 0.0f;
+			out[k] = static_cast<s16>(std::lround(v));
 			any = any || out[k] != 0;
 		}
 		return any;
 	}
 
-	JoltEntry MakeJoltEntry(u32 enemy, u8 bone, const s16 angle[3], int frames)
+	JoltEntry MakeJoltEntry(u32 enemy, u8 bone, const s16 angle[3], int frames, bool wait)
 	{
 		JoltEntry e;
 		e.enemy = enemy;
 		e.bone = bone;
+		e.wait = wait ? 1 : 0;
 		e.frames = static_cast<u8>(std::clamp(frames, 1, 255));
 		for (int k = 0; k < 3; k++)
 		{
@@ -2117,7 +2189,7 @@ namespace VR::PhysicalMelee
 	{
 		const auto h = [](s16 x) { return static_cast<u32>(static_cast<u16>(x)); };
 		w[0] = e.enemy;
-		w[1] = static_cast<u32>(e.bone) | (static_cast<u32>(e.frames) << 8);
+		w[1] = static_cast<u32>(e.bone) | (static_cast<u32>(e.frames) << 8) | (static_cast<u32>(e.wait) << 16);
 		w[2] = h(e.angle[0]) | (h(e.angle[1]) << 16);
 		w[3] = h(e.angle[2]);
 		w[4] = h(e.rate[0]) | (h(e.rate[1]) << 16);
@@ -2207,6 +2279,30 @@ namespace VR::PhysicalMelee
 			c(JoltAngles(hit, neck, vel, scaled, 20.0f, b) && b[0] == a[0], "angles: the parent's scale does not matter");
 		}
 		{
+			// A slanted axis: the three angles, composed as the game does (x, then y, then z about the parent's axes:
+			// Rz * Ry * Rx), give one turn of the asked size about the asked axis (the small-angle split was about 5 deg off).
+			const float hit[3] = {-14.0f, 160.0f, 12.0f}, vel[3] = {380.0f, 0.0f, -330.0f};
+			s16 a[3];
+			const bool ok = JoltAngles(hit, neck, vel, id, 22.0f, a);
+			const float k = 6.2831853f / 65536.0f;
+			const float x = a[0] * k, y = a[1] * k, z = a[2] * k;
+			const float cx = std::cos(x), sx = std::sin(x), cy = std::cos(y), sy = std::sin(y), cz = std::cos(z), sz = std::sin(z);
+			// R = Rz * Ry * Rx (column vectors).
+			const float R[3][3] = {{cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx},
+				{sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx}, {-sy, cy * sx, cy * cx}};
+			const float tr = std::clamp((R[0][0] + R[1][1] + R[2][2] - 1.0f) * 0.5f, -1.0f, 1.0f);
+			const float got = std::acos(tr) * (180.0f / 3.14159265f);
+			float ax[3] = {R[2][1] - R[1][2], R[0][2] - R[2][0], R[1][0] - R[0][1]};
+			// The asked axis: (joint -> contact) x velocity, normalised.
+			const float r[3] = {hit[0] - neck[0], std::fabs(hit[1] - neck[1]), hit[2] - neck[2]};
+			float want[3] = {r[1] * vel[2] - r[2] * vel[1], r[2] * vel[0] - r[0] * vel[2], r[0] * vel[1] - r[1] * vel[0]};
+			const float la = Len3(ax[0], ax[1], ax[2]), lw = Len3(want[0], want[1], want[2]);
+			const float dot = (ax[0] * want[0] + ax[1] * want[1] + ax[2] * want[2]) / std::max(la * lw, 1e-9f);
+			const float off = std::acos(std::clamp(dot, -1.0f, 1.0f)) * (180.0f / 3.14159265f);
+			c(ok && std::abs(got - 22.0f) < 0.2f && off < 0.5f && a[0] != 0 && a[1] != 0 && a[2] != 0,
+				"angles: a slanted turn is exact as the game composes it");
+		}
+		{
 			const float hit[3] = {0.0f, 150.0f, 0.0f}, still[3] = {0.0f, 0.0f, 0.5f}, down[3] = {0.0f, -500.0f, 0.0f};
 			const float flat[16] = {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 			const float side[3] = {300.0f, 0.0f, 0.0f};
@@ -2237,6 +2333,11 @@ namespace VR::PhysicalMelee
 				"entry: packed as the cave reads it");
 			const JoltEntry z = MakeJoltEntry(1, 2, ang, 0);
 			c(z.frames == 1 && z.rate[0] == 3641, "entry: at least one frame");
+			// Armed at the strike: byte +6 set (cave G holds the entry until the enemy's hit counter is set).
+			const JoltEntry wt = MakeJoltEntry(0x429530, 20, ang, 12, true);
+			u32 ww[6];
+			PackJoltEntry(wt, ww);
+			c(wt.wait == 1 && ww[1] == 0x010C14 && ww[2] == w[2] && ww[4] == w[4] && e.wait == 0, "entry: armed, it waits for the hit");
 		}
 		return c.failures;
 	}

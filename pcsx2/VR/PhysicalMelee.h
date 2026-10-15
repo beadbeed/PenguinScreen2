@@ -328,21 +328,24 @@ namespace VR::PhysicalMelee
 	// of the joint the bone moves (above it, or below it for the legs: below), so the part it moves goes with the swing,
 	// moved into the parent's frame (parent_world: its 4 x 4 row-vector world matrix; only the 3 x 3 is used, inverted, so
 	// its scale does not matter), deg degrees, as the three angles FUN_0055C450 applies (65536 a turn, about the parent's
-	// x, y, z). A lever shorter than 8 game units, or one along the velocity, uses straight up instead; false when the
+	// x, then y, then z: exactly that turn, Rz * Ry * Rx, not the small-angle split). A lever shorter than 8 game units, or one along the velocity, uses straight up instead; false when the
 	// velocity is too slow (under 1 game unit a second), the parent's matrix is singular or nothing is left.
 	bool JoltAngles(const float contact[3], const float pivot[3], const float vel[3], const float parent_world[16], float deg,
 		s16 out[3], bool below = false);
-	// One entry of cave G's block (24 bytes at block + 0x10 + 24 * k): the enemy, the bone, the frames left, the angles
-	// now and what is taken off them after each frame (angle / frames, toward zero).
+	// One entry of cave G's block (24 bytes at block + 0x10 + 24 * k): the enemy, the bone, the frames left, whether it
+	// still waits for the hit (armed at the strike: cave G holds it until the enemy's own hit counter +0x13F is set, the
+	// update the hit lands in, and clears it), the angles now and what is taken off them after each frame (angle / frames,
+	// toward zero).
 	struct JoltEntry
 	{
 		u32 enemy = 0;
 		u8 bone = 0;
 		u8 frames = 0;
+		u8 wait = 0;
 		s16 angle[3] = {};
 		s16 rate[3] = {};
 	};
-	JoltEntry MakeJoltEntry(u32 enemy, u8 bone, const s16 angle[3], int frames);
+	JoltEntry MakeJoltEntry(u32 enemy, u8 bone, const s16 angle[3], int frames, bool wait = false);
 	// The entry as the cave reads it: six little-endian words.
 	void PackJoltEntry(const JoltEntry& e, u32 words[6]);
 	constexpr int kJoltEntries = 4;

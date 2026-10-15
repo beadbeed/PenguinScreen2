@@ -1198,7 +1198,7 @@ int main(int argc, char* argv[])
 		if (!head || head->bones[0] != 20 || head->parents[0] != 11 || !belly || belly->bones[0] != 10 || belly->parents[0] != 2 ||
 			!VR::PhysicalMelee::JoltChainFor(m.jolt, 3))
 			return false;
-		// The entries: the site, then the cave (43 words at 0xFE800, clear of cave F and of the melee block's 0x90 bytes).
+		// The entries: the site, then the cave (49 words at 0xFE800, clear of cave F and of the melee block's 0x90 bytes).
 		MiniEE ee;
 		int site = -1, first_cave = -1, words = 0;
 		for (size_t i = 0; i < p->camera->silence.size(); i++)
@@ -1222,7 +1222,7 @@ int main(int argc, char* argv[])
 			ee.Store32(sil.ee_address, sil.value_on);
 			words++;
 		}
-		if (site < 0 || words != 43)
+		if (site < 0 || words != 49)
 			return false;
 		// Cave G with the game around it scripted: FUN_00577870 (the game's own jolt) and FUN_0055C450 (the apply) record
 		// their arguments and clobber the temporaries.
@@ -1299,7 +1299,30 @@ int main(int argc, char* argv[])
 			((ee.Load32(kBlk + 0x14) >> 8) & 0xFF) != 0)
 			return false;
 		s_calls.clear();
-		return run() && s_calls.size() == 1;
+		if (!run() || s_calls.size() != 1)
+			return false;
+		// Armed at the strike: an entry that waits holds (no apply, no frame taken) until the enemy's hit counter +0x13F is
+		// set, then runs on that same update, stops waiting and runs on from there.
+		{
+			const s16 ang[3] = {600, 0, 0};
+			const VR::PhysicalMelee::JoltEntry je = VR::PhysicalMelee::MakeJoltEntry(kEnemy, 20, ang, 3, true);
+			u32 w[6];
+			VR::PhysicalMelee::PackJoltEntry(je, w);
+			for (int q = 0; q < 6; q++)
+				ee.Store32(kBlk + 0x28u + 4u * static_cast<u32>(q), w[q]);
+		}
+		const auto frames_wait = [&]() { return (ee.Load32(kBlk + 0x2C) >> 8) & 0xFFFFu; };
+		ee.Store32(kEnemy + 0x13C, 0x00FFFFFFu); // +0x13F (the hit counter) clear, its neighbours set
+		s_calls.clear();
+		if (!run() || s_calls.size() != 1 || frames_wait() != 0x0103)
+			return false;
+		ee.Store32(kEnemy + 0x13C, 0x01000000u); // hit this update
+		s_calls.clear();
+		if (!run() || s_calls.size() != 2 || s_calls[1].a1 != 20 || s_calls[1].x != 600 || frames_wait() != 0x0002)
+			return false;
+		ee.Store32(kEnemy + 0x13C, 0); // the counter clear again: it no longer waits
+		s_calls.clear();
+		return run() && s_calls.size() == 2 && s_calls[1].x == 400 && frames_wait() == 0x0001;
 	});
 	RunGamepad();
 	RunSilent("CameraDriver::SelfTestAssembler (hook)", VR::CameraDriver::SelfTestAssembler);
