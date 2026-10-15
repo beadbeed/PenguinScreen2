@@ -243,7 +243,9 @@ namespace VR::PhysicalMelee
 					finish(Result::NotRaised);
 				break;
 			case Phase::Pressing:
-				if (!in.usable)
+				// Lowered inside the press (the player let go of the bumper): Circle in the normal stance is search, pick
+				// up, open; the press ends at once (review m1).
+				if (!in.usable || !in.raised)
 					finish(Result::Lost);
 				else if (in.screen)
 					finish(Result::Screen);
@@ -287,7 +289,7 @@ namespace VR::PhysicalMelee
 				break;
 		}
 		out.phase = st.phase;
-		out.hold_attack = st.phase == Phase::Pressing && st.phase_s < p.press_s;
+		out.hold_attack = st.phase == Phase::Pressing && st.phase_s < p.press_s && in.raised;
 		out.hold_raise = st.we_raise && (st.phase == Phase::Raising || st.phase == Phase::Pressing || st.phase == Phase::Swinging);
 		return out;
 	}
@@ -867,6 +869,21 @@ namespace VR::PhysicalMelee
 				r2.Run(1.0f);
 				c(r2.result == Result::Screen && !r2.circle_while_screen && !r2.out.hold_raise,
 					"driver: a screen mid-raise ends it, Circle never pressed, R1 let go");
+			}
+			{
+				// Raised by the player, lowered inside the press (review m1): the press ends, Circle never held lowered.
+				DriverState st;
+				DriverParams p;
+				DriverIn in;
+				in.dt = 1.0f / 60.0f;
+				in.usable = in.raised = in.aim_idle = true;
+				in.request = true;
+				const DriverOut o1 = Step(in, p, st);
+				in.request = false;
+				in.raised = in.aim_idle = false; // the normal stance: still usable
+				const DriverOut o2 = Step(in, p, st);
+				c(o1.hold_attack && !o2.hold_attack && o2.finished && o2.result == Result::Lost,
+					"driver: lowered inside the press lets Circle go at once");
 			}
 			{
 				// Hurt or grabbed mid-swing (not usable): ended, everything let go.
