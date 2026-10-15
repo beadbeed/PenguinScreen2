@@ -11723,6 +11723,19 @@ namespace VR::XRCompositor
 			chain.waited = false;
 			chain.release_pending = false;
 		}
+		// m7 (addendum 3): [VR] DepthLayer's depth swapchains go with their eyes (they were only forgotten before).
+		for (auto& chain : s.depth_chains)
+		{
+			if (chain.swapchain != XR_NULL_HANDLE)
+				DestroySwapchainSynced(chain.swapchain);
+			chain.swapchain = XR_NULL_HANDLE;
+			chain.images.clear();
+			chain.ever_released = false;
+			chain.wait_pending = false;
+			chain.waited = false;
+			chain.release_pending = false;
+		}
+		s.present_depth = FpDepth{};
 		s.swapchain_width = 0;
 		s.swapchain_height = 0;
 
