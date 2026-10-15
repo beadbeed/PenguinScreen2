@@ -46,7 +46,8 @@ an LTO build with 30 of 30 self-tests; its `resources` junction points at the `m
 in `D:\dev\PenguinScreen2-buildun-playtest-models` with its own settings. On there: `PhysicalMelee` (Contact), `MeleeHitJolt`,
 `SeamlessDoors`, `MenuPanel` (+ `MenuPanelRoom = Freeze`), `HandTargeting`, `ReloadGesture`, the game weapon models;
 off: `BeltPouches`, `DepthLayer`, `DepthWarp`, `PhysicalMeleeOnline`. A/B for leaning (slot 7, lean 10-20 cm at the counter):
-`DepthWarp = true`, then `DepthLayer = true`, then neither (in `run-playtest-models\inis\PenguinScreen2.ini`, `[VR]`).
+`DepthLayer = true`, then neither. **Don't turn on `DepthWarp` yet:** the 10-15 review found it allocates GPU memory from the
+pacer thread without the GS's lock (critical; being fixed on `nightfix`) (in `run-playtest-models\inis\PenguinScreen2.ini`, `[VR]`).
 Everything new since 10-14 evening is checked offline (and the menus and the warp on the null headset) only.
 
 **2026-10-15 overnight build: branch `nightly`** = `vrmelee` (contact-driven melee: `PhysicalMeleeMode = Contact`, the game's own
