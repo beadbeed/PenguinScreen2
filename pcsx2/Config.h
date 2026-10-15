@@ -1330,6 +1330,25 @@ struct Pcsx2Config
 		// front of you, where the menu pointer aims. The game reads the pad for its menu as before; nothing is confirmed
 		// for you. false = the pull-away to the world screen (or the Menu Tablet) as before. Ini only for now.
 		bool MenuPanel = false;
+		// With MenuPanel, what the room behind the panel does while a game screen is up
+		// (research/2026-10-13-menu-panel.md, "Calm menus"):
+		//  Freeze: the camera holds the view it had as the screen came up (the head no longer drives it), so the room stays
+		//          put in the world as you look around, like a VR game pausing into its scene; dimmed (below), and black
+		//          past its edges (no edge fill while it holds). The head drives the camera again as the screen goes.
+		//  Dim:    the camera follows the head as before, the room dimmed (below).
+		//  Live:   the camera follows the head, the room as bright as in play (MenuPanel as first played, 2026-10-14).
+		enum struct MenuPanelRoomMode : int
+		{
+			Freeze = 0,
+			Dim = 1,
+			Live = 2,
+		};
+		static const char* MenuPanelRoomModeNames[];
+		MenuPanelRoomMode MenuPanelRoom = MenuPanelRoomMode::Freeze;
+		// Freeze and Dim: how bright the room behind the panel is (1 = as in play), eased in and out with the screen.
+		static constexpr float MIN_MENU_PANEL_ROOM_BRIGHTNESS = 0.2f, MAX_MENU_PANEL_ROOM_BRIGHTNESS = 1.0f;
+		static constexpr float DEFAULT_MENU_PANEL_ROOM_BRIGHTNESS = 0.55f;
+		float MenuPanelRoomBrightness = DEFAULT_MENU_PANEL_ROOM_BRIGHTNESS;
 		// First person, File #1 offline only (profiles with camera.silence entries marked whenSetting: SeamlessDoors): a
 		// door you open yourself no longer plays the game's door shot or arrival shot, so first person holds while your
 		// character opens the door and comes back as soon as the next room is loaded, as when you follow a partner.

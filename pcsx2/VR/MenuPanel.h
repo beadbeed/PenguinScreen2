@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "VR/HeadPose.h"
+
 #include "common/Pcsx2Defs.h"
 
 class GSTexture;
@@ -160,4 +162,99 @@ namespace VR::MenuPanel
 
 	// The pure parts: the overlay test and the tracker.
 	bool SelfTest();
+
+	// --- Calm menus ([VR] MenuPanelRoom, MenuPanelRoomBrightness; research note, "Calm menus") ------------------------
+	// Alex's first session with the panel (2026-10-14): "the inventory is within my eyes, but I can still see the
+	// background moving around". The room behind the panel is the game's 30 fps view, about 100 ms behind the head, so
+	// with the panel crisp in front it swims. Three ways to show it:
+	//  - Freeze: the camera holds the pose it was last written from as the screen came up. The game keeps drawing the
+	//    room from there (it still runs: a zombie still moves), every frame is placed at that render pose, so the room
+	//    stays put in the world as the head turns, dimmed, with black past its edges (the head-locked edge fill is off
+	//    while it holds). As the screen goes the camera is written from the head again; the compositor places each frame
+	//    where it was rendered from, so the world does not jump, only the picture's edge catches up with the head.
+	//  - Dim: the camera follows the head as before, the room dimmed.
+	//  - Live: as first played.
+	// No layer, no swapchain: the dim goes through the presentation lift's own shader pass (VR::PresentationLift).
+	enum class RoomMode : u8
+	{
+		Freeze = 0, // the values of Pcsx2Config::VROptions::MenuPanelRoomMode
+		Dim = 1,
+		Live = 2,
+	};
+
+	// CPU thread (CameraDriver), every vsync: the setting, for the GS thread, and whether the camera is held for a screen
+	// this vsync (the compositor turns the edge fill off then).
+	void PublishRoom(RoomMode mode, float brightness, bool frozen);
+	// Any thread.
+	bool RoomFrozen();
+
+	// What the room behind the panel looks like at the dim's full effect (pure).
+	struct RoomLook
+	{
+		float brightness = 1.0f; // of the picture as shown in play
+		float saturation = 1.0f;
+	};
+	constexpr float kRoomSaturation = 0.8f; // a little greyer too: calmer, and the panel's colours stand out
+	constexpr float kRoomDimInS = 0.25f;    // the dim comes in over this
+	constexpr float kRoomDimOutS = 0.2f;    // and goes over this
+	RoomLook RoomLookFor(RoomMode mode, float brightness);
+	// The dim's amount (0 none, 1 full) eased toward target (0 or 1) over dt seconds.
+	float EaseRoomDim(float amount, float target, float dt);
+	// The look at an amount of the dim (1: full, 0: as in play).
+	RoomLook RoomLookAt(const RoomLook& full, float amount);
+	// The shader multiplies the colour by its brightness before its gamma (out = (c * b) ^ (1 / gamma)): to make the
+	// picture `dim` times as bright after the gamma, b is multiplied by dim ^ gamma.
+	float DimBeforeGamma(float dim, float gamma);
+	// GS thread, once per present after GetOutput (VR::PresentationLift): the room's look this present, eased in while
+	// the shown frame is a split room (the screen on the panel, not in the picture) and the mode is not Live, out after.
+	// False when it is as in play.
+	bool RoomLookNow(RoomLook* out);
+
+	// The held camera pose (pure; CameraDriver, every vsync camera.lookAt drives the camera).
+	struct RoomFreeze
+	{
+		bool frozen = false;
+		HeadPose::Snapshot pose; // the camera pose held: the last one written before the screen came up
+		HeadPose::Snapshot held; // what Step returns: pose's orientation and position, the live head's stamps
+		// screen: a game screen up with first person kept (camera only); freeze: RoomMode::Freeze; last_written: the pose
+		// the camera was last written from (null: none yet); live: the head now. Returns the pose to write the camera from
+		// (no prediction: it is not moving), or null for the head as usual. began / ended: the hold started / ended now.
+		const HeadPose::Snapshot* Step(bool screen, bool freeze, const HeadPose::Snapshot* last_written,
+			const HeadPose::Snapshot& live, bool* began, bool* ended);
+		void Reset() { *this = RoomFreeze{}; }
+	};
+
+	// --- The panel's place (pure; XRCompositor) -------------------------------------------------------------------------
+	// 1.0 m ahead of the eyes, 0.12 m below them, 0.80 m tall (about 44 deg; 1.07 m wide at 4:3), tilted to face the eyes,
+	// placed along the yaw the head looks as the screen comes up (its pitch left out: the item screen opens with a look
+	// down at the belt), and held there in the world while the head looks around it. Only a turn of more than
+	// kPanelReplaceDeg away from it brings it round to the new yaw, gliding (kPanelGlideS) rather than jumping.
+	constexpr float kPanelDistanceM = 1.0f;
+	constexpr float kPanelHeightM = 0.80f;
+	constexpr float kPanelDropM = 0.12f;
+	constexpr float kPanelReplaceDeg = 60.0f;
+	constexpr float kPanelGlideS = 0.15f; // time constant
+	// The yaw the head looks along (OpenXR: forward -Z, yaw counter-clockwise from above), from its orientation x, y, z, w;
+	// `fallback` when it looks straight up or down.
+	float PanelYawOf(const float q[4], float fallback);
+	// The panel's pose for eyes at `eye` and a yaw: position and orientation (x, y, z, w).
+	void PlacePanel(const float eye[3], float yaw, float pos[3], float quat[4]);
+	struct PanelPlacer
+	{
+		bool placed = false;
+		bool gliding = false;
+		float yaw = 0.0f;      // where it stands now
+		float eye[3] = {};     // the eyes it stands in front of
+		float target_yaw = 0.0f;
+		float target_eye[3] = {};
+		// As the screen comes up: in front of the head.
+		void Show(const float eye_now[3], float head_yaw);
+		// Every present while it is up: true when the head has turned far enough away that it set off for the head's yaw
+		// now (logged by the caller).
+		bool Update(const float eye_now[3], float head_yaw, float dt);
+		void Hide() { placed = false; gliding = false; }
+	};
+
+	// The pure parts of the calm menus: the look, the ease, the gamma, the hold, the placement and the re-place.
+	bool FeelSelfTest();
 }

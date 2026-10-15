@@ -2997,6 +2997,11 @@ namespace VR::CameraDriver
 		bool s_menu_hold = false;
 		// [VR] MenuPanel: the "screen up, first person kept" line logged for this screen.
 		bool s_menu_panel_logged = false;
+		// [VR] MenuPanelRoom = Freeze: the camera held for a game screen, and the pose camera.lookAt last wrote it from
+		// (the hold starts there, so the room on screen does not move as it begins).
+		MenuPanel::RoomFreeze s_room_freeze;
+		HeadPose::Snapshot s_last_cam_pose;
+		u64 s_room_freeze_ms = 0;
 
 		HeadPose::Snapshot FreshHeadPose()
 		{
@@ -3139,6 +3144,35 @@ namespace VR::CameraDriver
 		return deflection;
 	}
 
+	namespace
+	{
+		// [VR] MenuPanelRoom = Freeze: one line as the camera's hold begins and one as it ends, with how far the head
+		// had turned from the held view and for how long.
+		void LogRoomFreeze(bool began, bool ended, const HeadPose::Snapshot& head)
+		{
+			if (!began && !ended)
+				return;
+			const HeadPose::Snapshot& h = s_room_freeze.pose;
+			const float held_yaw = QuaternionToEulerYXZ(h.orientation_x, h.orientation_y, h.orientation_z, h.orientation_w).yaw;
+			const float head_yaw =
+				QuaternionToEulerYXZ(head.orientation_x, head.orientation_y, head.orientation_z, head.orientation_w).yaw;
+			const float apart = WrapPi(head_yaw - held_yaw) * (180.0f / PI_F);
+			if (began)
+			{
+				s_room_freeze_ms = NowMs();
+				Console.WriteLn("(VR) CameraDriver: the room holds still behind the panel ([VR] MenuPanelRoom = Freeze): the "
+								"camera held at the view it was last written from (%.1f deg from the head now).",
+					apart);
+			}
+			else
+			{
+				Console.WriteLn("(VR) CameraDriver: the screen is gone; the head drives the camera again (held %.2f s, the "
+								"head %.1f deg from the held view).",
+					static_cast<double>(NowMs() - s_room_freeze_ms) * 0.001, apart);
+			}
+		}
+	}
+
 	void Apply()
 	{
 		// Telemetry and the comfort vignette's motion are taken on every way out, so a reader always sees this
@@ -3160,8 +3194,15 @@ namespace VR::CameraDriver
 					s_menu_hold = false;
 				SpatialControls::SetMenuMode(s_menu_hold);
 				// [VR] MenuPanel: first person kept through the screen (lookAt still active under it).
-				MenuPanel::PublishScreenUp(EmuConfig.VR.MenuPanel && s_menu_hold && s_armed_logged &&
-										   s_lookat_active.load(std::memory_order_relaxed));
+				const bool panel_screen = EmuConfig.VR.MenuPanel && s_menu_hold && s_armed_logged &&
+				                          s_lookat_active.load(std::memory_order_relaxed);
+				MenuPanel::PublishScreenUp(panel_screen);
+				// [VR] MenuPanelRoom: a hold left over from a disarm (no screen kept any more) ends here; through the guard
+				// flicker's grace (nothing written) it stays.
+				if (!panel_screen && s_room_freeze.frozen)
+					s_room_freeze.Reset();
+				MenuPanel::PublishRoom(static_cast<MenuPanel::RoomMode>(EmuConfig.VR.MenuPanelRoom),
+					EmuConfig.VR.MenuPanelRoomBrightness, panel_screen && s_room_freeze.frozen);
 			}
 		};
 		PublishOnExit publish_on_exit;
@@ -3590,26 +3631,29 @@ namespace VR::CameraDriver
 			else
 				RestoreHolds(&la, true);
 			// The camera from the head, this vsync. camera_only ([VR] MenuPanel, a game screen up): nothing but the camera
-			// is written; the sticks, the aim and the body stay the menu's.
-			const auto drive_camera = [&](bool camera_only) {
+			// is written; the sticks, the aim and the body stay the menu's. held ([VR] MenuPanelRoom = Freeze): the pose to
+			// write it from instead of the head (the view as the screen came up), not predicted (it does not move).
+			const auto drive_camera = [&](bool camera_only, const HeadPose::Snapshot* held = nullptr) {
+				const HeadPose::Snapshot& head_pose = held ? *held : pose;
 				// lookAt recenters yaw only, so pitch and roll stay level with gravity whatever the head was
 				// doing at the recenter.
-				const EulerAngles head = QuaternionToEulerYXZ(pose.orientation_x, pose.orientation_y,
-					pose.orientation_z, pose.orientation_w);
+				const EulerAngles head = QuaternionToEulerYXZ(head_pose.orientation_x, head_pose.orientation_y,
+					head_pose.orientation_z, head_pose.orientation_w);
 				const EulerAngles look{WrapPi(head.yaw - s_ref_yaw), head.pitch, head.roll};
 				// lookAt.predict: the camera is written from where the head will be when the frame is shown.
 				// The frame records that pose, so the compositor places it exactly where it was rendered from
 				// (a wrong guess only moves an edge, the world never wobbles); gameplay keeps the true head.
-				const HeadPose::Snapshot cam_pose = PredictCameraPose(la, pose);
+				const HeadPose::Snapshot cam_pose = held ? *held : PredictCameraPose(la, pose);
 				const EulerAngles head_cam = QuaternionToEulerYXZ(cam_pose.orientation_x, cam_pose.orientation_y,
 					cam_pose.orientation_z, cam_pose.orientation_w);
 				const EulerAngles look_cam{WrapPi(head_cam.yaw - s_ref_yaw), head_cam.pitch, head_cam.roll};
 				TrackRenderPose(la);
 				LookAtWrite w;
-				const bool wrote = ApplyLookAt(la, base, look, look_cam, pose, &w, camera_only);
+				const bool wrote = ApplyLookAt(la, base, look, look_cam, head_pose, &w, camera_only);
 				if (wrote)
 				{
 					w.fov_deg = fov_sizes_screen ? fov_now : 0.0f;
+					s_last_cam_pose = cam_pose;
 					PushStampedPose(cam_pose);
 					PushWritten(w, cam_pose);
 					PublishMatchedPose(la);
@@ -3632,7 +3676,14 @@ namespace VR::CameraDriver
 						Console.WriteLn("(VR) CameraDriver: a game screen is up; first person keeps the camera ([VR] MenuPanel): "
 										"camera only, the sticks and buttons are the menu's.");
 					}
-					drive_camera(true);
+					// [VR] MenuPanelRoom = Freeze: the camera holds the view it had as the screen came up, so the room stays
+					// put in the world behind the panel instead of trailing the head at the game's 30 fps.
+					bool began = false, ended = false;
+					const HeadPose::Snapshot* held = s_room_freeze.Step(true,
+						EmuConfig.VR.MenuPanelRoom == Pcsx2Config::VROptions::MenuPanelRoomMode::Freeze,
+						s_last_cam_pose.valid ? &s_last_cam_pose : nullptr, pose, &began, &ended);
+					LogRoomFreeze(began, ended, pose);
+					drive_camera(true, held);
 				}
 				else
 				{
@@ -3645,6 +3696,11 @@ namespace VR::CameraDriver
 			else
 			{
 				s_menu_panel_logged = false;
+				// The screen gone: the head drives the camera again at once. Every frame is placed where it was rendered
+				// from, so the world does not jump; the picture's edge catches up with the head in a frame or two.
+				bool began = false, ended = false;
+				s_room_freeze.Step(false, false, nullptr, pose, &began, &ended);
+				LogRoomFreeze(began, ended, pose);
 				drive_camera(false);
 			}
 		}
@@ -3710,6 +3766,9 @@ namespace VR::CameraDriver
 		s_comfort_ref_valid = false;
 		s_comfort_speed = 0.0f;
 		s_comfort_motion.store(0.0f, std::memory_order_relaxed);
+		// [VR] MenuPanelRoom: no hold carried across a load (a screen up in the loaded state holds the head as it is then).
+		s_room_freeze.Reset();
+		s_last_cam_pose = HeadPose::Snapshot{};
 	}
 
 	bool RenderPose(HeadPose::Snapshot* out, float* turn_yaw)

@@ -25,9 +25,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
@@ -45,6 +48,12 @@ namespace VR::MenuPanel
 		u32 s_vsyncs_since_up = kTailVsyncs;
 
 		SplitTracker s_tracker;
+		// [VR] MenuPanelRoom: this present's Merge read a room snapshot (RoomFor gave one since the vsync began), and the
+		// dim's eased amount (GS thread).
+		bool s_room_shown = false;
+		float s_dim_amount = 0.0f;
+		std::chrono::steady_clock::time_point s_dim_last{};
+		bool s_dim_logged = false;
 		const char* s_no_panel_why = nullptr;
 		PanelInfo s_latest;
 		u64 s_serial = 0;
@@ -728,6 +737,7 @@ void main()
 		if (!snap || snap->GetSize() != colour->GetSize() || snap->GetArrayLayers() != colour->GetArrayLayers() ||
 			snap->GetFormat() != colour->GetFormat())
 			return nullptr;
+		s_room_shown = true;
 		return snap;
 	}
 
@@ -820,6 +830,7 @@ void main()
 		GSDeviceVK* const dev = VulkanDevice();
 		PollDump(dev);
 		s_trace_vsync++;
+		s_room_shown = false;
 		const bool up = ScreenUp();
 		s_vsyncs_since_up = up ? 0 : std::min(s_vsyncs_since_up + 1, kTailVsyncs);
 		if (TraceVsyncsSetting() > 0)
@@ -882,9 +893,417 @@ void main()
 		NoPanel("the menu panel is Vulkan only");
 		return false;
 	}
-	void OnVSync() {}
+	void OnVSync() { s_room_shown = false; }
 	void Destroy() {}
 #endif
+
+	// --- Calm menus ------------------------------------------------------------------------------------------------------
+	namespace
+	{
+		std::atomic<u8> s_room_mode{static_cast<u8>(RoomMode::Live)};
+		std::atomic<float> s_room_brightness{1.0f};
+		std::atomic_bool s_room_frozen{false};
+
+		constexpr float kPi = 3.14159265358979f;
+
+		float WrapAngle(float a)
+		{
+			if (!std::isfinite(a))
+				return 0.0f;
+			a = std::fmod(a + kPi, 2.0f * kPi);
+			if (a < 0.0f)
+				a += 2.0f * kPi;
+			return a - kPi;
+		}
+	}
+
+	void PublishRoom(RoomMode mode, float brightness, bool frozen)
+	{
+		s_room_mode.store(static_cast<u8>(mode), std::memory_order_relaxed);
+		s_room_brightness.store(brightness, std::memory_order_relaxed);
+		s_room_frozen.store(frozen, std::memory_order_release);
+	}
+
+	bool RoomFrozen()
+	{
+		return s_room_frozen.load(std::memory_order_acquire);
+	}
+
+	RoomLook RoomLookFor(RoomMode mode, float brightness)
+	{
+		RoomLook l;
+		if (mode == RoomMode::Live)
+			return l;
+		l.brightness = std::isfinite(brightness) ? std::clamp(brightness, 0.0f, 1.0f) : 1.0f;
+		// No dim asked for (brightness 1): no greying either.
+		l.saturation = (l.brightness < 1.0f) ? kRoomSaturation : 1.0f;
+		return l;
+	}
+
+	float EaseRoomDim(float amount, float target, float dt)
+	{
+		if (!std::isfinite(amount))
+			amount = 0.0f;
+		amount = std::clamp(amount, 0.0f, 1.0f);
+		if (!std::isfinite(target))
+			target = 0.0f;
+		target = std::clamp(target, 0.0f, 1.0f);
+		if (!std::isfinite(dt) || dt <= 0.0f)
+			return amount;
+		if (target > amount)
+			return std::min(target, amount + dt / kRoomDimInS);
+		return std::max(target, amount - dt / kRoomDimOutS);
+	}
+
+	RoomLook RoomLookAt(const RoomLook& full, float amount)
+	{
+		const float t = std::isfinite(amount) ? std::clamp(amount, 0.0f, 1.0f) : 0.0f;
+		RoomLook l;
+		l.brightness = 1.0f + (full.brightness - 1.0f) * t;
+		l.saturation = 1.0f + (full.saturation - 1.0f) * t;
+		return l;
+	}
+
+	float DimBeforeGamma(float dim, float gamma)
+	{
+		if (!std::isfinite(dim) || dim >= 1.0f)
+			return 1.0f;
+		if (!std::isfinite(gamma) || gamma <= 0.0f)
+			gamma = 1.0f;
+		return std::pow(std::max(dim, 0.0f), gamma);
+	}
+
+	bool RoomLookNow(RoomLook* out)
+	{
+		const auto now = std::chrono::steady_clock::now();
+		float dt = 0.0f;
+		if (s_dim_last.time_since_epoch().count() != 0)
+			dt = std::chrono::duration<float>(now - s_dim_last).count();
+		s_dim_last = now;
+		// A long gap (the GS idle, presents paused) counts as at most a few frames, so the dim never pops.
+		dt = std::clamp(dt, 0.0f, 0.05f);
+		const RoomMode mode = static_cast<RoomMode>(s_room_mode.load(std::memory_order_relaxed));
+		const RoomLook full = RoomLookFor(mode, s_room_brightness.load(std::memory_order_relaxed));
+		const bool want = EmuConfig.VR.MenuPanel && s_room_shown && mode != RoomMode::Live && full.brightness < 1.0f;
+		s_dim_amount = EaseRoomDim(s_dim_amount, want ? 1.0f : 0.0f, dt);
+		if (want && s_dim_amount >= 1.0f && !s_dim_logged)
+		{
+			s_dim_logged = true;
+			Console.WriteLn("(VR) Menu panel: the room behind it at %.0f%% brightness, %.0f%% saturation ([VR] MenuPanelRoom = %s).",
+				100.0f * full.brightness, 100.0f * full.saturation, (mode == RoomMode::Freeze) ? "Freeze" : "Dim");
+		}
+		else if (!want && s_dim_amount <= 0.0f)
+			s_dim_logged = false;
+		if (!(s_dim_amount > 0.0f))
+			return false;
+		*out = RoomLookAt(full, s_dim_amount);
+		return true;
+	}
+
+	const HeadPose::Snapshot* RoomFreeze::Step(bool screen, bool freeze, const HeadPose::Snapshot* last_written,
+		const HeadPose::Snapshot& live, bool* began, bool* ended)
+	{
+		*began = false;
+		*ended = false;
+		if (!screen || !freeze)
+		{
+			if (frozen)
+			{
+				frozen = false;
+				*ended = true;
+			}
+			return nullptr;
+		}
+		if (!frozen)
+		{
+			// The pose the room on screen was last rendered from (near enough: the newest write), so the picture does not
+			// move as the hold begins.
+			pose = (last_written && last_written->valid) ? *last_written : live;
+			frozen = true;
+			*began = true;
+		}
+		held = pose;
+		// Stamped as the head now, so everything that ages poses (the prediction horizons, the pose ring) sees a head
+		// held perfectly still rather than an old one.
+		held.frame = live.frame;
+		held.publish_ms = live.publish_ms;
+		held.valid = pose.valid && live.valid;
+		held.angular_velocity[0] = held.angular_velocity[1] = held.angular_velocity[2] = 0.0f;
+		held.angular_valid = true;
+		return &held;
+	}
+
+	float PanelYawOf(const float q[4], float fallback)
+	{
+		const float x = q[0], y = q[1], z = q[2], w = q[3];
+		const float fx = -2.0f * (w * y + z * x);
+		const float fz = -(1.0f - 2.0f * (x * x + y * y));
+		if (!std::isfinite(fx) || !std::isfinite(fz) || (fx * fx + fz * fz) <= 1.0e-4f)
+			return fallback;
+		return std::atan2(-fx, -fz);
+	}
+
+	void PlacePanel(const float eye[3], float yaw, float pos[3], float quat[4])
+	{
+		// anchor + R(yaw) * (0, -drop, -distance), turned Ry(yaw) * Rx(-tilt) so its face (+Z) looks back up at the eyes.
+		const float tilt = std::atan2(kPanelDropM, kPanelDistanceM);
+		const float th = -0.5f * tilt, ts = std::sin(th), tc = std::cos(th);
+		const float ys = std::sin(yaw * 0.5f), yc = std::cos(yaw * 0.5f);
+		quat[0] = yc * ts;
+		quat[1] = ys * tc;
+		quat[2] = -ys * ts;
+		quat[3] = yc * tc;
+		pos[0] = eye[0] - kPanelDistanceM * std::sin(yaw);
+		pos[1] = eye[1] - kPanelDropM;
+		pos[2] = eye[2] - kPanelDistanceM * std::cos(yaw);
+	}
+
+	void PanelPlacer::Show(const float eye_now[3], float head_yaw)
+	{
+		placed = true;
+		gliding = false;
+		yaw = target_yaw = WrapAngle(head_yaw);
+		for (int i = 0; i < 3; i++)
+			eye[i] = target_eye[i] = eye_now[i];
+	}
+
+	bool PanelPlacer::Update(const float eye_now[3], float head_yaw, float dt)
+	{
+		if (!placed)
+		{
+			Show(eye_now, head_yaw);
+			return false;
+		}
+		bool set_off = false;
+		const float away = WrapAngle(head_yaw - yaw);
+		if (!gliding && std::abs(away) > kPanelReplaceDeg * (kPi / 180.0f))
+		{
+			gliding = true;
+			set_off = true;
+			target_yaw = WrapAngle(head_yaw);
+			for (int i = 0; i < 3; i++)
+				target_eye[i] = eye_now[i];
+		}
+		if (gliding)
+		{
+			const float k = (std::isfinite(dt) && dt > 0.0f) ? (1.0f - std::exp(-dt / kPanelGlideS)) : 0.0f;
+			const float left = WrapAngle(target_yaw - yaw);
+			if (std::abs(left) < 0.25f * (kPi / 180.0f))
+			{
+				yaw = target_yaw;
+				for (int i = 0; i < 3; i++)
+					eye[i] = target_eye[i];
+				gliding = false;
+			}
+			else
+			{
+				yaw = WrapAngle(yaw + left * k);
+				for (int i = 0; i < 3; i++)
+					eye[i] += (target_eye[i] - eye[i]) * k;
+			}
+		}
+		return set_off;
+	}
+
+	bool FeelSelfTest()
+	{
+		int checks = 0;
+		int failed = 0;
+		const auto check = [&](bool ok, const char* what) {
+			checks++;
+			if (!ok)
+			{
+				failed++;
+				Console.Error("(VR) Menu panel feel self-test FAIL: %s", what);
+			}
+		};
+		const auto approx = [](float a, float b, float eps) { return std::abs(a - b) <= eps; };
+		constexpr float kDeg = kPi / 180.0f;
+		const float nan = std::numeric_limits<float>::quiet_NaN();
+
+		// The look.
+		const RoomLook live = RoomLookFor(RoomMode::Live, 0.55f);
+		check(live.brightness == 1.0f && live.saturation == 1.0f, "Live: the room as in play");
+		const RoomLook dim = RoomLookFor(RoomMode::Dim, 0.55f);
+		check(approx(dim.brightness, 0.55f, 1e-6f) && approx(dim.saturation, kRoomSaturation, 1e-6f), "Dim: 55%, a little grey");
+		const RoomLook frz = RoomLookFor(RoomMode::Freeze, 0.55f);
+		check(frz.brightness == dim.brightness && frz.saturation == dim.saturation, "Freeze dims the same way");
+		const RoomLook none = RoomLookFor(RoomMode::Dim, 1.0f);
+		check(none.brightness == 1.0f && none.saturation == 1.0f, "brightness 1: no dim, no greying");
+		check(RoomLookFor(RoomMode::Dim, 3.0f).brightness == 1.0f && RoomLookFor(RoomMode::Dim, -1.0f).brightness == 0.0f &&
+				  RoomLookFor(RoomMode::Dim, nan).brightness == 1.0f,
+			"brightness clamped to 0..1, NaN as none");
+		const RoomLook half = RoomLookAt(dim, 0.5f);
+		check(approx(half.brightness, 0.775f, 1e-6f) && approx(half.saturation, 0.9f, 1e-6f), "half way in: half the dim");
+		check(RoomLookAt(dim, 0.0f).brightness == 1.0f && RoomLookAt(dim, 1.0f).brightness == dim.brightness &&
+				  RoomLookAt(dim, 7.0f).brightness == dim.brightness,
+			"no dim at 0, all of it at 1 and beyond");
+
+		// The ease.
+		check(approx(EaseRoomDim(0.0f, 1.0f, 0.125f), 0.5f, 1e-5f) && EaseRoomDim(0.0f, 1.0f, kRoomDimInS) == 1.0f,
+			"the dim comes in over 0.25 s");
+		check(approx(EaseRoomDim(1.0f, 0.0f, 0.1f), 0.5f, 1e-5f) && EaseRoomDim(1.0f, 0.0f, kRoomDimOutS) == 0.0f,
+			"and goes over 0.2 s");
+		check(EaseRoomDim(0.4f, 0.4f, 1.0f) == 0.4f && EaseRoomDim(0.3f, 1.0f, 0.0f) == 0.3f &&
+				  EaseRoomDim(0.3f, 1.0f, -1.0f) == 0.3f,
+			"no time, no change");
+		check(approx(EaseRoomDim(nan, 1.0f, 0.05f), 0.2f, 1e-6f) && EaseRoomDim(0.5f, nan, 1.0f) == 0.0f,
+			"NaN amount starts from none; NaN target eases out");
+		{
+			float a = 0.0f;
+			int frames = 0;
+			while (a < 1.0f && frames < 100)
+			{
+				a = EaseRoomDim(a, 1.0f, 1.0f / 60.0f);
+				frames++;
+			}
+			check(frames >= 15 && frames <= 16, "at 60 presents a second the dim is in after a quarter second");
+		}
+
+		// The gamma: (c * b * dim^g) ^ (1/g) = dim * (c * b) ^ (1/g).
+		for (const float g : {1.0f, 1.2f, 2.2f})
+		{
+			const float c = 0.4f;
+			const float plain = std::pow(c, 1.0f / g);
+			const float dimmed = std::pow(c * DimBeforeGamma(0.55f, g), 1.0f / g);
+			check(approx(dimmed, 0.55f * plain, 1e-5f), "the dim survives the lift's gamma exactly");
+		}
+		check(DimBeforeGamma(1.0f, 1.2f) == 1.0f && DimBeforeGamma(nan, 1.2f) == 1.0f &&
+				  approx(DimBeforeGamma(0.5f, 0.0f), 0.5f, 1e-6f),
+			"no dim stays 1; a bad gamma counts as 1");
+
+		// The hold.
+		{
+			HeadPose::Snapshot written;
+			written.valid = true;
+			written.orientation_y = std::sin(0.25f);
+			written.orientation_w = std::cos(0.25f);
+			written.position_x = 0.1f;
+			written.position_valid = true;
+			written.frame = 10;
+			written.publish_ms = 1000;
+			HeadPose::Snapshot head = written;
+			head.orientation_y = std::sin(-0.4f);
+			head.orientation_w = std::cos(-0.4f);
+			head.position_x = 0.3f;
+			head.frame = 12;
+			head.publish_ms = 1033;
+			head.angular_velocity[1] = 2.0f;
+			head.angular_valid = true;
+			RoomFreeze f;
+			bool began = false, ended = false;
+			check(f.Step(false, true, &written, head, &began, &ended) == nullptr && !began && !ended && !f.frozen,
+				"no screen: the head as usual");
+			check(f.Step(true, false, &written, head, &began, &ended) == nullptr && !f.frozen, "Dim or Live: the head as usual");
+			const HeadPose::Snapshot* p = f.Step(true, true, &written, head, &began, &ended);
+			check(p && began && !ended && f.frozen, "a screen with Freeze: the hold begins");
+			check(p && p->orientation_y == written.orientation_y && p->position_x == written.position_x,
+				"held at the pose last written, not the head now");
+			check(p && p->frame == head.frame && p->publish_ms == head.publish_ms && p->valid, "stamped as the head now");
+			check(p && p->angular_valid && p->angular_velocity[1] == 0.0f, "and not moving");
+			head.orientation_y = std::sin(0.6f);
+			head.orientation_w = std::cos(0.6f);
+			head.frame = 14;
+			head.publish_ms = 1066;
+			HeadPose::Snapshot later = written;
+			later.orientation_y = 0.9f;
+			p = f.Step(true, true, &later, head, &began, &ended);
+			check(p && !began && p->orientation_y == written.orientation_y && p->publish_ms == 1066,
+				"still held as the head turns on (the newer writes are its own)");
+			head.valid = false;
+			p = f.Step(true, true, &later, head, &began, &ended);
+			check(p && !p->valid, "a head lost while held is lost");
+			head.valid = true;
+			p = f.Step(false, true, &later, head, &began, &ended);
+			check(p == nullptr && ended && !f.frozen, "the screen gone: the head drives the camera again");
+			p = f.Step(true, true, nullptr, head, &began, &ended);
+			check(p && began && p->orientation_y == head.orientation_y, "with nothing written yet it holds the head as it is");
+			p = f.Step(true, false, &written, head, &began, &ended);
+			check(p == nullptr && ended, "switched to Dim while held: the head again");
+			f.Step(true, true, &written, head, &began, &ended);
+			f.Reset();
+			check(!f.frozen, "reset");
+		}
+
+		// The placement.
+		{
+			const float eye[3] = {0.2f, 1.2f, -0.1f};
+			const float id[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+			check(approx(PanelYawOf(id, 9.0f), 0.0f, 1e-6f), "looking down -Z is yaw 0");
+			const float left[4] = {0.0f, std::sin(0.25f * kPi), 0.0f, std::cos(0.25f * kPi)};
+			check(approx(PanelYawOf(left, 9.0f), 0.5f * kPi, 1e-5f), "turned 90 deg left is yaw +90");
+			// Turned 30 deg left and pitched 40 deg down (Ry * Rx): the yaw is still 30 (the pitch is left out).
+			const float hy = 15.0f * kDeg, hp = -20.0f * kDeg;
+			const float down_left[4] = {std::cos(hy) * std::sin(hp), std::sin(hy) * std::cos(hp), -std::sin(hy) * std::sin(hp),
+				std::cos(hy) * std::cos(hp)};
+			check(approx(PanelYawOf(down_left, 9.0f), 30.0f * kDeg, 1e-4f), "a look down at the belt keeps its yaw");
+			const float straight_down[4] = {std::sin(-0.25f * kPi), 0.0f, 0.0f, std::cos(-0.25f * kPi)};
+			check(PanelYawOf(straight_down, 9.0f) == 9.0f, "straight down: the fallback");
+			float pos[3], q[4];
+			PlacePanel(eye, 0.0f, pos, q);
+			check(approx(pos[0], 0.2f, 1e-6f) && approx(pos[1], 1.2f - kPanelDropM, 1e-6f) && approx(pos[2], -1.1f, 1e-6f),
+				"yaw 0: 1 m ahead (-Z), 0.12 m below the eyes");
+			PlacePanel(eye, 0.5f * kPi, pos, q);
+			check(approx(pos[0], 0.2f - kPanelDistanceM, 1e-5f) && approx(pos[2], -0.1f, 1e-5f), "yaw +90: 1 m to the left (-X)");
+			for (const float yaw : {0.0f, 1.0f, -2.5f})
+			{
+				// Its face (+Z turned by q) points at the eyes.
+				PlacePanel(eye, yaw, pos, q);
+				const float x = q[0], y = q[1], z = q[2], w = q[3];
+				const float n[3] = {2.0f * (x * z + w * y), 2.0f * (y * z - w * x), 1.0f - 2.0f * (x * x + y * y)};
+				const float d[3] = {eye[0] - pos[0], eye[1] - pos[1], eye[2] - pos[2]};
+				const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+				check(approx(n[0], d[0] / len, 1e-5f) && approx(n[1], d[1] / len, 1e-5f) && approx(n[2], d[2] / len, 1e-5f) &&
+						  approx(x * x + y * y + z * z + w * w, 1.0f, 1e-5f),
+					"the panel faces the eyes");
+			}
+		}
+
+		// The re-place.
+		{
+			const float eye[3] = {0.0f, 1.2f, 0.0f};
+			constexpr float dt = 1.0f / 90.0f;
+			PanelPlacer pl;
+			check(!pl.Update(eye, 0.3f, dt) && pl.placed && approx(pl.yaw, 0.3f, 1e-6f),
+				"the first update places it where the head looks");
+			pl.Show(eye, 0.0f);
+			bool moved = false;
+			for (int i = 0; i < 90 && !moved; i++)
+				moved = pl.Update(eye, 59.0f * kDeg, dt);
+			check(!moved && pl.yaw == 0.0f, "a look 59 deg away leaves it where it is");
+			check(pl.Update(eye, 61.0f * kDeg, dt) && pl.gliding, "61 deg away sets it off");
+			check(approx(pl.yaw, 61.0f * kDeg * (1.0f - std::exp(-dt / kPanelGlideS)), 1e-4f), "gliding, not jumping");
+			int steps = 0;
+			bool again = false;
+			while (pl.gliding && steps < 400)
+			{
+				again = again || pl.Update(eye, 61.0f * kDeg, dt);
+				steps++;
+			}
+			check(!again, "no second set-off while gliding");
+			check(!pl.gliding && pl.yaw == WrapAngle(61.0f * kDeg), "there, exactly");
+			check(steps > 40 && steps < 120, "in under a second and a half (0.15 s time constant, 0.25 deg snap)");
+			// Across the back (+170 to -170 is 20 deg the short way): no re-place; a far turn glides the short way.
+			pl.Show(eye, 170.0f * kDeg);
+			check(!pl.Update(eye, -170.0f * kDeg, dt), "20 deg across the back is near");
+			pl.Show(eye, 170.0f * kDeg);
+			check(pl.Update(eye, -100.0f * kDeg, dt), "90 deg across the back is far");
+			check(pl.yaw > 170.0f * kDeg || pl.yaw < -170.0f * kDeg, "and it goes round the short way");
+			// It re-places in front of the eyes as they are then.
+			const float eye2[3] = {0.5f, 1.0f, 0.2f};
+			pl.Show(eye, 0.0f);
+			pl.Update(eye2, kPi, dt);
+			for (int i = 0; i < 400 && pl.gliding; i++)
+				pl.Update(eye2, kPi, dt);
+			check(pl.eye[0] == eye2[0] && pl.eye[1] == eye2[1] && pl.eye[2] == eye2[2], "re-placed in front of the eyes now");
+			pl.Hide();
+			check(!pl.placed, "hidden");
+		}
+
+		const bool ok = (failed == 0);
+		Console.WriteLn("(VR) Menu panel feel self-test: %d checks, %d failed%s", checks, failed, ok ? "" : " (see above)");
+		return ok;
+	}
 
 	bool SelfTest()
 	{
