@@ -428,3 +428,22 @@ except where noted. XRCompositor, DepthWarp and DepthExport were not touched.
 | a8 | fixed | f307e34 | After a near or far cut, MeshRaster clips against every guard plane, because the corners' guard codes predate the cut. Edge and area differences are in s64. `FloorToInt` is clamped to +-2^30, with NaN going low. ZoneMarkers' box pixel bounds are clamped before the int conversion. MeshRaster self-test 82 checks (FloorToInt). |
 | m3 | left | | It needs either the host to send the swing's end (a game call) or the cave restore and block clear to wait on cave F's pending-end state. Both mean cave F work and reassembly. |
 | d8, d9, d10, d12 | left | | Each changes cave D, E, G or F code: saving the window on the stack, an `a0 == block+8` test, v0/v1 and kind-2 handling, and a field-wise restore. None is a one-word change, so all need the caves reassembled. |
+
+## Fixed on `caveminors` (2026-10-15)
+
+The caves were reassembled with a relocating word editor over the profile's own cave lines (every intra-cave branch and
+jump re-aimed; delay slots, the 32-byte frames and the ra saves kept). Built locally; 41 of 41 self-tests pass, with a
+new interpreter case per fix (the interpreter learned and, xor, sltu). Offline headset-free run on run-caveminors
+(normal speed, slot 5, test-only pipe poke, the right hand scripted over PINE, nothing pressed, the dev install's own
+ini with PhysicalMelee, Contact and MeleeHitJolt): all 465 cave words and the five sites read back (A-C, D-F 0xFE200-
+0xFE7DC, G 0xFE800-0xFE8D8 each "in, read back"); three strikes landed (600 -> 540 each, the pipe's use spent); the
+jolt started on the hit's own update (3 bones, a 36-bone zombie); a focus on a partner's slot left everything as
+unarmed; a foreign word in A-C's range still refused the install and it came back after.
+
+| Id | Status | Commit | Evidence |
+|---|---|---|---|
+| d8 | fixed | 4b4fb76 | Cave D saves the window (+0x18) at 20(sp) before `jal 0x5521B0`; after it the object's life is the saved window (none if 0) and the strike is noted in the block only while the magic still reads. The store is kept when the magic is gone (not skipped as first proposed): leaving the game's -1, like life 0, never reaches 0 again, so the object would outlive the strike. Interpreter: a block cleared inside the spawn (life 6, nothing noted), a zero window, a window of 9. Not forced live: a vsync landing inside the call cannot be timed over PINE. |
+| d9 | fixed | b264463 | Cave E also requires the attacker a0 == block +0x08. Interpreter: the live object with a partner's record as attacker gets the game's own multiplier. Live: strikes still land at strength 1.5. |
+| d12 | fixed | bece554 | Verified first: the sender FUN_0064C620 writes only +0xBA0 bit 27 (0x64C72C/740/860/874/CFF8), and cave F wrote all of +0x08 and 0x23BF0C itself, so those stay restored whole. +0xBA0 now gets only bit 27 back. Interpreter: a bit set under the call stays; bit 27 set before is set again. Online-only path, not run live. |
+| d10 | fixed in part, part refuted | 79674c0 | Bone: cave G applies only below the model's own u16 count `*(enemy+0x34)+0x816` (stored at 0x1D5D88, looped on at 0x1D5DA8 and 0x5A3B18; a 23-bone model in the dumps keeps 13 stale pointers past it), and the host bounds by the same through the new `melee.jolt.bones.real`. Expiry: the host counts game frames from 0x48BF93 and frees an entry written more than 60 game frames ago, so entries for enemies whose update does not pass 0x6644D0 no longer hold a slot. v0/v1: **refuted** (the only caller goes on to `jal 0x6798F0` with a0 = s0; neither reads v0/v1). Interpreter: a bone at the model's count is skipped while its frames run out; a model of 0. |
+| m3 | left | | Still needs cave F's pending end (+0x2C) to hold the cave D site one more frame in CameraDriver's drain (with +0x2C forced to 1), or a host-side send; online only and cosmetic, and only testable online. |
