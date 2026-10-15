@@ -627,24 +627,25 @@ namespace
 
 	// Cave E for a node: the multiplier it returns (f0), and whether the game's own body ran as if called directly
 	// (*original: its frame made by its own first two words, returning straight to the caller) or inside cave E.
-	bool RunCaveE(bool magic, u32 live_obj, u32 node_obj, float strength, float* f0, bool* original)
+	bool RunCaveE(bool magic, u32 live_obj, u32 node_obj, float strength, float* f0, bool* original, u32 attacker = kLocalRecord)
 	{
 		MiniEE ee;
 		if (!ContactCaveMemory(ee))
 			return false;
 		s_cave_e = {};
 		ee.Store32(kBlock, magic ? 0x4D454C31u : 0u);
+		ee.Store32(kBlock + 0x08, kLocalRecord);
 		ee.Store32(kBlock + 0x14, live_obj);
 		ee.Store32(kBlock + 0x1C, MiniEE::Bits(strength));
 		ee.Store32(kNode + 0x08, node_obj);
-		ee.r[4] = kLocalRecord;
+		ee.r[4] = attacker;
 		ee.r[5] = kNode;
 		ee.r[31] = kReturn;
 		const u32 sp = ee.r[29];
 		const u32 out = ee.Run(0xFE400, 0xFE400, 0xFE500);
 		*f0 = MiniEE::F(ee.f[0]);
 		*original = s_cave_e.sp == sp - 48 && s_cave_e.ra == kReturn;
-		return out == kReturn && ee.r[29] == sp && s_cave_e.called && s_cave_e.a0 == kLocalRecord && s_cave_e.a1 == kNode;
+		return out == kReturn && ee.r[29] == sp && s_cave_e.called && s_cave_e.a0 == attacker && s_cave_e.a1 == kNode;
 	}
 
 	// Cave F (after cave D, every frame): the strike's hit notice spent as the swing's own stage FUN_006474A0 does it, and
@@ -992,6 +993,9 @@ namespace
 			check(RunCaveE(true, kObject, kObject + 0x200, 1.5f, &f0, &original) && original && f0 == 2.0f);
 			check(RunCaveE(false, kObject, kObject, 1.5f, &f0, &original) && original && f0 == 2.0f);
 			check(RunCaveE(true, 0, 0, 1.5f, &f0, &original) && original && f0 == 2.0f);
+			// Review d9: the live strike's object, but another attacker than the block's record (the object freed and
+			// reused for a partner's attack): the game's own multiplier.
+			check(RunCaveE(true, kObject, kObject, 1.5f, &f0, &original, kPartnerRecord) && original && f0 == 2.0f);
 		}
 		check(MeleeCaveF());
 		return ok;
