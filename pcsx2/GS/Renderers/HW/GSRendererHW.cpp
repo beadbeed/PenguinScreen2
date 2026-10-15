@@ -453,7 +453,7 @@ void GSRendererHW::VRBeforeEndOfFrame(GSTexture* current)
 			VR::MenuPanel::NoPanel("the picture is merged from two colour targets");
 		else if (!rt)
 			VR::MenuPanel::NoPanel("the shown colour target is gone");
-		else if (sw != dw || sh != dh || sx < 0 || sy < 0 || dx < 0 || dy < 0 || dx + dw > current->GetWidth() ||
+		else if (sw != dw || sh != dh || sw <= 0 || sh <= 0 || sx < 0 || sy < 0 || dx < 0 || dy < 0 || dx + dw > current->GetWidth() ||
 				 dy + dh > current->GetHeight())
 			VR::MenuPanel::NoPanel("the display stretches or offsets the frame (not a 1:1 copy)");
 		else
@@ -546,6 +546,13 @@ void GSRendererHW::VRBeforeEndOfFrame(GSTexture* current)
 	if (sw != dw || sh != dh || sx < 0 || sy < 0 || dx < 0 || dy < 0)
 	{
 		VR::DepthExport::NoExport("the display stretches or offsets the frame (not a 1:1 copy)");
+		return;
+	}
+	// m9: the copy below is min(sw, size - d): an empty frame, or a display offset at or past the merged image's edge,
+	// would make it zero or negative (a huge u32).
+	if (sw <= 0 || sh <= 0 || dx >= current->GetWidth() || dy >= current->GetHeight())
+	{
+		VR::DepthExport::NoExport("the shown frame is empty or lies outside the merged image");
 		return;
 	}
 	VR::DepthExport::ExportRequest req;

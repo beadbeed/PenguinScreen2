@@ -726,9 +726,11 @@ namespace VR::DepthExport
 			NoExport("no depth texture");
 			return false;
 		}
-		if (req.width == 0 || req.height == 0 || req.copy_w == 0 || req.copy_h == 0 || req.dst_x + req.copy_w > req.width ||
-			req.dst_y + req.copy_h > req.height || req.src_x + req.copy_w > static_cast<u32>(src_tex->GetWidth()) ||
-			req.src_y + req.copy_h > static_cast<u32>(src_tex->GetHeight()))
+		// In 64 bits: a copy size wrapped from a negative int must not pass by wrapping the sum back into range (m9).
+		const auto past = [](u32 a, u32 b, u32 limit) { return static_cast<u64>(a) + b > limit; };
+		if (req.width == 0 || req.height == 0 || req.copy_w == 0 || req.copy_h == 0 || past(req.dst_x, req.copy_w, req.width) ||
+			past(req.dst_y, req.copy_h, req.height) || past(req.src_x, req.copy_w, static_cast<u32>(src_tex->GetWidth())) ||
+			past(req.src_y, req.copy_h, static_cast<u32>(src_tex->GetHeight())))
 		{
 			NoExport("the shown frame does not map onto its depth target");
 			return false;
