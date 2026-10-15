@@ -438,6 +438,12 @@ namespace
 	};
 	std::vector<CaveFCall> s_cave_f_calls; // cave F's calls into the game, in order
 	u32 s_cave_f_filter = 0;               // what the filter FUN_006337C0 answers (1: the game would not send)
+	int s_hit_tests = 0;                   // how often the frame's hit test FUN_005A9DB0 ran
+	struct HitNotice
+	{
+		u8 notice = 0, kind = 0, idx = 0;
+	};
+	HitNotice s_hit_notice; // what the hit test writes into the local record (notice 0: nothing hit)
 
 	bool ContactStub(MiniEE& ee, u32 pc, u32* next)
 	{
@@ -455,6 +461,22 @@ namespace
 			}
 			for (int k : {1, 2, 3, 8, 9, 10, 11, 12, 13})
 				ee.r[k] = 0xDEAD0000u + static_cast<u32>(k); // the callee may clobber any temporary
+			*next = ee.r[31];
+			return true;
+		}
+		if (pc == 0x5A9DB0)
+		{
+			// The frame's hit test (cave F calls it, or cave D or F jumps on to it): a strike's hit writes its notice
+			// into the attacker's record, as FUN_00548E40 does (+0x116 + 1, then the target's kind and index).
+			s_hit_tests++;
+			if (s_hit_notice.notice)
+			{
+				ee.Store8(kLocalRecord + 0x116, s_hit_notice.notice);
+				ee.Store8(kLocalRecord + 0x117, s_hit_notice.kind);
+				ee.Store8(kLocalRecord + 0x118, s_hit_notice.idx);
+			}
+			for (int k : {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13})
+				ee.r[k] = 0xDEAD0000u + static_cast<u32>(k);
 			*next = ee.r[31];
 			return true;
 		}
@@ -559,8 +581,10 @@ namespace
 		ee.r[31] = 0x5CDF6C;
 		const u32 sp = ee.r[29];
 		ee.r[16] = 0x11111111;
-		const u32 out = ee.Run(0xFE200, 0xFE200, 0xFE800); // cave D, then cave F (nothing for it to do here)
-		res.ok = out == 0x5A9DB0 && ee.r[31] == 0x5CDF6C && ee.r[29] == sp && ee.r[16] == 0x11111111;
+		s_hit_tests = 0;
+		s_hit_notice = {};
+		const u32 out = ee.Run(0xFE200, 0xFE200, 0xFE800); // cave D, then cave F (nothing for it to do here), then back
+		res.ok = out == 0x5CDF6C && s_hit_tests == 1 && ee.r[29] == sp && ee.r[16] == 0x11111111;
 		res.spawned = s_contact_run.spawned;
 		for (int k = 0; k < 4; k++)
 			res.args[k] = s_contact_run.a[k];
@@ -602,6 +626,7 @@ namespace
 		u8 weapon = 34;                      // the record's weapon type (+0xCA8): 34 iron pipe (class 4)
 		u8 notice = 1, kind = 2, idx = 49;   // +0x116, +0x117, +0x118 (the enemy hit); 0xFF, 0xFF in +0x119, +0x11A
 		bool all_ff = false;                 // +0x117-+0x11A all 0xFF (a hit that told the owner: FUN_00548FC0)
+		bool before = false;                 // the notice already there before this frame's hit test (else written by it)
 		u32 watch = 9, made = 1, seen = 1;   // block +0x38, +0x24 (cave D's strikes), +0x34 (cave F's)
 		u32 partner = 0, left = 0;           // block +0x30 (the host: partners' swing frames, 0 off), +0x2C
 		u8 stance = 1, sub = 0, slot = 0, local_slot = 0;
@@ -640,9 +665,22 @@ namespace
 		ee.Store8(R + 0x09, c.sub);
 		ee.Store8(R + 0x0A, 7);
 		ee.Store8(R + 0x0B, 1);
-		ee.Store8(R + 0x116, c.notice);
-		ee.Store8(R + 0x117, c.all_ff ? 0xFF : c.kind);
-		ee.Store8(R + 0x118, c.all_ff ? 0xFF : c.idx);
+		s_hit_tests = 0;
+		s_hit_notice = {};
+		if (c.before)
+		{
+			ee.Store8(R + 0x116, c.notice);
+			ee.Store8(R + 0x117, c.all_ff ? 0xFF : c.kind);
+			ee.Store8(R + 0x118, c.all_ff ? 0xFF : c.idx);
+		}
+		else
+		{
+			s_hit_notice.notice = c.notice;
+			s_hit_notice.kind = c.all_ff ? 0xFF : c.kind;
+			s_hit_notice.idx = c.all_ff ? 0xFF : c.idx;
+			ee.Store8(R + 0x117, 0xFF);
+			ee.Store8(R + 0x118, 0xFF);
+		}
 		ee.Store8(R + 0x119, 0xFF);
 		ee.Store8(R + 0x11A, 0xFF);
 		ee.Store32(R + 0xBA0, c.ba0);
@@ -655,7 +693,7 @@ namespace
 		const u32 sp = ee.r[29];
 		ee.r[16] = 0x11111111;
 		const u32 out = ee.Run(0xFE500, 0xFE500, 0xFE800);
-		res.ok = out == 0x5A9DB0 && ee.r[31] == 0x5CDF6C && ee.r[29] == sp && ee.r[16] == 0x11111111;
+		res.ok = out == 0x5CDF6C && s_hit_tests == 1 && ee.r[29] == sp && ee.r[16] == 0x11111111;
 		res.notice = static_cast<u8>(ee.Load32(R + 0x114) >> 16);
 		res.kind = static_cast<u8>(ee.Load32(R + 0x114) >> 24);
 		res.ba0 = ee.Load32(R + 0xBA0);
@@ -1110,7 +1148,7 @@ int main(int argc, char* argv[])
 				cave_d++;
 			else if (a >= 0xFE400u && a < 0xFE470u)
 				cave_e++;
-			else if (a >= 0xFE500u && a < 0xFE7A4u)
+			else if (a >= 0xFE500u && a < 0xFE7B4u)
 				cave_f++;
 			else if ((a == 0x5CDF64u && sil.value_off == 0x0C16A76Cu && sil.value_on == 0x0C03F880u) ||
 					 (a == 0x636990u && sil.value_off == 0x27BDFFD0u && sil.value_on == 0x0803F900u) ||
@@ -1130,7 +1168,7 @@ int main(int argc, char* argv[])
 				first_cave = i;
 			any_cave = true;
 		}
-		return sites == 3 && cave_d == 87 && cave_e == 25 && cave_f == 169 && last_site < first_cave;
+		return sites == 3 && cave_d == 87 && cave_e == 25 && cave_f == 173 && last_site < first_cave;
 	});
 	RunSilent("Physical melee contact caves (D, E, F: File #1 profile words, interpreted)", MeleeContactCaves);
 	RunGamepad();
