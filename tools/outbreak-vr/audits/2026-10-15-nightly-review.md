@@ -364,3 +364,27 @@ was running):**
   resize or Shutdown, because it runs inside copy paths.
 
 **Still open:** addendum 3's m8, m9, m11, m12. None was refuted.
+
+## Fixed on branch `minorsA` (2026-10-15)
+
+Each item was checked against the code first. Built locally; 41 of 41 self-tests pass (new checks in the reload driver,
+the melee profile parser and MeshRaster suites). No emulator or headset run: the evidence is static plus self-tests,
+except where noted. XRCompositor, DepthWarp and DepthExport were not touched.
+
+| Id | Status | Commit | Evidence |
+|---|---|---|---|
+| a1 | fixed | b21c09e | New `ReloadDriver::RaiseButton`: an attempt ending on `Screen` or `Lost` keeps R1 held back release-first (let go once), so R1 never comes back into a screen. A reload that ran its course still gives R1 back as held. Self-tests: screen, lost, reloaded. |
+| a4 | fixed | b21c09e | A bumper (Gamepad) R1 press that begins under the hold-back, not one held from before, ends the attempt on the next poll (`Result::Raised`), with L1 up at once and R1 back after the gap. Holster and backpack presses do not abort it, because their grip flicker would. Self-test "abort". |
+| a2 | fixed | 6065031 | The driver's screen input is MenuMode or `melee.screenFlag` (0x48BF7E, up 30-60 ms after Start; research 2026-10-12-reload-timing). An unreadable flag counts as up. Static only: the timing into a real opening screen is not run live. |
+| a3 | fixed | 3fae768 | `ReloadDriver::OnStateLoaded` (from `GameFeedback::OnStateLoaded`): an attempt in flight lets go (L1 up, R1 back release-first), and the gesture and stance start over. Static. |
+| b4 | fixed | 3be6f00 | The Freeze uses `s_last_cam_pose` only if it was written within 6 vsyncs; it is cleared on disarm and when the VM is gone. Otherwise the hold starts from the live pose (as `RoomFreeze::Step` already did with none). Static. |
+| a5 | fixed | e78b912 | `MenuPanel::Destroy` (both builds) clears `s_screen_up` and `s_room_frozen` (MenuPanel.cpp only; the GS renderer goes as the VM stops). Static. |
+| b3 / d6 | already fixed (3d13353), verified | | The cave bodies are now `UpdateCaves`' (`CaveBodyEntry` skips them in Apply/RestoreSilence). The gate entry's `when` holds the overlay guard, so a failing guard drains the cave and zeroes it, and any site still reading ours is put back first. Nothing stays orphaned. Online, `RegionZero` reads "in use" only until the drain ends. |
+| b5 | fixed | 84f8677 | `ApplyKeptSilence` now runs after `ResolveNetMode` in the same vsync. |
+| m2 / d13 | fixed (stale part) | 85a084e | `CoopOverrideLive` is false once the poll that set it is more than 250 ms old (as `ReloadDriver::Reloading`). The one-vsync lag of a master change is left as is: Apply runs before the poll, and the stale-stamp rule already confines it to the local record. |
+| b8 | fixed | 47f8cf1 | A silence entry whose `when` has a guard that did not parse (or is not a list) is dropped whole. A guard width other than 1, 2 or 4 is now a parse failure; the shipped profiles use only 1, 2 and 4. Silence addresses must be 4-byte aligned. `melee.override` must match what a cave builds: a lui of the block's high half plus a load, store or addiu off it inside the block, and a lui/ori of the magic. Otherwise the override is dropped, and `contact` and `online` with it. All 497 entries of the shipped File #1 profile pass (scripted check). Parser self-test on cave A's words. |
+| m7 / b7 | documented | 98f93a8 | Profile comment and STATUS: the arrival words are patched while the switches are on, armed or not, and `FUN_00550220` is not proven door-only. Not tightened. |
+| b9 | fixed | 7371750 | `VRProfileDB.h` whenSetting names and co-op rule; the `CameraDriver.h` GetMapping comment (with MenuPanel the camera keeps being driven under a screen); a README `melee.jolt` row and `whenSetting: MeleeHitJolt`. |
+| a8 | fixed | f307e34 | After a near or far cut, MeshRaster clips against every guard plane, because the corners' guard codes predate the cut. Edge and area differences are in s64. `FloorToInt` is clamped to +-2^30, with NaN going low. ZoneMarkers' box pixel bounds are clamped before the int conversion. MeshRaster self-test 82 checks (FloorToInt). |
+| m3 | left | | It needs either the host to send the swing's end (a game call) or the cave restore and block clear to wait on cave F's pending-end state. Both mean cave F work and reassembly. |
+| d8, d9, d10, d12 | left | | Each changes cave D, E, G or F code: saving the window on the stack, an `a0 == block+8` test, v0/v1 and kind-2 handling, and a field-wise restore. None is a one-word change, so all need the caves reassembled. |
