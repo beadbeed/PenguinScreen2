@@ -255,8 +255,11 @@ the raised stance), the right hand ticks when the game's swing starts and
 buzzes when an enemy's HP drops during it. With an `override` block and the
 profile's `camera.silence` entries marked `whenSetting: PhysicalMelee` (File
 #1's code caves), the game's own hit test then runs on the VR weapon, where
-your hand holds it. Never while a game screen is up, while grabbed or hurt,
-and only strictly offline (no network adapter at all). Needs a `Gamepad`
+your hand holds it (File #1's caves act for the local player only; every
+other character runs the game's own code). Never while a game screen is up,
+while grabbed or hurt. Offline; online only with `PhysicalMeleeOnline` in
+private co-op, where it presses the game's own attack and the caves go in only
+while this console runs the room's enemies (`online` below). Needs a `Gamepad`
 control bound to the attack button and `feedback.weapon` (the stance).
 
 ```yaml
@@ -265,6 +268,7 @@ melee:
   swing: { sub: 0x09, idle: 1, attack: 3, normalStance: 1 }
   enemies: { table: 0x3FFCA0, stride: 0xD90, count: 64, present: 0x00, hp: 0x544 }
   override: { block: 0xFF000, magic: 0x4D454C31, counter: 0x48BF93 }
+  online: { room: 0x3065AC, masters: 0x825810, overlay: 0x820020, overlayTag: 0x6174656E, free: 0xFE000 }
   tip: 0.40
   speed: 2.2
 ```
@@ -275,6 +279,7 @@ melee:
 | `swing` | the record `camera.base` finds: `sub` the offset of its sub-action byte (default `0x09`), `idle` its value in aim idle (`1`), `attack` during the melee swing (`3`), `normalStance` the stance byte with the weapon down (`1`; the raised value is `feedback.weapon`'s) |
 | `enemies` | read only, for the contact buzz: the enemy table's address, its `stride` and `count` (1 to 256), and the offsets of the present byte and the 2-byte HP in each slot. Missing a key: no contact buzz |
 | `override` | the 16-byte aligned block the emulator writes the VR weapon's pose into each input poll (`+0` the `magic` while armed, `+4` the game's frame counter `counter` read that poll, `+8` the local record's address, `+0x40` the 4 x 4 row-vector matrix, `+0x80` the position) for the game's code caves to read. Missing or bad: the hit stays on the game's own swing |
+| `online` | read only, for `PhysicalMeleeOnline` in private co-op (needs `override`): `room` the u16 room the local player is in, `masters` the network overlay's table of each room's players (4 bytes a room, rooms 0-127; the first is the slot whose console runs the room's enemies), `overlay` a word of that overlay's header that must read `overlayTag` (else no console is taken as the master), `free` where the caves' free RAM starts (up to the block's end; it must read zero before the caves go in online). Missing or bad: online the swing stays the game's own |
 | `tip` | the point whose speed is measured, metres up the controller's handle (`0` to `1.5`, default `0.40`) |
 | `speed`, `rest`, `endMs` | a stroke starts above `speed` m/s (`0.5` to `10`, default `2.2`) and ends below `rest` (`0.1` to `5`, default `0.8`; halved if not below `speed`) for `endMs` (default `80`) |
 | `travel`, `straightness`, `strokeMs` | it counts as one swing once it has travelled `travel` metres (default `0.20`) with its straight-line distance at least `straightness` of its path (`0` to `1`, default `0.6`: a waggle never counts), within `strokeMs` (default `600`) |
@@ -282,8 +287,8 @@ melee:
 | `raiseMs`, `swingMs` | R1 may take `raiseMs` (default `900`) to bring the weapon up; a swing is followed for at most `swingMs` (default `2500`) |
 | `contactMs`, `cooldownMs` | an HP drop up to `contactMs` (default `250`) after the swing still buzzes; the next swing waits `cooldownMs` (default `250`) |
 
-A bad number keeps its default with a warning; a bad `enemies` or `override`
-block drops only that part.
+A bad number keeps its default with a warning; a bad `enemies`, `override` or
+`online` block drops only that part.
 
 ## `menuPointer`: point-and-click menus
 

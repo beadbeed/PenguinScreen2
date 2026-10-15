@@ -384,8 +384,9 @@ and File #2, plus the stance hysteresis and the release-first latch).
 
 Physical melee (VR setting `PhysicalMelee`, off by default, ini only; File #1's profile `melee` block and its
 `camera.silence` entries with `whenSetting: PhysicalMelee`; `VR/PhysicalMelee.cpp`, polled from
-`VRInputSource::PollEvents` after the reload; research `2026-10-14-melee.md`). Strictly offline (no network adapter,
-not online-safe), first person armed, a melee weapon equipped (the local record's equipped item record, ItemData
+`VRInputSource::PollEvents` after the reload; research `2026-10-14-melee.md`, `2026-10-14-melee-coop.md`). Offline (no
+network adapter, not online-safe), or online with `PhysicalMeleeOnline` (below), first person armed, a melee weapon
+equipped (the local record's equipped item record, ItemData
 `Melee`), stance normal or raised, no game screen: the right controller's point `tip` (0.40 m) up the handle is tracked;
 a stroke starts above `speed` (2.2 m/s, smoothed over 25 ms), ends below `rest` (0.8 m/s) for 80 ms, and counts once,
 when it has travelled `travel` (0.20 m) with its straight-line distance at least `straightness` (0.6) of its path, within
@@ -396,11 +397,22 @@ it or `contactMs` (250 ms) after; the next swing is taken `cooldownMs` (250 ms) 
 VR weapon's matrix in game space (`HandModel::ModelFrame`, the placement the hand draws the model with, mapped point by
 point with `CameraDriver::GameFromVr`) to the block at `0xFF000` with the magic, the local record and the game counter's
 stamp; the caves use it for the local player's attack object while it is at most 6 frames old, and the original copy
-otherwise. Logs: `(VR) Physical melee: on (...)` or `off (why)` once per game, `(VR) Melee: swing at 4.1 m/s (0.21 m of
+otherwise; cave C (`0xFE100`, called by the seven melee motions' spawn events instead of `FUN_00565C80`) opens the local
+player's hit window at motion frame 2 under the same test, every other record keeps the game's own frame. When the
+override stops the whole block is zeroed. Online (`PhysicalMeleeOnline`, off by default, ini only; private co-op only,
+never online-safe): every console runs every player's swing from the state the attacker sends and the room's master
+(the first slot of NETAQ.BIN's row for the room, `melee.online`) decides the enemies' HP and reactions for everyone, so
+there the swing always presses the game's own attack and the block and caves go in only while this console is that
+master and the caves' free RAM read zero (`VR::PhysicalMelee::Decide`: `CoopPress` / `CoopFull`; CameraDriver's
+`whenSetting` gate asks `ProfileDB::SilenceSettingCoopLive`). Logs: `(VR) Physical melee: on (...)` or `off (why)` once per game, `(VR) Melee: swing at 4.1 m/s (0.21 m of
 stroke); the game's swing started 33 ms later.`, `(VR) Melee: contact, enemy 49 HP 600 -> 540.`, `(VR) Melee: swing not
-made: <why>.`; `PCSX2_VR_MELEE_LOG=1` adds a line twice a second (the gates, the peak speed, the phase, the block).
+made: <why>.`, online `(VR) Melee: online, room N: this console (slot S) runs its enemies, so the hit follows the VR
+weapon.` or `... the console of slot M runs its enemies ..., so the hit is the game's own swing (press only).`;
+`PCSX2_VR_MELEE_LOG=1` adds a line twice a second (the mode, the gates, the peak speed, the phase, the block).
 `vr_selftests` runs `Physical melee` (the detector on scripted swings, stabs, sweeps, shakes and tracking loss; the
-driver against a fake game; the matrix), `Melee profile parser` and the File #1 entry check.
+driver against a fake game; the matrix), `Melee profile parser`, the File #1 entry check, `Physical melee online` (the
+mode table, the room master read, the free-RAM check) and `Physical melee caves` (caves A, B and C run from the
+profile's words on a small EE interpreter, for the local record and for others).
 
 First-person stereo depth (VR settings `NearDepthMetres`, default 0 = the profile's `stereo.firstPerson.nearest`,
 below 0 off, 0.45-1.5 m overrides; `RollParallax`, on by default; ini only): true stereo depth now reaches in front of
