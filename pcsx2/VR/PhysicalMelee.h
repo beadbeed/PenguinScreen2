@@ -304,7 +304,46 @@ namespace VR::PhysicalMelee
 		u8 parents[4] = {};
 		float weights[4] = {};
 		u8 below = 0; // bit i: bones[i] moves the body below its joint (the legs), not above it
+		u8 loose = 0; // bit i: bones[i] follows loosely (the spring's loose stiffness, damping and clamp: the arms)
+		u8 hard = 0;  // bit i: bones[i] moves only on a hard hit (spring.hard m/s and up): one more bone down the chain
 	};
+	// The spring-damper jolt (melee.jolt.spring; without it the linear decay above): each struck bone has an angle and an
+	// angular velocity (rotation vectors in its parent's frame, degrees and degrees a second); a hit adds impulse x speed x
+	// the bone's weight (deg/s) along the swing's turn, and each enemy update (1/30 s) integrates
+	// angle'' = -stiffness * angle - damping * angle', slightly underdamped so it overshoots once and settles; the angle is
+	// clamped to maxDeg (looseMaxDeg for loose bones) and the outward velocity taken off there. Hits add up.
+	struct SpringParams
+	{
+		float stiffness = 200.0f;      // 1/s^2 (omega0 about 14.1 rad/s)
+		float damping = 12.7f;         // 1/s (damping ratio about 0.45: one overshoot of about a fifth, settled by ~0.5 s)
+		float loose_stiffness = 120.0f; // the arms: slower and less damped, they swing
+		float loose_damping = 7.0f;
+		float impulse = 120.0f;        // deg/s of angular velocity per m/s of the weapon's far hit point (x the bone's weight)
+		float max_speed = 8.0f;        // m/s: faster swings count as this
+		float max_deg = 30.0f;         // the clamp, per bone
+		float loose_max_deg = 40.0f;
+		float hard = 4.0f;             // m/s: from here the chain's hard bones move too
+		float settle_deg = 0.75f;      // settled (the entry goes) when the angle and ...
+		float settle_rate = 15.0f;     // ... the angular velocity (deg/s) are both under these
+		int max_frames = 45;           // updates at most (1.5 s), whatever the spring does
+	};
+	struct SpringBone
+	{
+		float angle[3] = {};
+		float rate[3] = {};
+		bool loose = false;
+	};
+	// Adds an impulse of dps degrees a second about the (parent-frame, any length) axis.
+	void SpringKick(SpringBone& b, const float axis[3], float dps);
+	// One enemy update (dt seconds, integrated in four sub-steps), then the clamp.
+	void SpringStep(SpringBone& b, const SpringParams& p, float dt = 1.0f / 30.0f);
+	bool SpringSettled(const SpringBone& b, const SpringParams& p);
+	// The kick for a swing at speed m/s on a bone of weight w (deg/s; 0 when not finite).
+	float SpringImpulse(float speed, float w, const SpringParams& p);
+	// A rotation vector (degrees, parent frame) as the three angles FUN_0055C450 applies (Rz * Ry * Rx, 65536 a turn).
+	void JoltEuler(const float rotvec_deg[3], s16 out[3]);
+	// The integrator on scripted hits (one overshoot, the settle time, the clamps, accumulation). Returns the failed checks.
+	std::vector<std::string> SelfTestSpring();
 	struct JoltParams
 	{
 		float slow = 1.8f;    // m/s at the weapon's far hit point: min_deg and min_frames here and below
@@ -314,6 +353,8 @@ namespace VR::PhysicalMelee
 		int min_frames = 5;   // updates of the enemy (30 a second) from the full angle back to nothing (linear)
 		int max_frames = 10;
 		std::vector<JoltChain> chains;
+		bool spring_on = false; // melee.jolt.spring present: the spring-damper instead of the linear decay
+		SpringParams spring;
 	};
 	struct JoltSize
 	{
@@ -332,6 +373,9 @@ namespace VR::PhysicalMelee
 	// velocity is too slow (under 1 game unit a second), the parent's matrix is singular or nothing is left.
 	bool JoltAngles(const float contact[3], const float pivot[3], const float vel[3], const float parent_world[16], float deg,
 		s16 out[3], bool below = false);
+	// The same turn's unit axis in the parent's frame (what JoltAngles turns about); false as JoltAngles.
+	bool JoltAxis(const float contact[3], const float pivot[3], const float vel[3], const float parent_world[16], float out[3],
+		bool below = false);
 	// One entry of cave G's block (24 bytes at block + 0x10 + 24 * k): the enemy, the bone, the frames left, whether it
 	// still waits for the hit (armed at the strike: cave G holds it until the enemy's own hit counter +0x13F is set, the
 	// update the hit lands in, and clears it), the angles now and what is taken off them after each frame (angle / frames,

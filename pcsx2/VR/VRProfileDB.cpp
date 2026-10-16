@@ -3906,7 +3906,7 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 		          jt["bones"].is_map();
 		if (ok)
 		{
-			warnUnknownKeys(serial, jt, "melee.jolt", {"block", "magic", "hook", "bones", "slow", "fast", "minDeg", "maxDeg",
+			warnUnknownKeys(serial, jt, "melee.jolt", {"block", "magic", "hook", "bones", "slow", "fast", "minDeg", "maxDeg", "spring",
 				"minFrames", "maxFrames", "chains", "notes"});
 			const ryml::ConstNodeRef hk = jt["hook"], bn = jt["bones"];
 			warnUnknownKeys(serial, hk, "melee.jolt.hook", {"address", "on", "notes"});
@@ -3971,6 +3971,71 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 				j.min_frames = d.min_frames;
 				j.max_frames = d.max_frames;
 			}
+			// spring (optional): the spring-damper instead of the linear decay; each value range-checked (a bad one keeps its
+			// default), then omega0 and the damping ratio must leave it underdamped but not wobbly (ratio 0.15-0.95).
+			j.spring_on = false;
+			j.spring = VR::PhysicalMelee::SpringParams{};
+			if (jt.has_child("spring"))
+			{
+				const ryml::ConstNodeRef sp = jt["spring"];
+				if (sp.is_map())
+				{
+					warnUnknownKeys(serial, sp, "melee.jolt.spring", {"stiffness", "damping", "looseStiffness", "looseDamping", "impulse",
+						"maxSpeed", "maxDeg", "looseMaxDeg", "hard", "settleDeg", "settleRate", "maxFrames", "notes"});
+					VR::PhysicalMelee::SpringParams& q = j.spring;
+					const auto sf = [&](const char* key, float lo, float hi, float& dst) {
+						if (!sp.has_child(key))
+							return;
+						const std::optional<float> v = StringUtil::FromChars<float>(nodeVal(sp[key]));
+						if (v.has_value() && std::isfinite(v.value()) && v.value() >= lo && v.value() <= hi)
+							dst = v.value();
+						else
+							Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee.jolt.spring.{} must be from {} to {}; keeping {}.", serial,
+								key, lo, hi, dst);
+					};
+					sf("stiffness", 10.0f, 2000.0f, q.stiffness);
+					sf("damping", 0.5f, 100.0f, q.damping);
+					sf("looseStiffness", 10.0f, 2000.0f, q.loose_stiffness);
+					sf("looseDamping", 0.5f, 100.0f, q.loose_damping);
+					sf("impulse", 0.0f, 1000.0f, q.impulse);
+					sf("maxSpeed", 0.5f, 20.0f, q.max_speed);
+					sf("maxDeg", 1.0f, 60.0f, q.max_deg);
+					sf("looseMaxDeg", 1.0f, 60.0f, q.loose_max_deg);
+					sf("hard", 0.0f, 20.0f, q.hard);
+					sf("settleDeg", 0.05f, 5.0f, q.settle_deg);
+					sf("settleRate", 0.5f, 200.0f, q.settle_rate);
+					if (sp.has_child("maxFrames"))
+					{
+						const std::optional<s64> v = parseDecOrHex(nodeVal(sp["maxFrames"]));
+						if (v.has_value() && v.value() >= 2 && v.value() <= 120)
+							q.max_frames = static_cast<int>(v.value());
+						else
+							Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee.jolt.spring.maxFrames must be from 2 to 120; keeping {}.",
+								serial, q.max_frames);
+					}
+					const auto ratio = [](float k, float c) { return c / (2.0f * std::sqrt(k)); };
+					const VR::PhysicalMelee::SpringParams d;
+					if (ratio(q.stiffness, q.damping) < 0.15f || ratio(q.stiffness, q.damping) > 0.95f)
+					{
+						Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee.jolt.spring stiffness and damping give a damping ratio of "
+										   "{:.2f} (0.15-0.95 wanted); keeping the defaults for both.",
+							serial, ratio(q.stiffness, q.damping));
+						q.stiffness = d.stiffness;
+						q.damping = d.damping;
+					}
+					if (ratio(q.loose_stiffness, q.loose_damping) < 0.15f || ratio(q.loose_stiffness, q.loose_damping) > 0.95f)
+					{
+						Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee.jolt.spring looseStiffness and looseDamping give a damping "
+										   "ratio of {:.2f} (0.15-0.95 wanted); keeping the defaults for both.",
+							serial, ratio(q.loose_stiffness, q.loose_damping));
+						q.loose_stiffness = d.loose_stiffness;
+						q.loose_damping = d.loose_damping;
+					}
+					j.spring_on = true;
+				}
+				else
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee.jolt.spring must be a map; the linear decay is used.", serial);
+			}
 			j.chains.clear();
 			if (jt.has_child("chains") && jt["chains"].is_seq())
 			{
@@ -3981,7 +4046,7 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 					            c.has_child("weights") && c["bones"].is_seq() && c["parents"].is_seq() && c["weights"].is_seq();
 					if (good)
 					{
-						warnUnknownKeys(serial, c, "melee.jolt.chains", {"sphere", "bones", "parents", "weights", "below", "notes"});
+						warnUnknownKeys(serial, c, "melee.jolt.chains", {"sphere", "bones", "parents", "weights", "below", "loose", "hard", "notes"});
 						const std::optional<s64> hb = parseDecOrHex(nodeVal(c["sphere"]));
 						good = hb.has_value() && hb.value() >= 0 && hb.value() < o.jolt_bone_count;
 						if (good)
@@ -4013,16 +4078,22 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 						good = good && nb >= 1 && nb == np && nb == nw;
 						ch.count = good ? nb : 0;
 						// below (optional): the chain's bones that move the body below their joint (the legs).
-						if (good && c.has_child("below"))
-						{
+						// below, loose, hard (optional): the chain's bones that move the body below their joint (the legs), that
+						// follow loosely (the spring's loose values: the arms), that move only on a hard hit (spring.hard).
+						const auto mask = [&](const char* key, u8& dst) {
+							if (!good || !c.has_child(key))
+								return;
 							u8 lb[4] = {};
-							const int nl = c["below"].is_seq() ? bone_list(c["below"], lb) : -1;
+							const int nl = c[key].is_seq() ? bone_list(c[key], lb) : -1;
 							good = nl >= 0;
 							for (int q = 0; q < nl; q++)
 								for (int k = 0; k < nb; k++)
 									if (ch.bones[k] == lb[q])
-										ch.below |= static_cast<u8>(1u << k);
-						}
+										dst |= static_cast<u8>(1u << k);
+						};
+						mask("below", ch.below);
+						mask("loose", ch.loose);
+						mask("hard", ch.hard);
 					}
 					if (good)
 						j.chains.push_back(ch);
@@ -4236,6 +4307,36 @@ bool VR::ProfileDB::SelfTestMeleeParse()
 		check(parse((contact + head + "    slow: 5\n    fast: 2\n    maxDeg: 99\n" + one).c_str(), &m) && m.has_value() &&
 				  m->has_jolt && m->jolt.slow < m->jolt.fast && m->jolt.max_deg == VR::PhysicalMelee::JoltParams{}.max_deg,
 			"jolt: out-of-order speeds go back to the defaults, a bad maxDeg keeps its default");
+		check(m.has_value() && !m->jolt.spring_on, "jolt: without spring, the linear decay");
+		{
+			const std::string sp = contact + head +
+				"    spring: { stiffness: 150, damping: 9.8, looseStiffness: 80, looseDamping: 5, impulse: 90, maxSpeed: 7, maxDeg: 25, "
+				"looseMaxDeg: 35, hard: 3.5, settleDeg: 0.5, settleRate: 10, maxFrames: 40 }\n"
+				"    chains:\n"
+				"      - { sphere: 21, bones: [20, 21, 11, 12], parents: [11, 20, 10, 11], weights: [1, 0.5, 0.35, 0.6], loose: [12], "
+				"hard: [12, 7] }\n";
+			check(parse(sp.c_str(), &m) && m.has_value() && m->has_jolt && m->jolt.spring_on, "spring: a full spring block parses");
+			if (m.has_value() && m->has_jolt)
+			{
+				const VR::PhysicalMelee::SpringParams& q = m->jolt.spring;
+				check(q.stiffness == 150.0f && std::fabs(q.damping - 9.8f) < 1e-5f && q.loose_stiffness == 80.0f && q.loose_damping == 5.0f &&
+						  q.impulse == 90.0f && q.max_speed == 7.0f && q.max_deg == 25.0f && q.loose_max_deg == 35.0f && q.hard == 3.5f &&
+						  q.settle_deg == 0.5f && q.settle_rate == 10.0f && q.max_frames == 40,
+					"spring: the tuning");
+				check(m->jolt.chains.size() == 1 && m->jolt.chains[0].count == 4 && m->jolt.chains[0].loose == 8 && m->jolt.chains[0].hard == 8,
+					"spring: loose and hard bones (one not in the chain ignored)");
+			}
+			check(parse((contact + head + "    spring: { stiffness: 200, damping: 60, impulse: 5000, maxFrames: 1 }\n" + one).c_str(), &m) &&
+					  m.has_value() && m->jolt.spring_on && m->jolt.spring.damping == VR::PhysicalMelee::SpringParams{}.damping &&
+					  m->jolt.spring.impulse == VR::PhysicalMelee::SpringParams{}.impulse &&
+					  m->jolt.spring.max_frames == VR::PhysicalMelee::SpringParams{}.max_frames,
+				"spring: overdamped, too strong and too short go back to the defaults");
+			check(parse((contact + head + "    spring: 3\n" + one).c_str(), &m) && m.has_value() && m->has_jolt && !m->jolt.spring_on,
+				"spring: not a map, the linear decay");
+			check(parse((contact + head + "    spring: {}\n    chains:\n      - { sphere: 10, bones: [10], parents: [2], weights: [1], "
+										  "loose: [99] }\n").c_str(), &m) && m.has_value() && !m->has_jolt,
+				"spring: a chain with a bad loose list is skipped");
+		}
 		check(parse((std::string("melee:\n  override: { block: 0xFF000, magic: 0x4D454C31, counter: 0x48BF93 }\n") + head + one).c_str(),
 				  &m) && m.has_value() && !m->has_jolt,
 			"jolt: without contact it is dropped");

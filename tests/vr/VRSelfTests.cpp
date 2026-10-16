@@ -1318,6 +1318,16 @@ int main(int argc, char* argv[])
 			failed.empty() ? std::string("passed (it names the failed checks only, no check count)") :
 							 "FAIL: " + std::to_string(failed.size()) + " check(s), first: " + failed.front());
 	}
+	{
+		Begin("Physical melee spring jolt (PhysicalMelee::SelfTestSpring)");
+		const std::vector<std::string> failed = VR::PhysicalMelee::SelfTestSpring();
+		std::string all;
+		for (const std::string& f : failed)
+			all += (all.empty() ? "" : "; ") + f;
+		Record("Physical melee spring jolt", failed.empty(),
+			failed.empty() ? std::string("passed (it names the failed checks only, no check count)") :
+							 "FAIL: " + std::to_string(failed.size()) + " check(s): " + all);
+	}
 	RunSilent("Physical melee hit jolt (File #1 profile, melee.jolt, cave G interpreted)", +[]() {
 		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
 		if (!p || !p->melee.has_value() || !p->camera.has_value() || !VR::ProfileDB::IsSilenceSettingName("MeleeHitJolt"))

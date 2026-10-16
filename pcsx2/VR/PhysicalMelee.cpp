@@ -1201,6 +1201,100 @@ namespace VR::PhysicalMelee
 		u32 s_jolt_frames = 0;
 		int s_jolt_last_counter = -1;
 		u32 s_jolt_written[kJoltEntries] = {};
+		// The spring-damper jolt (melee.jolt.spring): the host keeps each entry's spring and rewrites the entry every poll
+		// with the angle for the next update and the slope to the one after (cave G's linear step, unchanged, carries it
+		// through a missed poll), a few updates ahead; how far cave G got is read back from the entry's frames left.
+		struct SpringSlot
+		{
+			bool live = false;
+			u32 enemy = 0;
+			u8 bone = 0;
+			SpringBone sb; // the state cave G applies at the entry's next update
+			int steps = 0;
+			u8 frames_written = 0;
+			u32 strike = 0;
+		};
+		SpringSlot s_spring[kJoltEntries];
+		constexpr int kSpringAhead = 4;
+
+		void WriteSpringEntry(const ProfileDB::MeleeParams& mp, int k, bool wait)
+		{
+			SpringSlot& sl = s_spring[k];
+			SpringBone next = sl.sb;
+			SpringStep(next, mp.jolt.spring);
+			s16 now[3], after[3];
+			JoltEuler(sl.sb.angle, now);
+			JoltEuler(next.angle, after);
+			const int frames = std::clamp(mp.jolt.spring.max_frames - sl.steps, 1, kSpringAhead);
+			JoltEntry e;
+			e.enemy = sl.enemy;
+			e.bone = sl.bone;
+			e.frames = static_cast<u8>(frames);
+			e.wait = wait ? 1 : 0;
+			for (int q = 0; q < 3; q++)
+			{
+				e.angle[q] = now[q];
+				e.rate[q] = static_cast<s16>(std::clamp(static_cast<int>(now[q]) - static_cast<int>(after[q]), -32768, 32767));
+			}
+			u32 w[6];
+			PackJoltEntry(e, w);
+			const u32 a = mp.jolt_block + 0x10u + 24u * static_cast<u32>(k);
+			// The angles first, the frames last (a poll between two of the zombie's updates; if not, one update is off).
+			for (int q = 2; q < 6; q++)
+				memWrite32(a + 4u * static_cast<u32>(q), w[q]);
+			memWrite32(a, w[0]);
+			memWrite32(a + 4, w[1]);
+			sl.frames_written = e.frames;
+			s_jolt_written[k] = s_jolt_frames;
+		}
+
+		// Each poll: every live spring is stepped by the updates cave G applied since it was written, then written again,
+		// or ended when settled (or after maxFrames updates, or when its entry is no longer ours).
+		void PumpSprings(GuestReader reader, const ProfileDB::MeleeParams& mp)
+		{
+			static const bool s_log = std::getenv("PCSX2_VR_SPRING_LOG") != nullptr;
+			for (int k = 0; k < kJoltEntries; k++)
+			{
+				SpringSlot& sl = s_spring[k];
+				if (!sl.live)
+					continue;
+				const u32 a = mp.jolt_block + 0x10u + 24u * static_cast<u32>(k);
+				u32 who = 0, bf = 0;
+				if (!Read(reader, a, 4, &who) || !Read(reader, a + 4, 4, &bf) || who != sl.enemy || (bf & 0xFFu) != sl.bone)
+				{
+					sl.live = false;
+					continue;
+				}
+				if (((bf >> 16) & 0xFFu) != 0)
+					continue; // still waiting for the hit
+				const int left = static_cast<int>((bf >> 8) & 0xFFu);
+				const int done = std::max(0, static_cast<int>(sl.frames_written) - left);
+				if (done == 0)
+					continue;
+				for (int q = 0; q < done; q++)
+					SpringStep(sl.sb, mp.jolt.spring);
+				sl.steps += done;
+				const bool end = SpringSettled(sl.sb, mp.jolt.spring) || sl.steps >= mp.jolt.spring.max_frames;
+				if (s_log || Diag())
+					Console.WriteLn("(VR) Melee spring: entry %d bone %u update %d (+%d) angle %.2f deg (%.2f %.2f %.2f) rate %.0f deg/s%s", k,
+						sl.bone, sl.steps, done, static_cast<double>(Len3(sl.sb.angle[0], sl.sb.angle[1], sl.sb.angle[2])),
+						static_cast<double>(sl.sb.angle[0]), static_cast<double>(sl.sb.angle[1]), static_cast<double>(sl.sb.angle[2]),
+						static_cast<double>(Len3(sl.sb.rate[0], sl.sb.rate[1], sl.sb.rate[2])), end ? ", settled: off" : "");
+				if (end)
+				{
+					memWrite32(a + 4, sl.bone);
+					sl.live = false;
+				}
+				else
+					WriteSpringEntry(mp, k, false);
+			}
+		}
+
+		void ClearSprings()
+		{
+			for (SpringSlot& sl : s_spring)
+				sl.live = false;
+		}
 
 		void ClearJolt()
 		{
@@ -1212,6 +1306,7 @@ namespace VR::PhysicalMelee
 			}
 			s_jolt_armed = false;
 			s_jolt_last_counter = -1;
+			ClearSprings();
 		}
 
 		void ResetContact()
@@ -1301,6 +1396,7 @@ namespace VR::PhysicalMelee
 				return true;
 			};
 			const JoltSize size = JoltMagnitude(s_pend_speed, mp.jolt);
+			const bool spring = mp.jolt.spring_on;
 			const u32 blk = mp.jolt_block;
 			// This enemy's old entries go, and any still waiting for an earlier strike's hit; then the free ones are taken
 			// in order.
@@ -1313,15 +1409,58 @@ namespace VR::PhysicalMelee
 				Read(reader, e + 4, 4, &bf);
 				frames_left[k] = static_cast<u8>(bf >> 8);
 				const bool expired = s_jolt_frames - s_jolt_written[k] > kJoltExpireFrames;
-				if (!s_jolt_armed || who == base || ((bf >> 16) & 0xFFu) != 0 || (expired && frames_left[k] != 0))
+				const bool waiting = ((bf >> 16) & 0xFFu) != 0;
+				// A running spring stays (a new hit on its bone adds to it); the linear jolt starts over for this enemy.
+				const bool keep = spring && s_jolt_armed && s_spring[k].live && !waiting && !expired && who == s_spring[k].enemy;
+				if (!keep && (!s_jolt_armed || who == base || waiting || (expired && frames_left[k] != 0)))
 				{
 					memWrite32(e + 4, 0);
 					frames_left[k] = 0;
 				}
+				if (!keep)
+					s_spring[k].live = false;
 			}
 			std::string line;
 			int slot = 0;
-			for (int i = 0; i < ch->count; i++)
+			for (int i = 0; i < ch->count && spring; i++)
+			{
+				// The spring: an impulse along the swing's turn; a bone already swinging for this enemy takes it on top.
+				if (((ch->hard >> i) & 1) && !(s_pend_speed >= mp.jolt.spring.hard))
+					continue;
+				float bw[16], pw[16], axis[3];
+				if (!bone_world(ch->bones[i], bw) || !bone_world(ch->parents[i], pw) ||
+					!JoltAxis(s_pend_contact, &bw[12], s_pend_vel, pw, axis, (ch->below >> i) & 1))
+					continue;
+				const float dps = SpringImpulse(s_pend_speed, ch->weights[i], mp.jolt.spring);
+				int k = 0;
+				while (k < kJoltEntries && !(s_spring[k].live && s_spring[k].enemy == base && s_spring[k].bone == ch->bones[i]))
+					k++;
+				const bool add = k < kJoltEntries;
+				if (add && s_spring[k].strike == s_strikes)
+					continue; // this strike's impulse is in already (written at the strike, the hit landed elsewhere)
+				if (!add)
+				{
+					while (slot < kJoltEntries && (frames_left[slot] != 0 || s_spring[slot].live))
+						slot++;
+					if (slot >= kJoltEntries)
+						break;
+					k = slot;
+					s_spring[k] = SpringSlot{};
+					s_spring[k].live = true;
+					s_spring[k].enemy = base;
+					s_spring[k].bone = ch->bones[i];
+					s_spring[k].sb.loose = ((ch->loose >> i) & 1) != 0;
+				}
+				SpringSlot& sl = s_spring[k];
+				sl.strike = s_strikes;
+				SpringKick(sl.sb, axis, dps);
+				if (!add)
+					SpringStep(sl.sb, mp.jolt.spring); // the first update shows one step of it
+				WriteSpringEntry(mp, k, wait && !add);
+				frames_left[k] = sl.frames_written;
+				line += fmt::format(" bone {} {}{:.0f} deg/s{}", ch->bones[i], add ? "+" : "", dps, sl.sb.loose ? " (loose)" : "");
+			}
+			for (int i = 0; i < ch->count && !spring; i++)
 			{
 				float bw[16], pw[16];
 				s16 ang[3];
@@ -1349,9 +1488,11 @@ namespace VR::PhysicalMelee
 			s_jolt_addr = blk;
 			s_jolt_magic = mp.jolt_magic;
 			s_jolt_crc = VMManager::GetDiscCRC();
-			Console.WriteLn("(VR) Melee: jolt%s, enemy %d struck on bone %u at %.1f m/s, %.1f deg over %d frames:%s (1/65536 turn, "
-							"about the parent's x y z); swing (%.0f, %.0f, %.0f) cm/s at (%.0f, %.0f, %.0f).",
-				wait ? " armed at the strike (starts on the hit's update)" : " after the hit", enemy, s_pend_bone, static_cast<double>(s_pend_speed), static_cast<double>(size.deg), size.frames, line.c_str(),
+			Console.WriteLn("(VR) Melee: jolt%s%s, enemy %d struck on bone %u at %.1f m/s, %.1f deg over %d frames:%s (%s); swing (%.0f, "
+							"%.0f, %.0f) cm/s at (%.0f, %.0f, %.0f).",
+				spring ? " (spring)" : "", wait ? " armed at the strike (starts on the hit's update)" : " after the hit", enemy,
+				s_pend_bone, static_cast<double>(s_pend_speed), static_cast<double>(spring ? 0.0f : size.deg), spring ? 0 : size.frames,
+				line.c_str(), spring ? "impulses about each bone's swing turn, parent frame" : "1/65536 turn, about the parent's x y z",
 				static_cast<double>(s_pend_vel[0]), static_cast<double>(s_pend_vel[1]), static_cast<double>(s_pend_vel[2]),
 				static_cast<double>(s_pend_contact[0]), static_cast<double>(s_pend_contact[1]), static_cast<double>(s_pend_contact[2]));
 			return true;
@@ -2160,12 +2301,11 @@ namespace VR::PhysicalMelee
 		return nullptr;
 	}
 
-	bool JoltAngles(const float contact[3], const float pivot[3], const float vel[3], const float pw[16], float deg, s16 out[3],
-		bool below)
+	bool JoltAxis(const float contact[3], const float pivot[3], const float vel[3], const float pw[16], float out[3], bool below)
 	{
-		out[0] = out[1] = out[2] = 0;
+		out[0] = out[1] = out[2] = 0.0f;
 		const float vl = Len3(vel[0], vel[1], vel[2]);
-		if (!(vl >= 1.0f) || !std::isfinite(deg))
+		if (!(vl >= 1.0f))
 			return false;
 		const float v[3] = {vel[0] / vl, vel[1] / vl, vel[2] / vl};
 		float r[3] = {contact[0] - pivot[0], contact[1] - pivot[1], contact[2] - pivot[2]};
@@ -2207,24 +2347,101 @@ namespace VR::PhysicalMelee
 		al = Len3(ap[0], ap[1], ap[2]);
 		if (!(al > 1e-6f))
 			return false;
+		for (int k = 0; k < 3; k++)
+			out[k] = ap[k] / al;
+		return true;
+	}
+
+	void JoltEuler(const float rv[3], s16 out[3])
+	{
+		out[0] = out[1] = out[2] = 0;
+		const float deg = Len3(rv[0], rv[1], rv[2]);
+		if (!std::isfinite(deg) || deg < 1e-6f)
+			return;
+		const float u[3] = {rv[0] / deg, rv[1] / deg, rv[2] / deg};
 		// The turn about that axis as FUN_001903E0 composes it: x, then y, then z about the parent's axes, R = Rz * Ry * Rx
 		// (column vectors). The small-angle split (x, y, z = the axis times the angle) leaned a slanted 20 deg turn's axis
 		// by about 5 deg; this is exact (the decay, all three taken down together, stays close to the same axis).
-		const float u[3] = {ap[0] / al, ap[1] / al, ap[2] / al};
 		const float th = deg * (3.14159265358979f / 180.0f);
 		const float cs = std::cos(th), sn = std::sin(th), vc = 1.0f - cs;
 		const float r00 = cs + u[0] * u[0] * vc, r10 = u[1] * u[0] * vc + u[2] * sn, r20 = u[2] * u[0] * vc - u[1] * sn;
 		const float r21 = u[2] * u[1] * vc + u[0] * sn, r22 = cs + u[2] * u[2] * vc;
 		const float eul[3] = {std::atan2(r21, r22), std::asin(std::clamp(-r20, -1.0f, 1.0f)), std::atan2(r10, r00)};
 		const float units = 65536.0f / (2.0f * 3.14159265358979f);
-		bool any = false;
 		for (int k = 0; k < 3; k++)
 		{
 			const float v = std::isfinite(eul[k]) ? std::clamp(units * eul[k], -16384.0f, 16384.0f) : 0.0f;
 			out[k] = static_cast<s16>(std::lround(v));
-			any = any || out[k] != 0;
 		}
-		return any;
+	}
+
+	bool JoltAngles(const float contact[3], const float pivot[3], const float vel[3], const float pw[16], float deg, s16 out[3],
+		bool below)
+	{
+		out[0] = out[1] = out[2] = 0;
+		float u[3];
+		if (!std::isfinite(deg) || !JoltAxis(contact, pivot, vel, pw, u, below))
+			return false;
+		const float rv[3] = {u[0] * deg, u[1] * deg, u[2] * deg};
+		JoltEuler(rv, out);
+		return out[0] != 0 || out[1] != 0 || out[2] != 0;
+	}
+
+	// --- The spring-damper jolt (pure). ---
+
+	void SpringKick(SpringBone& b, const float axis[3], float dps)
+	{
+		const float l = Len3(axis[0], axis[1], axis[2]);
+		if (!std::isfinite(l) || l < 1e-6f || !std::isfinite(dps))
+			return;
+		for (int k = 0; k < 3; k++)
+			b.rate[k] += axis[k] / l * dps;
+	}
+
+	void SpringStep(SpringBone& b, const SpringParams& p, float dt)
+	{
+		const float kk = b.loose ? p.loose_stiffness : p.stiffness, cc = b.loose ? p.loose_damping : p.damping;
+		const float lim = b.loose ? p.loose_max_deg : p.max_deg;
+		if (!std::isfinite(dt) || dt <= 0.0f)
+			return;
+		const float h = dt / 4.0f;
+		for (int s = 0; s < 4; s++)
+		{
+			// Semi-implicit Euler: the velocity from the force now, then the angle from the new velocity.
+			for (int k = 0; k < 3; k++)
+			{
+				b.rate[k] += (-kk * b.angle[k] - cc * b.rate[k]) * h;
+				b.angle[k] += b.rate[k] * h;
+			}
+			const float a = Len3(b.angle[0], b.angle[1], b.angle[2]);
+			if (a > lim && a > 0.0f)
+			{
+				float out = 0.0f;
+				for (int k = 0; k < 3; k++)
+				{
+					b.angle[k] *= lim / a;
+					out += b.rate[k] * b.angle[k] / lim;
+				}
+				if (out > 0.0f)
+					for (int k = 0; k < 3; k++)
+						b.rate[k] -= out * b.angle[k] / lim;
+			}
+		}
+		for (int k = 0; k < 3; k++)
+			if (!std::isfinite(b.angle[k]) || !std::isfinite(b.rate[k]))
+				b.angle[0] = b.angle[1] = b.angle[2] = b.rate[0] = b.rate[1] = b.rate[2] = 0.0f;
+	}
+
+	bool SpringSettled(const SpringBone& b, const SpringParams& p)
+	{
+		return Len3(b.angle[0], b.angle[1], b.angle[2]) < p.settle_deg && Len3(b.rate[0], b.rate[1], b.rate[2]) < p.settle_rate;
+	}
+
+	float SpringImpulse(float speed, float w, const SpringParams& p)
+	{
+		if (!std::isfinite(speed) || !std::isfinite(w))
+			return 0.0f;
+		return p.impulse * std::clamp(speed, 0.0f, p.max_speed) * w;
 	}
 
 	JoltEntry MakeJoltEntry(u32 enemy, u8 bone, const s16 angle[3], int frames, bool wait)
@@ -2399,6 +2616,130 @@ namespace VR::PhysicalMelee
 		return c.failures;
 	}
 
+	std::vector<std::string> SelfTestSpring()
+	{
+		Checker c;
+		const SpringParams p;
+		const float ax[3] = {1.0f, 0.0f, 0.0f};
+		// A 5 m/s hit on a weight-1 bone: the angle per update.
+		const auto series = [&](float dps, bool loose, int n, std::vector<float>* out, int* settled_at) {
+			SpringBone b;
+			b.loose = loose;
+			SpringKick(b, ax, dps);
+			*settled_at = -1;
+			for (int u = 1; u <= n; u++)
+			{
+				SpringStep(b, p);
+				out->push_back(b.angle[0]);
+				if (*settled_at < 0 && SpringSettled(b, p))
+					*settled_at = u;
+			}
+		};
+		{
+			std::vector<float> a;
+			int st = -1;
+			const float dps = SpringImpulse(5.0f, 1.0f, p);
+			series(dps, false, 45, &a, &st);
+			float peak = 0.0f, low = 0.0f, late = 0.0f;
+			int peak_at = -1, low_at = -1;
+			for (int u = 0; u < static_cast<int>(a.size()); u++)
+			{
+				if (a[u] > peak)
+					peak = a[u], peak_at = u + 1;
+				if (a[u] < low)
+					low = a[u], low_at = u + 1;
+			}
+			// After the overshoot's lobe (from the first update back at or above zero).
+			int back = low_at;
+			while (back < static_cast<int>(a.size()) && a[back] < 0.0f)
+				back++;
+			for (int u = back; u < static_cast<int>(a.size()); u++)
+				late = std::max(late, std::fabs(a[u]));
+			c(std::fabs(dps - 600.0f) < 1e-3f, "spring: the impulse is impulse x speed x weight");
+			c(a[0] > 8.0f && peak > 18.0f && peak < 26.0f && peak_at >= 2 && peak_at <= 4, "spring: a 5 m/s hit peaks near 20 deg in 2-4 updates");
+			c(low < -0.1f * peak && low > -0.35f * peak && low_at > peak_at, "spring: it overshoots once, by a tenth to a third");
+			c(late < 0.08f * peak, "spring: after the overshoot, nothing more to speak of");
+			c(st >= 12 && st <= 20, "spring: settled in 0.4-0.67 s (12-20 updates)");
+			std::vector<float> l;
+			int lst = -1;
+			series(dps * 0.4f, false, 45, &l, &lst);
+			c(lst > 0 && lst <= st, "spring: a lighter hit settles no later");
+		}
+		// The clamps: a huge kick holds at maxDeg (looseMaxDeg for a loose bone) and comes back.
+		{
+			std::vector<float> a, l;
+			int st = -1, lst = -1;
+			series(20000.0f, false, 45, &a, &st);
+			series(20000.0f, true, 60, &l, &lst);
+			float ma = 0.0f, ml = 0.0f;
+			for (float x : a)
+				ma = std::max(ma, std::fabs(x));
+			for (float x : l)
+				ml = std::max(ml, std::fabs(x));
+			c(ma <= p.max_deg + 1e-3f && ma > 0.8f * p.max_deg && std::fabs(a.back()) < p.settle_deg, "spring: clamped at maxDeg, then back");
+			c(ml <= p.loose_max_deg + 1e-3f && ml > p.max_deg, "spring: a loose bone clamps at looseMaxDeg");
+		}
+		// Loose bones swing slower: their first peak comes later.
+		{
+			std::vector<float> a, l;
+			int st, lst;
+			series(400.0f, false, 20, &a, &st);
+			series(400.0f, true, 20, &l, &lst);
+			const auto peak_at = [](const std::vector<float>& v) {
+				return static_cast<int>(std::max_element(v.begin(), v.end()) - v.begin());
+			};
+			c(peak_at(l) > peak_at(a), "spring: a loose bone peaks later");
+		}
+		// Accumulation: two kicks add (the same as one of both, unclamped); a second hit mid-swing adds to it; any number of
+		// hits stays inside the clamp; any axis length.
+		{
+			SpringBone one, two, mid;
+			SpringKick(one, ax, 500.0f);
+			const float ax2[3] = {3.0f, 0.0f, 0.0f};
+			SpringKick(two, ax2, 250.0f);
+			SpringKick(two, ax, 250.0f);
+			SpringStep(one, p);
+			SpringStep(two, p);
+			c(std::fabs(one.angle[0] - two.angle[0]) < 1e-3f && one.angle[0] > 0.0f, "spring: impulses add");
+			SpringKick(mid, ax, 300.0f);
+			SpringStep(mid, p);
+			const float before = mid.angle[0];
+			SpringBone ctl = mid;
+			SpringKick(mid, ax, 300.0f);
+			SpringStep(mid, p);
+			SpringStep(ctl, p);
+			c(mid.angle[0] > ctl.angle[0] + 3.0f && mid.angle[0] > before, "spring: a second hit adds to the swing");
+			SpringBone many;
+			const float diag[3] = {0.0f, 1.0f, 1.0f};
+			float mx = 0.0f;
+			for (int u = 0; u < 20; u++)
+			{
+				SpringKick(many, diag, 2000.0f);
+				SpringStep(many, p);
+				mx = std::max(mx, Len3(many.angle[0], many.angle[1], many.angle[2]));
+			}
+			c(mx <= p.max_deg + 1e-3f && std::fabs(many.angle[0]) < 1e-4f, "spring: many hits stay inside the clamp, on their axis");
+		}
+		// Guards and the angles.
+		{
+			SpringBone b;
+			const float zero[3] = {};
+			SpringKick(b, zero, 500.0f);
+			SpringKick(b, ax, std::numeric_limits<float>::quiet_NaN());
+			SpringStep(b, p);
+			c(SpringSettled(b, p) && b.angle[0] == 0.0f, "spring: no axis or a NaN kick, nothing");
+			c(SpringImpulse(30.0f, 1.0f, p) == p.impulse * p.max_speed && SpringImpulse(std::numeric_limits<float>::quiet_NaN(), 1.0f, p) == 0.0f &&
+				  SpringImpulse(-2.0f, 1.0f, p) == 0.0f && SpringImpulse(2.0f, -0.5f, p) < 0.0f,
+				"spring: speed clamped, NaN none, weights signed");
+			const float rv[3] = {10.0f, 0.0f, 0.0f}, rz[3] = {0.0f, 0.0f, -20.0f};
+			s16 e[3], z[3];
+			JoltEuler(rv, e);
+			JoltEuler(rz, z);
+			c(e[0] == 1820 && e[1] == 0 && e[2] == 0 && z[0] == 0 && z[1] == 0 && z[2] == -3641, "spring: the angles as the cave applies them");
+		}
+		return c.failures;
+	}
+
 	void OnStateLoaded()
 	{
 		s_enemies_valid = false;
@@ -2410,6 +2751,7 @@ namespace VR::PhysicalMelee
 		s_block_armed = s_block_addr != 0;
 		s_block_stale = true;
 		s_jolt_armed = s_jolt_addr != 0;
+		ClearSprings();
 		ResetContact();
 	}
 
@@ -2815,6 +3157,8 @@ namespace VR::PhysicalMelee
 					s_jolt_frames += (c + 60u - static_cast<u32>(s_jolt_last_counter)) % 60u;
 				s_jolt_last_counter = static_cast<int>(c);
 			}
+			if (mp->jolt.spring_on && s_jolt_armed)
+				PumpSprings(reader, *mp);
 		}
 		if (contact)
 			PollContact(reader, *mp, record, wrote && !screen && !swinging, m, origin, axes, counter, dt, jolt);

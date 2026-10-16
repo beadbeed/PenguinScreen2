@@ -1051,6 +1051,12 @@ SLPM-65428:
     # chest 11, waist 10; belly (10) -> waist 10, chest 11; knees (3) -> the legs' root 3 and the waist 10. Each bone's
     # turn is about (joint -> contact) x swing, the lever's height mirrored to the side the bone moves, so the part it
     # moves goes with the swing (a belly hit below the waist tips the body back, it does not fold it toward you).
+    # spring (present: a spring-damper instead of the linear decay; 2026-10-15): each struck bone gets an angular
+    # velocity of impulse deg/s per m/s (speed capped at maxSpeed) x its weight about that turn, and each enemy update
+    # integrates angle'' = -stiffness angle - damping angle' (1/s^2, 1/s; ratio 0.45: it overshoots once by about a fifth
+    # and settles in ~0.5 s), clamped to maxDeg; loose bones (the arms) use looseStiffness / looseDamping / looseMaxDeg
+    # and swing; hard bones move only from hard m/s. Hits add up. Ends when under settleDeg and settleRate deg/s, or
+    # after maxFrames updates. The minDeg..maxFrames values above are then unused.
     jolt:
       block: 0xFF100
       magic: 0x4A4C5431
@@ -1062,10 +1068,15 @@ SLPM-65428:
       maxDeg: 24
       minFrames: 5
       maxFrames: 10
+      spring: { stiffness: 200, damping: 12.7, looseStiffness: 120, looseDamping: 7, impulse: 120, maxSpeed: 8,
+                maxDeg: 30, looseMaxDeg: 40, hard: 4.0, settleDeg: 0.75, settleRate: 15, maxFrames: 45 }
       chains:
-        - { sphere: 21, bones: [20, 11, 10], parents: [11, 10, 2], weights: [1.0, 0.45, 0.2] }   # head
-        - { sphere: 10, bones: [10, 11], parents: [2, 10], weights: [1.0, 0.5] }                 # belly
-        - { sphere: 3, bones: [3, 10], parents: [2, 2], weights: [0.6, 0.3], below: [3] }        # knees
+        # head: neck, head, chest; a hard hit the waist too
+        - { sphere: 21, bones: [20, 21, 11, 10], parents: [11, 20, 10, 2], weights: [1.0, 0.5, 0.35, 0.2], hard: [10] }
+        # belly: waist, chest; a hard hit swings both arms (clavicles, loose: they lag, then swing back)
+        - { sphere: 10, bones: [10, 11, 12, 16], parents: [2, 10, 11, 11], weights: [1.0, 0.5, 0.8, 0.8], loose: [12, 16], hard: [12, 16] }
+        # knees: the legs' root (below), waist; a hard hit the chest too
+        - { sphere: 3, bones: [3, 10, 11], parents: [2, 2, 10], weights: [0.6, 0.3, 0.2], below: [3], hard: [11] }
 
   # VR controllers (only when launched with --vr; flat play is untouched).
   # A pad bound in Settings -> Controllers (e.g. a DualSense) keeps working alongside;
