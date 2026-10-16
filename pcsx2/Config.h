@@ -1406,6 +1406,11 @@ struct Pcsx2Config
 		// VR::MeshRaster into the same impostor images. A weapon whose model or grip is not known keeps the placeholder
 		// shape (logged once). false = the procedural glove and placeholder shapes as before. Ini only for now.
 		bool GameWeaponModels = true;
+		// With GameWeaponModels: the hands and weapons are lit from the room on screen (the shown frame's average colour
+		// and brightness round where the hands are, its brighter side as the key light, smoothed over about half a
+		// second), with no rim glow, so they are never brighter than the room. false = the fixed lit look with the rim.
+		// Ini only for now.
+		bool WeaponSceneLighting = true;
 		// First person: darkens the edges of the headset view while the view turns or walks without the head
 		// (smooth stick turns, walking), the more the faster it moves; snap turns keep the blink instead.
 		// Drawn in the headset only, so only what this player sees.

@@ -83,6 +83,9 @@ namespace VR::HandModel
 		// the hand and makes room for this much more than the hand.
 		constexpr float kFitNearM = 0.05f;
 		constexpr float kFitMargin = 1.06f;
+		// The mesh look's fit cuts the bounding box's edges this far in front of the eye (nearer than that, a pole's end
+		// would blow the quad up for a sliver at the edge of the view).
+		constexpr float kFitClipM = 0.12f;
 		constexpr float kFallbackGrow = 1.5f;
 
 		// The guns' barrels lie along one line in the pointing frame, 6.7 cm over the grip position: the pistol's muzzle
@@ -1523,8 +1526,25 @@ namespace VR::HandModel
 			return MatFromBasis(x, y, z, t);
 		}
 
-		void SetLighting(MeshRaster::Lighting& l, bool lit)
+		void SetLighting(MeshRaster::Lighting& l, bool lit, const SceneLight& scene)
 		{
+			if (scene.valid)
+			{
+				// [VR] WeaponSceneLighting: the room's brightness (the factors are in linear light, applied as their square
+				// root, so level squared), its light's side, a little headlight so the model still reads in a dark room,
+				// and no rim.
+				const float m2 = scene.level * scene.level;
+				l.enabled = true;
+				l.light_in_view_space = true;
+				for (int k = 0; k < 3; k++)
+					l.light_dir[k] = scene.dir[k];
+				l.ambient = (lit ? 0.55f : 0.38f) * m2;
+				l.key = 0.62f * m2;
+				l.headlight = (lit ? 0.30f : 0.06f) * m2;
+				l.rim = 0.0f;
+				l.linear_light = true;
+				return;
+			}
 			l.enabled = true;
 			l.light_in_view_space = true;
 			l.light_dir[0] = 0.35f;
@@ -1539,6 +1559,15 @@ namespace VR::HandModel
 			l.rim_colour[1] = 0.92f;
 			l.rim_colour[2] = 0.88f;
 			l.linear_light = true;
+		}
+
+		// The room's colour on a material's (it multiplies the texture).
+		void Tint(MeshRaster::Material& mat, const SceneLight& scene)
+		{
+			if (!scene.valid)
+				return;
+			for (int k = 0; k < 3; k++)
+				mat.base_colour[k] *= std::clamp(scene.colour[k], 0.0f, 1.0f);
 		}
 
 		struct MeshScratch
@@ -1587,8 +1616,10 @@ namespace VR::HandModel
 				mat.base_colour[0] = 0.72f;
 				mat.base_colour[1] = 0.53f;
 				mat.base_colour[2] = 0.43f;
-				SetLighting(mat.lighting, false);
-				mat.lighting.rim = 0.38f;
+				SetLighting(mat.lighting, false, h.scene);
+				if (!h.scene.valid)
+					mat.lighting.rim = 0.38f;
+				Tint(mat, h.scene);
 				MeshRaster::Draw(sc.target, cam, mesh, world, mat);
 			}
 
@@ -1630,7 +1661,8 @@ namespace VR::HandModel
 						{
 							mat.base_colour[0] = mat.base_colour[1] = mat.base_colour[2] = 0.45f;
 						}
-						SetLighting(mat.lighting, lit);
+						SetLighting(mat.lighting, lit, h.scene);
+						Tint(mat, h.scene);
 						MeshRaster::Draw(sc.target, cam, mesh, MeshRaster::Multiply(world, local), mat);
 					}
 					V3 muzzle;
@@ -1942,6 +1974,185 @@ namespace VR::HandModel
 		return true;
 	}
 
+	bool ProjectBoxOnPlane(const float corners[8][3], float de, float near_z, float out_rect[4])
+	{
+		if (!corners || !out_rect || !(de > 0.0f) || !(near_z > 0.0f) || !std::isfinite(de))
+			return false;
+		static constexpr int kEdges[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4},
+			{1, 5}, {2, 6}, {3, 7}};
+		float x0 = std::numeric_limits<float>::max();
+		float y0 = std::numeric_limits<float>::max();
+		float x1 = -std::numeric_limits<float>::max();
+		float y1 = -std::numeric_limits<float>::max();
+		bool any = false;
+		auto add = [&](float x, float y, float z) {
+			const float sc = de / z;
+			x0 = std::min(x0, sc * x);
+			x1 = std::max(x1, sc * x);
+			y0 = std::min(y0, sc * y);
+			y1 = std::max(y1, sc * y);
+			any = true;
+		};
+		for (const auto& ed : kEdges)
+		{
+			const float* a = corners[ed[0]];
+			const float* b = corners[ed[1]];
+			if (!Finite(a, 3) || !Finite(b, 3))
+				return false;
+			const bool ain = a[2] >= near_z;
+			const bool bin = b[2] >= near_z;
+			if (ain)
+				add(a[0], a[1], a[2]);
+			if (bin)
+				add(b[0], b[1], b[2]);
+			if (ain != bin)
+			{
+				const float t = (near_z - a[2]) / (b[2] - a[2]);
+				add(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, near_z);
+			}
+		}
+		if (!any)
+			return false;
+		out_rect[0] = x0;
+		out_rect[1] = y0;
+		out_rect[2] = x1;
+		out_rect[3] = y1;
+		return true;
+	}
+
+	SceneLight SampleSceneLight(const u32* grid, u32 grid_w, u32 grid_h)
+	{
+		SceneLight out;
+		if (!grid || grid_w == 0 || grid_h == 0)
+			return out;
+		auto chan = [](u32 p, int k) { return static_cast<float>((p >> (8 * k)) & 0xffu) * (1.0f / 255.0f); };
+		auto luma = [&](u32 p) { return 0.2126f * chan(p, 0) + 0.7152f * chan(p, 1) + 0.0722f * chan(p, 2); };
+		// The hands' region: the middle half across, the lower two thirds down.
+		const u32 rx0 = grid_w / 4;
+		const u32 rx1 = std::max(rx0 + 1, grid_w - grid_w / 4);
+		const u32 ry0 = grid_h / 3;
+		const u32 ry1 = grid_h;
+		double rgb[3] = {};
+		double n = 0.0;
+		double left = 0.0, right = 0.0, top = 0.0, bottom = 0.0;
+		double nl = 0.0, nr = 0.0, nt = 0.0, nb = 0.0;
+		for (u32 y = 0; y < grid_h; y++)
+		{
+			for (u32 x = 0; x < grid_w; x++)
+			{
+				const u32 p = grid[static_cast<size_t>(y) * grid_w + x];
+				const float l = luma(p);
+				if (x >= rx0 && x < rx1 && y >= ry0 && y < ry1)
+				{
+					for (int k = 0; k < 3; k++)
+						rgb[k] += chan(p, k);
+					n += 1.0;
+				}
+				// Halves; an odd grid's middle column or row counts to neither.
+				if (2 * x + 1 < grid_w)
+				{
+					left += l;
+					nl += 1.0;
+				}
+				else if (2 * x + 1 > grid_w)
+				{
+					right += l;
+					nr += 1.0;
+				}
+				if (2 * y + 1 < grid_h)
+				{
+					top += l;
+					nt += 1.0;
+				}
+				else if (2 * y + 1 > grid_h)
+				{
+					bottom += l;
+					nb += 1.0;
+				}
+			}
+		}
+		if (!(n > 0.0))
+			return out;
+		float c[3];
+		for (int k = 0; k < 3; k++)
+			c[k] = static_cast<float>(rgb[k] / n);
+		const float region_luma = 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
+		out.level = std::clamp(region_luma / kSceneFullLuma, kSceneLevelMin, 1.0f);
+		const float mx = std::max({c[0], c[1], c[2]});
+		for (int k = 0; k < 3; k++)
+			out.colour[k] = (mx > 1.0e-3f) ? 0.5f + 0.5f * (c[k] / mx) : 1.0f; // half the room's tint
+		auto mean = [](double sum, double cnt) { return cnt > 0.0 ? static_cast<float>(sum / cnt) : 0.0f; };
+		auto contrast = [](float a, float b) {
+			return (a + b > 1.0e-3f) ? std::clamp((a - b) / (a + b), -1.0f, 1.0f) : 0.0f;
+		};
+		const float dx = contrast(mean(right, nr), mean(left, nl));
+		const float dy = contrast(mean(top, nt), mean(bottom, nb));
+		const float d[3] = {1.5f * dx, 0.4f + 1.5f * dy, 0.6f};
+		const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+		for (int k = 0; k < 3; k++)
+			out.dir[k] = d[k] / len;
+		out.valid = true;
+		return out;
+	}
+
+	SceneLight SmoothSceneLight(const SceneLight& prev, const SceneLight& target, float dt_s)
+	{
+		if (!target.valid)
+			return prev;
+		if (!prev.valid)
+			return target;
+		const float dt = std::isfinite(dt_s) ? std::clamp(dt_s, 0.0f, 1.0f) : 0.0f;
+		const float a = 1.0f - std::exp(-dt / kSceneLightTauS);
+		SceneLight out = prev;
+		for (int k = 0; k < 3; k++)
+		{
+			out.colour[k] = prev.colour[k] + (target.colour[k] - prev.colour[k]) * a;
+			out.dir[k] = prev.dir[k] + (target.dir[k] - prev.dir[k]) * a;
+		}
+		out.level = prev.level + (target.level - prev.level) * a;
+		const float len = std::sqrt(out.dir[0] * out.dir[0] + out.dir[1] * out.dir[1] + out.dir[2] * out.dir[2]);
+		for (int k = 0; k < 3; k++)
+			out.dir[k] = (len > 1.0e-4f) ? out.dir[k] / len : target.dir[k];
+		return out;
+	}
+
+	namespace
+	{
+		std::mutex s_scene_mutex;
+		SceneLight s_scene;
+	} // namespace
+
+	void SetSceneLight(const SceneLight& light)
+	{
+		const std::lock_guard<std::mutex> lock(s_scene_mutex);
+		s_scene = light;
+	}
+
+	SceneLight GetSceneLight()
+	{
+		const std::lock_guard<std::mutex> lock(s_scene_mutex);
+		return s_scene;
+	}
+
+	bool SceneLightChanged(const SceneLight& a, const SceneLight& b)
+	{
+		if (a.valid != b.valid)
+			return true;
+		if (!a.valid)
+			return false;
+		if (!(std::fabs(a.level - b.level) <= 0.03f))
+			return true;
+		float dot = 0.0f;
+		for (int k = 0; k < 3; k++)
+		{
+			if (!(std::fabs(a.colour[k] - b.colour[k]) <= 0.03f))
+				return true;
+			dot += a.dir[k] * b.dir[k];
+		}
+		return !(dot >= 0.996f); // about 5 degrees
+	}
+
+
 	bool PlaceImpostor(int hand, const HandState& h, const float eye[3], ImpostorQuad* out)
 	{
 		if (!out || !h.valid || !Finite(h.pos, 3) || !Finite(h.quat, 4) || !Finite(eye, 3))
@@ -1972,7 +2183,7 @@ namespace VR::HandModel
 
 		const bool weapon = h.gun && hand == kRight;
 		const float base = (weapon && h.holstered) ? kQuadSizeHolsterM : weapon ? kQuadSizeGunM : kQuadSizeM;
-		const float long_max = mesh ? kQuadSizeModelLongM : kQuadSizeLongM;
+		const float long_max = mesh ? kQuadSizeModelLongMaxM : kQuadSizeLongM;
 		const float max_size = (weapon && (h.held == Held::LongGun || h.held == Held::Melee)) ? long_max : base * 2.0f;
 
 		// The quad faces the eye from the middle of everything drawn, so as much of a long gun or a pole as can be lies in
@@ -1994,7 +2205,30 @@ namespace VR::HandModel
 		float y0 = std::numeric_limits<float>::max();
 		float x1 = -std::numeric_limits<float>::max();
 		float y1 = -std::numeric_limits<float>::max();
-		for (int c = 0; c < 8 && fitted; c++)
+		if (mesh && fitted)
+		{
+			// The mesh look: the box's edges cut where they come nearer the eye than kFitClipM, so a weapon reaching
+			// past the eye or across the face keeps its far end in the quad instead of falling back round the hand.
+			float corners[8][3];
+			for (int c = 0; c < 8; c++)
+			{
+				const V3 corner = V3{(c & 1) ? lmax.x : lmin.x, (c & 2) ? lmax.y : lmin.y, (c & 4) ? lmax.z : lmin.z};
+				const V3 d = Sub(Add(pos, Rotate(q, Mul(corner, 0.01f))), e);
+				corners[c][0] = Dot(d, right);
+				corners[c][1] = Dot(d, up);
+				corners[c][2] = -Dot(d, n);
+			}
+			float rect[4];
+			fitted = ProjectBoxOnPlane(corners, de, kFitClipM, rect);
+			if (fitted)
+			{
+				x0 = Dot(ec, right) + rect[0];
+				y0 = Dot(ec, up) + rect[1];
+				x1 = Dot(ec, right) + rect[2];
+				y1 = Dot(ec, up) + rect[3];
+			}
+		}
+		for (int c = 0; c < 8 && fitted && !mesh; c++)
 		{
 			const V3 corner = V3{(c & 1) ? lmax.x : lmin.x, (c & 2) ? lmax.y : lmin.y, (c & 4) ? lmax.z : lmin.z};
 			const V3 d = Sub(Add(pos, Rotate(q, Mul(corner, 0.01f))), e);
@@ -2301,7 +2535,8 @@ namespace VR::HandModel
 			return true;
 		if (ref.gun != now.gun || ref.held != now.held || ref.item_id != now.item_id || ref.support != now.support ||
 			ref.slide_locked != now.slide_locked || ref.holstered != now.holstered || ref.lit != now.lit ||
-			ref.mesh != now.mesh || ref.attach.valid != now.attach.valid || ref.attach.type != now.attach.type)
+			ref.mesh != now.mesh || ref.attach.valid != now.attach.valid || ref.attach.type != now.attach.type ||
+			(now.mesh && SceneLightChanged(ref.scene, now.scene)))
 		{
 			return true;
 		}
@@ -3125,7 +3360,32 @@ namespace VR::HandModel
 				}
 				std::snprintf(what2, sizeof(what2), "mesh: a 1.3 m pole seen side on keeps the hand in its quad (%.2f m)",
 					static_cast<double>(qp_size));
-				check(hand_in && qp_size <= kQuadSizeModelLongM + 1.0e-4f, what2);
+				check(hand_in && qp_size <= kQuadSizeModelLongMaxM + 1.0e-4f, what2);
+				// [VR] WeaponSceneLighting: the same pole lit by a dark room draws no brighter than the fixed look, with
+				// the same outline.
+				if (PlaceImpostor(kRight, pole, near_eye, &qp))
+				{
+					HandState dark = pole;
+					const u32 dim_grid[4] = {MeshRaster::PackRgba(20, 18, 16), MeshRaster::PackRgba(20, 18, 16), MeshRaster::PackRgba(20, 18, 16),
+						MeshRaster::PackRgba(20, 18, 16)};
+					dark.scene = SampleSceneLight(dim_grid, 2, 2);
+					std::vector<u32> img_fixed, img_dark;
+					RenderImpostor(kRight, pole, near_eye, qp.centre, qp.right, qp.up, qp.size_m, img_fixed);
+					RenderImpostor(kRight, dark, near_eye, qp.centre, qp.right, qp.up, qp.size_m, img_dark);
+					u64 sum_fixed = 0, sum_dark = 0;
+					u32 cov_fixed = 0, cov_dark = 0;
+					for (size_t i = 0; i < img_fixed.size() && i < img_dark.size(); i++)
+					{
+						cov_fixed += (img_fixed[i] >> 24) != 0;
+						cov_dark += (img_dark[i] >> 24) != 0;
+						sum_fixed += (img_fixed[i] & 0xffu) + ((img_fixed[i] >> 8) & 0xffu) + ((img_fixed[i] >> 16) & 0xffu);
+						sum_dark += (img_dark[i] & 0xffu) + ((img_dark[i] >> 8) & 0xffu) + ((img_dark[i] >> 16) & 0xffu);
+					}
+					std::snprintf(what2, sizeof(what2),
+						"scene light: a dark room draws the pole darker (%llu < %llu), same outline (%u, %u)",
+						static_cast<unsigned long long>(sum_dark), static_cast<unsigned long long>(sum_fixed), cov_dark, cov_fixed);
+					check(dark.scene.valid && cov_fixed > 0 && cov_dark == cov_fixed && sum_dark * 10 < sum_fixed * 7, what2);
+				}
 				HandState hung = pole;
 				hung.holstered = true;
 				HolsterPose(Held::Melee, hip, 0.0f, hung.pos, hung.quat, true);
@@ -3141,6 +3401,78 @@ namespace VR::HandModel
 					"mesh: in the holster a pole hangs from the belt, its top end 12 cm over the hold point");
 			}
 			SetModelLookupForTest(nullptr);
+		}
+
+		// [VR] WeaponSceneLighting and the mesh look's fit: the pure parts.
+		{
+			using MeshRaster::PackRgba;
+			const u32 g = PackRgba(10, 10, 10);
+			const u32 dark_grid[4] = {g, g, g, g};
+			const SceneLight dark = SampleSceneLight(dark_grid, 2, 2);
+			check(dark.valid && std::fabs(dark.level - kSceneLevelMin) < 1.0e-5f, "scene light: a dark room, the lowest level");
+			const u32 w = PackRgba(240, 240, 240);
+			const u32 bright_grid[4] = {w, w, w, w};
+			const SceneLight bright = SampleSceneLight(bright_grid, 2, 2);
+			check(bright.valid && bright.level == 1.0f && bright.colour[0] == 1.0f && bright.colour[2] == 1.0f,
+				"scene light: a bright grey room, full level, no tint");
+			const u32 red = PackRgba(200, 60, 40);
+			const u32 red_grid[4] = {red, red, red, red};
+			const SceneLight reddish = SampleSceneLight(red_grid, 2, 2);
+			check(reddish.colour[0] == 1.0f && reddish.colour[1] < 0.75f && reddish.colour[2] < reddish.colour[1] &&
+					  reddish.colour[2] >= 0.5f,
+				"scene light: a red room tints red, half strength");
+			const u32 lit_left[4] = {w, g, w, g};
+			const SceneLight from_left = SampleSceneLight(lit_left, 2, 2);
+			const u32 lit_top[4] = {w, w, g, g};
+			const SceneLight from_top = SampleSceneLight(lit_top, 2, 2);
+			check(from_left.dir[0] < -0.5f && from_top.dir[1] > 0.8f &&
+					  std::fabs(Length(V3{from_left.dir[0], from_left.dir[1], from_left.dir[2]}) - 1.0f) < 1.0e-4f,
+				"scene light: the light comes from the brighter side, a unit vector");
+			check(!SampleSceneLight(nullptr, 2, 2).valid && !SampleSceneLight(dark_grid, 0, 2).valid,
+				"scene light: no grid, no light");
+
+			// Easing: after one time constant about 63 % of the way, a 1/60 s flash moves it under 4 %, an invalid target
+			// keeps the old light, an invalid old one jumps.
+			const SceneLight after_tau = SmoothSceneLight(dark, bright, kSceneLightTauS);
+			const float frac = (after_tau.level - dark.level) / (bright.level - dark.level);
+			check(std::fabs(frac - 0.632f) < 0.01f, "scene light: eased over its time constant");
+			const SceneLight flash = SmoothSceneLight(dark, bright, 1.0f / 60.0f);
+			check(flash.level - dark.level < 0.04f * (bright.level - dark.level), "scene light: a one-frame flash barely shows");
+			check(SmoothSceneLight(dark, SceneLight{}, 0.1f).level == dark.level &&
+					  SmoothSceneLight(SceneLight{}, bright, 0.1f).level == bright.level,
+				"scene light: invalid target keeps, invalid start jumps");
+			const SceneLight turned = SmoothSceneLight(from_left, from_top, 0.3f);
+			check(std::fabs(Length(V3{turned.dir[0], turned.dir[1], turned.dir[2]}) - 1.0f) < 1.0e-4f,
+				"scene light: the eased direction stays a unit vector");
+			check(!SceneLightChanged(dark, dark) && SceneLightChanged(dark, bright) && SceneLightChanged(dark, SceneLight{}) &&
+					  !SceneLightChanged(flash, dark) && SceneLightChanged(from_left, from_top),
+				"scene light: a redraw only past the thresholds");
+
+			// ProjectBoxOnPlane: a box in front projects as its corners do; one reaching past the eye keeps what is in
+			// front (its far end) and is cut at the near plane; one wholly behind gives nothing.
+			const auto box = [](float x0, float x1, float y0, float y1, float z0, float z1, float out[8][3]) {
+				for (int c = 0; c < 8; c++)
+				{
+					out[c][0] = (c & 1) ? x1 : x0;
+					out[c][1] = (c & 2) ? y1 : y0;
+					out[c][2] = (c & 4) ? z1 : z0;
+				}
+			};
+			float corners[8][3];
+			float rect[4];
+			box(-0.1f, 0.1f, -0.05f, 0.05f, 0.5f, 1.0f, corners);
+			const bool in_front = ProjectBoxOnPlane(corners, 0.5f, 0.12f, rect);
+			check(in_front && std::fabs(rect[0] + 0.1f) < 1.0e-5f && std::fabs(rect[2] - 0.1f) < 1.0e-5f &&
+					  std::fabs(rect[1] + 0.05f) < 1.0e-5f && std::fabs(rect[3] - 0.05f) < 1.0e-5f,
+				"fit: a box in front projects as its corners");
+			// A 1.4 m pole from beside the head (0.3 m right, at the eye's depth) out to 1.4 m in front, 0.5 m left.
+			box(-0.5f, 0.3f, -0.02f, 0.02f, -0.1f, 1.4f, corners);
+			const bool past = ProjectBoxOnPlane(corners, 0.5f, 0.12f, rect);
+			const float far_x = -0.5f * 0.5f / 1.4f;
+			check(past && rect[0] <= far_x + 1.0e-5f && std::isfinite(rect[2]) && rect[2] <= 0.3f * 0.5f / 0.12f + 1.0e-4f,
+				"fit: a pole reaching past the eye keeps its far end, cut at the near plane");
+			box(-0.1f, 0.1f, -0.1f, 0.1f, -1.0f, 0.05f, corners);
+			check(!ProjectBoxOnPlane(corners, 0.5f, 0.12f, rect), "fit: a box wholly behind the near plane gives nothing");
 		}
 
 		if (failed == 0)

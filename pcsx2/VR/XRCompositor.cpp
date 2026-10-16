@@ -2186,12 +2186,156 @@ namespace VR::XRCompositor
 			return h;
 		}
 
+		// [VR] WeaponSceneLighting: the room's light for the hand and weapon models, read back from the presented frame.
+		// Every kSceneReadEvery presents the frame is copied (GSDownloadTexture, in the GS's own command buffer, after
+		// this present's compositor work) into one of two host buffers; a later present reads a copy whose fence has
+		// already passed (never waits), averages it into a kSceneGridW x kSceneGridH grid (every kSceneStep-th pixel),
+		// and eases HandModel's scene light towards what that grid gives. Off, or on any failure: the fixed look.
+		constexpr u32 kSceneReadEvery = 6;
+		constexpr u32 kSceneGridW = 16;
+		constexpr u32 kSceneGridH = 12;
+		constexpr u32 kSceneStep = 4;
+		struct
+		{
+			std::unique_ptr<GSDownloadTexture> tex[2];
+			u64 fence[2] = {};
+			bool pending[2] = {};
+			u32 next = 0;
+			u32 presents = 0;
+			bool failed = false;
+			bool logged = false;
+			std::chrono::steady_clock::time_point last;
+			bool have_last = false;
+			HandModel::SceneLight smoothed;
+			u32 reads = 0;
+			double cpu_us_total = 0.0;
+			double cpu_us_max = 0.0;
+		} s_scene_read;
+
+		void ResetSceneLight()
+		{
+			if (s_scene_read.smoothed.valid)
+				HandModel::SetSceneLight(HandModel::SceneLight{});
+			s_scene_read.smoothed = HandModel::SceneLight{};
+			s_scene_read.have_last = false;
+			s_scene_read.pending[0] = s_scene_read.pending[1] = false;
+		}
+
+		void UpdateSceneLight(GSTexture* current)
+		{
+			auto& r = s_scene_read;
+			GSDeviceVK* const dev = GSDeviceVK::GetInstance();
+			if (!EmuConfig.VR.WeaponSceneLighting || !EmuConfig.VR.GameWeaponModels || r.failed || !dev)
+			{
+				ResetSceneLight();
+				return;
+			}
+			const auto t0 = std::chrono::steady_clock::now();
+			bool read = false;
+			for (u32 i = 0; i < 2; i++)
+			{
+				if (!r.pending[i] || dev->GetCompletedFenceCounter() < r.fence[i])
+					continue;
+				r.pending[i] = false;
+				GSDownloadTexture* const t = r.tex[i].get();
+				const u32 w = t->GetWidth();
+				const u32 h = t->GetHeight();
+				t->Flush(); // the fence has passed: returns at once
+				if (!t->Map(GSVector4i(0, 0, static_cast<s32>(w), static_cast<s32>(h))))
+					continue;
+				u32 sum[kSceneGridW * kSceneGridH][4] = {};
+				const u8* const base = t->GetMapPointer();
+				const u32 pitch = t->GetMapPitch();
+				for (u32 y = kSceneStep / 2; y < h; y += kSceneStep)
+				{
+					const u32 gy = y * kSceneGridH / h;
+					const u8* const row = base + static_cast<size_t>(y) * pitch;
+					for (u32 x = kSceneStep / 2; x < w; x += kSceneStep)
+					{
+						u32* const cell = sum[gy * kSceneGridW + x * kSceneGridW / w];
+						cell[0] += row[x * 4 + 0];
+						cell[1] += row[x * 4 + 1];
+						cell[2] += row[x * 4 + 2];
+						cell[3]++;
+					}
+				}
+				t->Unmap();
+				u32 grid[kSceneGridW * kSceneGridH];
+				for (u32 c = 0; c < kSceneGridW * kSceneGridH; c++)
+				{
+					const u32 n = std::max(1u, sum[c][3]);
+					grid[c] = (sum[c][0] / n) | ((sum[c][1] / n) << 8) | ((sum[c][2] / n) << 16) | 0xff000000u;
+				}
+				const HandModel::SceneLight target = HandModel::SampleSceneLight(grid, kSceneGridW, kSceneGridH);
+				const float dt = r.have_last ? std::chrono::duration<float>(t0 - r.last).count() : 0.0f;
+				r.last = t0;
+				r.have_last = true;
+				r.smoothed = HandModel::SmoothSceneLight(r.smoothed, target, dt);
+				HandModel::SetSceneLight(r.smoothed);
+				read = true;
+				if (!r.logged && r.smoothed.valid)
+				{
+					r.logged = true;
+					Console.WriteLn("(VR) WeaponSceneLighting: lighting the hand and weapon models from the %ux%u frame "
+									"(every %u presents, a %ux%u grid): level %.2f, tint %.2f %.2f %.2f, light from %.2f %.2f %.2f.",
+						w, h, kSceneReadEvery, kSceneGridW, kSceneGridH, r.smoothed.level, r.smoothed.colour[0],
+						r.smoothed.colour[1], r.smoothed.colour[2], r.smoothed.dir[0], r.smoothed.dir[1], r.smoothed.dir[2]);
+				}
+			}
+
+			// A new copy, every kSceneReadEvery presents, into a buffer not still in flight.
+			if (current && (++r.presents % kSceneReadEvery) == 0 && !r.pending[r.next] &&
+				current->GetFormat() == GSTexture::Format::Color)
+			{
+				const u32 slot = r.next;
+				const u32 w = static_cast<u32>(current->GetWidth());
+				const u32 h = static_cast<u32>(current->GetHeight());
+				if (!r.tex[slot] || r.tex[slot]->GetWidth() != w || r.tex[slot]->GetHeight() != h)
+				{
+					r.tex[slot].reset();
+					r.tex[slot] = dev->CreateDownloadTexture(w, h, GSTexture::Format::Color);
+					if (!r.tex[slot])
+					{
+						Console.Warning("(VR) WeaponSceneLighting: no %ux%u readback buffer; the fixed look for this session.", w, h);
+						r.failed = true;
+						ResetSceneLight();
+						return;
+					}
+				}
+				const GSVector4i rc(0, 0, static_cast<s32>(w), static_cast<s32>(h));
+				r.tex[slot]->CopyFromTexture(rc, current, rc, 0, true);
+				r.fence[slot] = dev->GetCurrentFenceCounter();
+				r.pending[slot] = true;
+				r.next ^= 1u;
+			}
+			if (read)
+			{
+				const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+				r.cpu_us_total += us;
+				r.cpu_us_max = std::max(r.cpu_us_max, us);
+				if (++r.reads % 600 == 0)
+				{
+					Console.WriteLn("(VR) WeaponSceneLighting: %u reads, %.0f us average, %.0f us longest (GS thread); level %.2f.",
+						r.reads, r.cpu_us_total / r.reads, r.cpu_us_max, r.smoothed.level);
+					r.cpu_us_max = 0.0;
+				}
+			}
+		}
+
+		// At every return of EndOfFrame: the scene light's readback goes in after this present's compositor work.
+		struct SceneLightAtEnd
+		{
+			GSTexture* current;
+			~SceneLightAtEnd() { UpdateSceneLight(current); }
+		};
+
 		// [VR] GameWeaponModels: the hand model's look, and for the weapon in the right hand (or in the holster) how the
 		// game attaches its model: the equipped weapon's own entry (GameFeedback's weapon read), else the scenario's item
 		// table's (the test hands).
 		void ApplyModelLook(HandModel::HandState& h, bool weapon)
 		{
 			h.mesh = EmuConfig.VR.GameWeaponModels;
+			h.scene = (h.mesh && EmuConfig.VR.WeaponSceneLighting) ? HandModel::GetSceneLight() : HandModel::SceneLight{};
 			h.attach = HandModel::GameAttach{};
 			if (!h.mesh || !weapon)
 				return;
@@ -10705,6 +10849,7 @@ namespace VR::XRCompositor
 	{
 		if (!s.initialized)
 			return;
+		const SceneLightAtEnd scene_light_at_end{current};
 		s_present_wait_left_ns = kPresentWaitBudgetNs;
 		// [VR] DepthLayer: set by this present's copy (CopyEyes) when the depth went in with the colour.
 		s.present_depth = FpDepth{};
@@ -11786,6 +11931,15 @@ namespace VR::XRCompositor
 		DestroyZoneResources();
 		DestroyBackground();
 		DestroyFillResources();
+		// The scene light's readback buffers are the GS device's: freed while it lives, else left to it.
+		for (auto& t : s_scene_read.tex)
+		{
+			if (vk_alive && GSDeviceVK::GetInstance())
+				t.reset();
+			else
+				static_cast<void>(t.release());
+		}
+		ResetSceneLight();
 		PcDestroy(abandoned);
 		if (!abandoned && vk_alive)
 		{

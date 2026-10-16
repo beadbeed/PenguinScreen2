@@ -125,3 +125,28 @@ The bone frame goes onto the hand model (`HandModel.cpp`, "GameWeaponModels" sec
   memory and drawn in the dump.
 - **Other scenarios' item tables**, File #2 (no `hold` key in its profile, so the placeholder stays there).
 - **Variant B's purpose.**
+
+## 2026-10-15: room lighting and long weapons (branch `weaponlook`)
+
+Alex's feedback: the weapons' light looks cartoony (the broom most), and the broom's far end still vanishes at some angles.
+
+- **Lighting (`[VR] WeaponSceneLighting`, on).** The compositor copies the presented frame (GSDownloadTexture, in the GS's
+  command buffer after the present's compositor work) every 6 presents into one of two buffers, and reads a copy whose
+  fence has passed (never waits): every 4th pixel averaged into a 16 x 12 grid. `HandModel::SampleSceneLight` takes the
+  lower middle (the middle half across, the lower two thirds) for brightness (level = luma / 0.42, 0.3 to 1) and a
+  half-strength tint, and the left/right, top/bottom contrast for the key light's side; `SmoothSceneLight` eases it with
+  a 0.5 s time constant. MeshRaster then lights with ambient 0.38, key 0.62, headlight 0.06, all times level squared (the
+  factors are linear light), no rim, the texture tinted. A light change past 0.03 or 5 degrees redraws a kept image.
+  The frame is read after ShadeBoost, so the game's brightness setting carries over. Off: the fixed look.
+- **Long weapons.** Two causes in `PlaceImpostor`: the quad was capped at 1.6 m (a pole across the view, or one pointing
+  partly back towards the face, projects bigger on the hand's plane), and when any corner of the weapon's box came within
+  5 cm of the eye the fit gave up and fell back to a quad round the hand (1.5 times its sphere), which cut most of the
+  pole. Now the mesh look projects the box's 12 edges cut 12 cm in front of the eye (`ProjectBoxOnPlane`), so the far end
+  is always in the outline, and the cap is 3.2 m (`kQuadSizeModelLongMaxM`). The image stays 256 pixels (no new
+  swapchain), so a quad that big is coarser, only while the weapon needs it. The placeholder look is unchanged.
+- **Evidence:** written, built, self-tests passed (42/42 suites; Hands 112 checks, new: the light estimate, easing,
+  redraw thresholds, the fit with a pole past the eye, a dark room drawing the pole darker with the same outline). Not
+  run in the emulator or headset (Alex was playing); the readback's cost is logged at run time
+  ("(VR) WeaponSceneLighting: N reads, X us average").
+- **To look at:** does the broom sit in the room (not glowing in a dark corridor, not too dark to see); does the brush end
+  stay in view held across the body and pointing back past the head; does the hand look softer when the quad grows.

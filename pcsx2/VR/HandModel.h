@@ -64,12 +64,36 @@ namespace VR::HandModel
 	bool DecodeGameAttach(const u8* entry, size_t size, u16 type, u32 grip_offset, u32 rotation_offset, u32 muzzle_offset,
 		GameAttach* out);
 
+	// [VR] WeaponSceneLighting: the room's light on the hand and weapon models, from the shown game frame.
+	//
+	// The compositor reads the frame back (a small grid of averaged sRGB colours, every few presents) and hands the
+	// grid to SampleSceneLight, which gives the colour and brightness of the part of the picture the hands are usually
+	// seen against (the lower middle) and the side the light comes from (where the frame is brighter, left against right
+	// and top against bottom). SmoothSceneLight eases one estimate towards the next over about kSceneLightTauS, so a
+	// muzzle flash or a cut does not make the models flicker. SetSceneLight publishes the eased light; the mesh drawing
+	// then lights from it, with no rim, its brightness following the room's (never above the fixed look's) and its
+	// colour tinted by the room's. Without a published light (or with the setting off) the fixed look stays.
+	struct SceneLight
+	{
+		bool valid = false;
+		float colour[3] = {1.0f, 1.0f, 1.0f}; // the room's tint, each channel 0 to 1, the brightest 1
+		float level = 1.0f;                   // the model's brightness against the fixed look, kSceneLevelMin to 1
+		float dir[3] = {0.35f, 0.8f, 0.5f};   // towards the light, in view space (x right, y up, z to the viewer), unit
+	};
+	static constexpr float kSceneLightTauS = 0.5f;
+	static constexpr float kSceneLevelMin = 0.3f;
+	// A room whose sampled region averages this sRGB luminance (0 to 1) lights the models fully (level 1).
+	static constexpr float kSceneFullLuma = 0.42f;
+
 	struct HandState
 	{
 		bool valid = false;
 		// [VR] GameWeaponModels: drawn with the hand model (HandMesh) and, in the right hand, the game's own weapon model
 		// (GameModels) placed by attach; false, or a weapon whose model or attach is missing, is today's procedural look.
 		bool mesh = false;
+		// [VR] WeaponSceneLighting: the room's light for the mesh look (invalid: the fixed look). A change past
+		// SceneLightChanged redraws a kept image.
+		SceneLight scene;
 		GameAttach attach;
 		// In the XR base space. pos is the controller's grip position (inside the handle); quat (xyzw)
 		// is the controller's pointing frame: -Z forward along the barrel, +Y up, +X right.
@@ -211,6 +235,26 @@ namespace VR::HandModel
 		u32 max_us = 0;
 	};
 	MeshDrawStats TakeMeshDrawStats();
+
+	// From a grid_w x grid_h grid of sRGB pixels (RGBA8, R in the low byte, row 0 on top). Invalid for an empty grid.
+	SceneLight SampleSceneLight(const u32* grid, u32 grid_w, u32 grid_h);
+	// prev eased towards target over dt_s seconds (an invalid prev jumps to target; an invalid target keeps prev).
+	SceneLight SmoothSceneLight(const SceneLight& prev, const SceneLight& target, float dt_s);
+	// The light the mesh drawing uses (any thread); an invalid one restores the fixed look. GetSceneLight is what was
+	// set; how far a drawn image's light is from it decides a redraw (SceneLightChanged).
+	void SetSceneLight(const SceneLight& light);
+	SceneLight GetSceneLight();
+	bool SceneLightChanged(const SceneLight& a, const SceneLight& b);
+
+	// PlaceImpostor's fit for the mesh look: a box's 8 corners as seen from the eye (x right, y up, z the distance in
+	// front of the eye along the quad's normal), projected from the eye onto the plane de in front of it. The box's 12
+	// edges are cut where they come nearer than near_z, so a pole reaching past the eye still gives the outline of what
+	// lies in front (not the old fallback round the hand, which cut the far end). out_rect = x0, y0, x1, y1 on the
+	// plane; false when no part of the box is near_z or more in front. Pure.
+	bool ProjectBoxOnPlane(const float corners[8][3], float de, float near_z, float out_rect[4]);
+	// The largest quad a long gun or a melee weapon drawn with its game model may get (the image keeps 256 pixels, so
+	// the bigger quad is coarser, only while the weapon needs it).
+	static constexpr float kQuadSizeModelLongMaxM = 3.2f;
 
 	// PCSX2_VR_DUMP_HANDS=<folder> (the CPU thread, once in game): draws each weapon of items (with its attach) as the right
 	// hand holds it and as it hangs in the holster, from a fixed eye, into PNG files there, and logs what each took. For
