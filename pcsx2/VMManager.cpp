@@ -7,6 +7,7 @@
 #include "VR/CameraDriver.h"
 #include "VR/GameFeedback.h"
 #include "VR/HudCards.h"
+#include "VR/VrBody.h"
 #include "VR/VrPresence.h"
 #include "VR/SplitState.h"
 #include "VR/VRManager.h"
@@ -2893,6 +2894,8 @@ void VMManager::Internal::VSyncOnCPUThread()
 	VR::HudCards::Poll();
 	// VR presence ([VR] VrPresence): the partner's VR head and hands over our own side channel; reads only.
 	VR::Presence::Poll();
+	// VR body ([VR] VrBody): the partner's (and with VrBodySelf your own) character's bones posed from those poses.
+	VR::VrBody::Poll();
 	{
 		static const char* s_dump_env = std::getenv("PCSX2_VR_GSDUMP_AT_VSYNC");
 		static u64 s_dump_vsyncs = 0;

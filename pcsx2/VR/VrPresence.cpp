@@ -3,17 +3,12 @@
 
 #include "VR/VrPresence.h"
 
-#include "VR/HandMesh.h"
-#include "VR/MeshRaster.h"
 #include "VR/VRInputState.h"
 #include "VR/VRProfileDB.h"
 #include "Config.h"
 #include "Memory.h"
 #include "VMManager.h"
 #include "common/Console.h"
-#include "common/FileSystem.h"
-#include "common/Image.h"
-#include "common/Path.h"
 #include "fmt/format.h"
 
 #include <algorithm>
@@ -242,7 +237,7 @@ namespace VR::Presence
 			u32 key = 0;
 		};
 
-		std::mutex s_mutex; // everything below up to s_view
+		std::mutex s_mutex; // everything below up to s_game
 		NetConfig s_cfg;
 		u64 s_cfg_gen = 0;
 		Packet s_out;
@@ -253,7 +248,7 @@ namespace VR::Presence
 		u64 s_in_ms = 0;
 
 		std::mutex s_view_mutex;
-		PartnerView s_view;
+		PartnerGame s_game;
 
 		std::atomic<bool> s_active{false};
 		std::atomic<bool> s_wanted{false};
@@ -533,77 +528,7 @@ namespace VR::Presence
 		void ClearView()
 		{
 			std::lock_guard<std::mutex> lock(s_view_mutex);
-			s_view = PartnerView{};
-		}
-
-		// --- The head's mesh: a unit sphere, drawn scaled as the shell and the visor --------------------------------
-		struct Sphere
-		{
-			std::vector<float> pos;
-			std::vector<u16> idx;
-		};
-
-		const Sphere& UnitSphere()
-		{
-			static const Sphere s = []() {
-				Sphere sp;
-				constexpr int kStacks = 10, kSlices = 16;
-				constexpr double kPi = 3.14159265358979323846;
-				for (int i = 0; i <= kStacks; i++)
-				{
-					const double th = kPi * i / kStacks;
-					for (int j = 0; j <= kSlices; j++)
-					{
-						const double ph = 2.0 * kPi * j / kSlices;
-						sp.pos.push_back(static_cast<float>(std::sin(th) * std::cos(ph)));
-						sp.pos.push_back(static_cast<float>(std::cos(th)));
-						sp.pos.push_back(static_cast<float>(std::sin(th) * std::sin(ph)));
-					}
-				}
-				const auto at = [&sp](int v) { return V3{sp.pos[v * 3], sp.pos[v * 3 + 1], sp.pos[v * 3 + 2]}; };
-				const auto tri = [&](int a, int b, int c) {
-					const V3 pa = at(a), pb = at(b), pc = at(c);
-					const V3 n = Cross(pb - pa, pc - pa);
-					if (Len(n) < 1.0e-9)
-						return;
-					// Counter-clockwise seen from outside.
-					if (Dot(n, pa + pb + pc) < 0.0)
-						std::swap(b, c);
-					sp.idx.push_back(static_cast<u16>(a));
-					sp.idx.push_back(static_cast<u16>(b));
-					sp.idx.push_back(static_cast<u16>(c));
-				};
-				for (int i = 0; i < kStacks; i++)
-				{
-					for (int j = 0; j < kSlices; j++)
-					{
-						const int a = i * (kSlices + 1) + j, b = a + kSlices + 1;
-						tri(a, b, a + 1);
-						tri(a + 1, b, b + 1);
-					}
-				}
-				return sp;
-			}();
-			return s;
-		}
-
-		// Where each part of the head sits in the head's frame (OpenXR: +X right, +Y up, +Z back; the origin between the eyes).
-		constexpr float kShellCentre[3] = {0.0f, -0.03f, 0.075f};
-		constexpr float kShellScale[3] = {0.085f, 0.11f, 0.10f};
-		constexpr float kVisorCentre[3] = {0.0f, 0.0f, -0.035f};
-		constexpr float kVisorScale[3] = {0.088f, 0.048f, 0.05f};
-		constexpr float kHeadReachM = 0.17f; // round the eyes, the whole head
-		constexpr float kHandReachM = 0.13f; // round the grip, the whole hand
-
-		void ApplyPartnerLighting(MeshRaster::Lighting& l)
-		{
-			l.ambient = 0.35f;
-			l.key = 0.6f;
-			l.headlight = 0.15f;
-			l.rim = 0.35f;
-			l.rim_colour[0] = 0.75f;
-			l.rim_colour[1] = 0.9f;
-			l.rim_colour[2] = 1.0f;
+			s_game = PartnerGame{};
 		}
 
 		// --- The CPU thread's view of the peer setting -----------------------------------------------------------------
@@ -849,19 +774,9 @@ namespace VR::Presence
 	}
 
 	// --- The partner for the compositor --------------------------------------------------------------------------------
-	bool GetPartnerView(PartnerView* out)
+	bool GetPartnerView(PartnerView*)
 	{
-		PartnerView v;
-		{
-			std::lock_guard<std::mutex> lock(s_view_mutex);
-			v = s_view;
-		}
-		const u64 now = NowMs();
-		if (!v.valid || v.flags == 0 || (now > v.stamp_ms && now - v.stamp_ms > kStaleMs))
-			return false;
-		if (out)
-			*out = v;
-		return true;
+		return false; // nothing is drawn for the partner any more (see PlacePartner below)
 	}
 
 	bool Wanted()
@@ -869,165 +784,27 @@ namespace VR::Presence
 		return s_wanted.load(std::memory_order_acquire);
 	}
 
-	namespace
-	{
-		struct Part
-		{
-			V3 c;
-			double r;
-		};
+	// The placeholder drawing (a grey head shell and teal CC0 hands in one impostor) is gone: VR body ([VR] VrBody) poses
+	// the partner's own character instead. These stay only so the compositor's old partner slot still links; with
+	// GetPartnerView always false it never makes the swapchain or draws.
+	bool PlacePartner(const PartnerView&, const float[3], ZoneMarkers::Quad*) { return false; }
+	void RasterPartner(const PartnerView&, const float[3], const ZoneMarkers::Quad&, std::vector<u32>& out_rgba) { out_rgba.clear(); }
+	int PartnerMarks(const PartnerView&, ZoneMarkers::Mark*) { return 0; }
 
-		int PartsOf(const PartnerView& v, Part* parts)
-		{
-			int n = 0;
-			if (v.flags & kFlagHead)
-				parts[n++] = {Load(v.head_pos) + Rotate(v.head_quat, V3{0.0, -0.02, 0.04}), kHeadReachM};
-			for (int h = 0; h < 2; h++)
-			{
-				if (v.flags & (h == 0 ? kFlagLeft : kFlagRight))
-					parts[n++] = {Load(v.hand_pos[h]) + Rotate(v.hand_quat[h], V3{0.0, 0.0, -0.04}), kHandReachM};
-			}
-			return n;
-		}
-	} // namespace
-
-	bool PlacePartner(const PartnerView& v, const float eye[3], ZoneMarkers::Quad* out)
+	// --- The partner for VR body ---------------------------------------------------------------------------------------
+	bool GetPartnerGame(PartnerGame* out)
 	{
-		if (!out || !Finite3(eye) || !v.valid)
-			return false;
-		Part parts[3];
-		const int n = PartsOf(v, parts);
-		if (n == 0)
-			return false;
-		V3 mid{};
-		for (int i = 0; i < n; i++)
+		PartnerGame g;
 		{
-			if (!Finite(parts[i].c))
-				return false;
-			mid = mid + parts[i].c;
+			std::lock_guard<std::mutex> lock(s_view_mutex);
+			g = s_game;
 		}
-		mid = mid * (1.0 / n);
-		const V3 e = Load(eye);
-		V3 nrm = e - mid;
-		const double dist = Len(nrm);
-		if (!Normalize(nrm))
+		const u64 now = NowMs();
+		if (!g.valid || g.flags == 0 || (now > g.stamp_ms && now - g.stamp_ms > kStaleMs))
 			return false;
-		V3 up_ref{0.0, 1.0, 0.0};
-		if (std::fabs(Dot(up_ref, nrm)) > 0.97)
-			up_ref = V3{0.0, 0.0, -1.0};
-		V3 u = up_ref - nrm * Dot(up_ref, nrm);
-		if (!Normalize(u))
-			return false;
-		const V3 r = Cross(u, nrm);
-		double x0 = 1e30, x1 = -1e30, y0 = 1e30, y1 = -1e30;
-		for (int i = 0; i < n; i++)
-		{
-			// Along the view, the part's distance from the eye; its middle and reach projected onto the plane.
-			const double dc = Dot(e - parts[i].c, nrm);
-			if (!(dc > 0.05))
-				return false;
-			const double k = dist / dc;
-			const V3 hit = e + (parts[i].c - e) * k;
-			const double x = Dot(hit - mid, r), y = Dot(hit - mid, u);
-			const double rr = parts[i].r * k;
-			x0 = std::min(x0, x - rr);
-			x1 = std::max(x1, x + rr);
-			y0 = std::min(y0, y - rr);
-			y1 = std::max(y1, y + rr);
-		}
-		const double size = std::clamp(std::max(x1 - x0, y1 - y0) * 1.08, 0.1, 2.4);
-		const V3 c = mid + r * (0.5 * (x0 + x1)) + u * (0.5 * (y0 + y1));
-		if (!Finite(c) || !std::isfinite(size))
-			return false;
-		Store(c, out->centre);
-		Store(r, out->right);
-		Store(u, out->up);
-		QuatFromAxes(r, u, nrm, out->quat);
-		out->size_m = static_cast<float>(size);
+		if (out)
+			*out = g;
 		return true;
-	}
-
-	void RasterPartner(const PartnerView& v, const float eye[3], const ZoneMarkers::Quad& quad, std::vector<u32>& out_rgba)
-	{
-		constexpr u32 kSize = ZoneMarkers::kImageSize;
-		out_rgba.assign(static_cast<size_t>(kSize) * kSize, 0u);
-		thread_local MeshRaster::Target target;
-		thread_local HandMesh::Blend blend;
-		if (target.Width() != kSize && !target.Resize(kSize, kSize, 2))
-			return;
-		MeshRaster::Camera cam;
-		if (!v.valid || !MeshRaster::Camera::Impostor(eye, quad.centre, quad.right, quad.up, quad.size_m, 0.02f, 100.0f, &cam))
-			return;
-		target.Clear();
-		if (v.flags & kFlagHead)
-		{
-			const Sphere& sp = UnitSphere();
-			MeshRaster::Mesh mesh;
-			mesh.positions = sp.pos.data();
-			mesh.normals = sp.pos.data(); // a unit sphere's normals are its positions
-			mesh.vertex_count = static_cast<u32>(sp.pos.size() / 3);
-			mesh.indices16 = sp.idx.data();
-			mesh.index_count = static_cast<u32>(sp.idx.size());
-			const auto part = [&](const float centre[3], const float scale[3], float r, float g, float b) {
-				float at[3];
-				Store(Load(v.head_pos) + Rotate(v.head_quat, Load(centre)), at);
-				const MeshRaster::Mat4 world = MeshRaster::ModelMatrix(at, v.head_quat, scale);
-				MeshRaster::Material mat;
-				mat.base_colour[0] = r;
-				mat.base_colour[1] = g;
-				mat.base_colour[2] = b;
-				ApplyPartnerLighting(mat.lighting);
-				MeshRaster::Draw(target, cam, mesh, world, mat);
-			};
-			part(kShellCentre, kShellScale, 0.62f, 0.66f, 0.72f);
-			part(kVisorCentre, kVisorScale, 0.015f, 0.018f, 0.025f);
-		}
-		for (int h = 0; h < 2; h++)
-		{
-			if (!(v.flags & (h == 0 ? kFlagLeft : kFlagRight)))
-				continue;
-			const HandMesh::Mesh& hm = HandMesh::Lerp(h, HandMesh::Pose::Open, HandMesh::Pose::Grip, v.grip[h], blend);
-			MeshRaster::Mesh mesh;
-			mesh.positions = hm.position;
-			mesh.normals = hm.normal;
-			mesh.vertex_count = hm.vertex_count;
-			mesh.indices16 = hm.index;
-			mesh.index_count = hm.triangle_count * 3;
-			MeshRaster::Material mat;
-			// A teal glove, so the partner's hands never read as your own.
-			mat.base_colour[0] = 0.28f;
-			mat.base_colour[1] = 0.60f;
-			mat.base_colour[2] = 0.66f;
-			ApplyPartnerLighting(mat.lighting);
-			MeshRaster::Draw(target, cam, mesh, MeshRaster::ModelMatrix(v.hand_pos[h], v.hand_quat[h]), mat);
-		}
-		target.Resolve();
-		target.CopyUnpremultiplied(out_rgba.data());
-	}
-
-	int PartnerMarks(const PartnerView& v, ZoneMarkers::Mark* marks)
-	{
-		if (!marks || !v.valid)
-			return 0;
-		int n = 0;
-		const auto add = [&](const float pos[3], const float quat[4]) {
-			Store(Load(pos), marks[n].centre);
-			marks[n].radius = 0.05f;
-			marks[n].shape = ZoneMarkers::Shape::Ring;
-			n++;
-			Store(Load(pos) + Rotate(quat, V3{0.0, 0.0, -0.1}), marks[n].centre);
-			marks[n].radius = 0.05f;
-			marks[n].shape = ZoneMarkers::Shape::Ring;
-			n++;
-		};
-		if (v.flags & kFlagHead)
-			add(v.head_pos, v.head_quat);
-		for (int h = 0; h < 2; h++)
-		{
-			if (v.flags & (h == 0 ? kFlagLeft : kFlagRight))
-				add(v.hand_pos[h], v.hand_quat[h]);
-		}
-		return n;
 	}
 
 	// --- The CPU thread ------------------------------------------------------------------------------------------------
@@ -1210,7 +987,9 @@ namespace VR::Presence
 		// The partner: the record of the packet's slot, used, in this room, as is the packet.
 		static int s_partner_state = -1;
 		int state = 0;
-		PartnerView view;
+		PartnerView view; // for the log only (the headset-space poses)
+		PartnerGame game;
+		u32 found_rec = 0;
 		float rec_pos[3] = {};
 		if (!have_in)
 			state = 1;
@@ -1240,6 +1019,7 @@ namespace VR::Presence
 				}
 				read_f3(static_cast<u32>(r + la.position_offset), rec_pos);
 				found = Finite3(rec_pos);
+				found_rec = r;
 				break;
 			}
 			if (!found && state == 0)
@@ -1251,6 +1031,33 @@ namespace VR::Presence
 					const double dx = g.pos[0] - in.character[0], dy = g.pos[1] - in.character[1], dz = g.pos[2] - in.character[2];
 					return std::sqrt(dx * dx + dy * dy + dz * dz) <= kMaxReachCm;
 				};
+				const auto shifted = [&shift](const GamePose& g) {
+					GamePose o = g;
+					for (int k = 0; k < 3; k++)
+						o.pos[k] += shift[k];
+					return o;
+				};
+				game.record = found_rec;
+				game.slot = in.slot;
+				game.seq = in.seq;
+				if ((in.flags & kFlagHead) && near_char(in.head))
+				{
+					game.head = shifted(in.head);
+					game.flags |= kFlagHead;
+				}
+				for (int h = 0; h < 2; h++)
+				{
+					const u8 f = (h == 0) ? kFlagLeft : kFlagRight;
+					if ((in.flags & f) && near_char(in.hand[h]))
+					{
+						game.hand[h] = shifted(in.hand[h]);
+						game.flags |= f;
+					}
+					game.grip[h] = in.grip[h] / 255.0f;
+					game.trigger[h] = in.trigger[h] / 255.0f;
+				}
+				game.valid = game.flags != 0;
+				game.stamp_ms = now;
 				if ((in.flags & kFlagHead) && near_char(in.head) && PoseFromGame(m, in.head, shift, view.head_pos, view.head_quat))
 					view.flags |= kFlagHead;
 				for (int h = 0; h < 2; h++)
@@ -1270,12 +1077,12 @@ namespace VR::Presence
 		}
 		{
 			std::lock_guard<std::mutex> lock(s_view_mutex);
-			s_view = view;
+			s_game = game;
 		}
 		if (state != s_partner_state)
 		{
 			s_partner_state = state;
-			static const char* const kState[] = {"a partner is drawn", "no fresh packet from the peer",
+			static const char* const kState[] = {"a partner is placed", "no fresh packet from the peer",
 				"the peer's packets carry this console's own slot", "the partner is in another room",
 				"the partner's record is in another room", "no used record has the packet's slot",
 				"the packet's parts are not usable"};
@@ -1307,39 +1114,6 @@ namespace VR::Presence
 					f3(in.character).c_str(), view.seq, static_cast<unsigned long long>(now - in_ms));
 			}
 		}
-
-		// PCSX2_VR_PRESENCE_DUMP=<folder>: the partner's impostor as seen from the local head, once a partner has been drawn
-		// for 3 s (for inspection on this PC only; never committed).
-		static const char* s_dump = std::getenv("PCSX2_VR_PRESENCE_DUMP");
-		static u64 s_seen_since = 0;
-		static bool s_dumped = false;
-		if (s_dump && !s_dumped && view.valid && snap.head_pose.valid)
-		{
-			if (s_seen_since == 0)
-				s_seen_since = now;
-			else if (now - s_seen_since >= 3000)
-			{
-				s_dumped = true;
-				ZoneMarkers::Quad q;
-				std::vector<u32> px;
-				if (PlacePartner(view, snap.head_pose.position_xyz.data(), &q))
-				{
-					RasterPartner(view, snap.head_pose.position_xyz.data(), q, px);
-					FileSystem::CreateDirectoryPath(s_dump, false);
-					const std::string path = Path::Combine(s_dump, "presence_partner.png");
-					const bool ok = RGBA8Image(ZoneMarkers::kImageSize, ZoneMarkers::kImageSize, px.data()).SaveToFile(path.c_str());
-					size_t opaque = 0;
-					for (const u32 c : px)
-						opaque += (c >> 24) > 16 ? 1u : 0u;
-					Console.WriteLn("(VR) Presence: dumped the partner's image (%s, quad %.2f m at (%.3f, %.3f, %.3f), %zu of "
-									"%u pixels drawn) to %s.",
-						ok ? "saved" : "NOT saved", q.size_m, q.centre[0], q.centre[1], q.centre[2], opaque,
-						ZoneMarkers::kImageSize * ZoneMarkers::kImageSize, path.c_str());
-				}
-			}
-		}
-		else if (!view.valid)
-			s_seen_since = 0;
 	}
 
 	// --- Self-test -----------------------------------------------------------------------------------------------------
@@ -1541,68 +1315,6 @@ namespace VR::Presence
 			check(!PoseToGame(bad, pos, q, &g) && !PoseToGame(a, nanp, q, &g) && !PoseToGame(a, pos, zq, &g) &&
 					  !PoseFromGame(bad, g, nullptr, bp, bq),
 				"an unusable mapping, position or orientation: refused");
-		}
-
-		// --- Placement and raster ---
-		{
-			PartnerView v;
-			v.valid = true;
-			v.flags = kFlagHead | kFlagLeft | kFlagRight;
-			// A partner 2 m ahead, facing this player (turned 180 deg about +Y), hands out to the sides.
-			const float face[4] = {0.0f, 1.0f, 0.0f, 0.0f};
-			const float hp[3] = {0.0f, 1.6f, -2.0f};
-			std::memcpy(v.head_pos, hp, sizeof(hp));
-			std::memcpy(v.head_quat, face, sizeof(face));
-			const float lp[3] = {0.35f, 1.15f, -1.75f}, rp[3] = {-0.35f, 1.15f, -1.75f};
-			std::memcpy(v.hand_pos[0], lp, sizeof(lp));
-			std::memcpy(v.hand_pos[1], rp, sizeof(rp));
-			std::memcpy(v.hand_quat[0], face, sizeof(face));
-			std::memcpy(v.hand_quat[1], face, sizeof(face));
-			const float eye[3] = {0.0f, 1.6f, 0.0f};
-			ZoneMarkers::Quad quad;
-			const bool placed = PlacePartner(v, eye, &quad);
-			check(placed && quad.size_m > 0.8f && quad.size_m < 1.4f && quad.centre[2] < -1.7f && quad.centre[2] > -2.1f,
-				"the quad sits at the partner, about 1 m across for a head and hands 70 cm apart");
-			const V3 nrm = Rotate(quad.quat, V3{0, 0, 1});
-			V3 to_eye = Load(eye) - Load(quad.centre);
-			check(placed && Normalize(to_eye) && Dot(nrm, to_eye) > 0.99, "and faces the eye");
-			std::vector<u32> px;
-			if (placed)
-				RasterPartner(v, eye, quad, px);
-			size_t opaque = 0, dark = 0, teal = 0;
-			for (const u32 c : px)
-			{
-				if ((c >> 24) < 128)
-					continue;
-				opaque++;
-				const u32 r = c & 0xFF, g = (c >> 8) & 0xFF, b = (c >> 16) & 0xFF;
-				dark += (r + g + b < 200) ? 1u : 0u;
-				teal += (g > r + 30 && b > r + 30) ? 1u : 0u;
-			}
-			check(px.size() == static_cast<size_t>(ZoneMarkers::kImageSize) * ZoneMarkers::kImageSize && opaque > 1500 &&
-					  opaque < px.size() / 2,
-				"the raster draws the head and hands, with the background clear");
-			check(dark > 50 && teal > 200, "the visor is dark and the gloves are teal");
-			// Seen from behind the partner, the visor is hidden by the shell.
-			const float eye_behind[3] = {0.0f, 1.6f, -4.0f};
-			ZoneMarkers::Quad qb;
-			std::vector<u32> pb;
-			if (PlacePartner(v, eye_behind, &qb))
-				RasterPartner(v, eye_behind, qb, pb);
-			size_t dark_b = 0;
-			for (const u32 c : pb)
-			{
-				const u32 r = c & 0xFF, g = (c >> 8) & 0xFF, b = (c >> 16) & 0xFF;
-				dark_b += ((c >> 24) >= 128 && r + g + b < 200) ? 1u : 0u;
-			}
-			check(!pb.empty() && dark_b < dark / 4, "from behind, the visor does not show");
-			ZoneMarkers::Mark marks[ZoneMarkers::kMaxMarks];
-			check(PartnerMarks(v, marks) == 6, "six redraw marks for a head and two hands");
-			PartnerView none = v;
-			none.flags = 0;
-			check(!PlacePartner(none, eye, &quad) && PartnerMarks(none, marks) == 0, "nothing valid: no quad, no marks");
-			const float eye_in[3] = {0.0f, 1.6f, -2.0f};
-			check(!PlacePartner(v, eye_in, &quad), "the eye inside the partner's head: no quad");
 		}
 
 		if (failed == 0)

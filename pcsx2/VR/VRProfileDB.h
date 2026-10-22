@@ -806,6 +806,28 @@ namespace VR::ProfileDB
 		u32 record_used = 0;
 	};
 
+	// body ([VR] VrBody; tools/outbreak-vr/research/2026-10-21-vr-body.md; needs presence): where a character's bones are
+	// (*(record + bones) + boneTable + 4 * bone, a struct per bone with its world matrix at +0x00, its local at `local`,
+	// its index at `boneIndex` (s16) and its parent's struct at `boneParent`; the model's u16 bone count at boneCount),
+	// the bones it poses, and cave V's host block, matrix tables and the draw site that reads hookOn while cave V is in.
+	static constexpr u32 kBodyTableBytes = 0x600; // 24 matrices of 64 bytes, one table per posed character
+	struct BodyParams
+	{
+		u32 block = 0;    // the host block (0x100 bytes of free RAM; must read zero or our magic)
+		u32 tables = 0;   // the matrix tables (two of kTableBytes; the same)
+		u32 hook = 0;     // the draw site cave V is called from
+		u32 hook_on = 0;  // the word there while cave V is in
+		u32 bones = 0x34;
+		u32 bone_table = 0x820;
+		u32 bone_count = 0x816;
+		u32 local = 0x40;
+		u32 bone_index = 0xC4;
+		u32 bone_parent = 0xC8;
+		int chest = 11, neck = 20, head = 21;
+		int arms[2][4] = {{12, 13, 14, 15}, {16, 17, 18, 19}}; // clavicle, upper, fore, wrist; [0] the model's +X side
+		float eye[3] = {0.0f, 7.0f, 9.0f}; // the eyes in the head bone's frame (game units)
+	};
+
 	struct BreakoutParams
 	{
 		std::vector<RecordCheck> grabbed; // all must hold; at least one
@@ -934,6 +956,7 @@ namespace VR::ProfileDB
 		std::optional<BreakoutParams> breakout;
 		std::optional<MeleeParams> melee;
 		std::optional<PresenceParams> presence;
+		std::optional<BodyParams> body;
 		std::string notes;
 	};
 

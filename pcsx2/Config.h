@@ -1443,6 +1443,16 @@ struct Pcsx2Config
 		int VrPresencePort = 47800;
 		// A shared word both consoles set alike (empty is a word too); packets carrying another word's hash are dropped.
 		std::string VrPresenceKey;
+		// VR body (tools/outbreak-vr/research/2026-10-21-vr-body.md): a VR player is shown as the game's own character model,
+		// its own skeleton posed by the player's real head and hands (the head and neck turned to the VR head, each arm
+		// reaching the VR hand with a two-bone IK, the hand turned to the controller; the legs, hips and walking stay the
+		// game's animation). The partner's, from VrPresence's poses (so only in private co-op or its offline loopback
+		// test). Off by default. Only the bone matrices the game rebuilds every frame for the draw; never a character's
+		// game state, never the game's traffic.
+		bool VrBody = false;
+		// With VrBody: the local character too, offline only, so in first person you see your own character's arms
+		// (the rest of the body stays hidden) instead of the hand models.
+		bool VrBodySelf = false;
 		// First-person near depth, in metres: how near true stereo depth reaches before it flattens onto that
 		// plane. 0 = the profile's stereo.firstPerson.nearest, below 0 = off (flatten at the convergence plane
 		// as before), above 0 = this value (clamped to 0.45-1.5 m).

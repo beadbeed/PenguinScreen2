@@ -29,11 +29,11 @@
 // - Nothing is sent, and the socket is not even open, unless first person is armed with its record resolved and the
 //   network mode is private co-op, or, for the offline loopback test, PCSX2_VR_PRESENCE_LOOPBACK=1 with the game offline
 //   and the peer on 127/8.
-// - Drawing: the partner whose slot the packets carry, in the same room as this player (the game's own room numbers),
-//   is drawn as a simple head with a visor and the CC0 hand model, all in one impostor image (ZoneMarkers::kPartner: one
-//   more swapchain, made only once a partner shows up; if none is free the partner is skipped and that is logged). The
-//   game's own character stays; the poses are moved by where this console's copy of that character stands, so the VR
-//   head sits on it even when the game's copy lags.
+// - The partner whose slot the packets carry, in the same room as this player (the game's own room numbers), is placed
+//   on this console's copy of that character: the poses are moved by where it stands, so they sit on it even when the
+//   game's copy lags. Nothing is drawn over it: VR body ([VR] VrBody, VR/VrBody.h) poses that character's own skeleton
+//   from these poses (GetPartnerGame). The first version's placeholder (a head shell and teal hands in an impostor) is
+//   gone; GetPartnerView is always false, so the compositor's partner slot stays empty.
 namespace VR::Presence
 {
 	static constexpr u32 kMagic = 0x31505256u; // "VRP1"
@@ -111,7 +111,7 @@ namespace VR::Presence
 	bool PoseToGame(const CameraDriver::Mapping& m, const float pos[3], const float quat[4], GamePose* out);
 	bool PoseFromGame(const CameraDriver::Mapping& m, const GamePose& in, const float shift[3], float pos[3], float quat[4]);
 
-	// The partner as the compositor draws it, in the headset's space.
+	// The partner in this headset's space (the log only now; the compositor no longer gets one).
 	struct PartnerView
 	{
 		bool valid = false;
@@ -126,8 +126,26 @@ namespace VR::Presence
 		u64 stamp_ms = 0; // CameraDriver::SteadyNowMs when Poll published it
 	};
 
-	// The newest partner Poll placed, if it came within kStaleMs. Any thread.
+	// Always false now (the placeholder drawing is gone; kept so the compositor's old partner slot links and stays empty).
 	bool GetPartnerView(PartnerView* out);
+
+	// The partner as VR body poses it: its record, and its VR head and hands in the GAME's coordinates moved onto this
+	// console's copy of its character (record position minus the packet's character position added), within kStaleMs.
+	struct PartnerGame
+	{
+		bool valid = false;
+		u32 record = 0; // the partner's character record (camera.base's, the packet's slot, used, this room)
+		u8 slot = 0;
+		u8 flags = 0; // kFlag*
+		GamePose head;
+		GamePose hand[2];
+		float grip[2] = {0.0f, 0.0f};
+		float trigger[2] = {0.0f, 0.0f};
+		u32 seq = 0;
+		u64 stamp_ms = 0;
+	};
+	// Any thread.
+	bool GetPartnerGame(PartnerGame* out);
 
 	// The setting is on and names a peer (the compositor makes the partner's swapchain only then). Any thread.
 	bool Wanted();
@@ -139,18 +157,13 @@ namespace VR::Presence
 	// Stops the socket thread (it is started again by Poll when wanted).
 	void Shutdown();
 
-	// The partner's impostor quad: facing the eye from the parts' middle, just big enough for the head and both hands
-	// (0.1 to 2.4 m). False with nothing valid or a part nearer the eye than 5 cm along the view. Pure.
+	// Inert (false, an empty image, 0): the placeholder drawing is gone; kept only so the compositor's old slot links.
 	bool PlacePartner(const PartnerView& v, const float eye[3], ZoneMarkers::Quad* out);
-	// The head (a shell and a dark visor) and the hands (the CC0 hand model, curled by the grip) as seen from eye on the
-	// quad, into a ZoneMarkers::kImageSize square image (straight alpha). Its own thread-local scratch: any thread.
 	void RasterPartner(const PartnerView& v, const float eye[3], const ZoneMarkers::Quad& quad, std::vector<u32>& out_rgba);
-	// Points that move with the parts (each part's position and a point 10 cm along its forward), as ZoneMarkers marks,
-	// so the compositor's redraw rule sees a turn as well as a move. Returns how many (at most 6). Pure.
 	int PartnerMarks(const PartnerView& v, ZoneMarkers::Mark* marks);
 
 	// Encode and decode, the private-address filter and the peer parser, the stale and reorder filter, the pose mapping
-	// round trip (with a mirroring map and a shift), the placement and the raster. Logs "(VR) Presence self-test: N checks
+	// round trip (with a mirroring map and a shift). Logs "(VR) Presence self-test: N checks
 	// passed" or each failure. True when every check passed.
 	bool SelfTest();
 }

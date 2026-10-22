@@ -851,6 +851,253 @@ SLPM-65428:
       - { address: 0x0FE8CC, on: 0x8FBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
       - { address: 0x0FE8D0, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
       - { address: 0x0FE8D4, on: 0x27BD0020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      # VR body ([VR] VrBody, off by default; tools/outbreak-vr/research/2026-10-21-vr-body.md): a VR player shown as the
+      # game's own character, its skeleton posed by the player's real head and hands. The characters' body pass
+      # FUN_00345210 (main program) draws each character with `jalr *(record + 0x18)` at 0x345314, after the frame's
+      # update (animation, world matrices, held items, hit tests) and before VU1 (the draw turns the world matrices into
+      # skin matrices). Cave V (0xFD000) is called there instead: while the host block at 0xFF300 reads "VBD1", for the
+      # slot naming this record (two of 0x40 from 0xFF310: u32 record, u32 table, u8 count, u8 ref, u8 flags, u32 keep
+      # mask x2, two attaches, u8 bones[28]) every listed bone below the model's own count (u16 *(record + 0x34) + 0x816)
+      # gets world = table[k] x the chest's world (the game's FUN_00190C50); flag 2 zeroes the axes of every bone not kept
+      # (its vertices fall onto its joint: only the arms show); flag 1 runs the game's own FUN_006313A0 again (its first
+      # word checked) so the held items sit in the posed hands; then the draw. Only the matrices the game rebuilds every
+      # update; never a record, never the game's traffic, so it runs in private co-op too (the partner). VrBodySelf
+      # (offline only): the focus character's skip at 0x3452E8 (`beq zero, zero, <return>`, ld ra in its delay slot) jumps
+      # to cave V's SELF instead, which draws it through V only for a slot with flag 4 naming it (your own arms), else
+      # takes the same return. Cave U (the normal way, flag 8): the characters' update FUN_00346810 calls FUN_005A6720
+      # (bone 1's height) at 0x346884 in the tick's world build (0x5CDEB0), from the last tick's locals and before the
+      # world matrices, the held items (FUN_006313A0) and the hit tests; U calls it, then for the slot naming the record
+      # writes its first nloc (slot byte +0x0B) entries as the bones' local matrices and stamps the slot (+0x38). So the
+      # game itself builds the posed arms, the weapon in the posed hand and the hit spheres on the posed body; the
+      # animation (0x638850) writes every local again after it. Cave V at the draw writes the rest of the entries as
+      # world matrices (the head's subtree, over the game's own head look FUN_0062F790, which runs after the world build)
+      # and zeroes the axes of the bones not kept for your own arms (VrBodySelf), or, as the fallback
+      # (PCSX2_VR_BODY_DRAWTIME=1), writes world matrices itself. The sites first (each checks the cave's first and last
+      # words), then the cave.
+      - { address: 0x346884, on: 0x0C03F4A4, off: 0x0C1699C8, when: [{ address: 0x346810, equals: 0x27BDFFD0 }, { address: 0xFD000, equals: 0x27BDFFC0 }, { address: 0xFD370, equals: 0x27BD0020 }], whenSetting: VrBody }   # characters' update: jal 0xFD290 (cave U) over jal FUN_005A6720
+      - { address: 0x345314, on: 0x0C03F400, off: 0x0040F809, when: [{ address: 0x345210, equals: 0x27BDFFE0 }, { address: 0xFD000, equals: 0x27BDFFC0 }, { address: 0xFD370, equals: 0x27BD0020 }], whenSetting: VrBody }   # body pass: jal 0xFD000 (cave V) over jalr *(record + 0x18)
+      - { address: 0x3452E8, on: 0x0803F48A, off: 0x10000024, when: [{ address: 0x345210, equals: 0x27BDFFE0 }, { address: 0xFD000, equals: 0x27BDFFC0 }, { address: 0xFD370, equals: 0x27BD0020 }], whenSetting: VrBodySelf }   # the focus character's skip: j 0xFD228 (cave V's SELF)
+      - { address: 0x0FD000, on: 0x27BDFFC0, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # cave V
+      - { address: 0x0FD004, on: 0xAFBF0000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD008, on: 0xAFA40004, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD00C, on: 0xAFA20008, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD010, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD014, on: 0x8D69F300, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD018, on: 0x3C0A3144, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD01C, on: 0x354A4256, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD020, on: 0x152A007B, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD024, on: 0x2568F310, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD028, on: 0xAFA8000C, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD02C, on: 0x8D090000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD030, on: 0x8FAA0004, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD034, on: 0x152A0070, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD038, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD03C, on: 0x8D4C0034, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD040, on: 0x1180006D, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD044, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD048, on: 0x910E0009, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD04C, on: 0x958D0816, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD050, on: 0x01CD782B, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD054, on: 0x11E00068, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD058, on: 0x000E7080, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD05C, on: 0x018E7021, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD060, on: 0x8DCE0820, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD064, on: 0x11C00064, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD068, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD06C, on: 0xAFAE0010, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD070, on: 0x9109000A, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD074, on: 0x31290008, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD078, on: 0x11200002, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD07C, on: 0x00007821, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD080, on: 0x910F000B, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD084, on: 0xAFAF0014, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD088, on: 0x8FA8000C, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD08C, on: 0x8FA90014, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD090, on: 0x910A0008, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD094, on: 0x012A582B, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD098, on: 0x11600014, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD09C, on: 0x01095821, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0A0, on: 0x916B001C, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0A4, on: 0x8FAC0004, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0A8, on: 0x8D8C0034, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0AC, on: 0x958D0816, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0B0, on: 0x016D782B, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0B4, on: 0x11E00009, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0B8, on: 0x000B5880, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0BC, on: 0x018B5821, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0C0, on: 0x8D640820, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0C4, on: 0x10800005, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0C8, on: 0x8D050004, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0CC, on: 0x00094980, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0D0, on: 0x00A92821, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0D4, on: 0x0C064314, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0D8, on: 0x8FA60010, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0DC, on: 0x8FA90014, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0E0, on: 0x25290001, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0E4, on: 0x1000FFE8, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0E8, on: 0xAFA90014, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0EC, on: 0x9109000A, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0F0, on: 0x31290002, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0F4, on: 0x11200021, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0F8, on: 0x8FAC0004, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD0FC, on: 0x8D8C0034, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD100, on: 0x958D0816, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD104, on: 0x00007021, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD108, on: 0x01CD782B, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD10C, on: 0x11E0001B, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD110, on: 0x000E7942, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD114, on: 0x000F7880, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD118, on: 0x010F7821, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD11C, on: 0x8DEF000C, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD120, on: 0x31D8001F, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD124, on: 0x030F7806, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD128, on: 0x31EF0001, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD12C, on: 0x15E00011, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD130, on: 0x000EC080, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD134, on: 0x0198C021, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD138, on: 0x8F180820, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD13C, on: 0x1300000D, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD140, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD144, on: 0xAF000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD148, on: 0xAF000004, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD14C, on: 0xAF000008, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD150, on: 0xAF00000C, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD154, on: 0xAF000010, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD158, on: 0xAF000014, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD15C, on: 0xAF000018, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD160, on: 0xAF00001C, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD164, on: 0xAF000020, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD168, on: 0xAF000024, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD16C, on: 0xAF000028, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD170, on: 0xAF00002C, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD174, on: 0x1000FFE4, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD178, on: 0x25CE0001, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD17C, on: 0x8FA8000C, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD180, on: 0x9109000A, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD184, on: 0x31290001, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD188, on: 0x1120001B, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD18C, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD190, on: 0x8D6AF308, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD194, on: 0x11400018, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD198, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD19C, on: 0x8D490000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1A0, on: 0x8D6CF30C, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1A4, on: 0x152C0014, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1A8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1AC, on: 0xAFAA0018, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1B0, on: 0x95090014, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1B4, on: 0x11200006, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1B8, on: 0x8FA40004, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1BC, on: 0x00894821, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1C0, on: 0x91250000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1C4, on: 0x91060016, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1C8, on: 0x0140F809, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1CC, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1D0, on: 0x8FA8000C, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1D4, on: 0x8FAA0018, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1D8, on: 0x95090018, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1DC, on: 0x11200006, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1E0, on: 0x8FA40004, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1E4, on: 0x00894821, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1E8, on: 0x91250000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1EC, on: 0x9106001A, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1F0, on: 0x0140F809, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1F4, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1F8, on: 0x8FA8000C, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD1FC, on: 0x25080040, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD200, on: 0x3C090010, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD204, on: 0x2529F390, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD208, on: 0x1509FF87, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD20C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD210, on: 0x8FA20008, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD214, on: 0x0040F809, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD218, on: 0x8FA40004, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD21C, on: 0x8FBF0000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD220, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD224, on: 0x27BD0040, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD228, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # SELF
+      - { address: 0x0FD22C, on: 0x8D69F300, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD230, on: 0x3C0A3144, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD234, on: 0x354A4256, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD238, on: 0x152A000B, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD23C, on: 0x2568F310, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD240, on: 0x8D090000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD244, on: 0x15300004, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD248, on: 0x9109000A, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD24C, on: 0x31290004, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD250, on: 0x15200007, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD254, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD258, on: 0x25080040, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD25C, on: 0x2569F390, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD260, on: 0x1509FFF7, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD264, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD268, on: 0x080D14DF, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD26C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD270, on: 0x27BDFFF0, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD274, on: 0xAFBF0000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD278, on: 0x8E020018, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD27C, on: 0x0C03F400, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD280, on: 0x02002021, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD284, on: 0x8FBF0000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD288, on: 0x080D14DF, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD28C, on: 0x27BD0010, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD290, on: 0x27BDFFE0, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # U
+      - { address: 0x0FD294, on: 0xAFBF0000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD298, on: 0xAFA40004, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD29C, on: 0x0C1699C8, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2A0, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2A4, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2A8, on: 0x8D69F300, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2AC, on: 0x3C0A3144, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2B0, on: 0x354A4256, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2B4, on: 0x152A002C, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2B8, on: 0x2568F310, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2BC, on: 0x8D090000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2C0, on: 0x8FAA0004, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2C4, on: 0x152A0024, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2C8, on: 0x9109000A, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2CC, on: 0x31290008, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2D0, on: 0x11200021, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2D4, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2D8, on: 0x8D4C0034, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2DC, on: 0x1180001E, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2E0, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2E4, on: 0x958D0816, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2E8, on: 0x00007021, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2EC, on: 0x9109000B, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2F0, on: 0x01C9502B, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2F4, on: 0x11400016, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2F8, on: 0x010E5021, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD2FC, on: 0x914A001C, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD300, on: 0x014D782B, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD304, on: 0x11E00010, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD308, on: 0x000A5080, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD30C, on: 0x018A5021, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD310, on: 0x8D4A0820, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD314, on: 0x1140000C, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD318, on: 0x8D090004, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD31C, on: 0x000E7980, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD320, on: 0x012F4821, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD324, on: 0x0000C821, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD328, on: 0x01397821, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD32C, on: 0x8DE50000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD330, on: 0x01597821, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD334, on: 0xADE50040, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD338, on: 0x27390004, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD33C, on: 0x2F260040, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD340, on: 0x14C0FFF9, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD344, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD348, on: 0x1000FFE8, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD34C, on: 0x25CE0001, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD350, on: 0x8D69F304, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD354, on: 0xAD090038, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD358, on: 0x25080040, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD35C, on: 0x2569F390, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD360, on: 0x1509FFD6, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD364, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD368, on: 0x8FBF0000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD36C, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD370, on: 0x27BD0020, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
     # The code caves the melee entries above write (nightly review M2, b2, d2). Each goes in all or nothing: its whole
     # range must read zero (or exactly these words) and holds exactly `words` silence entries; the body is written and
     # read back before any site that jumps into it (an entry whose `when` reads a word in the range) is patched. Sites
@@ -859,6 +1106,7 @@ SLPM-65428:
       - { from: 0xFE000, to: 0xFE1E0, words: 99, counter: 0x48BF93 }    # A (0xFE000), C (0xFE100), B (0xFE170) (PhysicalMelee)
       - { from: 0xFE200, to: 0xFE7DC, words: 312, counter: 0x48BF93 }   # D, E, F (PhysicalMeleeContact)
       - { from: 0xFE800, to: 0xFE8D8, words: 54, counter: 0x48BF93 }    # G (MeleeHitJolt)
+      - { from: 0xFD000, to: 0xFD374, words: 221, counter: 0x48BF93 }    # V (VrBody)
     lookAt:
       eye: 0x306338
       target: 0x306344
@@ -1109,6 +1357,15 @@ SLPM-65428:
   # messages carry) and recordUsed a u16 that is not zero in a used record (the max HP; record 3 reads 0 when nobody
   # plays it). The partner is the record whose +0x03 is the packet's slot; its position is camera.lookAt.position.
   presence: { room: 0x3065AC, recordRoom: 0x1E2, recordUsed: 0x546 }
+  # VR body ([VR] VrBody, off by default; tools/outbreak-vr/research/2026-10-21-vr-body.md): the partner (and with
+  # VrBodySelf your own arms) shown as the game's own character posed by the VR head and hands. Where the bones are
+  # (*(record + 0x34) + 0x820 + 4 * bone, a 0x190-byte struct: world matrix +0x00, local +0x40, index s16 +0xC4, parent
+  # +0xC8; the model's u16 count +0x816), the bones it poses (every File #1 player character: the chest 11, the neck 20
+  # and head 21, per side clavicle, shoulder, elbow, wrist: the model's +X side 12-15 is the character's left, -X 16-19
+  # its right, where the game puts the weapon), the eyes in the head bone's frame, and cave V's host block, matrix
+  # tables (two of 0x600 from 0xFD400), the update site and the draw site (camera.silence, whenSetting VrBody). Free RAM: 0xFD000-0xFDFFF and
+  # 0xFF300-0xFF3FF read zero in all 22 RAM dumps of File #1 we have.
+  body: { block: 0xFF300, tables: 0xFD400, hook: 0x345314, hookOn: 0x0C03F400, chest: 11, neck: 20, head: 21, arms: [[12, 13, 14, 15], [16, 17, 18, 19]], eye: [0, 7, 9] }
 
   controls:
     - device: Gamepad

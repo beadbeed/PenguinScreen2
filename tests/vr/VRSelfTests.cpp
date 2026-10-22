@@ -35,6 +35,7 @@
 #include "VR/StereoAuto.h"
 #include "VR/VRProfileDB.h"
 #include "VR/ZoneMarkers.h"
+#include "VR/VrBody.h"
 #include "VR/VrPresence.h"
 #include "VR/XRCompositor.h"
 
@@ -235,6 +236,16 @@ namespace
 						break;
 					if (fn == 0x00)
 						r[rd] = r[rt] << ((i >> 6) & 31u);
+					else if (fn == 0x02)
+						r[rd] = r[rt] >> ((i >> 6) & 31u);
+					else if (fn == 0x06)
+						r[rd] = r[rt] >> (r[rs] & 31u);
+					else if (fn == 0x09)
+					{
+						*branch = *taken = true;
+						*target = r[rs];
+						r[rd] = pc + 8u;
+					}
 					else if (fn == 0x21)
 						r[rd] = r[rs] + r[rt];
 					else if (fn == 0x23)
@@ -273,11 +284,13 @@ namespace
 				case 0x07: *branch = true; *taken = static_cast<s32>(r[rs]) > 0; *target = bt; break;
 				case 0x09: r[rt] = r[rs] + simm; break;
 				case 0x0B: r[rt] = r[rs] < simm ? 1u : 0u; break;
+				case 0x0C: r[rt] = r[rs] & imm; break;
 				case 0x0D: r[rt] = r[rs] | imm; break;
 				case 0x0F: r[rt] = imm << 16; break;
 				case 0x23: r[rt] = Load32(r[rs] + simm); break;
 				case 0x21: r[rt] = static_cast<u32>(static_cast<s32>(static_cast<s16>(static_cast<u16>(Load32(r[rs] + simm) >> (((r[rs] + simm) & 2u) * 8u))))); break; // lh
 				case 0x24: r[rt] = (Load32(r[rs] + simm) >> (((r[rs] + simm) & 3u) * 8u)) & 0xFFu; break;
+				case 0x25: r[rt] = (Load32(r[rs] + simm) >> (((r[rs] + simm) & 2u) * 8u)) & 0xFFFFu; break; // lhu
 				case 0x2B: Store32(r[rs] + simm, r[rt]); break;
 				case 0x29: Store16(r[rs] + simm, static_cast<u16>(r[rt])); break;
 				case 0x28: Store8(r[rs] + simm, static_cast<u8>(r[rt])); break;
@@ -297,11 +310,11 @@ namespace
 		}
 
 		// From entry until control leaves [lo, hi) (after a branch's delay slot): where it went, or 0 on an unknown
-		// instruction, a branch in a delay slot or more than 500 steps.
+		// instruction, a branch in a delay slot or more than 20000 steps.
 		u32 Run(u32 entry, u32 lo, u32 hi)
 		{
 			u32 pc = entry;
-			for (int n = 0; n < 500; n++)
+			for (int n = 0; n < 20000; n++)
 			{
 				if (pc < lo || pc >= hi)
 				{
@@ -1093,7 +1106,8 @@ int main(int argc, char* argv[])
 	RunLogged("Hands", VR::HandModel::SelfTest, "(VR) Hands self-test: ");
 	RunLogged("Pickup cue and hand targeting", VR::ItemReach::SelfTest, "(VR) Pickup cue self-test");
 	RunLogged("Zone markers", VR::ZoneMarkers::SelfTest, "(VR) Zone markers self-test");
-	RunLogged("VR presence (side channel, partner head and hands)", VR::Presence::SelfTest, "(VR) Presence self-test");
+	RunLogged("VR presence (side channel, partner poses)", VR::Presence::SelfTest, "(VR) Presence self-test");
+	RunLogged("VR body (bone map, IK, head clamp, blend, block)", VR::VrBody::SelfTest, "(VR) Body self-test");
 	RunLogged("MeshRaster", +[]() { return VR::MeshRaster::SelfTest() == 0; }, "(VR) MeshRaster self-test");
 	{
 		Begin("Reload gesture (ReloadGesture::SelfTest)");
@@ -1129,7 +1143,7 @@ int main(int argc, char* argv[])
 		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
 		{
 			if (sil.when_setting.empty() || sil.when_setting == "PhysicalMelee" || sil.when_setting == "PhysicalMeleeContact" ||
-				sil.when_setting == "MeleeHitJolt")
+				sil.when_setting == "MeleeHitJolt" || sil.when_setting == "VrBody" || sil.when_setting == "VrBodySelf")
 			{
 				if (sil.keep_through_disarm)
 					return false;
@@ -1330,6 +1344,255 @@ int main(int argc, char* argv[])
 			failed.empty() ? std::string("passed (it names the failed checks only, no check count)") :
 							 "FAIL: " + std::to_string(failed.size()) + " check(s): " + all);
 	}
+	RunSilent("VR body (File #1 profile, body, caves U and V interpreted)", +[]() {
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		if (!p || !p->body.has_value() || !p->camera.has_value() || !VR::ProfileDB::IsSilenceSettingName("VrBody") ||
+			!VR::ProfileDB::IsSilenceSettingName("VrBodySelf"))
+			return false;
+		const VR::ProfileDB::BodyParams& bp = p->body.value();
+		if (bp.block != 0xFF300 || bp.tables != 0xFD400 || bp.hook != 0x345314 || bp.hook_on != 0x0C03F400 || bp.chest != 11 ||
+			bp.neck != 20 || bp.head != 21 || bp.arms[0][3] != 15 || bp.arms[1][0] != 16)
+			return false;
+		// The entries: three sites, the cave's 221 words in [0xFD000, 0xFD374), all VrBody but the self site.
+		MiniEE ee;
+		int words = 0;
+		bool draw_site = false, update_site = false, self_site = false;
+		u32 update_on = 0;
+		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
+		{
+			if (sil.when_setting != "VrBody" && sil.when_setting != "VrBodySelf")
+				continue;
+			if (sil.offline_only || sil.keep_through_disarm || sil.when.empty())
+				return false;
+			if (sil.ee_address == 0x345314u)
+				draw_site = sil.value_on == 0x0C03F400u && sil.value_off == 0x0040F809u && sil.when.size() == 3 && sil.when_setting == "VrBody";
+			else if (sil.ee_address == 0x346884u)
+			{
+				update_site = sil.value_off == 0x0C1699C8u && sil.when.size() == 3 && sil.when_setting == "VrBody";
+				update_on = sil.value_on;
+			}
+			else if (sil.ee_address == 0x3452E8u)
+				self_site = sil.value_off == 0x10000024u && sil.when.size() == 3 && sil.when_setting == "VrBodySelf";
+			else if (sil.ee_address >= 0xFD000u && sil.ee_address < 0xFD374u && sil.value_off == 0 && sil.when_setting == "VrBody")
+			{
+				ee.Store32(sil.ee_address, sil.value_on);
+				words++;
+			}
+			else
+				return false;
+		}
+		const u32 kU = 0x0FD290u, kSelf = 0x0FD228u;
+		if (!draw_site || !update_site || !self_site || words != 221 || update_on != (0x0C000000u | (kU >> 2)))
+			return false;
+		// A record, its model (36 bones, structs 0x190 apart), each bone's world and local matrices filled with numbers.
+		constexpr u32 kRec = 0x477EB0, kModel = 0x480000, kBones = 0x500000, kDraw = 0x341EB0, kAttach = 0x6313A0;
+		ee.Store32(kRec + 0x34, kModel);
+		ee.Store32(kRec + 0x18, kDraw); // the record's draw callback (SELF calls it through V)
+		ee.Store16(kModel + 0x816, 36);
+		ee.Store8(kRec + 0xC7C, 5);
+		ee.Store8(kRec + 0xC7D, 0);
+		const auto bone = [](int b) { return kBones + 0x190u * static_cast<u32>(b); };
+		for (int b = 0; b < 36; b++)
+		{
+			ee.Store32(kModel + 0x820 + 4u * static_cast<u32>(b), bone(b));
+			for (u32 q = 0; q < 16; q++)
+			{
+				ee.Store32(bone(b) + 4u * q, MiniEE::Bits(static_cast<float>(b) + 0.01f * static_cast<float>(q)));
+				ee.Store32(bone(b) + 0x40 + 4u * q, MiniEE::Bits(100.0f + static_cast<float>(b) + 0.01f * static_cast<float>(q)));
+			}
+		}
+		ee.Store32(kAttach, 0x27BDFF50u);
+		struct Call
+		{
+			u32 pc, a0, a1, a2;
+			float w13; // bone 13's world [12] at the call (the draw sees the new matrices)
+		};
+		static std::vector<Call> s_calls;
+		ee.stub = +[](MiniEE& e, u32 pc, u32* next) {
+			if (pc != 0x190C50 && pc != 0x5A6720 && pc != 0x6313A0 && pc != 0x341EB0)
+				return false;
+			s_calls.push_back({pc, e.r[4], e.r[5], e.r[6], MiniEE::F(e.Load32(0x500000 + 0x190 * 13 + 48))});
+			if (pc == 0x190C50) // out = a x b
+			{
+				float a[16], b[16], o[16];
+				for (u32 q = 0; q < 16; q++)
+				{
+					a[q] = MiniEE::F(e.Load32(e.r[5] + 4u * q));
+					b[q] = MiniEE::F(e.Load32(e.r[6] + 4u * q));
+				}
+				VR::VrBody::Mul44(a, b, o);
+				for (u32 q = 0; q < 16; q++)
+					e.Store32(e.r[4] + 4u * q, MiniEE::Bits(o[q]));
+			}
+			for (int k : {1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 24, 25})
+				e.r[k] = 0xDEAD0000u + static_cast<u32>(k);
+			*next = e.r[31];
+			return true;
+		};
+		const auto write_slot = [&](int si, const VR::VrBody::BlockSlot& bs) {
+			u32 w[16];
+			VR::VrBody::PackSlot(bs, w);
+			for (u32 q = 0; q < 14; q++)
+				ee.Store32(0xFF310 + 0x40u * static_cast<u32>(si) + 4u * q, w[q]);
+		};
+		const auto header = [&](bool magic) {
+			ee.Store32(0xFF300, magic ? VR::VrBody::kBlockMagic : 0u);
+			ee.Store32(0xFF304, 77);
+			ee.Store32(0xFF308, kAttach);
+			ee.Store32(0xFF30C, 0x27BDFF50u);
+		};
+		const auto table = [&](u32 t, u32 k, float base) {
+			for (u32 q = 0; q < 16; q++)
+				ee.Store32(t + 64u * k + 4u * q, MiniEE::Bits(base + static_cast<float>(q)));
+		};
+		const auto m16 = [&](u32 a, u32 q) { return MiniEE::F(ee.Load32(a + 4u * q)); };
+		const auto f = [](int b, int q, float base) { return base + static_cast<float>(b) + 0.01f * static_cast<float>(q); };
+		bool ok = true;
+
+		// Cave U, locals mode: after FUN_005A6720, the first nloc listed bones' locals become the table's.
+		header(true);
+		VR::VrBody::BlockSlot u;
+		u.record = kRec;
+		u.table = 0xFD400;
+		u.count = 3;
+		u.ref = 11;
+		u.flags = VR::VrBody::kFlagLocals;
+		u.bones[0] = 13;
+		u.bones[1] = 14;
+		u.bones[2] = 40; // past the model's 36: skipped
+		u.nloc = 3;
+		write_slot(0, u);
+		write_slot(1, VR::VrBody::BlockSlot{});
+		table(0xFD400, 0, 500.0f);
+		table(0xFD400, 1, 600.0f);
+		table(0xFD400, 2, 700.0f);
+		s_calls.clear();
+		ee.r[4] = kRec;
+		ee.r[29] = 0x01F00000;
+		ee.r[31] = 0x34688C;
+		ee.r[16] = 0x5555;
+		ok &= ee.Run(kU, 0xFD000, 0xFD374) == 0x34688C && ee.r[29] == 0x01F00000 && ee.r[16] == 0x5555;
+		ok &= s_calls.size() == 1 && s_calls[0].pc == 0x5A6720 && s_calls[0].a0 == kRec;
+		ok &= m16(bone(13) + 0x40, 0) == 500.0f && m16(bone(13) + 0x40, 15) == 515.0f && m16(bone(14) + 0x40, 3) == 603.0f;
+		ok &= m16(bone(15) + 0x40, 0) == f(15, 0, 100.0f) && m16(bone(13), 12) == f(13, 12, 0.0f);
+		ok &= ee.Load32(0xFF310 + 0x38) == 77;
+		if (!ok)
+			return false;
+		// Another record: only the game's call.
+		s_calls.clear();
+		ee.r[4] = 0x476DD0;
+		ee.r[31] = 0x34688C;
+		ok &= ee.Run(kU, 0xFD000, 0xFD374) == 0x34688C && s_calls.size() == 1 && m16(bone(13) + 0x40, 0) == 500.0f;
+		// Cave V in locals mode for a partner, every entry a local: no world matrix written, the draw only.
+		s_calls.clear();
+		ee.r[4] = kRec;
+		ee.r[2] = kDraw;
+		ee.r[31] = 0x34531C;
+		ok &= ee.Run(0xFD000, 0xFD000, 0xFD374) == 0x34531C && ee.r[29] == 0x01F00000 && s_calls.size() == 1 && s_calls[0].pc == kDraw &&
+			  s_calls[0].a0 == kRec && m16(bone(13), 12) == f(13, 12, 0.0f);
+		// With one more entry after the locals (the head over the game's head look): only that one's world, at the draw.
+		u.count = 4;
+		u.bones[3] = 21;
+		write_slot(0, u);
+		table(0xFD400, 3, 800.0f);
+		{
+			float d3[16], c[16], w3[16];
+			for (u32 q = 0; q < 16; q++)
+			{
+				d3[q] = m16(0xFD400 + 3 * 64, q);
+				c[q] = m16(bone(11), q);
+			}
+			VR::VrBody::Mul44(d3, c, w3);
+			s_calls.clear();
+			ee.r[4] = kRec;
+			ee.r[2] = kDraw;
+			ee.r[31] = 0x34531C;
+			ok &= ee.Run(0xFD000, 0xFD000, 0xFD374) == 0x34531C && s_calls.size() == 2 && s_calls[0].pc == 0x190C50 &&
+				  s_calls[0].a0 == bone(21) && s_calls[1].pc == kDraw && m16(bone(21), 12) == w3[12] && m16(bone(13), 12) == f(13, 12, 0.0f);
+		}
+		if (!ok)
+			return false;
+
+		// Cave V, the draw-time fallback: bone 13's world = table x the chest's world, the held items again, then the draw.
+		VR::VrBody::BlockSlot v;
+		v.record = kRec;
+		v.table = 0xFD400;
+		v.count = 1;
+		v.ref = 11;
+		v.flags = VR::VrBody::kFlagAttach;
+		v.bones[0] = 13;
+		v.attach_offset[0] = 0xC7C;
+		v.attach_bone[0] = 19;
+		v.attach_offset[1] = 0xC7D;
+		v.attach_bone[1] = 15;
+		write_slot(0, v);
+		float d[16], chest[16], want[16];
+		for (u32 q = 0; q < 16; q++)
+		{
+			d[q] = m16(0xFD400, q);
+			chest[q] = m16(bone(11), q);
+		}
+		VR::VrBody::Mul44(d, chest, want);
+		s_calls.clear();
+		ee.r[4] = kRec;
+		ee.r[2] = kDraw;
+		ee.r[31] = 0x34531C;
+		ok &= ee.Run(0xFD000, 0xFD000, 0xFD374) == 0x34531C && ee.r[29] == 0x01F00000 && ee.r[16] == 0x5555;
+		ok &= s_calls.size() == 4 && s_calls[0].pc == 0x190C50 && s_calls[0].a0 == bone(13) && s_calls[0].a2 == bone(11) &&
+			  s_calls[1].pc == kAttach && s_calls[1].a0 == kRec && s_calls[1].a1 == 5 && s_calls[1].a2 == 19 && s_calls[2].pc == kAttach &&
+			  s_calls[2].a1 == 0 && s_calls[2].a2 == 15 && s_calls[3].pc == kDraw && s_calls[3].a0 == kRec && s_calls[3].w13 == want[12];
+		for (u32 q = 0; q < 16; q++)
+			ok &= m16(bone(13), q) == want[q];
+		// The attach function's first word not the game's (another overlay): no call to it.
+		ee.Store32(kAttach, 0x12345678u);
+		s_calls.clear();
+		ee.r[4] = kRec;
+		ee.r[2] = kDraw;
+		ee.r[31] = 0x34531C;
+		ok &= ee.Run(0xFD000, 0xFD000, 0xFD374) == 0x34531C && s_calls.size() == 2 && s_calls[1].pc == kDraw;
+		ee.Store32(kAttach, 0x27BDFF50u);
+		if (!ok)
+			return false;
+
+		// Your own arms (locals mode, collapse, self): every bone not kept loses its axes, its joint stays; the kept ones
+		// are untouched; SELF (s0 = the record) draws it through V and takes the skip's own return.
+		VR::VrBody::BlockSlot s;
+		s.record = kRec;
+		s.table = 0xFD400 + VR::ProfileDB::kBodyTableBytes;
+		s.flags = VR::VrBody::kFlagLocals | VR::VrBody::kFlagCollapse | VR::VrBody::kFlagSelf;
+		s.keep[0] = (1u << 13) | (1u << 14) | (1u << 15);
+		s.keep[1] = 1u; // bone 32
+		write_slot(0, VR::VrBody::BlockSlot{});
+		write_slot(1, s);
+		s_calls.clear();
+		ee.r[16] = kRec;
+		ee.r[31] = 0x00ABC0; // the body pass's own return (its delay slot reloaded ra)
+		const float w13 = m16(bone(13), 12);
+		const float w21 = m16(bone(21), 13);
+		ok &= ee.Run(kSelf, 0xFD000, 0xFD374) == 0x34537C && ee.r[31] == 0x00ABC0 && ee.r[29] == 0x01F00000;
+		ok &= s_calls.size() == 1 && s_calls[0].pc == kDraw && s_calls[0].a0 == kRec;
+		ok &= m16(bone(0), 0) == 0.0f && m16(bone(0), 11) == 0.0f && m16(bone(0), 12) == f(0, 12, 0.0f) && m16(bone(21), 5) == 0.0f &&
+			  m16(bone(21), 13) == w21 && m16(bone(13), 12) == w13 && m16(bone(32), 1) == f(32, 1, 0.0f) &&
+			  m16(bone(35), 1) == 0.0f;
+		// Without flag 4 SELF draws nothing and takes the return.
+		s.flags = VR::VrBody::kFlagLocals;
+		write_slot(1, s);
+		s_calls.clear();
+		ee.r[31] = 0x00ABC0;
+		ok &= ee.Run(kSelf, 0xFD000, 0xFD374) == 0x34537C && s_calls.empty();
+		// No magic: V only draws, U only calls the game.
+		header(false);
+		s_calls.clear();
+		ee.r[4] = kRec;
+		ee.r[2] = kDraw;
+		ee.r[31] = 0x34531C;
+		ok &= ee.Run(0xFD000, 0xFD000, 0xFD374) == 0x34531C && s_calls.size() == 1 && s_calls[0].pc == kDraw;
+		s_calls.clear();
+		ee.r[4] = kRec;
+		ee.r[31] = 0x34688C;
+		ok &= ee.Run(kU, 0xFD000, 0xFD374) == 0x34688C && s_calls.size() == 1 && s_calls[0].pc == 0x5A6720;
+		return ok;
+	});
 	RunSilent("Physical melee hit jolt (File #1 profile, melee.jolt, cave G interpreted)", +[]() {
 		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
 		if (!p || !p->melee.has_value() || !p->camera.has_value() || !VR::ProfileDB::IsSilenceSettingName("MeleeHitJolt"))

@@ -1099,6 +1099,7 @@ set(pcsx2VRSources
 	VR/VRVulkanBridge.cpp
 	VR/XRCompositor.cpp
 	VR/XRSession.cpp
+	VR/VrBody.cpp
 	VR/VrPresence.cpp
 	VR/ZoneMarkers.cpp
 )
@@ -1143,6 +1144,7 @@ set(pcsx2VRHeaders
 	VR/VRVulkanBridge.h
 	VR/XRCompositor.h
 	VR/XRSession.h
+	VR/VrBody.h
 	VR/VrPresence.h
 	VR/ZoneMarkers.h
 )
