@@ -428,6 +428,9 @@ namespace VR::ProfileDB
 		// The game's view matrix (4x4 f32, row vectors: look = -column 2, eye = -row 3 * R^T). Matching
 		// it against recent writes tells which head pose each displayed frame was rendered from.
 		u32 view_matrix_address = 0;
+		// The game's screen matrix (4x4 f32, row vectors: projection x viewport, X = m[0] x / w - m[8], Y = m[5] y / w -
+		// m[9] in GS pixels): its intrinsics, which [VR] TrueStereo maps each eye's vertices with. 0 = unknown.
+		u32 screen_matrix_address = 0;
 		// Which matched frame is on screen at a vsync: the newest matched view matrix minus this many
 		// (1 = the game builds its next view right after a flip, while the last frame is displayed).
 		u32 sync_frames_back = 1;

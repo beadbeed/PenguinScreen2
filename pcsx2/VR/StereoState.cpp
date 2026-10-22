@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <mutex>
 
 namespace VR::StereoState
@@ -102,5 +103,47 @@ namespace VR::StereoState
 	bool DumpAllowed()
 	{
 		return s_dump_allowed.load(std::memory_order_relaxed);
+	}
+
+	namespace
+	{
+		std::mutex s_cam_mutex;
+		float s_cam[4] = {};
+		s64 s_cam_ms = 0;
+		std::atomic<bool> s_true_stereo{false};
+	}
+
+	void PublishGameCamera(float fx, float fy, float cx, float cy)
+	{
+		std::lock_guard<std::mutex> lock(s_cam_mutex);
+		s_cam[0] = fx;
+		s_cam[1] = fy;
+		s_cam[2] = cx;
+		s_cam[3] = cy;
+		s_cam_ms = NowMs();
+	}
+
+	bool GameCamera(float* fx, float* fy, float* cx, float* cy)
+	{
+		std::lock_guard<std::mutex> lock(s_cam_mutex);
+		const s64 age = NowMs() - s_cam_ms;
+		if (s_cam_ms == 0 || age < 0 || age > 250)
+			return false;
+		*fx = s_cam[0];
+		*fy = s_cam[1];
+		*cx = s_cam[2];
+		*cy = s_cam[3];
+		return true;
+	}
+
+	void SetTrueStereoActive(bool active)
+	{
+		s_true_stereo.store(active, std::memory_order_relaxed);
+	}
+
+	bool TrueStereoActive()
+	{
+		static const bool s_test = (std::getenv("PCSX2_VR_TRUESTEREO_TEST") != nullptr);
+		return s_test || s_true_stereo.load(std::memory_order_relaxed);
 	}
 }

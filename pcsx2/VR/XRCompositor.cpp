@@ -5,6 +5,8 @@
 #include "VR/CameraDriver.h"
 #include "VR/DepthExport.h"
 #include "VR/DepthWarp.h"
+#include "VR/EyeProjection.h"
+#include "VR/StereoState.h"
 #include "VR/SplitState.h"
 #include "VR/ControlQuads.h"
 #include "VR/HandModel.h"
@@ -376,6 +378,16 @@ namespace VR::XRCompositor
 			bool eyes_placed = false;
 		};
 
+		// [VR] TrueStereo: how each eye that saw this frame sat relative to the game camera it was rendered from (the
+		// camera: fp_head, oriented as the Screen quads), and the field of view its layer was drawn with
+		// (VR/EyeProjection.h, the same eyes the GS mapped the vertices for). Set where the first-person screen is placed.
+		struct FpTrue
+		{
+			bool valid = false;
+			XrPosef eye[2] = {};
+			XrFovf fov[2] = {};
+		};
+
 		// [VR] DepthWarp: what the frame the Screen entries show is in the warp's source ring (the GS thread's copy of it,
 		// both eyes, and its exported depth when it had one) and how the eyes that saw it sat (the first-person screen only).
 		struct FpWarp
@@ -435,6 +447,8 @@ namespace VR::XRCompositor
 			// [VR] DepthLayer: the depth that goes with the Screen entries' images (FpDepth), and the projection layer
 			// BuildSubmitArray makes of the first-person screen's quads with it, in this copy of the set.
 			FpDepth fp_depth;
+			// [VR] TrueStereo: the eyes the Screen entries' images were drawn for (BuildTrueProjection).
+			FpTrue fp_true;
 			XrCompositionLayerProjection fp_proj;
 			XrCompositionLayerProjectionView fp_views[2];
 			XrCompositionLayerDepthInfoKHR fp_depth_info[2];
@@ -570,6 +584,9 @@ namespace VR::XRCompositor
 			EyeChain depth_chains[2];
 			FpDepth present_depth;
 			bool warned_depth = false;
+			// [VR] TrueStereo (Initialize): on for this session (not PacerCopies); this present's eyes (GS thread).
+			bool true_stereo = false;
+			FpTrue present_true;
 			// [VR] DepthWarp: this present's frame in the warp's ring (WarpCopyFrame), for the publish (GS thread).
 			FpWarp present_warp;
 
@@ -6732,6 +6749,7 @@ namespace VR::XRCompositor
 				merged.turn_rate = prev.fp_screen ? turn_rate : 0.0f;
 				merged.fp_image = prev.fp_image;
 				merged.fp_depth = prev.fp_depth;
+				merged.fp_true = prev.fp_true;
 				merged.fp_warp = prev.fp_warp;
 				merged.serial = prev.serial + 1;
 				// PacerCopies: the kept Screen entries show the frame they were published with.
@@ -6742,6 +6760,7 @@ namespace VR::XRCompositor
 			}
 			next.serial = prev.serial + 1;
 			next.fp_depth = fp_screen ? s.present_depth : FpDepth{};
+			next.fp_true = fp_screen ? s.present_true : FpTrue{};
 			next.fp_warp = s.present_warp;
 			if (!fp_screen)
 				next.fp_warp.eyes_placed = false;
@@ -7066,6 +7085,81 @@ namespace VR::XRCompositor
 			return true;
 		}
 
+		// [VR] TrueStereo: the first-person screen's two eye quads go as one projection layer whose views are the eyes
+		// themselves: each layer of the frame is that eye's own image (the GS drew it with the eye's view and projection),
+		// so the view is the eye's pose at the frame's render pose and the fov it was drawn with. The depth goes with it
+		// when [VR] DepthLayer has it (each layer's depth is that eye's own now).
+		bool BuildTrueProjection(PublishedSet& set, const XrCompositionLayerQuad* left, const XrCompositionLayerQuad* right)
+		{
+			const XrCompositionLayerQuad* const eye_quad[2] = {left, right};
+			if (!set.fp_true.valid || !left || !right || left == right)
+				return false;
+			for (u32 v = 0; v < 2; v++)
+			{
+				const XrCompositionLayerQuad* const q = eye_quad[v];
+				// The camera: the quad's orientation (yaw and pitch at the render pose, turned with the stick since) at
+				// the head position the screen is placed around.
+				const XrQuaternionf c = q->pose.orientation;
+				const XrQuaternionf e = set.fp_true.eye[v].orientation;
+				const XrVector3f p = set.fp_true.eye[v].position;
+				XrCompositionLayerProjectionView& pv = set.fp_views[v];
+				pv = XrCompositionLayerProjectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+				pv.pose.orientation = {c.w * e.x + c.x * e.w + c.y * e.z - c.z * e.y, c.w * e.y - c.x * e.z + c.y * e.w + c.z * e.x,
+					c.w * e.z + c.x * e.y - c.y * e.x + c.z * e.w, c.w * e.w - c.x * e.x - c.y * e.y - c.z * e.z};
+				// v' = v + 2w (c x v) + 2 c x (c x v)
+				const float t1x = c.y * p.z - c.z * p.y, t1y = c.z * p.x - c.x * p.z, t1z = c.x * p.y - c.y * p.x;
+				const float t2x = c.y * t1z - c.z * t1y, t2y = c.z * t1x - c.x * t1z, t2z = c.x * t1y - c.y * t1x;
+				pv.pose.position = {set.fp_head.x + p.x + 2.0f * (c.w * t1x + t2x), set.fp_head.y + p.y + 2.0f * (c.w * t1y + t2y),
+					set.fp_head.z + p.z + 2.0f * (c.w * t1z + t2z)};
+				pv.fov = set.fp_true.fov[v];
+				pv.subImage = q->subImage;
+				pv.next = nullptr;
+				if (set.fp_depth.valid)
+				{
+					XrSwapchain depth = XR_NULL_HANDLE;
+					for (int k = 0; k < 2; k++)
+					{
+						if (set.fp_depth.colour[k] != XR_NULL_HANDLE && set.fp_depth.colour[k] == q->subImage.swapchain)
+							depth = set.fp_depth.depth[k];
+					}
+					if (depth != XR_NULL_HANDLE)
+					{
+						XrCompositionLayerDepthInfoKHR& di = set.fp_depth_info[v];
+						di = XrCompositionLayerDepthInfoKHR{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
+						di.subImage.swapchain = depth;
+						di.subImage.imageRect = q->subImage.imageRect;
+						di.subImage.imageArrayIndex = 0;
+						di.minDepth = set.fp_depth.range.min_depth;
+						di.maxDepth = set.fp_depth.range.max_depth;
+						di.nearZ = set.fp_depth.range.near_z;
+						di.farZ = set.fp_depth.range.far_z;
+						pv.next = &di;
+					}
+				}
+			}
+			set.fp_proj = XrCompositionLayerProjection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+			set.fp_proj.layerFlags = 0;
+			set.fp_proj.space = left->space;
+			set.fp_proj.viewCount = 2;
+			set.fp_proj.views = set.fp_views;
+			static std::atomic_bool s_first_logged{false};
+			if (!s_first_logged.exchange(true))
+			{
+				constexpr float kDeg = 180.0f / 3.14159265f;
+				const XrCompositionLayerProjectionView& l = set.fp_views[0];
+				const XrCompositionLayerProjectionView& r = set.fp_views[1];
+				const float dx = r.pose.position.x - l.pose.position.x, dy = r.pose.position.y - l.pose.position.y,
+							dz = r.pose.position.z - l.pose.position.z;
+				Console.WriteLn("(VR) TrueStereo: first per-eye projection layer: eyes %.1f mm apart, left fov %.1f/%.1f/%.1f/%.1f, "
+								"right %.1f/%.1f/%.1f/%.1f deg (left/right/up/down), %dx%d, %s.",
+					1000.0f * std::sqrt(dx * dx + dy * dy + dz * dz), l.fov.angleLeft * kDeg, l.fov.angleRight * kDeg,
+					l.fov.angleUp * kDeg, l.fov.angleDown * kDeg, r.fov.angleLeft * kDeg, r.fov.angleRight * kDeg,
+					r.fov.angleUp * kDeg, r.fov.angleDown * kDeg, l.subImage.imageRect.extent.width,
+					l.subImage.imageRect.extent.height, l.next ? "with depth" : "no depth");
+			}
+			return true;
+		}
+
 		u32 BuildSubmitArray(PublishedSet& set, const XrCompositionLayerProjection* background, bool stale, float turn,
 			const XrCompositionLayerBaseHeader** out)
 		{
@@ -7075,7 +7169,7 @@ namespace VR::XRCompositor
 			// [VR] DepthLayer: the first-person screen's quads go as one projection layer, in the first one's position.
 			// m8: only with one Screen quad per eye (or one for both). A split-screen first person has several viewports
 			// per eye, and one projection view per eye would drop all but the first: those go as quads, without depth.
-			bool depth_proj = set.fp_screen && set.fp_depth.valid;
+			bool depth_proj = set.fp_screen && (set.fp_depth.valid || set.fp_true.valid);
 			if (depth_proj)
 			{
 				u32 per_eye[2] = {0, 0};
@@ -7120,7 +7214,8 @@ namespace VR::XRCompositor
 			}
 			if (proj_at >= 0)
 			{
-				if (BuildDepthProjection(set, eye_quad[0], eye_quad[1], turn))
+				if (set.fp_true.valid ? BuildTrueProjection(set, eye_quad[0], eye_quad[1]) :
+				                        BuildDepthProjection(set, eye_quad[0], eye_quad[1], turn))
 				{
 					out[proj_at] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&set.fp_proj);
 				}
@@ -10697,7 +10792,26 @@ namespace VR::XRCompositor
 		wp.claimed = -1;
 		wp.test_shift_m = 0.0f;
 		wp.dump_dir.clear();
-		if (EmuConfig.VR.DepthWarp)
+		// [VR] TrueStereo: each eye's own image, sent as a projection layer of the eyes (BuildTrueProjection).
+		s.true_stereo = false;
+		if (EmuConfig.VR.TrueStereo)
+		{
+			if (pc.on)
+				Console.Warning("(VR) TrueStereo: off: it needs [VR] PacerCopies off.");
+			else
+			{
+				s.true_stereo = true;
+				Console.WriteLn("(VR) TrueStereo: on ([VR] TrueStereo): in first person each eye's layer is drawn with that eye's "
+								"view and projection and sent as a projection layer of the eyes (no first-person screen).");
+			}
+		}
+		StereoState::SetTrueStereoActive(s.true_stereo);
+		if (EmuConfig.VR.DepthWarp && s.true_stereo)
+		{
+			Console.Warning("(VR) Depth warp: off: [VR] TrueStereo is on (the warp redraws a screen image; the eyes' own "
+							"images go as a projection layer the runtime reprojects).");
+		}
+		else if (EmuConfig.VR.DepthWarp)
 		{
 			if (!s.headset_rate)
 				Console.Warning("(VR) Depth warp: off: it needs [VR] HeadsetRateSubmit (the pacer draws every display frame).");
@@ -11318,6 +11432,47 @@ namespace VR::XRCompositor
 					}
 					s.present_warp.eyes_placed = true;
 				}
+				// [VR] TrueStereo: the eyes that saw this frame, relative to its camera (VR/EyeProjection.h, as the GS drew
+				// them): the headset's IPD, cant and per-eye fov, and the head's roll at the render pose.
+				s.present_true.valid = false;
+				if (s.true_stereo)
+				{
+					EyeProjection::GameCamera cam;
+					if (!StereoState::GameCamera(&cam.fx, &cam.fy, &cam.cx, &cam.cy))
+						cam.fx = cam.fy = 100.0f; // the poses and fovs do not depend on it
+					const EyeInfo ei = GetEyeInfo();
+					EyeProjection::EyeSpec spec;
+					constexpr float kRad = 3.14159265358979323846f / 180.0f;
+					if (ei.valid)
+					{
+						spec.ipd_m = (ei.ipd_m > 0.04f && ei.ipd_m < 0.09f) ? ei.ipd_m : 0.064f;
+						spec.cant_rad = ei.cant_deg * kRad;
+						for (int e = 0; e < 2; e++)
+							for (int k = 0; k < 4; k++)
+								spec.tan[e][k] = std::tan(ei.fov_deg[e][k] * kRad);
+					}
+					else
+					{
+						EyeProjection::CameraTangents(cam, spec.tan[0]);
+						EyeProjection::CameraTangents(cam, spec.tan[1]);
+					}
+					// Roll about the view axis: the right axis's rise over the pitch's cos (yaw-pitch-roll).
+					const float rxy = 2.0f * (q.x * q.y + q.w * q.z);
+					const float fyq = -2.0f * (q.y * q.z - q.w * q.x);
+					const float cp = std::sqrt(std::max(1.0f - fyq * fyq, 1e-6f));
+					spec.roll_rad = std::asin(std::clamp(rxy / cp, -1.0f, 1.0f));
+					EyeProjection::Eye eyes[2];
+					if (EyeProjection::Build(cam, spec, eyes))
+					{
+						for (int e = 0; e < 2; e++)
+						{
+							s.present_true.eye[e].position = {eyes[e].pos_m[0], eyes[e].pos_m[1], eyes[e].pos_m[2]};
+							s.present_true.eye[e].orientation = {eyes[e].quat[0], eyes[e].quat[1], eyes[e].quat[2], eyes[e].quat[3]};
+							s.present_true.fov[e] = {eyes[e].fov_rad[0], eyes[e].fov_rad[1], eyes[e].fov_rad[2], eyes[e].fov_rad[3]};
+						}
+						s.present_true.valid = true;
+					}
+				}
 				const float fx = -2.0f * (q.x * q.z + q.w * q.y);
 				const float fy = -2.0f * (q.y * q.z - q.w * q.x);
 				const float fz = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
@@ -11819,6 +11974,7 @@ namespace VR::XRCompositor
 		FillPublishedSet(&set, layers, layer_count, sources);
 		ParkFreeSlots(&set);
 		set.fp_depth = pub_fp_screen ? s.present_depth : FpDepth{};
+		set.fp_true = pub_fp_screen ? s.present_true : FpTrue{};
 		set.fp_screen = pub_fp_screen;
 		set.fp_head = pub_fp_head;
 		set.fp_image = pub_fp_image;

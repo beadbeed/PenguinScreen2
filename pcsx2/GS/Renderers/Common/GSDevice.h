@@ -1005,6 +1005,12 @@ struct alignas(16) GSHWDrawConfig
 		u32 vr_band_count;
 		GSVector4 vr_splits;
 		GSVector4 vr_band[4];
+		// [VR] TrueStereo (vr_map_mode 3, VR/EyeProjection.h): the game camera's intrinsics (fx, fy, cx, cy); the
+		// vertex's depth source (a0, beta, flat-plane w, kind 0 flat / 1 Z fit / 2 Q); per eye the camera-to-eye rows
+		// and the eye's intrinsics.
+		GSVector4 vr_eye_in;
+		GSVector4 vr_eye_fit;
+		GSVector4 vr_eye[8];
 		__fi VSConstantBuffer()
 		{
 			memset(static_cast<void*>(this), 0, sizeof(*this));

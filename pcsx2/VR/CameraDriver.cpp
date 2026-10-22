@@ -2741,6 +2741,17 @@ namespace VR::CameraDriver
 		// from one of the earlier writes. Match it and queue that write's head pose for the frame.
 		void TrackRenderPose(const ProfileDB::CameraLookAt& la)
 		{
+			// [VR] TrueStereo: the game's screen intrinsics, for the GS's per-eye vertex map (VR/EyeProjection.h).
+			if (la.screen_matrix_address != 0)
+			{
+				const auto rd = [&la](u32 i) {
+					return std::bit_cast<float>(static_cast<u32>(memRead32(la.screen_matrix_address + i * 4)));
+				};
+				const float fx = rd(0), fy = rd(5), cx = -rd(8), cy = -rd(9);
+				if (std::isfinite(fx) && std::isfinite(fy) && std::isfinite(cx) && std::isfinite(cy) && std::abs(fx) > 1.0f &&
+					std::abs(fy) > 1.0f)
+					StereoState::PublishGameCamera(fx, fy, cx, cy);
+			}
 			if (la.view_matrix_address == 0)
 				return;
 			float m[16];

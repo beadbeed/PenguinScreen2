@@ -34,6 +34,9 @@ layout(std140, set = 0, binding = 0) uniform cb0
 	uint vr_band_count;
 	vec4 vr_splits;
 	vec4 vr_band[4];
+	vec4 vr_eye_in;
+	vec4 vr_eye_fit;
+	vec4 vr_eye[8];
 };
 
 layout(location = 0) out VSOutput
@@ -81,6 +84,37 @@ float vr_stereo_disp(float q_in, float z_norm)
 }
 #endif
 
+
+#if VS_MULTIVIEW
+// [VR] TrueStereo (vr_map_mode 3; pcsx2/VR/EyeProjection.h has the CPU twin): the vertex the game's VU1 emitted for its
+// one camera, mapped into this view's eye. p is the GS position (12.4), zr the raw Z, q the vertex Q. vr_eye_in holds the
+// game's intrinsics (fx, fy, cx, cy); vr_eye_fit (a0, beta, flat-plane w, kind: 0 flat, 1 Z fit, 2 Q); vr_eye[4e..4e+2]
+// the camera-to-eye rows and vr_eye[4e+3] the eye's intrinsics. k comes back as w / w', the factor S, T and Q take so
+// S/Q stays and Q becomes 1/w'. Flat draws (the HUD, text) sit on a plane vr_eye_fit.z ahead and keep their Z and Q.
+void vr_true_eye(inout vec2 p, inout float zr, out float k, float q)
+{
+	uint e = uint(gl_ViewIndex) * 4u;
+	vec2 P = p * (1.0f / 16.0f);
+	float w = vr_eye_fit.z;
+	if (vr_eye_fit.w > 1.5f)
+		w = 1.0f / max(q, 1e-7f);
+	else if (vr_eye_fit.w > 0.5f)
+		w = 1.0f / max(vr_eye_fit.y * (zr * exp2(-32.0f) - vr_eye_fit.x), 1e-7f);
+	vec4 pc = vec4((P.x - vr_eye_in.z) * w / vr_eye_in.x, (P.y - vr_eye_in.w) * w / vr_eye_in.y, -w, 1.0f);
+	vec3 pe = vec3(dot(vr_eye[e], pc), dot(vr_eye[e + 1u], pc), dot(vr_eye[e + 2u], pc));
+	float we = max(-pe.z, 0.5f);
+	vec4 K = vr_eye[e + 3u];
+	p = vec2(K.z + K.x * pe.x / we, K.w + K.y * pe.y / we) * 16.0f;
+	k = 1.0f;
+	if (vr_eye_fit.w > 0.5f)
+	{
+		k = w / we;
+		if (vr_eye_fit.w < 1.5f)
+			zr = clamp(((1.0f / we) / vr_eye_fit.y + vr_eye_fit.x) * exp2(32.0f), 0.0f, float(MaxDepth));
+	}
+}
+#endif
+
 #if VS_FST
 float vr_collimate_signed()
 {
@@ -107,13 +141,20 @@ void main()
 {
 	uint z = min(a_z, MaxDepth);
 
-	gl_Position = vec4(a_p, float(z), 1.0f) - vec4(0.05f, 0.05f, 0, 0);
+	vec2 vr_p = vec2(a_p);
+	float vr_z = float(z);
+	float vr_k = 1.0f;
+	#if VS_MULTIVIEW
+		if (vr_map_mode == 3u)
+			vr_true_eye(vr_p, vr_z, vr_k, a_q);
+	#endif
+	gl_Position = vec4(vr_p, vr_z, 1.0f) - vec4(0.05f, 0.05f, 0, 0);
 	gl_Position.xy = gl_Position.xy * vec2(VertexScale.x, -VertexScale.y) - vec2(VertexOffset.x, -VertexOffset.y);
 	gl_Position.z *= exp2(-32.0f);
 	gl_Position.y = -gl_Position.y;
 
 	#if !VS_FST
-		if (vr_stereo.x != 0.0f || vr_map_mode != 0u)
+		if ((vr_stereo.x != 0.0f || vr_map_mode != 0u) && vr_map_mode != 3u)
 		{
 			#if VS_MULTIVIEW
 				float vr_eye_sign = (gl_ViewIndex == 0) ? -1.0f : 1.0f;
@@ -142,7 +183,7 @@ void main()
 
 	#if VS_TME
 		vec2 uv = a_uv - TextureOffset;
-		vec2 st = a_st - TextureOffset;
+		vec2 st = a_st * vr_k - TextureOffset;
 
 		vsOut.ti.xy = uv * TextureScale;
 
@@ -153,7 +194,7 @@ void main()
 		#endif
 
 		vsOut.t.xy = st;
-		vsOut.t.w = a_q;
+		vsOut.t.w = a_q * vr_k;
 	#else
 		vsOut.t = vec4(0.0f, 0.0f, 0.0f, 1.0f);
 		vsOut.ti = vec4(0.0f);
@@ -227,14 +268,21 @@ ProcessedVertex load_vertex(uint index)
 	ProcessedVertex vtx;
 
 	uint z = min(a_z, MaxDepth);
-	vtx.p = vec4(a_p, float(z), 1.0f) - vec4(0.05f, 0.05f, 0, 0);
+	vec2 vr_p = vec2(a_p);
+	float vr_z = float(z);
+	float vr_k = 1.0f;
+	#if VS_MULTIVIEW
+		if (vr_map_mode == 3u)
+			vr_true_eye(vr_p, vr_z, vr_k, a_q);
+	#endif
+	vtx.p = vec4(vr_p, vr_z, 1.0f) - vec4(0.05f, 0.05f, 0, 0);
 	vtx.p.xy = vtx.p.xy * vec2(VertexScale.x, -VertexScale.y) - vec2(VertexOffset.x, -VertexOffset.y);
 	vtx.p.z *= exp2(-32.0f);
 	vtx.p.y = -vtx.p.y;
 
 	#if VS_TME
 		vec2 uv = a_uv - TextureOffset;
-		vec2 st = a_st - TextureOffset;
+		vec2 st = a_st * vr_k - TextureOffset;
 		vtx.ti.xy = uv * TextureScale;
 
 		#if VS_FST
@@ -244,7 +292,7 @@ ProcessedVertex load_vertex(uint index)
 		#endif
 
 		vtx.t.xy = st;
-		vtx.t.w = a_q;
+		vtx.t.w = a_q * vr_k;
 	#else
 		vtx.t = vec4(0.0f, 0.0f, 0.0f, 1.0f);
 		vtx.ti = vec4(0.0f);
@@ -480,7 +528,7 @@ void main()
 	gl_Position = vtx.p;
 
 	#if !VS_FST
-		if (vr_stereo.x != 0.0f || vr_map_mode != 0u)
+		if ((vr_stereo.x != 0.0f || vr_map_mode != 0u) && vr_map_mode != 3u)
 		{
 			#if VS_MULTIVIEW
 				float vr_eye_sign = (gl_ViewIndex == 0) ? -1.0f : 1.0f;

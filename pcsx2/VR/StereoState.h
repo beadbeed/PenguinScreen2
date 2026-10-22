@@ -92,6 +92,15 @@ namespace VR::StereoState
 	// Head roll (radians, game camera convention) published by the camera driver each
 	// time it writes the look-at. HeadRoll returns false if never set or older than 150 ms.
 	void PublishHeadRoll(float roll_rad);
+	// [VR] TrueStereo: the game camera's intrinsics in GS pixels (fx, fy, cx, cy) from the profile's camera.lookAt
+	// screenMatrix, published by CameraDriver every vsync while first person drives the camera (EE thread); GameCamera
+	// returns false if never set or older than 250 ms (GS thread).
+	void PublishGameCamera(float fx, float fy, float cx, float cy);
+	bool GameCamera(float* fx, float* fy, float* cx, float* cy);
+	// [VR] TrueStereo is in effect: the setting is on and the compositor accepted it (or PCSX2_VR_TRUESTEREO_TEST for
+	// headset-free checks). Set by the compositor, read by the GS.
+	void SetTrueStereoActive(bool active);
+	bool TrueStereoActive();
 	bool HeadRoll(float* roll_rad);
 
 	// Rotate first-person parallax with head roll (VR.RollParallax).
