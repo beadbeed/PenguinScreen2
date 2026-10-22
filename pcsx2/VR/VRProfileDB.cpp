@@ -2864,7 +2864,7 @@ static std::optional<VR::ProfileDB::ReachParams> parseReach(const std::string_vi
 		Console.WarningFmt("(VR) ProfileDB: Serial '{}' reach {}.", serial, why);
 		ok = false;
 	};
-	warnUnknownKeys(serial, rnode, "reach", {"list", "node", "accept", "items", "probe", "maxNodes", "hand"});
+	warnUnknownKeys(serial, rnode, "reach", {"list", "node", "accept", "items", "probe", "maxNodes", "hand", "pickup"});
 
 	// A hex number under key; absent keeps the default, present but not a number makes the block bad.
 	const auto hex = [&](const ryml::ConstNodeRef& map, const char* key, const std::string& what, u32& dst) {
@@ -3066,6 +3066,91 @@ static std::optional<VR::ProfileDB::ReachParams> parseReach(const std::string_vi
 				hand_bad("keep must be at least range");
 		}
 		rp.has_hand = hand_ok;
+	}
+
+	// pickup: real hand pickups ([VR] HandPickup). Like hand, a bad entry drops just this part (HandPickup then does
+	// nothing in this game) and the pickup cue keeps the rest.
+	if (rnode.has_child("pickup"))
+	{
+		const ryml::ConstNodeRef h = rnode["pickup"];
+		bool pk_ok = h.is_map();
+		const auto pk_bad = [&](const std::string& why) {
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' reach.pickup {}, so HandPickup does nothing in this game.", serial, why);
+			pk_ok = false;
+		};
+		if (!pk_ok)
+			pk_bad("is not a map");
+		else
+		{
+			warnUnknownKeys(serial, h, "reach.pickup", {"near", "show", "maxReach", "block", "magic", "counter", "site", "siteOn", "cave",
+				"caveFirst", "prompt", "result", "cells", "cellCount", "overlay", "which", "sub", "grid", "cursorNode",
+				"cursorIndex", "cellNodes"});
+			const auto num = [&](const char* key, float lo, float hi, float& dst) {
+				if (!h.has_child(key))
+					return;
+				const std::string_view raw = nodeVal(h[key]);
+				const std::optional<float> v = StringUtil::FromChars<float>(raw);
+				if (!v.has_value() || !std::isfinite(v.value()) || v.value() < lo || v.value() > hi)
+					pk_bad(fmt::format("{} '{}' must be a number from {} to {}", key, raw, lo, hi));
+				else
+					dst = v.value();
+			};
+			// A required address in main RAM, aligned to `align`.
+			const auto addr = [&](const char* key, u32 align, u32 bytes, u32& dst) {
+				const std::optional<u32> v = h.has_child(key) ? parseAddress(nodeVal(h[key])) : std::nullopt;
+				if (!v.has_value() || !inMainRam(v.value(), bytes) || (v.value() % align) != 0)
+					pk_bad(fmt::format("needs {} (a {}-byte aligned address in main RAM)", key, align));
+				else
+					dst = v.value();
+			};
+			// A required word or record offset.
+			const auto word = [&](const char* key, u32& dst, u32 max) {
+				const std::optional<u32> v = h.has_child(key) ? parseHexU32(nodeVal(h[key])) : std::nullopt;
+				if (!v.has_value() || v.value() > max)
+					pk_bad(fmt::format("needs {} (a number up to {:#x})", key, max));
+				else
+					dst = v.value();
+			};
+			num("near", 0.0f, 50.0f, rp.pickup_near);
+			num("show", 0.0f, 500.0f, rp.pickup_show);
+			num("maxReach", 20.0f, 300.0f, rp.pickup_max_reach);
+			addr("block", 4, 0x20, rp.pickup_block);
+			word("magic", rp.pickup_magic, 0xFFFFFFFFu);
+			addr("counter", 1, 1, rp.pickup_counter);
+			addr("site", 4, 4, rp.pickup_site);
+			word("siteOn", rp.pickup_site_on, 0xFFFFFFFFu);
+			addr("cave", 4, 4, rp.pickup_cave);
+			word("caveFirst", rp.pickup_cave_first, 0xFFFFFFFFu);
+			addr("prompt", 4, 4, rp.pickup_prompt);
+			word("result", rp.pickup_result, 0xFFFF);
+			word("cells", rp.pickup_cells, 0xFFFF);
+			if (h.has_child("cellCount"))
+				word("cellCount", rp.pickup_cell_count, 4);
+			addr("overlay", 4, 4, rp.pickup_overlay);
+			addr("which", 1, 1, rp.pickup_which);
+			addr("sub", 1, 1, rp.pickup_sub);
+			addr("grid", 1, 1, rp.pickup_grid);
+			addr("cursorNode", 4, 4, rp.pickup_cursor_node);
+			addr("cursorIndex", 2, 2, rp.pickup_cursor_index);
+			if (!h.has_child("cellNodes") || !h["cellNodes"].is_seq() || h["cellNodes"].num_children() != rp.pickup_cell_count)
+				pk_bad("needs cellNodes: [one cell node address per cell]");
+			else
+			{
+				u32 k = 0;
+				for (const ryml::ConstNodeRef& c : h["cellNodes"].children())
+				{
+					const std::optional<u32> v = parseAddress(nodeVal(c));
+					if (!v.has_value() || !inMainRam(v.value(), 4))
+						pk_bad("cellNodes holds an address outside main RAM");
+					else if (k < 4)
+						rp.pickup_cell_nodes[k] = v.value();
+					k++;
+				}
+			}
+			if (pk_ok && (rp.pickup_magic == 0 || rp.pickup_site_on == 0 || rp.pickup_cave_first == 0 || rp.pickup_cell_count == 0))
+				pk_bad("magic, siteOn, caveFirst and cellCount must not be 0");
+		}
+		rp.has_pickup = pk_ok;
 	}
 
 	if (!ok)
@@ -5558,7 +5643,8 @@ static int CountMultibandResolveMismatches(bool log)
 bool VR::ProfileDB::IsSilenceSettingName(std::string_view name)
 {
 	return name == "SeamlessDoors" || name == "PhysicalMelee" || name == "PhysicalMeleeContact" || name == "MeleeHitJolt" ||
-	       name == "GunRayAim";
+	       name == "GunRayAim" ||
+	       name == "HandPickup";
 }
 
 bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
@@ -5577,6 +5663,9 @@ bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
 	// The gun ray's cave I: strictly offline (SilenceSettingCoopLive says no for it).
 	if (name == "GunRayAim")
 		return EmuConfig.VR.GunRayAim;
+	// Real hand pickups' cave (the Circle search at the hand): strictly offline (SilenceSettingCoopLive says no for it).
+	if (name == "HandPickup")
+		return EmuConfig.VR.HandPickup;
 	return false;
 }
 

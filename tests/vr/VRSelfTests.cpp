@@ -25,6 +25,7 @@
 #include "VR/CameraDriver.h"
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
+#include "VR/HandPickup.h"
 #include "VR/HudCards.h"
 #include "VR/ItemReach.h"
 #include "VR/MenuPanel.h"
@@ -179,7 +180,7 @@ namespace
 	}
 
 	// [VR] PhysicalMelee's caves, run as the EE would run them: the File #1 profile's camera.silence words in a small
-	// interpreter of just the instructions they use (lui, ori, addiu, sltiu, sll, addu, subu, and, xor, sltu, lw, lh, lbu, sw, sh, sb, sd, lwc1, swc1, mul.s,
+	// interpreter of just the instructions they use (lui, ori, addiu, sltiu, sll, addu, subu, and, xor, sltu, lw, lh, lbu, sw, sh, sb, sd, lwc1, swc1, mtc1, mul.s,
 	// beq, bne, bgez, bgtz, blez, j, jal, jr, with delay slots; the FPU loads and stores only move bits). A stub stands in
 	// for game code the caves call or jump to: Run asks it where control goes on from an address outside the cave.
 	struct MiniEE
@@ -284,7 +285,12 @@ namespace
 				case 0x28: Store8(r[rs] + simm, static_cast<u8>(r[rt])); break;
 				case 0x3F: Store32(r[rs] + simm, r[rt]); Store32(r[rs] + simm + 4u, 0); break; // sd: these values are 32-bit
 				case 0x11:
-					// mul.s fd, fs, ft only
+					// mtc1 rt, fs (the bits move), and mul.s fd, fs, ft
+					if (((i >> 21) & 31u) == 0x04 && (i & 0x7FFu) == 0)
+					{
+						f[rd] = r[rt];
+						break;
+					}
 					if (((i >> 21) & 31u) != 0x10 || fn != 0x02)
 						return false;
 					f[(i >> 6) & 31u] = Bits(F(f[rd]) * F(f[rt]));
@@ -1217,6 +1223,7 @@ int main(int argc, char* argv[])
 	RunLogged("Feedback", VR::GameFeedback::SelfTest, "(VR) Feedback self-test: ");
 	RunLogged("Hands", VR::HandModel::SelfTest, "(VR) Hands self-test: ");
 	RunLogged("Pickup cue and hand targeting", VR::ItemReach::SelfTest, "(VR) Pickup cue self-test");
+	RunLogged("Hand pickup", VR::HandPickup::SelfTest, "(VR) Hand pickup self-test");
 	RunLogged("Zone markers", VR::ZoneMarkers::SelfTest, "(VR) Zone markers self-test");
 	RunLogged("MeshRaster", +[]() { return VR::MeshRaster::SelfTest() == 0; }, "(VR) MeshRaster self-test");
 	{
@@ -1254,7 +1261,8 @@ int main(int argc, char* argv[])
 		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
 		{
 			if (sil.when_setting.empty() || sil.when_setting == "PhysicalMelee" || sil.when_setting == "PhysicalMeleeContact" ||
-				sil.when_setting == "MeleeHitJolt" || sil.when_setting == "GunRayAim")
+				sil.when_setting == "MeleeHitJolt" || sil.when_setting == "GunRayAim" ||
+				sil.when_setting == "HandPickup")
 			{
 				if (sil.keep_through_disarm)
 					return false;
@@ -1481,6 +1489,112 @@ int main(int argc, char* argv[])
 			failed.empty() ? std::string("passed (it names the failed checks only, no check count)") :
 							 "FAIL: " + std::to_string(failed.size()) + " check(s): " + all);
 	}
+	// [VR] HandPickup's cave (File #1 profile, research/2026-10-21-hand-pickup.md), run as the EE would: the site at
+	// 0x61DB94 and the cave at 0xFEC00 (37 words, its own camera.caves entry), entered with the Circle pickup handler's
+	// registers (a0 the record, a1 the kind, a2 0, $ra 0x61DB9C). Armed for this record (the host block 0xFF200: 'HPK1', a
+	// fresh stamp, the record, the point): on to the search core FUN_005ABBE0 with the point, the record, mode 0 and radius
+	// 50, the word cleared (single use). Anything else (kind 0, no word, a partner's record, a record that is not the camera
+	// focus's slot, a stale stamp, a second press): on to FUN_00631760 with the game's own a0, a1, a2 and $ra, the block untouched.
+	RunSilent("Hand pickup cave (File #1 profile, the Circle search at the hand, interpreted)", +[]() {
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		if (!p || !p->camera.has_value() || !VR::ProfileDB::IsSilenceSettingName("HandPickup"))
+			return false;
+		constexpr u32 kCave = 0xFEC00, kCaveEnd = 0xFEC94, kBlk = 0xFF200, kMagic = 0x48504B31, kCore = 0x5ABBE0,
+					  kWrapper = 0x631760, kRet = 0x61DB9C;
+		MiniEE base;
+		int words = 0;
+		bool site = false;
+		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
+		{
+			if (sil.when_setting != "HandPickup")
+				continue;
+			if (!sil.offline_only || sil.keep_through_disarm || sil.when.empty())
+				return false;
+			if (sil.ee_address == 0x61DB94u)
+			{
+				// The site: jal 0xFEC00 over jal 0x631760, only while the cave's first word is in.
+				if (sil.value_on != 0x0C03FB00u || sil.value_off != 0x0C18C5D8u || sil.when.size() != 2 ||
+					sil.when[1].ee_address != kCave || sil.when[1].equals != 0x3C0B0010u)
+					return false;
+				site = true;
+				continue;
+			}
+			// RAM 0xFEC00-0xFEFFF only, clear of PhysicalMelee's fake object at 0xFEE80.
+			if (sil.ee_address < kCave || sil.ee_address >= kCaveEnd || sil.value_off != 0)
+				return false;
+			base.Store32(sil.ee_address, sil.value_on);
+			words++;
+		}
+		bool cave_entry = false;
+		for (const VR::ProfileDB::CameraCave& cv : p->camera->caves)
+			cave_entry = cave_entry || (cv.from == kCave && cv.to == kCaveEnd && cv.words == 37 && cv.usable && cv.counter == 0x48BF93u);
+		if (!site || words != 37 || !cave_entry || base.Load32(kCave) != 0x3C0B0010u)
+			return false;
+		const auto f32 = [](float x) {
+			u32 b;
+			std::memcpy(&b, &x, 4);
+			return b;
+		};
+		struct Case
+		{
+			u32 record;
+			u32 kind;
+			bool magic;
+			u32 armed_for;
+			u8 focus;
+			u8 stamp;
+			u8 counter;
+			bool to_core;
+		};
+		const Case cases[] = {
+			{kLocalRecord, 1, true, kLocalRecord, 0, 10, 12, true},       // armed, fresh, the local player: the hand's search
+			{kLocalRecord, 1, true, kLocalRecord, 0, 55, 13, true},       // the counter wrapped (18 frames): still fresh
+			{kLocalRecord, 1, true, kLocalRecord, 0, 10, 28, true},       // 18 frames old: the last fresh one
+			{kLocalRecord, 1, true, kLocalRecord, 0, 10, 29, false},      // 19: stale
+			{kLocalRecord, 0, true, kLocalRecord, 0, 10, 12, false},      // kind 0 (action byte 26): the game's own
+			{kLocalRecord, 1, false, kLocalRecord, 0, 10, 12, false},     // not armed
+			{kPartnerRecord, 1, true, kLocalRecord, 0, 10, 12, false},    // a partner's (AI) press while armed for us
+			{kPartnerRecord, 1, true, kPartnerRecord, 0, 10, 12, false},  // armed naming a partner (a slot flicker), focus 0
+			{kLocalRecord, 1, true, kLocalRecord, 1, 10, 12, false},      // the record is not the camera focus's slot
+		};
+		for (const Case& c : cases)
+		{
+			MiniEE ee = base;
+			MeleeIdentities(ee, c.focus);
+			ee.Store32(kBlk, c.magic ? kMagic : 0u);
+			ee.Store32(kBlk + 0x04, c.stamp);
+			ee.Store32(kBlk + 0x08, c.armed_for);
+			ee.Store32(kBlk + 0x0C, 0x48500001u);
+			ee.Store32(kBlk + 0x10, f32(9601.0f));
+			ee.Store32(kBlk + 0x14, f32(137.0f));
+			ee.Store32(kBlk + 0x18, f32(13070.0f));
+			ee.Store8(0x48BF93, c.counter);
+			ee.r[4] = c.record;
+			ee.r[5] = c.kind;
+			ee.r[6] = 0;
+			ee.r[31] = kRet;
+			ee.r[16] = c.record;
+			ee.f[12] = 0x11111111u;
+			const u32 to = ee.Run(kCave, kCave, kCaveEnd);
+			if (c.to_core)
+			{
+				if (to != kCore || ee.r[4] != kBlk + 0x10 || ee.r[5] != c.record || ee.r[6] != 0 || ee.f[12] != f32(50.0f) ||
+					ee.r[31] != kRet || ee.r[16] != c.record || ee.Load32(kBlk) != 0 || ee.Load32(kBlk + 0x10) != f32(9601.0f))
+					return false;
+				// Single use: the same press again (another call this frame) is the game's own search.
+				ee.r[4] = c.record;
+				ee.r[5] = 1;
+				ee.r[6] = 0;
+				ee.r[31] = kRet;
+				if (ee.Run(kCave, kCave, kCaveEnd) != kWrapper || ee.r[4] != c.record || ee.r[5] != 1 || ee.r[31] != kRet)
+					return false;
+			}
+			else if (to != kWrapper || ee.r[4] != c.record || ee.r[5] != c.kind || ee.r[6] != 0 || ee.r[31] != kRet ||
+					 ee.r[16] != c.record || ee.f[12] != 0x11111111u || ee.Load32(kBlk) != (c.magic ? kMagic : 0u))
+				return false;
+		}
+		return true;
+	});
 	RunSilent("Physical melee hit jolt (File #1 profile, melee.jolt, cave G interpreted)", +[]() {
 		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
 		if (!p || !p->melee.has_value() || !p->camera.has_value() || !VR::ProfileDB::IsSilenceSettingName("MeleeHitJolt"))

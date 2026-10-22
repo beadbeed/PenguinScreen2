@@ -87,8 +87,51 @@ namespace VR::ItemReach
 	// only_centre (may be null): consider only a volume whose centre (the corners' mean, the y range's middle) lies within
 	// only_tol_cm of that game point; PollHandTarget passes the J's Bar counter pistol's, so no other Handgun trigger is
 	// ever a target.
+	// any_item: every floor item counts, not only reach.hand's item id ([VR] HandPickup).
 	HandTarget EvaluateHandTarget(const ProfileDB::ReachParams& params, u32 record, const double hand_game[3], MemReader reader,
-		const double* only_centre = nullptr, double only_tol_cm = 0.0);
+		const double* only_centre = nullptr, double only_tol_cm = 0.0, bool any_item = false);
+
+	// --- Real hand pickups ([VR] HandPickup, File #1 strictly offline) ---
+	//
+	// The game's search core FUN_005ABBE0 at a point, as the cave at 0x61DB94 will call it (search mode 0, radius 50): every
+	// enabled, not busy node of search mode 0 or 4, of any type (floor items 0x80 / 0x81 by the circle against the quad, 0x85
+	// by the character's own position in the quad, every other type by the point in the quad), the height rule, the lowest
+	// priority first in the list. Conservative: the core's extra checks on types 0x01, 0x02, 0x81 can only refuse a node, so a
+	// node this names may lose to nothing it leaves out. Returns the winning node's address (0 for none, or a walk fault).
+	u32 CoreSearchAt(const ProfileDB::ReachParams& params, u32 record, const double point[3], MemReader reader, Fault* fault = nullptr);
+
+	// A point for the cave whose search picks target.node (CoreSearchAt): the hand's own (moved just inside the quad when it
+	// is beside it), else the volume's centre, else halfway to each corner; the height the hand's, held inside the volume's
+	// range. False when another trigger would win at every one of them (then nothing is armed).
+	bool PickupPoint(const ProfileDB::ReachParams& params, u32 record, const HandTarget& target, MemReader reader, double out[3]);
+
+	// The item a hand is on ([VR] HandPickup): refreshed every other vsync by PollHandTarget while HandPickup runs, cleared
+	// when it stops. highlighted: the hand is inside the item's volume or within reach.pickup.near of it, and point holds a
+	// search point the game's core picks this node from (point_ok). CPU thread only.
+	struct PickupTarget
+	{
+		bool valid = false;        // an item within reach.pickup.show of a hand (the box shows)
+		bool highlighted = false;  // ... and squeezable: inside or within near, point_ok
+		int hand = -1;             // VRInputSnapshot::LEFT / RIGHT
+		u32 node = 0;
+		u32 index = 0;             // the item record index the node names
+		u16 item_id = 0;
+		double distance_cm = 0.0;  // from the hand to the volume (0 inside)
+		bool point_ok = false;
+		float point[3] = {};       // game cm: the search point for the cave
+		u32 serial = 0;            // counts every change of the highlighted node (an entry, a switch, a leave)
+		bool forward_agrees = false; // the character's own Circle (46 cm ahead) would take this item now (logs)
+	};
+	PickupTarget CurrentPickup();
+
+	// Pure: which hand's item is the pickup target this evaluation. cand[h].found / distance for each hand (found false for a
+	// hand that is not tracked or found nothing); the nearest within show wins, the right hand on a tie; highlighted when
+	// within near (0 inside). Returns the hand (or -1).
+	int ChoosePickupHand(const HandTarget cand[2], double near_cm, double show_cm, bool* highlighted);
+
+	// Pure: the hand (game cm) is within max_cm of the character's position on the floor plane (x, z), arm's reach: farther,
+	// it highlights nothing (reach.pickup.maxReach). False for a non-finite input.
+	bool WithinArmReach(const double hand_game[3], double body_x, double body_z, double max_cm);
 
 	// What the caller knows about this vsync (GameFeedback::Poll fills it from CameraDriver and SpatialControls).
 	struct Live

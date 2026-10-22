@@ -104,6 +104,14 @@ Null headset: the layer is accepted every frame, eyes 63 mm apart, each eye's de
 the counter and Handgun at arm's length, a zombie close, leaning, rolling the head, the HUD text, a menu with `MenuPanel`.
 Research and the plan: `research/2026-10-21-true-stereo.md`.
 
+**2026-10-21 branch `handpickup`** (from `nightly`; local LTO-off build, 44 of 44 self-tests; checked offline,
+headset-free only): `[VR] HandPickup` (off), real hand pickups. Put a hand on any floor item within arm's reach (85 cm;
+the box shows), squeeze and keep squeezing: the game's own Circle search runs at the hand (a cave at 0x61DB94,
+local record only), its take-it prompt comes up and is confirmed for you (Alex's approved exception), and the item is in
+your cells, whichever way the character faces. Offline: the J's Bar Handgun facing it and turned 90 deg away, the bathroom
+Green Herb from 1.5 m facing away, all taken; let go early and the prompt is yours; switch off and nothing happens.
+`research/2026-10-21-hand-pickup.md`, `pickuptest.py`.
+
 ## Where things are
 
 | | |
@@ -300,6 +308,7 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 | `BeltPouches` | false | true: the chest-rig pouches and the buckle (reach in to name an item, squeeze to open the item screen at that cell) and their rings. Off since Alex's 2026-10-14 session: grab things through the item screen |
 | `ReloadGesture` | true | false: no reload gesture (the hip squeeze opens the item screen even with the gun raised; L1 by hand still reloads) |
 | `HandTargeting` | false | true: File #1 offline only, a read-only prototype: the right hand against the J's Bar Handgun's trigger volume (a wireframe box, one tick on entering it, `Hand targeting:` lines in the emulog); nothing is written to the game. Its trigger and distances are the File #1 profile's `reach.hand` |
+| `HandPickup` | false | true: File #1, strictly offline (no network adapter, so not private co-op either): real hand pickups. Any floor item whose trigger volume a hand is in (or within 6 cm of) is highlighted, within arm's reach (85 cm from the character, `reach.pickup.maxReach`) (the box; a light tick in that hand). A deliberate grip squeeze there (open first, then past 0.75; no screen up, weapon lowered, not in a body zone) arms a single-use word at 0xFF200 and presses Circle once; the cave at 0x61DB94 (0xFEC00, local record only) makes the game's own Circle search look at the hand, so the item under the hand is taken whichever way the character faces. Keep squeezing: when the game's take-it prompt for that item comes up, it is confirmed with Circle on a free cell (Alex's approved exception, 2026-10-21). Let go early, press a button yourself, a full inventory (the game's swap), any other screen or item: nothing is pressed. `Hand pickup:` lines in the emulog; `research/2026-10-21-hand-pickup.md` |
 | `DedicatedXrQueue` | false | true: the OpenXR session gets its own Vulkan queue. The emulog says `(VR) XR queue: dedicated` or `shared with the GS (why)`. |
 | `PacerCopies` | false | true (with `DedicatedXrQueue` in effect): the VR pacer copies the frame, hands and cards into the headset's swapchains itself, so the GS thread never calls into the runtime or waits for its queue lock; the frame shows about one GS frame later (`PCSX2_VR_PACER_COPIES_FLUSH=1` takes that back with one more GS submit); the emulog says `(VR) Pacer copies: on` or why it stays off |
 | `MenuPanel` | false | true: a game screen (the profile's `camera.lookAt.pauseWhen`, File #1's u32 `0x720AA0`: item screen, map, pause, take-it prompts) keeps first person: the camera alone follows the head (no stick turn, aim or body-follow; the sticks and buttons are the menu's as before), the room keeps rendering in stereo, and the screen's own draws go on a flat panel 1.0 m ahead (0.80 m tall, placed where you look as it comes up), where the menu pointer aims. The screens' full-frame tint is left out. While a screen is up the desktop window shows the room without it, and the depth layer sends quads. Needs `PacerCopies` off (else screens pull away as before). The emulog says `(VR) Menu panel: on`, `shown ...` / `hidden`, or why not |
@@ -572,8 +581,10 @@ re-press; the VR self-tests in CI.
 - Never upload or share discs, BIOS, memory cards, savestates, dumps or anything extracted from the disc. This repo holds
   code only.
 - Ask before changing SteamVR configuration. The null-headset test is allowed and always restored.
-- Never confirm a menu entry automatically. The only exception: a deliberate reload gesture may drive the reload, and it uses
-  the native L1 reload, so no menu is involved.
+- Never confirm a menu entry automatically. Exceptions: a deliberate reload gesture may drive the reload (the native L1
+  reload, so no menu is involved); and (approved by Alex 2026-10-21) a deliberate squeeze of the hand on a highlighted item
+  may confirm the game's "Will you take it?" prompt for that very item (`HandPickup`, grab-to-take). Nothing else may
+  confirm on its own: not the swap flow of a full inventory, not a partner's hand-over, not any other screen.
 - Ask before changing Alex's emulator graphics settings: internal resolution, Fast CDVD and so on.
 - Commits use the beadbeed noreply address.
 
@@ -597,6 +608,10 @@ re-press; the VR self-tests in CI.
 - **`PCSX2_VR_DUMP_HANDS=<folder>`:** once in game, draws every weapon of the scenario as held, holstered and from afar
   into PNGs there (the game's models: keep them on the PC).
 - **`handtest.py <dev install>`:** hand targeting from slot 7 (above).
+- **`pickuptest.py <dev install> <slot> <item id>[,...] [--turn DEG] [--release-early] [--vr x,y,z]`:** `[VR] HandPickup`:
+  a scripted right hand on the item (`PCSX2_VR_PICKUP_DEBUG` lists every floor item's centre), a squeeze, the prompt flags
+  and the cells before and after. Slots 7 (Handgun, id 0) and 8 (Green Herb, id 300). Refuses while another emulator or
+  vrserver runs; kills only its own emulator.
 - **`nearcull_test.py <dev install> <before|after> <slot> <seconds> [zombie|down]`:** the near-cull patch against
   the committed profile; slot 5 faces the approaching zombie, slot 6 looks down at the body (above).
 - **`menupanel_test.py <dev install> <out dir> [items] [map] [takeit] [pause] [--xr]`:** `[VR] MenuPanel`: per

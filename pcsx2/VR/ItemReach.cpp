@@ -344,7 +344,7 @@ namespace VR::ItemReach
 	}
 
 	HandTarget EvaluateHandTarget(const ProfileDB::ReachParams& p, u32 record, const double hand_game[3], MemReader reader,
-		const double* only_centre, double only_tol_cm)
+		const double* only_centre, double only_tol_cm, bool any_item)
 	{
 		HandTarget out;
 		if (!hand_game || !std::isfinite(hand_game[0]) || !std::isfinite(hand_game[1]) || !std::isfinite(hand_game[2]))
@@ -375,7 +375,7 @@ namespace VR::ItemReach
 			if (!peek(static_cast<u64>(node) + p.item_offset, 4, &index) ||
 				!peek(static_cast<u64>(p.item_table) + static_cast<u64>(index) * p.item_stride + p.item_id_offset, 2, &id))
 				return true;
-			if (id != p.hand_item)
+			if (!any_item && id != p.hand_item)
 				return true;
 			double y_min = 0.0;
 			double y_max = 0.0;
@@ -444,6 +444,182 @@ namespace VR::ItemReach
 		const Reach forward = Evaluate(p, record, reader);
 		out.forward_agrees = forward.found && forward.node == out.node;
 		return out;
+	}
+
+	u32 CoreSearchAt(const ProfileDB::ReachParams& p, u32 record, const double point[3], MemReader reader, Fault* fault)
+	{
+		const Peek peek{reader ? reader : &ReadGuest};
+		if (fault)
+			*fault = Fault::None;
+		if (!point || !std::isfinite(point[0]) || !std::isfinite(point[1]) || !std::isfinite(point[2]))
+		{
+			if (fault)
+				*fault = Fault::Probe;
+			return 0;
+		}
+		// The core converts the point's x and z to whole cm (cvt.w.s truncates) and keeps its y as a float.
+		const double px = std::trunc(point[0]);
+		const double py = point[1];
+		const double pz = std::trunc(point[2]);
+		double cx = 0.0;
+		double cz = 0.0;
+		const bool have_char = peek.F32(static_cast<u64>(record) + p.position_offset, &cx) &&
+		                       peek.F32(static_cast<u64>(record) + p.position_offset + 8, &cz) && std::isfinite(cx) &&
+		                       std::isfinite(cz);
+		cx = std::trunc(cx);
+		cz = std::trunc(cz);
+		const double radius = static_cast<double>(p.radius);
+		const double above = static_cast<double>(p.above);
+		u32 best = 0;
+		u32 best_priority = 0;
+		u32 walked = 0;
+		const Fault f = WalkTriggerList(peek, p, &walked, [&](u32 node) {
+			u32 type = 0, mode = 0, enabled = 0, busy = 0, priority = 0;
+			if (!peek(static_cast<u64>(node) + p.type_offset, 1, &type) || !peek(static_cast<u64>(node) + p.mode_offset, 1, &mode) ||
+				!peek(static_cast<u64>(node) + p.enabled_offset, 1, &enabled) ||
+				!peek(static_cast<u64>(node) + p.busy_offset, 1, &busy) ||
+				!peek(static_cast<u64>(node) + p.priority_offset, 1, &priority))
+				return false;
+			// Search mode 0 looks at nodes of mode 0, and of mode 4 (0x5ABCB4 lets 0, 2, 4, 5 and 6 in there).
+			if (enabled == 0 || busy != 0 || !(mode == p.accept_mode || mode == 4))
+				return true;
+			if (best != 0 && !(priority < best_priority))
+				return true;
+			double y_min = 0.0, y_max = 0.0;
+			Quad q{};
+			bool have = peek.S32(static_cast<u64>(node) + p.y_min_offset, &y_min) &&
+			            peek.S32(static_cast<u64>(node) + p.y_max_offset, &y_max);
+			for (int i = 0; i < 4 && have; i++)
+			{
+				have = peek.S32(static_cast<u64>(node) + p.quad_offset + static_cast<u64>(i) * 8, &q.x[i]) &&
+				       peek.S32(static_cast<u64>(node) + p.quad_offset + static_cast<u64>(i) * 8 + 4, &q.z[i]);
+			}
+			if (!have)
+				return false;
+			bool hit = false;
+			if (type == p.accept_type || type == 0x81u)
+				hit = CircleOverlapsQuad(px, pz, radius, q);
+			else if (type == 0x85u)
+				hit = have_char && PointInQuad(cx, cz, q);
+			else
+				hit = PointInQuad(px, pz, q);
+			if (hit && HeightsOverlap(py, y_min, y_max, above))
+			{
+				best = node;
+				best_priority = priority;
+			}
+			return true;
+		});
+		if (fault)
+			*fault = f;
+		// A walk cut short could have missed a winner: name nothing.
+		return f == Fault::None ? best : 0;
+	}
+
+	bool PickupPoint(const ProfileDB::ReachParams& p, u32 record, const HandTarget& t, MemReader reader, double out[3])
+	{
+		if (!t.found)
+			return false;
+		Quad q{};
+		for (int i = 0; i < 4; i++)
+		{
+			q.x[i] = t.quad_x[i];
+			q.z[i] = t.quad_z[i];
+		}
+		const double cx = t.centre[0];
+		const double cz = t.centre[2];
+		const double y = std::clamp(t.hand[1], std::min(t.y_min, t.y_max), std::max(t.y_min, t.y_max));
+		const auto lerp = [](double a, double b, double f) { return a + (b - a) * f; };
+
+		double cand[6][2];
+		int n = 0;
+		// The hand's own point when it is over the quad; beside it, the nearest edge point moved a fifth of the way in.
+		if (PointInQuad(t.hand[0], t.hand[2], q))
+		{
+			cand[n][0] = t.hand[0];
+			cand[n][1] = t.hand[2];
+			n++;
+		}
+		else
+		{
+			double best_d2 = std::numeric_limits<double>::max();
+			double ex = cx, ez = cz;
+			for (int i = 0; i < 4; i++)
+			{
+				const int j = (i + 1) & 3;
+				const double dx = q.x[j] - q.x[i];
+				const double dz = q.z[j] - q.z[i];
+				const double len2 = dx * dx + dz * dz;
+				const double s = len2 > 0.0 ? std::clamp(((t.hand[0] - q.x[i]) * dx + (t.hand[2] - q.z[i]) * dz) / len2, 0.0, 1.0) : 0.0;
+				const double x = q.x[i] + s * dx;
+				const double z = q.z[i] + s * dz;
+				const double d2 = (x - t.hand[0]) * (x - t.hand[0]) + (z - t.hand[2]) * (z - t.hand[2]);
+				if (d2 < best_d2)
+				{
+					best_d2 = d2;
+					ex = x;
+					ez = z;
+				}
+			}
+			cand[n][0] = lerp(ex, cx, 0.2);
+			cand[n][1] = lerp(ez, cz, 0.2);
+			n++;
+		}
+		cand[n][0] = cx;
+		cand[n][1] = cz;
+		n++;
+		for (int i = 0; i < 4; i++)
+		{
+			cand[n][0] = lerp(cx, q.x[i], 0.5);
+			cand[n][1] = lerp(cz, q.z[i], 0.5);
+			n++;
+		}
+		for (int k = 0; k < n; k++)
+		{
+			const double pt[3] = {cand[k][0], y, cand[k][1]};
+			if (CoreSearchAt(p, record, pt, reader) == t.node)
+			{
+				out[0] = pt[0];
+				out[1] = pt[1];
+				out[2] = pt[2];
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool WithinArmReach(const double hand_game[3], double body_x, double body_z, double max_cm)
+	{
+		if (!hand_game || !std::isfinite(hand_game[0]) || !std::isfinite(hand_game[2]) || !std::isfinite(body_x) ||
+			!std::isfinite(body_z) || !std::isfinite(max_cm))
+			return false;
+		const double dx = hand_game[0] - body_x;
+		const double dz = hand_game[2] - body_z;
+		return dx * dx + dz * dz <= max_cm * max_cm;
+	}
+
+	int ChoosePickupHand(const HandTarget cand[2], double near_cm, double show_cm, bool* highlighted)
+	{
+		int best = -1;
+		double best_d = 0.0;
+		// The right hand first, so it wins a tie.
+		for (int h : {1, 0})
+		{
+			if (!cand[h].found)
+				continue;
+			const double d = cand[h].inside ? 0.0 : std::sqrt(cand[h].horizontal_cm * cand[h].horizontal_cm +
+			                                                   cand[h].vertical_cm * cand[h].vertical_cm);
+			if (!(d <= show_cm))
+				continue;
+			if (best < 0 || d < best_d)
+			{
+				best = h;
+				best_d = d;
+			}
+		}
+		if (highlighted)
+			*highlighted = best >= 0 && best_d <= near_cm;
+		return best;
 	}
 
 	namespace
@@ -723,8 +899,241 @@ namespace VR::ItemReach
 		}
 	}
 
+	namespace
+	{
+		// --- Real hand pickups' target ([VR] HandPickup; the CPU thread's) ---
+		PickupTarget s_pickup;
+		u32 s_pickup_vsync = 0;
+		bool s_pickup_active = false;
+		const char* s_pickup_wait = nullptr;
+		u32 s_pickup_said_node = 0; // the highlighted node last said in the log (0 none)
+
+		void PickupWait(const char* why)
+		{
+			if (why == s_pickup_wait)
+				return;
+			s_pickup_wait = why;
+			if (why)
+				Console.WriteLn("(VR) Hand pickup: waiting: %s", why);
+		}
+
+		// No target (or not evaluating): the box goes, and a highlighted item is said lost.
+		void PickupStop()
+		{
+			if (s_pickup.highlighted && s_pickup_said_node != 0)
+				Console.WriteLn("(VR) Hand pickup: item left: node 0x%08X, item %u (%s)", s_pickup.node,
+					static_cast<u32>(s_pickup.item_id), ItemData::Name(s_pickup.item_id));
+			const u32 serial = s_pickup.serial + ((s_pickup.valid || s_pickup.highlighted) ? 1u : 0u);
+			s_pickup = PickupTarget{};
+			s_pickup.serial = serial;
+			s_pickup_said_node = 0;
+			if (s_hand.published)
+				PublishMark(nullptr);
+		}
+
+		void PollPickupTarget(const ProfileDB::ReachParams* params, const Live& live, u64 now_ms, float haptic_strength)
+		{
+			if (!params || !params->has_pickup || !live.hand_game || !live.net_offline || !live.armed || !VMManager::HasValidVM())
+			{
+				PickupStop();
+				if (s_pickup_active)
+					Console.WriteLn("(VR) Hand pickup: targeting stopped");
+				s_pickup_active = false;
+				PickupWait(!params || !params->has_pickup ? "this game's profile has no reach.pickup" :
+						   !live.armed || !VMManager::HasValidVM() ? "first person is not armed" :
+						   !live.hand_game ? "not File #1" : "not offline");
+				return;
+			}
+			if (!s_pickup_active)
+			{
+				s_pickup_active = true;
+				Console.WriteLn("(VR) Hand pickup: targeting on (offline File #1, either hand, any floor item): highlighted inside or "
+								"within %.0f cm, the box within %.0f cm",
+					static_cast<double>(params->pickup_near), static_cast<double>(params->pickup_show));
+			}
+			// The camera guards' flicker: the same scene, nothing changes this vsync.
+			if (!live.guards_now)
+				return;
+			if (live.screen_up)
+			{
+				PickupStop();
+				PickupWait("a game screen is up");
+				return;
+			}
+			CameraDriver::Mapping map;
+			const VRInputSnapshot snap = GetInputSnapshot();
+			if (!CameraDriver::GetMapping(&map) || snap.generation == 0 || !snap.actions_active)
+			{
+				PickupStop();
+				PickupWait(!CameraDriver::GetMapping(&map) ? "no camera mapping (the camera is not being driven)" : "no controller input");
+				return;
+			}
+			if ((s_pickup_vsync++ % kHandEvalEveryVsyncs) != 0)
+				return;
+
+			// PCSX2_VR_PICKUP_DEBUG: once a second, every floor item's volume centre in the game and in the headset's space
+			// (test scripts place a scripted hand there).
+			static const bool debug = std::getenv("PCSX2_VR_PICKUP_DEBUG") != nullptr;
+			static u64 s_debug_ms = 0;
+			if (debug && now_ms >= s_debug_ms)
+			{
+				s_debug_ms = now_ms + 1000;
+				const Peek peek{&ReadGuest};
+				u32 walked = 0;
+				WalkTriggerList(peek, *params, &walked, [&](u32 node) {
+					u32 type = 0, mode = 0, enabled = 0, busy = 0, index = 0, id = 0;
+					double y0 = 0, y1 = 0;
+					Quad q{};
+					bool ok = peek(static_cast<u64>(node) + params->type_offset, 1, &type) &&
+					          peek(static_cast<u64>(node) + params->mode_offset, 1, &mode) &&
+					          peek(static_cast<u64>(node) + params->enabled_offset, 1, &enabled) &&
+					          peek(static_cast<u64>(node) + params->busy_offset, 1, &busy);
+					if (!ok || type != params->accept_type || mode != params->accept_mode || enabled == 0 || busy != 0)
+						return true;
+					ok = peek(static_cast<u64>(node) + params->item_offset, 4, &index) &&
+					     peek(static_cast<u64>(params->item_table) + static_cast<u64>(index) * params->item_stride + params->item_id_offset, 2, &id) &&
+					     peek.S32(static_cast<u64>(node) + params->y_min_offset, &y0) && peek.S32(static_cast<u64>(node) + params->y_max_offset, &y1);
+					for (int i = 0; i < 4 && ok; i++)
+						ok = peek.S32(static_cast<u64>(node) + params->quad_offset + i * 8, &q.x[i]) &&
+						     peek.S32(static_cast<u64>(node) + params->quad_offset + i * 8 + 4, &q.z[i]);
+					if (!ok)
+						return true;
+					const float c[3] = {static_cast<float>(0.25 * (q.x[0] + q.x[1] + q.x[2] + q.x[3])), static_cast<float>(0.5 * (y0 + y1)),
+						static_cast<float>(0.25 * (q.z[0] + q.z[1] + q.z[2] + q.z[3]))};
+					float v[3] = {};
+					if (CameraDriver::VrFromGame(map, c, v))
+						Console.WriteLn("(VR) Hand pickup debug: item node 0x%08X item %u record %u centre game (%.1f, %.1f, %.1f) VR (%.3f, %.3f, %.3f)",
+							node, id, index, static_cast<double>(c[0]), static_cast<double>(c[1]), static_cast<double>(c[2]),
+							static_cast<double>(v[0]), static_cast<double>(v[1]), static_cast<double>(v[2]));
+					return true;
+				});
+			}
+
+			// Arm's reach: from the character's own position (its record's x, z).
+			double body_x = 0.0, body_z = 0.0;
+			const Peek body_peek{&ReadGuest};
+			const bool have_body = body_peek.F32(static_cast<u64>(live.record) + params->position_offset, &body_x) &&
+			                       body_peek.F32(static_cast<u64>(live.record) + params->position_offset + 8, &body_z);
+			bool out_of_reach = false;
+			HandTarget cand[2];
+			for (int h = 0; h < 2; h++)
+			{
+				const VRPose& grip = snap.hands[h].grip_pose;
+				float hand_game[3];
+				if (!grip.valid || !CameraDriver::GameFromVr(map, grip.position_xyz.data(), hand_game))
+					continue;
+				const double hand[3] = {hand_game[0], hand_game[1], hand_game[2]};
+				if (!have_body || !WithinArmReach(hand, body_x, body_z, params->pickup_max_reach))
+				{
+					out_of_reach = true;
+					continue;
+				}
+				cand[h] = EvaluateHandTarget(*params, live.record, hand, nullptr, nullptr, 0.0, true);
+			}
+			bool highlighted = false;
+			const int h = ChoosePickupHand(cand, params->pickup_near, params->pickup_show, &highlighted);
+			if (h < 0)
+			{
+				PickupStop();
+				PickupWait(out_of_reach ? "no floor item near a hand within arm's reach (reach.pickup.maxReach)" :
+				                          "no floor item near a hand");
+				return;
+			}
+			PickupWait(nullptr);
+			const HandTarget& t = cand[h];
+
+			PickupTarget next;
+			next.valid = true;
+			next.hand = h;
+			next.node = t.node;
+			next.index = t.index;
+			next.item_id = t.item_id;
+			next.distance_cm = t.inside ? 0.0 : std::sqrt(t.horizontal_cm * t.horizontal_cm + t.vertical_cm * t.vertical_cm);
+			next.forward_agrees = t.forward_agrees;
+			if (highlighted)
+			{
+				double pt[3];
+				next.point_ok = PickupPoint(*params, live.record, t, nullptr, pt);
+				if (next.point_ok)
+				{
+					for (int k = 0; k < 3; k++)
+						next.point[k] = static_cast<float>(pt[k]);
+				}
+				// Squeezable only where the game's own search would pick this very item.
+				next.highlighted = next.point_ok;
+			}
+
+			// The box: dim within show, brighter within 20 cm, brightest while highlighted.
+			TargetMark mark;
+			bool mapped = true;
+			for (int i = 0; i < 4 && mapped; i++)
+			{
+				const float low[3] = {static_cast<float>(t.quad_x[i]), static_cast<float>(t.y_min), static_cast<float>(t.quad_z[i])};
+				const float high[3] = {static_cast<float>(t.quad_x[i]), static_cast<float>(t.y_max), static_cast<float>(t.quad_z[i])};
+				mapped = CameraDriver::VrFromGame(map, low, mark.corner[i]) && CameraDriver::VrFromGame(map, high, mark.corner[4 + i]);
+			}
+			if (mapped)
+			{
+				mark.node = t.node;
+				mark.glow = next.highlighted ? 2 : (next.distance_cm <= 20.0 ? 1 : 0);
+				PublishMark(&mark);
+			}
+
+			const bool was = s_pickup.highlighted;
+			const bool changed = next.highlighted != was || (next.highlighted && (next.node != s_pickup.node || next.hand != s_pickup.hand));
+			next.serial = s_pickup.serial + (changed ? 1u : 0u);
+			if (changed && was && s_pickup_said_node != 0)
+			{
+				Console.WriteLn("(VR) Hand pickup: item left: node 0x%08X, item %u (%s)", s_pickup.node,
+					static_cast<u32>(s_pickup.item_id), ItemData::Name(s_pickup.item_id));
+				s_pickup_said_node = 0;
+			}
+			if (changed && next.highlighted)
+			{
+				// One light tick in that hand on taking hold of an item's volume.
+				const float amp = std::clamp(kTickAmp * (std::isfinite(haptic_strength) ? haptic_strength : 0.0f), 0.0f, 1.0f);
+				if (amp > 0.0f)
+					XRInput::QueuePulse(h, amp, kTickSeconds);
+				s_pickup_said_node = next.node;
+				Console.WriteLn("(VR) Hand pickup: item highlighted: %s hand, node 0x%08X, item %u (%s, record %u), %.1f cm from its "
+								"volume; search point (%.1f, %.1f, %.1f); the character's own Circle would take it: %s",
+					h == 1 ? "right" : "left", next.node, static_cast<u32>(next.item_id), ItemData::Name(next.item_id), next.index,
+					next.distance_cm, static_cast<double>(next.point[0]), static_cast<double>(next.point[1]),
+					static_cast<double>(next.point[2]), next.forward_agrees ? "yes" : "no");
+			}
+			else if (highlighted && !next.point_ok && (s_pickup_said_node != next.node || !was) && now_ms >= s_hand.next_log_ms)
+			{
+				s_hand.next_log_ms = now_ms + kHandLogMs;
+				Console.WriteLn("(VR) Hand pickup: node 0x%08X (item %u, %s) is under the %s hand but another trigger would win the "
+								"game's search at every point of it: not squeezable",
+					next.node, static_cast<u32>(next.item_id), ItemData::Name(next.item_id), h == 1 ? "right" : "left");
+			}
+			s_pickup = next;
+		}
+	}
+
+	PickupTarget CurrentPickup()
+	{
+		return s_pickup;
+	}
+
 	void PollHandTarget(const ProfileDB::Profile* profile, const Live& live, u64 now_ms, float haptic_strength)
 	{
+		// [VR] HandPickup: every floor item and either hand, in place of the one-trigger prototype.
+		if (EmuConfig.VR.HandPickup)
+		{
+			if (s_hand.has_target)
+				HandStop(false);
+			PollPickupTarget((profile && profile->reach.has_value()) ? &profile->reach.value() : nullptr, live, now_ms,
+				haptic_strength);
+			return;
+		}
+		if (s_pickup_active || s_pickup.valid)
+		{
+			PickupStop();
+			s_pickup_active = false;
+		}
+
 		const ProfileDB::ReachParams* params =
 			(profile && profile->reach.has_value() && profile->reach->has_hand) ? &profile->reach.value() : nullptr;
 		if (!params || !EmuConfig.VR.HandTargeting || !live.hand_game || !live.net_offline || !live.armed ||
@@ -921,6 +1330,7 @@ namespace VR::ItemReach
 		s_hand.inside = false;
 		s_hand.next_log_ms = 0;
 		PublishMark(nullptr);
+		PickupStop();
 	}
 
 	View Current()
@@ -1514,6 +1924,129 @@ namespace VR::ItemReach
 			Tracker fresh;
 			u = Step(fresh, y, 7800);
 			check(u.announce, "once: a fresh tracker (a state load, a new arm) announces what is in reach");
+		}
+
+		// --- Real hand pickups: any item under a hand, the game's core at a point, the point the cave gets. ---
+		{
+			s_test_ram.fill(0);
+			PutItem(1, 300); // Green Herb
+			PutItem(2, 0);   // Handgun
+			PutCharacter(50, 0, -100, 0, 0);
+			NodeSpec a;      // the herb: x 0-40, z 0-40, y 100-140
+			Rect(a, 0, 0, 40, 40);
+			a.y_min = 100;
+			a.y_max = 140;
+			a.item = 1;
+			a.next = 1;
+			NodeSpec b = a;  // the Handgun beside it: x 60-100 (20 cm away)
+			Rect(b, 60, 0, 100, 40);
+			b.item = 2;
+			b.next = -1;
+			PutNode(0, a);
+			PutNode(1, b);
+			TestPut(kTestHead, 4, NodeAddress(0));
+			const double over_a[3] = {20, 120, 20};
+			HandTarget t = EvaluateHandTarget(p, kTestRecord, over_a, TestRead, nullptr, 0.0, true);
+			check(t.found && t.node == NodeAddress(0) && t.item_id == 300 && t.inside, "pickup: any item: the herb under the hand");
+			t = EvaluateHandTarget(p, kTestRecord, over_a, TestRead);
+			check(t.found && t.node == NodeAddress(1) && !t.inside, "pickup: without any_item only reach.hand's item (the Handgun)");
+			const double at_a[3] = {20, 120, 20};
+			check(CoreSearchAt(p, kTestRecord, at_a, TestRead) == NodeAddress(0), "core: both within 50, the same priority: first in the list");
+			const double at_b[3] = {80, 120, 20};
+			check(CoreSearchAt(p, kTestRecord, at_b, TestRead) == NodeAddress(0),
+				"core: at the Handgun's middle the herb's edge is 40 away and first in the list: the herb");
+			const double over_b[3] = {80, 125, 20};
+			t = EvaluateHandTarget(p, kTestRecord, over_b, TestRead, nullptr, 0.0, true);
+			double pt[3] = {};
+			check(t.found && t.node == NodeAddress(1) && !PickupPoint(p, kTestRecord, t, TestRead, pt),
+				"point: the Handgun is not squeezable while the game's search would take the herb at every point of it");
+			b.priority = 0;
+			a.priority = 1;
+			PutNode(0, a);
+			PutNode(1, b);
+			check(PickupPoint(p, kTestRecord, t, TestRead, pt) && pt[0] == 80.0 && pt[2] == 20.0 && pt[1] == 125.0,
+				"point: with the lower priority the Handgun wins at the hand's own point (its height kept)");
+			t = EvaluateHandTarget(p, kTestRecord, over_a, TestRead, nullptr, 0.0, true);
+			check(!PickupPoint(p, kTestRecord, t, TestRead, pt), "point: and the herb then loses everywhere within 50 of it");
+			Rect(b, 120, 0, 160, 40);
+			PutNode(1, b);
+			t = EvaluateHandTarget(p, kTestRecord, over_a, TestRead, nullptr, 0.0, true);
+			check(PickupPoint(p, kTestRecord, t, TestRead, pt) && pt[0] == 20.0 && pt[2] == 20.0,
+				"point: moved 80 cm away the herb wins at the hand");
+			const double beside_a[3] = {20, 150, 45};
+			t = EvaluateHandTarget(p, kTestRecord, beside_a, TestRead, nullptr, 0.0, true);
+			check(t.found && t.node == NodeAddress(0) && !t.inside && PickupPoint(p, kTestRecord, t, TestRead, pt) && pt[1] == 140.0 &&
+					  pt[2] < 40.0 && pt[2] > 30.0,
+				"point: a hand 5 cm beside and 10 above: a point just inside the quad, the height held at the top");
+			// Another kind of trigger: an examine spot (type 0x05, mode 0, point in quad) with a lower priority covers the herb.
+			NodeSpec ex;
+			Rect(ex, 0, 0, 25, 40);
+			ex.type = 0x05;
+			ex.y_min = 0;
+			ex.y_max = 300;
+			ex.priority = 0;
+			ex.next = -1;
+			a.priority = 1;
+			a.next = 2;
+			b.next = 2;
+			PutNode(0, a);
+			PutNode(2, ex);
+			b.next = -1;
+			a.next = 2;
+			PutNode(1, b);
+			const double at_left[3] = {10, 120, 20};
+			const double at_right[3] = {35, 120, 20};
+			check(CoreSearchAt(p, kTestRecord, at_left, TestRead) == NodeAddress(2) &&
+					  CoreSearchAt(p, kTestRecord, at_right, TestRead) == NodeAddress(0),
+				"core: an examine spot wins where the point is in its quad, not by the circle");
+			const double over_a_left[3] = {10, 120, 20};
+			t = EvaluateHandTarget(p, kTestRecord, over_a_left, TestRead, nullptr, 0.0, true);
+			check(t.found && t.node == NodeAddress(0) && PickupPoint(p, kTestRecord, t, TestRead, pt) && pt[0] >= 25.0,
+				"point: the hand over the spot: another point of the herb's quad, clear of it");
+			ex.mode = 1;
+			PutNode(2, ex);
+			check(CoreSearchAt(p, kTestRecord, at_left, TestRead) == NodeAddress(0), "core: a node of search mode 1 is not looked at");
+			ex.mode = 4;
+			PutNode(2, ex);
+			check(CoreSearchAt(p, kTestRecord, at_left, TestRead) == NodeAddress(2), "core: mode 4 is (search mode 0 lets it in)");
+			ex.enabled = 0;
+			PutNode(2, ex);
+			check(CoreSearchAt(p, kTestRecord, at_left, TestRead) == NodeAddress(0), "core: a switched-off node is not");
+			TestPut(NodeAddress(2) + 0x28, 4, NodeAddress(0)); // a loop
+			check(CoreSearchAt(p, kTestRecord, at_left, TestRead) == 0, "core: a walk cut short names nothing");
+
+			// Which hand.
+			HandTarget c[2];
+			c[1].found = c[0].found = true;
+			c[1].inside = true;
+			c[0].horizontal_cm = 3.0;
+			bool hl = false;
+			check(ChoosePickupHand(c, 6.0, 45.0, &hl) == 1 && hl, "hand: the right inside beats the left 3 cm off");
+			c[1].inside = false;
+			c[1].horizontal_cm = 4.0;
+			check(ChoosePickupHand(c, 6.0, 45.0, &hl) == 0 && hl, "hand: the nearer (left, 3 cm) wins");
+			c[0].horizontal_cm = 4.0;
+			check(ChoosePickupHand(c, 6.0, 45.0, &hl) == 1 && hl, "hand: a tie is the right's");
+			c[0].horizontal_cm = c[1].horizontal_cm = 7.0;
+			check(ChoosePickupHand(c, 6.0, 45.0, &hl) == 1 && !hl, "hand: 7 cm off shows the box, not highlighted");
+			c[0].horizontal_cm = c[1].horizontal_cm = 46.0;
+			check(ChoosePickupHand(c, 6.0, 45.0, &hl) == -1 && !hl, "hand: beyond show, nothing");
+			c[0].found = false;
+			c[1].horizontal_cm = 0.0;
+			c[1].vertical_cm = 5.0;
+			check(ChoosePickupHand(c, 6.0, 45.0, &hl) == 1 && hl, "hand: 5 cm above the volume is within near");
+
+			// Arm's reach (85 cm on the floor plane from the character's position; the height does not count).
+			const double near_hand[3] = {8493.5, 140.0, 12950.0};
+			check(WithinArmReach(near_hand, 8496.8, 13026.6, 85.0), "reach: the J's Bar Handgun from Kevin's spot (77 cm) is in reach");
+			const double far_hand[3] = {9601.5, 156.0, 13072.5};
+			check(!WithinArmReach(far_hand, 9450.8, 12951.5, 85.0), "reach: the bathroom herb from the door (1.9 m) is not");
+			const double edge[3] = {85.0, 0.0, 0.0};
+			const double past[3] = {85.1, -500.0, 0.0};
+			check(WithinArmReach(edge, 0.0, 0.0, 85.0) && !WithinArmReach(past, 0.0, 0.0, 85.0),
+				"reach: exactly 85 counts, 85.1 does not (whatever the height)");
+			const double nan_hand[3] = {std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0};
+			check(!WithinArmReach(nan_hand, 0.0, 0.0, 85.0) && !WithinArmReach(nullptr, 0.0, 0.0, 85.0), "reach: no number, no reach");
 		}
 
 		// --- The cue itself. ---

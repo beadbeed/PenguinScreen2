@@ -285,8 +285,8 @@ namespace VR::ProfileDB
 		// Optional (whenSetting: <name>): only patched while that VR switch is on and never online-safe; strictly offline
 		// (no network adapter), or in private co-op only where SilenceSettingCoopLive allows it (PhysicalMelee and
 		// PhysicalMeleeContact with [VR] PhysicalMeleeOnline while this console runs the room's enemies; SeamlessDoors and
-		// MeleeHitJolt never). Known names (IsSilenceSettingName): SeamlessDoors, PhysicalMelee, PhysicalMeleeContact,
-		// MeleeHitJolt, GunRayAim (strictly offline); an unknown name drops the entry. Off: a word we patched is put back.
+		// MeleeHitJolt and HandPickup never). Known names (IsSilenceSettingName): SeamlessDoors, PhysicalMelee,
+		// PhysicalMeleeContact, MeleeHitJolt, GunRayAim, HandPickup (strictly offline); an unknown name drops the entry. Off: a word we patched is put back.
 		std::string when_setting;
 		// Optional (keepThroughDisarm: true, needs whenSetting): patched while the switch is on, the profile's `when`
 		// guard passes and the game is offline, whether first person is armed or not (e.g. code that runs during a room
@@ -680,6 +680,30 @@ namespace VR::ProfileDB
 		float hand_range = 300.0f;        // a target appears while the hand is within this of the volume's centre
 		float hand_keep = 320.0f;         // and stays until this (no flicker at the edge)
 		float hand_near = 30.0f;          // the marker brightens within this of the volume
+		// reach.pickup: real hand pickups ([VR] HandPickup, File #1 strictly offline; research/2026-10-21-hand-pickup.md).
+		// Optional: without it (or with a bad one) HandPickup does nothing in this game. Distances in game cm.
+		bool has_pickup = false;
+		float pickup_near = 6.0f;          // a hand inside a floor item's volume or this close to it highlights the item
+		float pickup_show = 45.0f;         // the box shows (dim) for the nearest item within this of a hand
+		float pickup_max_reach = 85.0f;    // a hand farther than this (on the floor plane) from the character's body is out of reach
+		u32 pickup_block = 0;              // the host block the cave reads: +0 magic, +4 stamp (u8), +8 record, +0x10 point (3 f32)
+		u32 pickup_magic = 0;              // the armed word's value (the cave compares its own copy)
+		u32 pickup_counter = 0;            // u8 game frame counter (wraps at 60): the block's stamp
+		u32 pickup_site = 0;               // the patched call (0x61DB94) and what it reads while patched
+		u32 pickup_site_on = 0;
+		u32 pickup_cave = 0;               // the cave's first word and its value while in
+		u32 pickup_cave_first = 0;
+		u32 pickup_prompt = 0;             // the take-it prompt's item: +1 u8 its record index, +2 u16 its item id (+8 its name)
+		u32 pickup_result = 0;             // record offset: the last Circle search's item record index (u8)
+		u32 pickup_cells = 0;              // record offset of the item cells (u8 record index each, 0 = empty)
+		u32 pickup_cell_count = 4;
+		u32 pickup_overlay = 0;            // u32: a game screen is drawn
+		u32 pickup_which = 0;              // u8: which screen (1 = the item screen or a take-it prompt)
+		u32 pickup_sub = 0;                // u8: its sub-mode (2 = a take-it prompt; stale after close)
+		u32 pickup_grid = 0;               // u8: the cursor is in your own item grid
+		u32 pickup_cursor_node = 0;        // u32: the cursor's cell node
+		u32 pickup_cursor_index = 0;       // u16: the cell's index
+		u32 pickup_cell_nodes[4] = {};     // your own cells' nodes, cell 0..3 (a 2 x 2 grid: 0 1 / 2 3)
 	};
 
 	// hud.wrist: a card on the back of the left wrist while first person is active (VR only), with the

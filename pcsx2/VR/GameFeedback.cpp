@@ -6,6 +6,7 @@
 #include "VR/GameModels.h"
 #include "VR/GunRay.h"
 #include "VR/HandModel.h"
+#include "VR/HandPickup.h"
 #include "VR/ItemData.h"
 #include "VR/ItemReach.h"
 #include "VR/PhysicalMelee.h"
@@ -609,6 +610,8 @@ namespace VR::GameFeedback
 			const u64 now_ms = CameraDriver::SteadyNowMs();
 			ItemReach::Poll(profile, live, now_ms, strength);
 			ItemReach::PollHandTarget(profile, live, now_ms, strength);
+			// [VR] HandPickup: a squeeze on the item PollHandTarget highlighted (it reads ItemReach::CurrentPickup).
+			HandPickup::Poll(profile, live);
 		}
 
 		void MaybeRunSelfTest()
@@ -958,6 +961,7 @@ namespace VR::GameFeedback
 	void OnStateLoaded()
 	{
 		ItemReach::OnStateLoaded();
+		HandPickup::OnStateLoaded();
 		PhysicalMelee::OnStateLoaded();
 		GunRay::OnStateLoaded();
 		ReloadDriver::OnStateLoaded();

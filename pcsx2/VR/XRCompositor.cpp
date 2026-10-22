@@ -4126,7 +4126,7 @@ namespace VR::XRCompositor
 				return false;
 			// Hand targeting's slot gets its swapchain only while the HandTargeting setting is on, so with it off the
 			// resources are exactly what they were before the slot existed (a later switch-on creates it on the next call).
-			const auto chain_wanted = [](int k) { return k != ZoneMarkers::kTarget || EmuConfig.VR.HandTargeting; };
+			const auto chain_wanted = [](int k) { return k != ZoneMarkers::kTarget || EmuConfig.VR.HandTargeting || EmuConfig.VR.HandPickup; };
 			bool chains_ok = true;
 			for (int k = 0; k < kZoneSlots; k++)
 				chains_ok = chains_ok && (!chain_wanted(k) || s.zone_chains[k].swapchain != XR_NULL_HANDLE);
@@ -4299,7 +4299,7 @@ namespace VR::XRCompositor
 			// Hand targeting's box (ItemReach::GetTargetMark; only ever published with the HandTargeting setting on) shows with
 			// or without the ZoneMarkers setting; the body-zone markers only with it.
 			ItemReach::TargetMark target_mark;
-			const bool target_on = EmuConfig.VR.HandTargeting && ItemReach::GetTargetMark(&target_mark);
+			const bool target_on = (EmuConfig.VR.HandTargeting || EmuConfig.VR.HandPickup) && ItemReach::GetTargetMark(&target_mark);
 			const bool zones_on = HudCards::ZoneMarkersEnabled();
 			if (!zones_on && !target_on)
 				return 0;
