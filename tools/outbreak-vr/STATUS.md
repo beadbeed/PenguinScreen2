@@ -14,27 +14,79 @@ Details live elsewhere:
 Updated by the Windows PC session on 2026-10-13 at night: no headset session that day; everything below dated 10-13 is
 checked offline or on SteamVR's null headset only.
 
-**Morning of 2026-10-22, for Alex:** `D:\Games\PS2\Playtest\Slot5/6/7/9.cmd` now run `nightly` = the 10-15 build +
-`truestereo` + `grabdoor` + `vraim` (local LTO build, 50 of 50 self-tests, profile check passes), in
-`D:\dev\PenguinScreen2-buildun-playtest-models` with its own settings (the previous exe is kept there as
-`pcsx2-qt.prev-13e5427.exe`). New in its `inis\PenguinScreen2.ini` `[VR]`: `TrueStereo = true` and
-`PhysicalMeleeFists = true`; `GrabFirstPerson`, `DoorVeil` and `GunRayAim` are on by default; everything else as before.
-Checked offline headset-free (slot 5: 255.5 counts/s of 0x48BF93, normal speed; all four caves in and read back: A-C,
-D-F+H, G at 0xFE900, I at 0xFEA00; grabbed in slot 5 kept first person) and on SteamVR's null headset (slot 7, scripted
-head and hands, TrueStereo off and on: no xrEndFrame or Vulkan error, 58-60 frames/s submitted in first person as
-before (the first TrueStereo launch dipped to 46-54/s while its shaders were new, the next two did not), hands drawn,
-the panel set up). Not in the headset yet. Headset checklist:
+**Morning of 2026-10-22 (second update), for Alex:** `D:\Games\PS2\Playtest\Slot5/6/7/9.cmd` now run `nightly` = the
+10-15 build + `truestereo` + `grabdoor` + `vraim` + `handpickup` + `nativefeel` + `vrbody` (with `vrpresence`) +
+`reatlas` (notes only): a local LTO build, 58 of 58 self-tests, the profile check passes. It runs in
+`D:\dev\PenguinScreen2-build\run-playtest-models` with its own settings. The previous exe is kept there as
+`pcsx2-qt.prev-626ef93.exe`.
+
+In its `inis\PenguinScreen2.ini` `[VR]`:
+- set: `TrueStereo`, `PhysicalMeleeFists`, `HandPickup` and `VrBodySelf` (all `true`);
+- on by default: `GrabFirstPerson`, `DoorVeil`, `GunRayAim` and the five native-feel switches (`ScriptedShotsFirstPerson`,
+  `HeadInWall`, `SpatialAudio`, `GameRumbleEvents`, `FadeDim`);
+- off: `VrBody` and `VrPresence`, until the two-machine test.
+
+`VrBodySelf` only works together with `VrBody`, so your own arms (item 4) need `VrBody = true` as well. With
+`VrPresence` off, no partner is posed; `VrBodySelf` is offline only.
+
+The code caves no longer overlap:
+- A-C at 0xFE000;
+- D-F+H at 0xFE200-0xFE8F0;
+- G at 0xFE900;
+- I at 0xFEA00;
+- hand pickup at 0xFEC00-0xFEC94;
+- spatial audio at 0xFC000-0xFC12C;
+- VR body V/U at 0xFD000-0xFD374 (tables 0xFD400).
+
+The host blocks are 0xFEB80, 0xFEBF0 and 0xFF000-0xFF400.
+
+What was checked, offline and headset-free:
+- slot 5: 255.6-255.8 counts/s of 0x48BF93 (normal speed), with all seven caves in and read back, and no errors;
+- slot 7: the scripted squeeze on the J's Bar Handgun took it into cell 0;
+- `VrBody` + `VrBodySelf` (loopback `body_test.py --self`, and alone without presence): Kevin's own wrists were built
+  by the game 0.1 cm from the targets.
+
+What was checked on SteamVR's null headset: slot 7 with these settings and TrueStereo on, scripted head and hands. There
+was no xrEndFrame or Vulkan error, and 55-60 frames/s were submitted at the null headset's 90 Hz, as before. The game ran
+at 255.7 counts/s, the hands were drawn, the menu panel was on, and the per-eye projection layer was sent. None of this
+has been in the headset yet.
+
+Headset checklist:
 1. **TrueStereo on/off** (slot 7): the counter and Handgun at arm's length, a zombie close (slot 5), leaning, rolling
    your head, the HUD text, a menu (MenuPanel). Then `TrueStereo = false` for the same: which feels more solid? If
    anything looks doubled or swims, say where.
-2. **Grab** (slot 5, `GrabFirstPerson`): the zombie grabs from behind; you should stay in first person, turn round to
-   see it, shake to break free as before.
-3. **Doors** (slot 9, the bathroom door; `DoorVeil`): open a door yourself: black through the load, no third-person flash of the room
-   camera, then first person in the next room.
-4. **Gun ray** (slot 5 or 6, `GunRayAim`): shots should hit where the laser points, also when the gun is off to the side
-   of where you face.
-5. **Fists** (`PhysicalMeleeFists`): with a gun, a fast swing of the gun hand pistol-whips; with nothing equipped, a
-   fast punch. Slow moves should do nothing; if quick aiming ever triggers a whip, set it to `false`.
+2. **Hand pickup** (`HandPickup`): in slot 7, put a hand on the Handgun on the counter, so the box shows. Squeeze and
+   keep squeezing: the prompt comes up and is taken for you. Let go early and the prompt is yours. In slot 8, try the
+   Green Herb on the bathroom sink, from close up and from across the room (there it should refuse: too far).
+3. **Head in wall** (`HeadInWall`, slot 7): lean into the J's Bar counter and a wall. The eye should stop at them and
+   the view should darken past 15 cm.
+4. **Kevin's own arms** (`VrBody = true` + `VrBodySelf = true`, slot 6 or 7): look down. You should see Kevin's arms
+   reaching your hands, and the rest of him should stay hidden.
+5. **360 degree sound** (`SpatialAudio`, slot 5): turn your head with the zombie groaning behind you. It should move
+   round you, not just left and right across the screen.
+6. **Game rumble** (`GameRumbleEvents`, slot 5): get grabbed and feel the game's own rumble in both hands; firing
+   rumbles on the gun hand.
+7. **Scripted shots** (`ScriptedShotsFirstPerson`): a fixed cut or a camera shake should keep first person. The shake
+   should move only the game's eye, not yours.
+8. **Grab** (slot 5, `GrabFirstPerson`): the zombie grabs from behind. You should stay in first person, turn round to
+   see it, and shake to break free as before.
+9. **Doors** (slot 9, the bathroom door; `DoorVeil` and `FadeDim`): open a door yourself. It should be black through
+   the load (the game's fade dims everything, the hands too), with no third-person flash of the room camera, then first
+   person in the next room.
+10. **Gun ray** (slot 5 or 6, `GunRayAim`): shots should hit where the laser points, also when the gun is off to the
+    side of where you face.
+11. **Fists** (`PhysicalMeleeFists`): with a gun, a fast swing of the gun hand pistol-whips; with nothing equipped, a
+    fast punch. Slow moves should do nothing. If quick aiming ever triggers a whip, set it to `false`.
+
+**Two-machine VR body test** (later, with a second PC running PenguinScreen2): both consoles need these settings:
+- `VrPresence = true`;
+- `VrPresencePeer = <the other PC's LAN or Tailscale address>:47800`;
+- the same `VrPresenceKey`;
+- `VrBody = true`.
+
+Then in private co-op, each player should see the partner's character turn its head to their VR head and reach for
+their VR hands. The steps and what to watch are in `research/2026-10-21-vr-body.md` and
+`research/2026-10-21-vr-presence.md`.
 
 **2026-10-13 in short:**
 - **Direction:** Alex chose PenguinScreen2 as the foundation. The native-port option (REO) was assessed and parked:
@@ -50,8 +102,7 @@ the panel set up). Not in the headset yet. Headset checklist:
 
 **2026-10-14 playtest build:** branch `playtest` = `menupanel` + `reloadwire` (the reload gesture) + `meshraster` (the mesh
 renderer, not drawn with yet), built locally with LTO like CI (25 of 25 self-tests). Launch with
-`D:\Games\PS2\Launch-Playtest-SteamVR.cmd`. It runs `D:\dev\PenguinScreen2-build
-un-playtest`, a separate portable
+`D:\Games\PS2\Launch-Playtest-SteamVR.cmd`. It runs `D:\dev\PenguinScreen2-build\run-playtest`, a separate portable
 install with its own settings (`HandTargeting`, `MenuPanel` and `ReloadGesture` on, `DepthLayer` off), memory cards and copies
 of the File #1 savestates. Headset-free speed in slot 5 matches the CI build.
 `D:\Games\PS2\Launch-Playtest-Models-SteamVR.cmd` runs the same with `handmodels` on top (the game's own weapon models in
@@ -65,8 +116,7 @@ Since 2026-10-14 21:15 `run-playtest-models` (and `Playtest\Slot*.cmd`) runs bra
 an LTO build with 30 of 30 self-tests; its `resources` junction points at the `melee` worktree.
 
 **Morning of 2026-10-15, for Alex:** `D:\Games\PS2\Playtest\Slot5/6/7/9.cmd` run `nightly` (local LTO build, 39 of 39 self-tests),
-in `D:\dev\PenguinScreen2-build
-un-playtest-models` with its own settings. On there: `PhysicalMelee` (Contact), `MeleeHitJolt`,
+in `D:\dev\PenguinScreen2-build\run-playtest-models` with its own settings. On there: `PhysicalMelee` (Contact), `MeleeHitJolt`,
 `SeamlessDoors`, `MenuPanel` (+ `MenuPanelRoom = Freeze`), `HandTargeting`, `ReloadGesture`, the game weapon models;
 off: `BeltPouches`, `DepthLayer`, `DepthWarp`, `PhysicalMeleeOnline`. A/B for leaning (slot 7, lean 10-20 cm at the counter):
 `DepthWarp = true` (our own warp: the review's critical fix is in, and it ran clean on the null headset after the merge:
@@ -136,8 +186,7 @@ everything, the hands too).
 | Depth layer | Branch `depthproj` (from `nearcull`): the shown frame's depth exported beside its colour, in metres, and (`[VR] DepthLayer`, off) sent to SteamVR with the first-person frame as a projection layer with depth. Road step 5's foundation. Checked offline and on the null headset, 2026-10-13 (below). Not in the headset yet. |
 | Menu panel | Branch `menupanel` (from `depthproj`): with `[VR] MenuPanel` (off) a game screen keeps first person, the room keeps rendering around you, and the screen's own draws are split off the frame onto a flat panel in front of you, where the menu pointer aims. Road step 1, stage 1. Item screen, map, take-it prompt and pause checked offline headset-free and on the null headset, 2026-10-13 (below). Alex played it on 2026-10-14 ("it all works", but the room behind the panel swims). |
 | Calm menus | Branch `panelfeel` (from `meleecoop`): `[VR] MenuPanelRoom` (with `MenuPanel` on). `Freeze`, the default, holds the camera at the view it had as the screen came up, so the room stays put in the world behind the panel; the room is dimmed to 55% and the panel comes round only after a turn of more than 60 deg. `Dim` dims without the hold; `Live` is the 10-14 behaviour. Checked offline headset-free and on the null headset, 2026-10-14 (below; `research/2026-10-13-menu-panel.md`, "Calm menus"). Not in the headset yet. |
-| Dev installs (local builds, portable, own settings) | `D:\dev\PenguinScreen2-build
-un-dev`: `nearcull` with `HandTargeting = true`. `run-depth`: `depthproj`. `run-menu`: `menupanel` (set `MenuPanel` / `DepthLayer` in its `inis\PenguinScreen2.ini`). `run-panel`: `panelfeel` (`MenuPanel = true`, `MenuPanelRoom = Freeze`). `D:\Games\PS2\PenguinScreen2` is unchanged (CI build `3eb2524`). |
+| Dev installs (local builds, portable, own settings) | `D:\dev\PenguinScreen2-build\run-dev`: `nearcull` with `HandTargeting = true`. `run-depth`: `depthproj`. `run-menu`: `menupanel` (set `MenuPanel` / `DepthLayer` in its `inis\PenguinScreen2.ini`). `run-panel`: `panelfeel` (`MenuPanel = true`, `MenuPanelRoom = Freeze`). `D:\Games\PS2\PenguinScreen2` is unchanged (CI build `3eb2524`). |
 | Steam Frame standalone | **On hold** (Alex: File #1 first). ARMSX2 branch `outbreak-vr-frame` has M0 to M3, CI green, with a Monado headless OpenXR test and the sync tool: `STEAM-FRAME.md`. |
 
 **Local builds (2026-10-13)** are the everyday loop; CI is for checkpoints. All in `D:\dev\PenguinScreen2-build`, nothing in
