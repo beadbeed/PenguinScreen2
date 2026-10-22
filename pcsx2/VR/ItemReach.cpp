@@ -705,6 +705,9 @@ namespace VR::ItemReach
 			return true;
 		}
 
+		// The serial of the cue's last toast ([VR] GameText: taken off once the game's own take-it prompt names the item).
+		u32 s_cue_toast = 0;
+
 		void Announce(const Update& u, float strength)
 		{
 			std::string text;
@@ -718,7 +721,7 @@ namespace VR::ItemReach
 			const float amp = std::clamp(kTickAmp * (std::isfinite(strength) ? strength : 0.0f), 0.0f, 1.0f);
 			if (amp > 0.0f)
 				XRInput::QueuePulse(kRightHand, amp, kTickSeconds);
-			HudCards::Toast(text, kToastSeconds);
+			s_cue_toast = HudCards::Toast(text, kToastSeconds);
 		}
 
 		const char* FaultText(Fault f)
@@ -860,6 +863,13 @@ namespace VR::ItemReach
 		// it knew, so a prompt declined with Cross, or a weapon lowered beside the same item, is not announced again.
 		if (live.screen_up || live.weapon_raised)
 		{
+			// [VR] GameText: a screen is up (the take-it prompt names the item itself): our toast for it goes.
+			if (live.screen_up && EmuConfig.VR.GameText && s_cue_toast != 0)
+			{
+				if (HudCards::CancelToast(s_cue_toast))
+					Console.WriteLn("(VR) Pickup cue: a game screen is up (its take-it prompt names the item): our toast is off.");
+				s_cue_toast = 0;
+			}
 			Publish(false, 0, 0);
 			return;
 		}

@@ -1452,6 +1452,13 @@ struct Pcsx2Config
 		// inventory (the game's swap), any other screen or a different item: nothing is pressed. Ini only, off by default
 		// until checked in the headset (tools/outbreak-vr/research/2026-10-21-hand-pickup.md).
 		bool HandPickup = false;
+		// First person: the game's own text (speech subtitles, "X Obtained", examine and system lines: File #1's 2D layer,
+		// it has no persistent HUD) is drawn at half its size about the view centre, so lines the game puts near the bottom
+		// of its screen sit 10-25 deg below the line of sight instead of 30-40: with TrueStereo the flat plane spans half as
+		// much of the view; without it the 2D draws move toward the picture's centre. Not fades, not menus. Our pickup cue's
+		// toast is taken off once the game's own take-it prompt names the item. Display only, no game state. false = the
+		// game's own placement (research/2026-10-22-game-cues.md).
+		bool GameText = true;
 		// First person: the hands are the CC0 hand model (VR::HandMesh) and the weapon in the right hand, in the hip
 		// holster and slung over the shoulder is the game's own model read from the disc (VR::GameModels), at its real
 		// size and placed in the hand the way the game attaches it (its weapon table's grip offset and turn), drawn with

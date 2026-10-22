@@ -15,6 +15,7 @@
 #include "VR/DepthHistogram.h"
 #include "VR/DepthExport.h"
 #include "VR/MenuPanel.h"
+#include "VR/SpatialControls.h"
 #include "VR/StereoState.h"
 #include "MemoryTypes.h"
 #include "VR/EyeProjection.h"
@@ -6515,10 +6516,14 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 				m_conf.cb_vs.vr_stereo = GSVector2(0.0f, 0.0f);
 				m_conf.cb_vs.vr_band[0].w = 0.0f;
 				// Flat draws: the game's 2D screen as a plane 1.5 m ahead, sized to 90% of the view both eyes share, so
-				// the HUD's edges stay in sight whatever the headset's field of view.
+				// the HUD's edges stay in sight whatever the headset's field of view. [VR] GameText (no menu up): that
+				// times EyeProjection::kGameTextScale, so the game's own text near the bottom of its screen sits where
+				// it is read without looking far down.
 				float flat_fx = cam.fx, flat_fy = cam.fy;
 				if (kind == 0.0f)
 				{
+					const float fraction = 0.9f * ((EmuConfig.VR.GameText && !VR::SpatialControls::MenuMode()) ?
+														  VR::EyeProjection::kGameTextScale : 1.0f);
 					float th = 10.0f, tv = 10.0f;
 					for (int e = 0; e < 2; e++)
 					{
@@ -6527,8 +6532,8 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 					}
 					if (th > 0.05f && tv > 0.05f)
 					{
-						flat_fx = cam.half_w / (0.9f * th);
-						flat_fy = -cam.half_h / (0.9f * tv);
+						flat_fx = cam.half_w / (fraction * th);
+						flat_fy = -cam.half_h / (fraction * tv);
 					}
 				}
 				m_conf.cb_vs.vr_eye_in = GSVector4(flat_fx, flat_fy, cam.cx, cam.cy);
@@ -6549,6 +6554,37 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 								"right eye fx %.3f cx %.2f, offset %.4f m",
 					cam.fx, cam.fy, cam.cx, cam.cy, 2.0f * cam.half_w, 2.0f * cam.half_h, eyes[1].fx, eyes[1].cx,
 					eyes[1].pos_m[0]);
+			}
+		}
+	}
+	// [VR] GameText without TrueStereo: the first-person screen shows the game's picture at the camera's FOV, so its 2D
+	// draws (FST: the game's text) are moved toward the picture's centre by EyeProjection::kGameTextScale, as TrueStereo
+	// sizes its flat plane. Not a draw that fills the target (a fade), not a screen split onto the menu panel, not while a
+	// menu is up (MenuPanel off: the screen keeps its size).
+	else if (st.enabled && st.first_person && vr_multiview_target && PRIM->FST && EmuConfig.VR.GameText &&
+			 !VR::SpatialControls::MenuMode() && !(EmuConfig.VR.MenuPanel && VR::MenuPanel::SplitOn()))
+	{
+		float fx = 0.0f, fy = 0.0f, cx = 0.0f, cy = 0.0f;
+		const GSVector4i full = m_context->scissor.in;
+		const GSVector4i cover = m_r.rintersect(full);
+		const bool fills = !cover.rempty() && full.width() > 0 && full.height() > 0 &&
+						   cover.width() * 100 >= full.width() * 95 && cover.height() * 100 >= full.height() * 95;
+		if (!fills && VR::StereoState::GameCamera(&fx, &fy, &cx, &cy) && std::isfinite(cx) && std::isfinite(cy))
+		{
+			const float s = VR::EyeProjection::kGameTextScale;
+			for (u32 i = 0; i < m_vertex->next; i++)
+			{
+				GSVertex& v = m_vertex->buff[i];
+				v.XYZ.X = VR::EyeProjection::GameTextMapFixed(static_cast<u16>(v.XYZ.X), cx, s);
+				v.XYZ.Y = VR::EyeProjection::GameTextMapFixed(static_cast<u16>(v.XYZ.Y), cy, s);
+			}
+			m_vr_true_draw = true; // the vertices now land outside the draw's own bounding box
+			static bool s_gt_logged = false;
+			if (!s_gt_logged)
+			{
+				s_gt_logged = true;
+				Console.WriteLn("(VR) GameText: the game's 2D draws in first person at %.2f of their size about %.1f,%.1f "
+								"(no TrueStereo).", s, cx, cy);
 			}
 		}
 	}
