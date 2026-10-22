@@ -451,6 +451,9 @@ namespace VR::ProfileDB
 		// Stay armed until the guards have failed this many vsyncs in a row, so a guard byte the game
 		// flips for a frame inside its own update doesn't hand the camera back for a frame.
 		u32 disarm_after_vsyncs = 0;
+		// roomLoad: guards that all hold while the game changes rooms (File #1: scenario status 0x48BF60 == 3, the fade
+		// out, the load and the fade in). [VR] DoorVeil shows that black when it starts from first person. Empty: none.
+		std::vector<CameraGuard> room_load;
 		// u8 the game sets to 1 while it is in network play (Outbreak File #1 0x3065C2). Read every vsync to
 		// tell online from offline even when the network adapter setting can't (the setting is per emulator).
 		std::optional<u32> network_flag;
@@ -802,6 +805,19 @@ namespace VR::ProfileDB
 	{
 		std::vector<RecordCheck> grabbed; // all must hold; at least one
 		GrabBreakout::Params shake;
+		// facePull ([VR] GrabFacePull): where the enemies are, to turn the view toward the one holding you: the table, its
+		// stride and count, the present byte and the f32 x, y, z position (record offsets), and how near (game units across
+		// the floor) the nearest must be. Reads only.
+		struct FacePull
+		{
+			u32 table = 0;
+			u32 stride = 0;
+			u32 count = 0;
+			u32 present = 0;
+			u32 position = 0;
+			float within = 0.0f;
+		};
+		std::optional<FacePull> face_pull;
 	};
 
 	// melee: [VR] PhysicalMelee (VR::PhysicalMelee; tools/outbreak-vr/research/2026-10-14-melee.md). Where the local record

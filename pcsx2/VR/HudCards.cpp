@@ -429,8 +429,26 @@ namespace VR::HudCards
 			return (now_ms > back) ? (now_ms - back) : 1;
 		}
 
+		// The veil (SetVeil): black from veil_start over the blink's rise, held while it is on.
+		float VeilOpacityAt(u64 veil_start_ms, u64 now_ms)
+		{
+			if (veil_start_ms == 0 || now_ms < veil_start_ms)
+				return 0.0f;
+			return std::min(1.0f, static_cast<float>(now_ms - veil_start_ms) / static_cast<float>(kBlinkRiseMs));
+		}
+
+		// Where a veil starts so that it rises from opacity o (the blink's now), and where a blink starts so that it carries
+		// on from the veil's o as the veil lets go: still rising if it was, else held black for the hold, then the fall.
+		u64 StartAtOpacity(float o, u64 now_ms)
+		{
+			const u64 back = static_cast<u64>(std::lround(std::clamp(o, 0.0f, 1.0f) * static_cast<float>(kBlinkRiseMs)));
+			return (now_ms > back) ? (now_ms - back) : 1;
+		}
+
 		std::mutex s_blink_mutex;
 		u64 s_blink_start_ms = 0;
+		bool s_veil_on = false;
+		u64 s_veil_start_ms = 0;
 		// The ComfortBlink setting, published by Poll (CPU thread) for every thread; on until the first
 		// vsync, as the setting's default is.
 		std::atomic<bool> s_blink_enabled{true};
@@ -707,6 +725,25 @@ namespace VR::HudCards
 		return true;
 	}
 
+	void SetVeil(bool on)
+	{
+		const u64 now = NowMs();
+		std::lock_guard<std::mutex> lock(s_blink_mutex);
+		if (on == s_veil_on)
+			return;
+		if (on)
+		{
+			s_veil_start_ms = StartAtOpacity(BlinkOpacityAt(s_blink_start_ms, now), now);
+		}
+		else
+		{
+			const float o = std::max(VeilOpacityAt(s_veil_start_ms, now), BlinkOpacityAt(s_blink_start_ms, now));
+			s_blink_start_ms = StartAtOpacity(o, now);
+			s_veil_start_ms = 0;
+		}
+		s_veil_on = on;
+	}
+
 	bool CurrentBlink(float* opacity)
 	{
 		const u64 now = NowMs();
@@ -714,6 +751,8 @@ namespace VR::HudCards
 		{
 			std::lock_guard<std::mutex> lock(s_blink_mutex);
 			o = BlinkOpacityAt(s_blink_start_ms, now);
+			if (s_veil_on)
+				o = std::max(o, VeilOpacityAt(s_veil_start_ms, now));
 		}
 		if (opacity)
 			*opacity = o;
@@ -1310,6 +1349,18 @@ namespace VR::HudCards
 		check(std::abs(BlinkOpacityAt(again, 1140) - 0.5f) < 0.03f && BlinkOpacityAt(again, 1141) >= BlinkOpacityAt(again, 1140),
 			"a trigger while clearing goes dark again from where it was");
 		check(BlinkRestartAt(1000, 1300) == 1300u, "a trigger after a blink starts a new one");
+		// The veil (the door veil): rises like a blink, holds, and as it lets go the blink carries on from its darkness.
+		check(VeilOpacityAt(0, 5000) == 0.0f && std::abs(VeilOpacityAt(1000, 1020) - 0.5f) < 0.01f &&
+				  VeilOpacityAt(1000, 1040) == 1.0f && VeilOpacityAt(1000, 90000) == 1.0f,
+			"veil: dark over 40 ms, then held");
+		check(StartAtOpacity(1.0f, 5000) == 4960u && BlinkOpacityAt(4960, 5000) == 1.0f && BlinkOpacityAt(4960, 5059) == 1.0f &&
+				  BlinkOpacityAt(4960, 5180) == 0.0f,
+			"veil let go while black: held 60 ms, clear 80 ms later");
+		check(std::abs(BlinkOpacityAt(StartAtOpacity(0.5f, 5000), 5000) - 0.5f) < 0.03f &&
+				  BlinkOpacityAt(StartAtOpacity(0.5f, 5000), 5021) == 1.0f,
+			"veil let go while still darkening: the blink goes on darkening from there");
+		check(std::abs(VeilOpacityAt(StartAtOpacity(0.25f, 5000), 5000) - 0.25f) < 0.03f,
+			"veil set mid-blink: rises from the blink's darkness");
 		std::vector<u32> bimg;
 		RasterBlink(bimg);
 		bool black = (bimg.size() == static_cast<size_t>(kBlinkImageSize) * kBlinkImageSize);

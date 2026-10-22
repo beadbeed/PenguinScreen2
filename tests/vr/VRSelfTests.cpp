@@ -1494,6 +1494,26 @@ int main(int argc, char* argv[])
 	RunSilent("CameraDriver::SelfTestMath (math, predict, comfort, FOV)", VR::CameraDriver::SelfTestMath);
 	RunSilent("CameraDriver::SelfTestStableSlot (the debounced local slot, review M1)", VR::CameraDriver::SelfTestStableSlot);
 	RunSilent("CameraDriver::SelfTestCaves (all-or-nothing caves, review M2 / d2)", VR::CameraDriver::SelfTestCaves);
+	RunSilent("CameraDriver::SelfTestGrabDoor (GrabFirstPerson, GrabFacePull, DoorVeil)", VR::CameraDriver::SelfTestGrabDoor);
+	// [VR] DoorVeil and GrabFirstPerson read File #1's camera.roomLoad (scenario status 3) and breakout.grabbed (stance 5,
+	// status in normal play, so a grab never keeps first person when down or dead).
+	RunSilent("Grab and door profile (File #1 camera.roomLoad, breakout.grabbed)", +[]() {
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		if (!p || !p->camera.has_value() || !p->breakout.has_value())
+			return false;
+		const auto& rl = p->camera->room_load;
+		if (rl.size() != 1 || rl[0].ee_address != 0x48BF60u || rl[0].equals != 3u || rl[0].width != 1 || rl[0].not_equals)
+			return false;
+		bool stance = false, status = false;
+		for (const VR::ProfileDB::RecordCheck& c : p->breakout->grabbed)
+		{
+			stance = stance || (c.offset == 0x08 && !c.has_range && c.equals == 5u);
+			status = status || (c.offset == 0xBA0 && c.has_range && c.max < 0x18u);
+		}
+		const auto& fp = p->breakout->face_pull;
+		return stance && status && fp.has_value() && fp->table == 0x3FFCA0u && fp->stride == 0xD90u && fp->count == 64u &&
+		       fp->position == 0x38u && fp->within == 120.0f;
+	});
 	RunSilent("ProfileDB::SelfTestMultibandResolve", VR::ProfileDB::SelfTestMultibandResolve);
 	RunAutoStereo();
 	RunCameraDriverLogged();
