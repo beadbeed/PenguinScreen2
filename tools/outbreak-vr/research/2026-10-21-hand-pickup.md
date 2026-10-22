@@ -11,7 +11,8 @@ in a headset.
 ## What a squeeze does
 
 1. **Which item** (`ItemReach`, every other vsync). Each tracked hand's grip position goes into the game's space
-   (`CameraDriver::GameFromVr`) and is measured against every floor-item trigger volume the game's own search looks at
+   (`CameraDriver::GameFromVr`); a hand more than `maxReach` (85 cm) from the character's position on the floor plane is
+   out of arm's reach and counts for nothing. The rest is measured against every floor-item trigger volume the game's own search looks at
    (the list at `0x23BD90`, type `0x80`, mode 0, enabled, not busy; any item id). The nearest volume within
    `reach.pickup.show` (45 cm) of a hand gets the box (the hand-targeting marker); inside it, or within `near` (6 cm), the
    item is **highlighted**, and that hand ticks once. The right hand wins a tie.
@@ -76,6 +77,10 @@ flat screen without `MenuPanel`), and a re-squeeze test could be met by a fidget
 | slot 9, the .45 rounds (id 262) on the sink, one free cell | squeeze, hold, twice | the cave took the word and the character reached both times, but the game opened no prompt (the rounds' record 8 is the one already in cell 2); "no take-it prompt came": nothing pressed, cells unchanged |
 | slot 7, `HandPickup = false`, head turned 90 deg (heading 33732 -> 50116, 90.0 deg), the same squeeze at the Handgun | squeeze, hold | no `Hand pickup` lines, the cave never went in, overlay stayed 0, cells unchanged |
 
+After the reach limit (f802fcf, 2026-10-22): slot 7, the hand 4.5 cm in front of the Handgun's volume (about 77 cm from
+Kevin): highlighted, prompt, confirmed, Handgun in cell 0. Slot 8, the hand on the Green Herb 1.9 m from Kevin: "no floor
+item near a hand within arm's reach", no highlight, nothing pressed, overlay 0, cells unchanged.
+
 Not checked live: a full inventory (no savestate has four full cells and a floor item with a prompt; the refusal is
 self-tested), the cursor resting on a full cell (every prompt seen opened on cell 0 and it was free), a partner's
 hand-over, the left hand, the box in a headset. One of the slot 8 runs did not arm first person at all after the load
@@ -86,14 +91,15 @@ cue's suite grew from 120 to 141 checks with the selection).
 
 ## Risks and what is not known
 
-- **The box draws only with `HandTargeting = true`.** The compositor gates the marker's swapchain on that switch, and the
-  GS/compositor files were out of bounds for this change. Set both for now; the gate wants `|| HandPickup` (one line in
-  `XRCompositor.cpp`).
+- **The box** draws with `HandPickup` on too (9b1c2a9: the compositor's two `HandTargeting` gates, the target slot's
+  swapchain and its draw, also take `HandPickup`; nothing else in that file changed).
 - **The replica is conservative, not exact.** Types `0x01`, `0x02` and `0x81` have extra checks in the core that can only
   refuse; `0x85` uses the character's position. A node the replica names may lose to nothing, so the worst case is an item
   that is not squeezable, never a different item taken (and the prompt check catches a different item anyway).
-- **No reach limit.** The game takes an item from wherever the hand is (1.5 m away in slot 8: the character walks over in
-  the reach animation). A seated player's hand cannot be farther than an arm, so this is only a scripted-hand oddity.
+- **Arm's reach** (f802fcf, `reach.pickup.maxReach`, 85 cm): a hand farther than that from the character's position on
+  the floor plane highlights nothing, so its squeeze arms nothing. Before it, the game took the slot 8 herb from 1.9 m (the
+  character walked over in the reach animation). The J's Bar Handgun's volume centre is 104 cm from Kevin's spot at the
+  counter, its near edge 78 cm: at 85 cm the counter's front half of the volume is in reach. Tune in the headset.
 - **Partner hand-overs and the inventory-full swap with a real prompt** are guarded by the prompt struct and the cells;
   the swap is checked offline below, a hand-over is not.
 - **Co-op:** `offlineOnly`, and `SilenceSettingCoopLive` says no for `HandPickup`, so the site and cave never go in with
