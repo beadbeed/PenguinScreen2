@@ -20,6 +20,7 @@ from presence_echo import Echo
 SELF = "--self" in sys.argv
 SHOTS = sys.argv[sys.argv.index("--shots") + 1] if "--shots" in sys.argv else None
 args = [a for a in sys.argv[2:] if not a.startswith("--") and a != SHOTS]
+# --sweep: only the first pose, then a quick look-round for the screenshots
 STATE_SLOT = int(args[0]) if args else 6
 EXE = os.path.join(DEV, "pcsx2-qt.exe")
 LOG = os.path.join(DEV, "logs", "emulog.txt")
@@ -124,17 +125,28 @@ def main():
             ("3 both out to the sides, head 90 right (clamped)", -90.0, (-0.60, -0.25, -0.05), (0.60, -0.25, -0.05)),
             ("4 hands too far (blend back)", 0.0, (-0.2, -0.3, -2.5), (0.2, -0.3, -2.5)),
         ]
+        if "--sweep" in sys.argv:
+            steps = steps[:1]  # straight to the look-round (the slot's own cut starts about 25 s after the load)
         with FakeController(p, head=pose(pos=(0.0, 0.0, 0.0))) as fc:
             for name, yaw, lh, rh in steps:
                 mark = len(log())
                 fc.set_head(pose(yaw_deg=yaw, pos=(0.0, 0.0, 0.0)))
                 fc.set_hand(0, grip=pose(pos=lh), aim=pose(pos=lh), squeeze=0.3)
                 fc.set_hand(1, grip=pose(pos=rh), aim=pose(pos=rh), squeeze=0.8)
-                time.sleep(6)
+                time.sleep(2 if "--sweep" in sys.argv else 6)
                 L = body_lines(mark)
                 out[name] = dict(lines=L, partner=summary(L, "partner"), self=summary(L, "self"))
                 if shot:
                     shot("body_%s" % name.split()[0])
+            # Look round (hands forward) so a shot finds the partner: for the eye only.
+            if shot:
+                lh, rh = (-0.22, -0.30, -0.42), (0.24, -0.28, -0.45)
+                fc.set_hand(0, grip=pose(pos=lh), aim=pose(pos=lh), squeeze=0.3)
+                fc.set_hand(1, grip=pose(pos=rh), aim=pose(pos=rh), squeeze=0.8)
+                for yaw in range(0, 360, 30):
+                    fc.set_head(pose(yaw_deg=float(yaw), pitch_deg=-10.0, pos=(0.0, 0.0, 0.0)))
+                    time.sleep(1.2)
+                    shot("look_%03d" % yaw)
     finally:
         echo.stop()
         try:
