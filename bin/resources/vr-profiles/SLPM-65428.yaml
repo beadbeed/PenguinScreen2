@@ -1102,6 +1102,14 @@ SLPM-65428:
   # ahead) and turn with the head's yaw. Squeeze the grip inside one to press its button;
   # it holds until the grip opens, wherever the hand goes.
   # To tune: copy this file into <data dir>/vrprofiles/ and edit the copy.
+  # VR presence ([VR] VrPresence, off by default; tools/outbreak-vr/research/2026-10-21-vr-presence.md): in private co-op
+  # each console sends the other its player's VR head and hands over a UDP side channel of our own, and draws the
+  # partner's beside the partner's character. Reads only: room, the u16 room the local player is in (as melee.online);
+  # in each camera.base record, recordRoom the u16 room that character is in (+0x1E2, the same value the game's own
+  # messages carry) and recordUsed a u16 that is not zero in a used record (the max HP; record 3 reads 0 when nobody
+  # plays it). The partner is the record whose +0x03 is the packet's slot; its position is camera.lookAt.position.
+  presence: { room: 0x3065AC, recordRoom: 0x1E2, recordUsed: 0x546 }
+
   controls:
     - device: Gamepad
       id: controllers

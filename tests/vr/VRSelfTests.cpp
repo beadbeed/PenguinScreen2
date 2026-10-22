@@ -35,6 +35,7 @@
 #include "VR/StereoAuto.h"
 #include "VR/VRProfileDB.h"
 #include "VR/ZoneMarkers.h"
+#include "VR/VrPresence.h"
 #include "VR/XRCompositor.h"
 
 #include "Config.h"
@@ -1092,6 +1093,7 @@ int main(int argc, char* argv[])
 	RunLogged("Hands", VR::HandModel::SelfTest, "(VR) Hands self-test: ");
 	RunLogged("Pickup cue and hand targeting", VR::ItemReach::SelfTest, "(VR) Pickup cue self-test");
 	RunLogged("Zone markers", VR::ZoneMarkers::SelfTest, "(VR) Zone markers self-test");
+	RunLogged("VR presence (side channel, partner head and hands)", VR::Presence::SelfTest, "(VR) Presence self-test");
 	RunLogged("MeshRaster", +[]() { return VR::MeshRaster::SelfTest() == 0; }, "(VR) MeshRaster self-test");
 	{
 		Begin("Reload gesture (ReloadGesture::SelfTest)");

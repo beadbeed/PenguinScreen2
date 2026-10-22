@@ -31,7 +31,11 @@ namespace VR::ZoneMarkers
 	// a slot of its own and is the first thing dropped when layers are short; nothing is drawn in it unless that setting
 	// has published a target.
 	static constexpr int kTarget = 3;
-	static constexpr int kSlots = 4;
+	// VR presence's partner ([VR] VrPresence, VrPresence.h): a co-op partner's VR head and both hands, drawn together into
+	// this one image. Its swapchain exists only while that setting names a peer and a partner has shown up; it goes in
+	// right after the holster when layers are short.
+	static constexpr int kPartner = 4;
+	static constexpr int kSlots = 5;
 
 	// The images: square RGBA8, the hands' byte order (sRGB-encoded colour, unpremultiplied alpha), background alpha 0.
 	static constexpr u32 kImageSize = 256;
@@ -104,8 +108,9 @@ namespace VR::ZoneMarkers
 	// for anything not finite. Pure.
 	bool ClearOfView(const float eye[3], const float head_quat[4], const float point[3]);
 
-	// Which of the wanted layers go in the free_layers left: the holster first, then the belt's bag, then the pouches'
-	// rings, then hand targeting's box (so the box goes first when layers are short, then the markers, then the holster).
+	// Which of the wanted layers go in the free_layers left: the holster first, then a co-op partner's head and hands, then
+	// the belt's bag, then the pouches' rings, then hand targeting's box (so the box goes first when layers are short, then
+	// the markers, then the partner, then the holster).
 	// Pure.
 	std::array<bool, kSlots> Plan(u32 free_layers, const std::array<bool, kSlots>& want);
 

@@ -3540,6 +3540,31 @@ static void checkPouches(const std::string_view serial, VR::ProfileDB::Profile& 
 // breakout: shaking a controller breaks free of a grab (VR::GrabBreakout). The presses are the player's own pad input and
 // run only while the grabbed checks hold, so a grabbed list with any bad entry (which would widen it) drops the whole
 // block with a warning; a bad tuning number keeps its default.
+// presence: where VR presence reads the rooms and which records are in use (reads only). A bad entry drops the block.
+static std::optional<VR::ProfileDB::PresenceParams> parsePresence(const std::string_view serial, const ryml::ConstNodeRef& node)
+{
+	warnUnknownKeys(serial, node, "presence", {"room", "recordRoom", "recordUsed", "notes"});
+	VR::ProfileDB::PresenceParams pp;
+	const auto read_hex = [&](const char* key, u32& dst) {
+		if (!node.has_child(key))
+			return false;
+		const std::optional<u32> v = parseHexU32(nodeVal(node[key]));
+		if (!v.has_value())
+			return false;
+		dst = v.value();
+		return true;
+	};
+	if (!read_hex("room", pp.room) || !read_hex("recordRoom", pp.record_room) || !read_hex("recordUsed", pp.record_used) ||
+		(pp.room % 2) != 0 || pp.room + 2 > Ps2MemSize::MainRam || (pp.record_room % 2) != 0 || (pp.record_used % 2) != 0 ||
+		pp.record_room > 0x10000 || pp.record_used > 0x10000)
+	{
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' presence needs room (a u16 in main RAM), recordRoom and recordUsed (u16 "
+						   "record offsets); ignoring it, so no partner's VR head or hands are drawn.", serial);
+		return std::nullopt;
+	}
+	return pp;
+}
+
 static std::optional<VR::ProfileDB::BreakoutParams> parseBreakout(const std::string_view serial, const ryml::ConstNodeRef& node)
 {
 	using VR::ProfileDB::BreakoutParams;
@@ -4777,6 +4802,20 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 	}
 	else if (node.has_child("melee"))
 		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a melee that is not a map; ignoring it.", serial);
+
+	if (node.has_child("presence") && node["presence"].is_map())
+	{
+		out.presence = parsePresence(serial, node["presence"]);
+		if (out.presence.has_value() &&
+			!(out.camera.has_value() && out.camera->base.has_value() && out.camera->base->is_indexed && out.camera->look_at.has_value()))
+		{
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a presence block but no indexed camera.base and camera.lookAt; "
+							   "the partners' records are found through them, so no partner is drawn.", serial);
+			out.presence.reset();
+		}
+	}
+	else if (node.has_child("presence"))
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a presence that is not a map; ignoring it.", serial);
 
 	if (node.has_child("controls"))
 	{

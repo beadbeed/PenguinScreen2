@@ -795,6 +795,17 @@ namespace VR::ProfileDB
 	// as held while every grabbed check holds on the record camera.base finds (CameraDriver::LocalRecordAny, so first
 	// person need not be armed) and no lookAt.pauseWhen menu is up, never on obsrv; the Gamepad then presses for the player
 	// with the shake tuning while a controller is shaken.
+	// presence ([VR] VrPresence; tools/outbreak-vr/research/2026-10-21-vr-presence.md): reads only. The u16 room the local
+	// player is in, and in each character record (camera.base's records: indexed base, stride, count and idOffset) the u16
+	// room it is in and a u16 that is not zero in a used record (File #1: the max HP). The record's position is
+	// camera.lookAt.position.
+	struct PresenceParams
+	{
+		u32 room = 0;
+		u32 record_room = 0;
+		u32 record_used = 0;
+	};
+
 	struct BreakoutParams
 	{
 		std::vector<RecordCheck> grabbed; // all must hold; at least one
@@ -922,6 +933,7 @@ namespace VR::ProfileDB
 		std::vector<SpatialControlSpec> controls;
 		std::optional<BreakoutParams> breakout;
 		std::optional<MeleeParams> melee;
+		std::optional<PresenceParams> presence;
 		std::string notes;
 	};
 

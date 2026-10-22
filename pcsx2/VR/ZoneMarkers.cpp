@@ -386,7 +386,7 @@ namespace VR::ZoneMarkers
 	{
 		std::array<bool, kSlots> go{};
 		// In order of what matters most, so the last ones go first when layers are short.
-		static constexpr int kOrder[kSlots] = {kHolster, kBelt, kPouches, kTarget};
+		static constexpr int kOrder[kSlots] = {kHolster, kPartner, kBelt, kPouches, kTarget};
 		for (const int slot : kOrder)
 		{
 			if (!want[static_cast<size_t>(slot)] || free_layers == 0)
@@ -1016,6 +1016,16 @@ namespace VR::ZoneMarkers
 			check(Plan(4, with_box)[kTarget] && !Plan(3, with_box)[kTarget] && Plan(3, with_box)[kPouches] && !Plan(0, with_box)[kTarget],
 				"the hand-targeting box is the first thing dropped when layers are short");
 			check(Plan(1, std::array<bool, kSlots>{{false, false, false, true}})[kTarget], "with nothing else wanted it takes a free layer");
+			// VR presence's partner (the fifth slot): after the holster, before the bag, the rings and the box.
+			const std::array<bool, kSlots> every{{true, true, true, true, true}};
+			const std::array<bool, kSlots> two = Plan(2, every);
+			check(two[kHolster] && two[kPartner] && !two[kBelt] && !two[kPouches] && !two[kTarget],
+				"two layers free with everything wanted: the holster and the partner");
+			check(Plan(5, every)[kPartner] && Plan(5, every)[kTarget] && !Plan(4, every)[kTarget] && Plan(4, every)[kPartner],
+				"room for all five: all go; one short: the box goes, the partner stays");
+			check(Plan(1, std::array<bool, kSlots>{{false, false, false, false, true}})[kPartner] &&
+					  !Plan(0, std::array<bool, kSlots>{{false, false, false, false, true}})[kPartner],
+				"the partner alone takes a free layer, and none without one");
 
 			// A box 0.5 m wide and 0.4 m tall, 0.6 to 1.1 m ahead of a head at the origin (+Y up, forward -Z).
 			const float beye[3] = {0.0f, 1.2f, 0.0f};

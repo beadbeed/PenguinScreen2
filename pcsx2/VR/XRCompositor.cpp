@@ -27,6 +27,7 @@
 #include "VR/ItemData.h"
 #include "VR/ItemReach.h"
 #include "VR/ZoneMarkers.h"
+#include "VR/VrPresence.h"
 #include "Config.h"
 #include "VMManager.h"
 
@@ -691,6 +692,10 @@ namespace VR::XRCompositor
 			VkFence zone_fence = VK_NULL_HANDLE;
 			bool zone_fence_submitted = false;
 			bool zone_disabled = false;
+			// VR presence's partner slot (ZoneMarkers::kPartner): its swapchain is wanted only once a partner has shown up,
+			// and a failure to make it (SteamVR's 16-swapchain limit) skips the partner for the session, nothing else.
+			bool partner_seen = false;
+			bool partner_chain_failed = false;
 			// What each zone swapchain's last released image shows (GS thread only).
 			ZoneMarkers::Drawn zone_drawn[kZoneSlots];
 
@@ -4109,7 +4114,13 @@ namespace VR::XRCompositor
 				return false;
 			// Hand targeting's slot gets its swapchain only while the HandTargeting setting is on, so with it off the
 			// resources are exactly what they were before the slot existed (a later switch-on creates it on the next call).
-			const auto chain_wanted = [](int k) { return k != ZoneMarkers::kTarget || EmuConfig.VR.HandTargeting; };
+			// VR presence's partner likewise: only while [VR] VrPresence names a peer and a partner has been seen, and never
+			// again once its swapchain could not be made.
+			const auto chain_wanted = [](int k) {
+				if (k == ZoneMarkers::kPartner)
+					return Presence::Wanted() && s.partner_seen && !s.partner_chain_failed;
+				return k != ZoneMarkers::kTarget || EmuConfig.VR.HandTargeting;
+			};
 			bool chains_ok = true;
 			for (int k = 0; k < kZoneSlots; k++)
 				chains_ok = chains_ok && (!chain_wanted(k) || s.zone_chains[k].swapchain != XR_NULL_HANDLE);
@@ -4217,6 +4228,16 @@ namespace VR::XRCompositor
 				ci.arraySize = 1;
 				ci.mipCount = 1;
 				XrResult res = CountedCreateSwapchain(ci, &zc.swapchain);
+				if (XR_FAILED(res) && k == ZoneMarkers::kPartner)
+				{
+					// The partner is extra: without a free swapchain it is skipped (logged once), the markers stay.
+					zc.swapchain = XR_NULL_HANDLE;
+					s.partner_chain_failed = true;
+					Console.Warning("(VR) Presence: no swapchain for the partner's head and hands (%d%s); the partner is not "
+									"drawn this session.",
+						static_cast<int>(res), res == XR_ERROR_LIMIT_REACHED ? ", SteamVR's 16-swapchain limit" : "");
+					continue;
+				}
 				if (XR_FAILED(res))
 				{
 					zc.swapchain = XR_NULL_HANDLE;
@@ -4284,7 +4305,13 @@ namespace VR::XRCompositor
 			ItemReach::TargetMark target_mark;
 			const bool target_on = EmuConfig.VR.HandTargeting && ItemReach::GetTargetMark(&target_mark);
 			const bool zones_on = HudCards::ZoneMarkersEnabled();
-			if (!zones_on && !target_on)
+			// VR presence's partner ([VR] VrPresence; Presence::Poll placed it in this headset's space): with or without the
+			// ZoneMarkers setting.
+			Presence::PartnerView partner;
+			const bool partner_on = !s.partner_chain_failed && Presence::GetPartnerView(&partner);
+			if (partner_on)
+				s.partner_seen = true;
+			if (!zones_on && !target_on && !partner_on)
 				return 0;
 			if (!s.head_pose_valid || !s.head_position_valid || !CameraDriver::LookAtActive() || SpatialControls::MenuMode())
 				return 0;
@@ -4301,8 +4328,8 @@ namespace VR::XRCompositor
 			std::array<bool, kZoneSlots> want{};
 			float frame_pos[kZoneSlots][3] = {};
 			float frame_quat[kZoneSlots][4] = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f},
-				{0.0f, 0.0f, 0.0f, 1.0f}};
-			static_assert(kZoneSlots == 4, "one frame quaternion per zone slot");
+				{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}};
+			static_assert(kZoneSlots == 5, "one frame quaternion per zone slot");
 			u64 key[kZoneSlots] = {};
 			ZoneMarkers::Mark marks[kZoneSlots][ZoneMarkers::kMaxMarks];
 			int mark_count[kZoneSlots] = {};
@@ -4446,6 +4473,21 @@ namespace VR::XRCompositor
 				key[ZoneMarkers::kTarget] = static_cast<u64>(target_mark.node) | (static_cast<u64>(std::clamp(target_mark.glow, 0, 2)) << 32);
 			}
 
+			// The partner's head and hands, one image riding a frame at the first part (not turned): six marks (each part and a
+			// point 10 cm along its forward) so a turn redraws it as a move does. The key names the slot and the parts.
+			if (partner_on)
+			{
+				const int n = Presence::PartnerMarks(partner, marks[ZoneMarkers::kPartner]);
+				if (n > 0)
+				{
+					want[ZoneMarkers::kPartner] = true;
+					mark_count[ZoneMarkers::kPartner] = n;
+					for (int k = 0; k < 3; k++)
+						frame_pos[ZoneMarkers::kPartner][k] = marks[ZoneMarkers::kPartner][0].centre[k];
+					key[ZoneMarkers::kPartner] = (1ull << 20) | static_cast<u64>(partner.flags) | (static_cast<u64>(partner.slot) << 8);
+				}
+			}
+
 			const std::array<bool, kZoneSlots> go = ZoneMarkers::Plan(layer_capacity - layer_count, want);
 			bool any = false;
 			for (const bool g : go)
@@ -4466,6 +4508,24 @@ namespace VR::XRCompositor
 				                       key[slot], marks[slot], mark_count[slot]);
 				if (!stale)
 					continue;
+				// The partner moves all the time: drawn again at most at its packets' rate (a kept image rides its frame
+				// meanwhile), unless what it shows changed.
+				static u64 s_partner_drawn_ms = 0;
+				if (slot == ZoneMarkers::kPartner)
+				{
+					// No swapchain for it (it could not be made this present): nothing to draw into.
+					if (!pc.on && s.zone_chains[slot].swapchain == XR_NULL_HANDLE)
+						continue;
+					const u64 now_ms = CameraDriver::SteadyNowMs();
+					const ZoneMarkers::Drawn& pd = s.zone_drawn[slot];
+					if (s.zone_chains[slot].ever_released && pd.valid && pd.key == key[slot] && pd.count == mark_count[slot] &&
+						now_ms - s_partner_drawn_ms < Presence::kSendIntervalMs)
+						continue;
+					redraw[slot] = Presence::PlacePartner(partner, eye, &quad[slot]);
+					if (redraw[slot])
+						s_partner_drawn_ms = now_ms;
+					continue;
+				}
 				if (slot == ZoneMarkers::kHolster)
 				{
 					HandModel::ImpostorQuad iq;
@@ -4509,6 +4569,8 @@ namespace VR::XRCompositor
 					const ZoneMarkers::Quad& pq = quad[slot];
 					if (slot == ZoneMarkers::kHolster)
 						HandModel::RenderImpostor(HandModel::kRight, weapon, eye, pq.centre, pq.right, pq.up, pq.size_m, s_zone_pixels);
+					else if (slot == ZoneMarkers::kPartner)
+						Presence::RasterPartner(partner, eye, pq, s_zone_pixels);
 					else
 						ZoneMarkers::RasterMarks(marks[slot], mark_count[slot], eye, pq, s_zone_pixels);
 					if (s_zone_pixels.size() * sizeof(u32) != static_cast<size_t>(kZoneImageBytes))
@@ -4569,6 +4631,8 @@ namespace VR::XRCompositor
 				const ZoneMarkers::Quad& q = quad[slot];
 				if (slot == ZoneMarkers::kHolster)
 					HandModel::RenderImpostor(HandModel::kRight, weapon, eye, q.centre, q.right, q.up, q.size_m, s_zone_pixels);
+				else if (slot == ZoneMarkers::kPartner)
+					Presence::RasterPartner(partner, eye, q, s_zone_pixels);
 				else
 					ZoneMarkers::RasterMarks(marks[slot], mark_count[slot], eye, q, s_zone_pixels);
 				if (s_zone_pixels.size() * sizeof(u32) == static_cast<size_t>(kZoneImageBytes))
