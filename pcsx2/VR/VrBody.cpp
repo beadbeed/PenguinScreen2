@@ -634,6 +634,11 @@ namespace VR::VrBody
 		std::memcpy(out, t, sizeof(t));
 	}
 
+	bool MayClear(u32 crc_now, u32 crc_written, u32 block_word0)
+	{
+		return crc_now == crc_written && block_word0 == kBlockMagic;
+	}
+
 	bool UseLocals(bool offline, bool eth_enabled, bool drawtime)
 	{
 		return offline && !eth_enabled && !drawtime;
@@ -695,6 +700,8 @@ namespace VR::VrBody
 		SlotState s_slot[kSlots];
 		bool s_written = false;
 		u32 s_written_block = 0, s_written_tables = 0;
+		u32 s_written_crc = 0;        // the disc CRC the block was written under (night review M3)
+		bool s_state_loaded = false;  // a state was loaded: a block reading our magic is the state's (night review m3)
 		int s_why = -1;
 		u32 s_stamp = 0;
 		u64 s_log_ms = 0;
@@ -707,8 +714,12 @@ namespace VR::VrBody
 				m[k] = std::bit_cast<float>(memRead32(a + 4u * static_cast<u32>(k)));
 		}
 
-		void ClearBlock(u32 block, u32 tables)
+		// Zeroes the block and its tables, only while they are this game's and ours (night review M3): a VM, the disc CRC
+		// they were written under, and our magic still in the block. Never in another game, the BIOS or an ELF loader.
+		void ClearBlock(u32 block, u32 tables, u32 crc)
 		{
+			if (!VMManager::HasValidVM() || !MayClear(VMManager::GetDiscCRC(), crc, memRead32(block)))
+				return;
 			for (u32 off = 0; off < 0x100; off += 4)
 				memWrite32(block + off, 0);
 			for (u32 off = 0; off < 2 * ProfileDB::kBodyTableBytes; off += 4)
@@ -906,9 +917,18 @@ namespace VR::VrBody
 
 	void Shutdown()
 	{
-		if (s_written && VMManager::HasValidVM())
-			ClearBlock(s_written_block, s_written_tables);
+		// VM shutdown, reset or ELF change (night review M3): forget the block, never write (the RAM is going, or is the
+		// next program's).
 		s_written = false;
+		s_written_block = s_written_tables = s_written_crc = 0;
+		s_state_loaded = false;
+		for (SlotState& st : s_slot)
+			st = SlotState{};
+	}
+
+	void OnStateLoaded()
+	{
+		s_state_loaded = true;
 	}
 
 	void Poll()
@@ -933,8 +953,8 @@ namespace VR::VrBody
 			}
 		};
 		const auto clear = [&]() {
-			if (s_written && VMManager::HasValidVM())
-				ClearBlock(s_written_block, s_written_tables);
+			if (s_written)
+				ClearBlock(s_written_block, s_written_tables, s_written_crc);
 			s_written = false;
 			for (SlotState& st : s_slot)
 			{
@@ -955,8 +975,23 @@ namespace VR::VrBody
 			set_why(2);
 			return;
 		}
-		if (s_written && (s_written_block != bp->block || s_written_tables != bp->tables))
+		if (s_written && (s_written_block != bp->block || s_written_tables != bp->tables || s_written_crc != VMManager::GetDiscCRC()))
 			clear();
+		// A loaded state's block (night review m3): its slots name records posed in another session; zeroed while it reads
+		// our magic, so the caves stop applying its stale matrices, then posed afresh.
+		if (s_state_loaded)
+		{
+			s_state_loaded = false;
+			if (memRead32(bp->block) == kBlockMagic)
+			{
+				s_written = true;
+				s_written_block = bp->block;
+				s_written_tables = bp->tables;
+				s_written_crc = VMManager::GetDiscCRC();
+				clear();
+				Console.WriteLn("(VR) Body: a loaded state's block cleared.");
+			}
+		}
 		if (memRead32(bp->hook) != bp->hook_on)
 		{
 			clear();
@@ -1243,6 +1278,7 @@ namespace VR::VrBody
 		s_written = true;
 		s_written_block = bp->block;
 		s_written_tables = bp->tables;
+		s_written_crc = VMManager::GetDiscCRC();
 	}
 	// --- Self-test -----------------------------------------------------------------------------------------------------
 	namespace

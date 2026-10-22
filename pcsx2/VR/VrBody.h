@@ -200,6 +200,9 @@ namespace VR::VrBody
 	// hits stay one-to-one with what each console simulates; the partner is posed at the draw only (cave V, render-only,
 	// after the hit tests). The profile closes cave U's site online too (whenSetting VrBodyLocals, never co-op live). Pure.
 	bool UseLocals(bool offline, bool eth_enabled, bool drawtime);
+	// Whether the host may zero the block and its tables (night review M3): the disc CRC now is the one it was written
+	// under and the block's first word is still our magic. Pure.
+	bool MayClear(u32 crc_now, u32 crc_written, u32 block_word0);
 	// The slot's flags: si 0 the partner, 1 the local character (kSelf | kCollapse); with locals kFlagLocals, else at the
 	// draw (the partner's held items re-attached while an arm is posed). Pure.
 	u8 SlotFlags(int si, bool locals, bool arms);
@@ -207,7 +210,11 @@ namespace VR::VrBody
 	// CPU thread, every vsync after VR presence's Poll: writes or clears the host block. Reads the bones; writes only the
 	// block, its matrix tables (both in free RAM) and nothing else.
 	void Poll();
+	// VM shutdown, reset and ELF change: forgets the block without writing guest memory (night review M3). Clears are only
+	// ever written while the disc CRC is the one the block was written under and the block reads our magic.
 	void Shutdown();
+	// CPU thread, a state was loaded: the next Poll zeroes a block reading our magic (the state's, night review m3).
+	void OnStateLoaded();
 
 	// The math above (IK reach, clamps and singularities, the head clamp, the blend), the bone map against File #1's
 	// parent tables, the cave's block layout. Logs "(VR) Body self-test: N checks passed" or each failure.

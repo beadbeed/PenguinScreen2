@@ -1162,6 +1162,9 @@ void VMManager::ClearDiscDetails()
 void VMManager::HandleELFChange(bool verbose_patches_if_changed)
 {
 	const u32 crc_to_report = HasBootedELF() ? s_current_crc : 0;
+#ifdef ENABLE_VR
+	VR::VrBody::Shutdown(); // night review M3: another program's RAM; forgets, never writes
+#endif
 
 	ReportGameChangeToHost();
 	Achievements::GameChanged(s_disc_crc, crc_to_report);
@@ -1643,6 +1646,10 @@ void VMManager::Shutdown(bool save_resume_state)
 	s_elf_override = {};
 	ClearELFInfo();
 	CDVDsys_ClearFiles();
+#ifdef ENABLE_VR
+	// VR body forgets its block without writing (night review M3): the next VM's RAM is never its to clear.
+	VR::VrBody::Shutdown();
+#endif
 
 	{
 		std::unique_lock lock(s_info_mutex);
@@ -1739,6 +1746,9 @@ void VMManager::Reset()
 	vu1Thread.WaitVU();
 	vu1Thread.Reset();
 	MTGS::WaitGS();
+#ifdef ENABLE_VR
+	VR::VrBody::Shutdown(); // night review M3: forgets, never writes
+#endif
 
 	const bool elf_was_changed = (s_current_crc != 0);
 	ClearELFInfo();
@@ -1866,6 +1876,7 @@ bool VMManager::DoLoadState(const char* filename, Error* error)
 #ifdef ENABLE_VR
 	VR::CameraDriver::OnStateLoaded();
 	VR::GameFeedback::OnStateLoaded();
+	VR::VrBody::OnStateLoaded();
 #endif
 	if (g_InputRecording.isActive())
 	{

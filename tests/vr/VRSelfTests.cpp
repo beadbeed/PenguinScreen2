@@ -1936,6 +1936,17 @@ int main(int argc, char* argv[])
 		}
 		return ok && enter_u == 1;
 	});
+	// Night review M3: the host zeroes its block and tables only in the game it wrote them in, with its magic still there.
+	RunSilent("VR body clears only its own block (disc CRC and magic, review M3)", +[]() {
+		using namespace VR::VrBody;
+		bool ok = MayClear(0x32088394u, 0x32088394u, kBlockMagic);
+		ok &= !MayClear(0x12345678u, 0x32088394u, kBlockMagic); // another disc (File #2) booted after File #1
+		ok &= !MayClear(0, 0x32088394u, kBlockMagic);           // the BIOS (no disc CRC)
+		ok &= !MayClear(0x32088394u, 0x32088394u, 0);           // the magic gone: not ours any more
+		ok &= !MayClear(0x32088394u, 0x32088394u, 0x27BDFFC0u); // someone else's word
+		Shutdown();                                             // forgets with no VM, writes nothing
+		return ok;
+	});
 	RunSilent("Physical melee hit jolt (File #1 profile, melee.jolt, cave G interpreted)", +[]() {
 		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
 		if (!p || !p->melee.has_value() || !p->camera.has_value() || !VR::ProfileDB::IsSilenceSettingName("MeleeHitJolt"))
