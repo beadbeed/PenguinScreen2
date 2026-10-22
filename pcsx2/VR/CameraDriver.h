@@ -342,14 +342,20 @@ namespace VR::CameraDriver
 			bool loading = false;      // camera.roomLoad holds
 			bool armed = false;        // first person armed this vsync
 			bool ours_shown = false;   // the frame on screen is one drawn from the head (a matched render pose)
+			// The game's newest view matrix was built from first person's write (its frame is on its way to the screen).
+			// With the head held still the matched pose is never published (no new view to match), so this alone also
+			// lets go, after kNewestVsyncs (the frames in flight, about 3 at 30 fps, have reached the screen by then).
+			bool newest_ours = false;
 		};
 		static constexpr u32 kShownVsyncs = 2;
+		static constexpr u32 kNewestVsyncs = 8;
 		static constexpr u32 kNoReturnVsyncs = 90;
 		static constexpr u32 kMaxVsyncs = 1800;
 		Phase phase = Phase::Idle;
 		u32 total = 0;   // vsyncs since the veil began
 		u32 waited = 0;  // vsyncs since the load ended
 		u32 shown = 0;   // vsyncs in a row first person's own frames have been on screen
+		u32 newest = 0;  // vsyncs in a row the newest view matrix has been first person's
 		bool gave_up = false; // the last veil ended on a timeout
 		// This vsync: whether the view is held black.
 		bool Step(const In& in);

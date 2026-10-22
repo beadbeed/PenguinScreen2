@@ -3513,7 +3513,7 @@ namespace VR::CameraDriver
 			if (!(in.loading && in.fp_before))
 				return false;
 			phase = Phase::Loading;
-			total = waited = shown = 0;
+			total = waited = shown = newest = 0;
 			gave_up = false;
 			return true;
 		}
@@ -3527,23 +3527,24 @@ namespace VR::CameraDriver
 		{
 			// The load (or another one straight after it): black throughout.
 			phase = Phase::Loading;
-			waited = shown = 0;
+			waited = shown = newest = 0;
 			return true;
 		}
 		if (phase == Phase::Loading)
 		{
 			phase = Phase::Waiting;
-			waited = shown = 0;
+			waited = shown = newest = 0;
 		}
 		waited++;
 		shown = (in.armed && in.ours_shown) ? shown + 1 : 0;
-		if (shown >= kShownVsyncs)
+		newest = (in.armed && (in.ours_shown || in.newest_ours)) ? newest + 1 : 0;
+		if (shown >= kShownVsyncs || newest >= kNewestVsyncs)
 		{
 			phase = Phase::Idle;
 			return false;
 		}
 		// First person did not come back (a cutscene, a scripted shot in the new room): show the game's own picture.
-		if (!(in.armed && in.ours_shown) && waited > kNoReturnVsyncs)
+		if (!(in.armed && (in.ours_shown || in.newest_ours)) && waited > kNoReturnVsyncs)
 		{
 			phase = Phase::Idle;
 			gave_up = true;
@@ -3613,6 +3614,21 @@ namespace VR::CameraDriver
 			c(v.Step(in), "first own frame on screen: still black for the margin");
 			c(!v.Step(in) && v.phase == DoorVeil::Phase::Idle && !v.gave_up, "second own frame: the veil lets go");
 			c(!v.Step(in), "stays clear");
+		}
+		{
+			// A head held still: no matched pose is published, but the newest view is first person's.
+			DoorVeil v;
+			DoorVeil::In in;
+			in.enabled = in.fp_before = in.loading = true;
+			v.Step(in);
+			in.loading = false;
+			in.armed = true;
+			in.newest_ours = true;
+			bool all = true;
+			for (u32 i = 1; i < DoorVeil::kNewestVsyncs; i++)
+				all = all && v.Step(in);
+			c(all, "newest view ours: black while its frames are in flight");
+			c(!v.Step(in) && !v.gave_up, "newest view ours for kNewestVsyncs: clear (not a give-up)");
 		}
 		{
 			DoorVeil v;
@@ -3975,6 +3991,7 @@ namespace VR::CameraDriver
 			vi.loading = room_loading;
 			vi.armed = armed;
 			vi.ours_shown = armed && s_render_published && s_lookat_active.load(std::memory_order_relaxed);
+			vi.newest_ours = armed && s_view_matched && s_lookat_active.load(std::memory_order_relaxed);
 			const bool veil = s_door_veil.Step(vi);
 			SetDoorVeil(veil, veil ? "a room load from first person" :
 			                  !vi.enabled         ? "switched off" :
@@ -4004,10 +4021,10 @@ namespace VR::CameraDriver
 					                    (la && s_render_published) ? "fp-own" :
 					                    la                         ? "fp-unmatched" :
 					                                                 "world";
-					Console.WriteLn("(VR) doorlog: v%llu guards%s load %d armed %d gfail %u lookat %d pub %d veil %d/%u blink %.2f "
+					Console.WriteLn("(VR) doorlog: v%llu guards%s load %d armed %d gfail %u lookat %d pub %d newest %d veil %d/%u blink %.2f "
 									"shown %s",
 						static_cast<unsigned long long>(s_vsync_counter), gv.c_str(), room_loading ? 1 : 0, armed ? 1 : 0,
-						s_guard_fail_vsyncs, la ? 1 : 0, s_render_published ? 1 : 0, static_cast<int>(s_door_veil.phase),
+						s_guard_fail_vsyncs, la ? 1 : 0, s_render_published ? 1 : 0, s_view_matched ? 1 : 0, static_cast<int>(s_door_veil.phase),
 						s_door_veil.total, o, shown);
 				}
 			}
