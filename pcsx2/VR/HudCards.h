@@ -174,7 +174,12 @@ namespace VR::HudCards
 	// Shows text on the toast card for about `seconds` (fades included), replacing any toast on screen.
 	// Any thread. Lower-case letters are drawn as capitals; characters outside the font are left blank.
 	// Nothing is drawn without a running VR session (the toast just expires).
-	void Toast(const std::string& text, float seconds = 2.0f);
+	// Returns the toast's serial (ToastView::serial), for CancelToast.
+	u32 Toast(const std::string& text, float seconds = 2.0f);
+
+	// Takes the toast with this serial off at once ([VR] GameText: the game's own window now says the same thing).
+	// A later toast (another serial) is left alone. True when it was still on screen. Any thread.
+	bool CancelToast(u32 serial);
 
 	struct ToastView
 	{

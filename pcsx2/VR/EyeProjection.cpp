@@ -5,6 +5,7 @@
 
 #include "common/Console.h"
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 
@@ -104,6 +105,21 @@ namespace VR::EyeProjection
 		*y2 = eye.cy + eye.fy * pe[1] / we;
 		*w2 = we;
 		return true;
+	}
+
+	unsigned short GameTextMapFixed(unsigned short v, float centre_px, float s)
+	{
+		const float m = GameTextMap(static_cast<float>(v), centre_px * 16.0f, s);
+		if (!std::isfinite(m))
+			return v;
+		return static_cast<unsigned short>(std::clamp(std::lround(m), 0L, 65535L));
+	}
+
+	float GameTextDegreesBelow(float y, float cy, float half_h, float fraction, float tan_half)
+	{
+		if (!(half_h > 0.0f))
+			return 0.0f;
+		return std::atan((y - cy) / half_h * fraction * tan_half) * (180.0f / 3.14159265358979323846f);
 	}
 
 	bool SelfTest()
@@ -230,6 +246,38 @@ namespace VR::EyeProjection
 			check(!Build(cam, bad, e), "degenerate fov");
 			GameCamera none;
 			check(!Build(none, s, e), "no camera");
+		}
+
+		// [VR] GameText: the 2D layer at kGameTextScale. On a 90-100 deg tall view (tan 45-50 deg), TrueStereo's plane
+		// (0.9 of the view times the scale) and the first-person screen (the whole view times the scale) put File #1's
+		// "X Obtained" (rows 385-396 of 448) and a speech subtitle (324-339) between 8 and 26 deg below the line of
+		// sight, where they were 30-40 deg below at the game's size; the centre stays put, the vertices stay on screen.
+		{
+			const float s = kGameTextScale;
+			check(s >= 0.45f && s <= 0.7f, "game text: the 2D layer at about half size");
+			bool placed = true, was_low = true;
+			for (float tan_half : {std::tan(45.0f * 3.14159265f / 180.0f), std::tan(50.0f * 3.14159265f / 180.0f)})
+			{
+				for (float fraction : {0.9f, 1.0f})
+				{
+					for (float y : {324.0f, 339.0f, 385.0f, 396.0f})
+					{
+						const float now = GameTextDegreesBelow(y, 224.0f, 224.0f, fraction * s, tan_half);
+						placed = placed && now >= 8.0f && now <= 26.0f;
+					}
+					was_low = was_low && GameTextDegreesBelow(390.0f, 224.0f, 224.0f, fraction, tan_half) > 30.0f;
+				}
+			}
+			check(placed, "game text: Obtained and a subtitle 8-26 deg below the line of sight");
+			check(was_low, "game text: at the game's size Obtained sat more than 30 deg below");
+			check(GameTextMap(2048.0f, 2048.0f, s) == 2048.0f && GameTextMap(2272.0f, 2048.0f, s) < 2272.0f &&
+					  GameTextMap(1824.0f, 2048.0f, s) > 1824.0f,
+				"game text: the centre stays, edges move inward");
+			check(GameTextMapFixed(2048 * 16, 2048.0f, s) == 2048 * 16 &&
+					  GameTextMapFixed((2048 + 166) * 16, 2048.0f, s) == static_cast<unsigned short>(std::lround((2048.0f + 166.0f * s) * 16.0f)) &&
+					  GameTextMapFixed(65535, 2048.0f, s) < 65535 && GameTextMapFixed(0, 2048.0f, s) > 0,
+				"game text: 12.4 vertices map toward the centre and stay in range");
+			check(GameTextMapFixed(1234, std::nanf(""), s) == 1234, "game text: no camera centre, the vertex is left alone");
 		}
 
 		if (fails.empty())

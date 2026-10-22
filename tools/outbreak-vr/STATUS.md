@@ -349,6 +349,22 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
    The 5 s `(VR) Hands:` line now has `mesh images N/s mean X max Y ms`.
 7. **Reload gesture** (when in): grab at the left hip, bring it to the gun.
 
+**2026-10-22 branch `gamecues`** (from `nightly` 0557a8d; local build, 61 of 61 self-tests; checked offline
+headset-free only; `research/2026-10-22-game-cues.md`). `GameText` (on): the game's own text, its speech subtitles
+and "X Obtained", is drawn at half size about the view centre, with TrueStereo (the flat plane) and without (the 2D
+draws move toward the picture's centre). Menus, fades and the menu panel are left alone. In slot 7, "HANDGUN Obtained"
+moved from rows 385-396 of 448 to 304-310, and a subtitle from 323-338 to 274-281: about 20 and 15 deg below the line of
+sight in the headset, where they were 35-40. The pickup cue's toast is taken off once the game's take-it prompt is up.
+The other cues stay because the game shows nothing there:
+- the cue before the press;
+- the wrist card;
+- the pouch names;
+- the reload and grab hints;
+- the emulator messages.
+The game's `0x540140` window (y 380.0 at `0x540214`) is not what draws these lines, so it is not patched.
+Headset check: slot 7, take the Handgun with TrueStereo on and off. Is the line readable without looking down, and is
+it big enough?
+
 **Switches**, in `inis\PenguinScreen2.ini` under `[VR]`: each one undoes one change.
 
 | Setting | Default | The other value |
@@ -360,6 +376,7 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 | `EdgeFill` | true | false: black around the first-person screen |
 | `NearDepthMetres` | 0 | 0 = the profile's 0.5 m; 1.0 = the wave 8 near field; -1 = flat near field; 0.45 to 1.5 = that depth |
 | `FirstPersonAutoStereo` | true | false: the profile's fixed stereo numbers |
+| `GameText` | true | false: the game's text (subtitles, "X Obtained") at the game's own size and place, at the bottom edge |
 | `RollParallax` | true | false: parallax not turned with head roll |
 | `MenuPointer` | true | false: no beam, dot or point-to-select |
 | `ZoneMarkers` | true | false: no holstered weapon or zone markers |

@@ -678,13 +678,14 @@ namespace VR::HudCards
 		}
 	}
 
-	void Toast(const std::string& text, float seconds)
+	u32 Toast(const std::string& text, float seconds)
 	{
 		if (!std::isfinite(seconds))
 			seconds = 2.0f;
 		seconds = std::clamp(seconds, 0.5f, 10.0f);
 		const std::string shown = text.substr(0, kMaxToastChars);
 		const u64 now = NowMs();
+		u32 serial = 0;
 		{
 			std::lock_guard<std::mutex> lock(s_toast_mutex);
 			// A toast replacing one still on screen starts at full opacity instead of blinking out and in.
@@ -692,9 +693,20 @@ namespace VR::HudCards
 			s_toast.text = shown;
 			s_toast.start_ms = (showing && now > kFadeMs) ? (now - kFadeMs) : now;
 			s_toast.end_ms = now + static_cast<u64>(seconds * 1000.0f);
-			s_toast.serial++;
+			serial = ++s_toast.serial;
 		}
 		Console.WriteLn("(VR) HUD toast: \"%s\" (%.1f s).", shown.c_str(), static_cast<double>(seconds));
+		return serial;
+	}
+
+	bool CancelToast(u32 serial)
+	{
+		const u64 now = NowMs();
+		std::lock_guard<std::mutex> lock(s_toast_mutex);
+		if (serial == 0 || s_toast.serial != serial || s_toast.end_ms <= now)
+			return false;
+		s_toast.end_ms = std::max(s_toast.start_ms, now);
+		return true;
 	}
 
 	bool CurrentToast(ToastView* out)
@@ -1425,6 +1437,27 @@ namespace VR::HudCards
 		check(ToastOpacityAt(1000, 3000, 2000) == 1.0f, "toast opaque mid-way");
 		check(std::abs(ToastOpacityAt(1000, 3000, 2925) - 0.5f) < 0.01f, "toast half faded out 75 ms before the end");
 		check(ToastOpacityAt(1000, 3000, 3000) == 0.0f, "toast gone at the end");
+
+		// CancelToast ([VR] GameText): only the toast it names goes, and at once; a later toast stays.
+		{
+			const u32 first = Toast("self-test toast one", 2.0f);
+			const u32 second = Toast("self-test toast two", 2.0f);
+			const bool first_kept = !CancelToast(first);
+			bool later_stays, named_goes;
+			{
+				std::lock_guard<std::mutex> lock(s_toast_mutex);
+				later_stays = second != first && s_toast.serial == second && s_toast.end_ms > NowMs();
+			}
+			const bool second_off = CancelToast(second);
+			const bool none_off = !CancelToast(0) && !CancelToast(second);
+			{
+				std::lock_guard<std::mutex> lock(s_toast_mutex);
+				named_goes = s_toast.end_ms <= NowMs() && s_toast.serial == second;
+				s_toast.text.clear();
+			}
+			check(later_stays && first_kept, "cancel: a toast that replaced the named one stays");
+			check(named_goes && second_off && none_off && !CurrentToast(nullptr), "cancel: the named toast is off at once, once");
+		}
 
 		// Blink: black after 40 ms, held to 100 ms, clear at 180 ms; a new trigger never lightens it.
 		check(BlinkOpacityAt(1000, 1000) == 0.0f, "blink starts clear");

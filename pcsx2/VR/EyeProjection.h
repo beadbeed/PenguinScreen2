@@ -67,6 +67,23 @@ namespace VR::EyeProjection
 	bool MapVertex(const GameCamera& cam, const Eye& eye, float x, float y, float w, float* x2, float* y2, float* w2,
 		float min_w = 0.5f);
 
+	// [VR] GameText: in first person the game's own 2D layer (its text: speech subtitles, "X Obtained", examine and
+	// system lines; File #1 has no persistent HUD) is drawn at kGameTextScale of its size about the view centre, so text
+	// the game puts near the bottom edge (y 385-396 of 448 for "Obtained", 324-339 for a subtitle) lands 10-25 deg below
+	// the line of sight instead of 30-40. TrueStereo: the flat plane spans that much less of the view; without it: the
+	// flat draws' vertices are moved toward the centre of the game's picture. The game's own text, untouched otherwise.
+	static constexpr float kGameTextScale = 0.5f;
+
+	// One coordinate moved toward centre by scale s (any unit, the centre in the same unit).
+	inline float GameTextMap(float v, float centre, float s) { return centre + s * (v - centre); }
+
+	// A GS vertex coordinate (12.4 fixed, as in GSVertex XYZ) moved toward centre_px (GS pixels), rounded and clamped.
+	unsigned short GameTextMapFixed(unsigned short v, float centre_px, float s);
+
+	// Degrees below the line of sight of 2D-screen row y (screen centre cy, half-height half_h, in the same unit), on a 2D
+	// layer drawn over `fraction` of a view whose half-height tangent is tan_half (TrueStereo: 0.9 * scale).
+	float GameTextDegreesBelow(float y, float cy, float half_h, float fraction, float tan_half);
+
 	// Unit tests (vr_selftests): logs "(VR) Eye projection self-test: ...".
 	bool SelfTest();
 } // namespace VR::EyeProjection
