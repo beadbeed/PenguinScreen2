@@ -541,7 +541,7 @@ SLPM-65428:
       - { address: 0x0FE2FC, on: 0xAFAE0014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE300, on: 0x24850050, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE304, on: 0x24860038, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
-      - { address: 0x0FE308, on: 0x0C15486C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE308, on: 0x0C03F9F8, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE30C, on: 0x90870C7C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE310, on: 0x8FA40008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE314, on: 0x8FAD0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
@@ -787,6 +787,74 @@ SLPM-65428:
       - { address: 0x0FE7D0, on: 0x27BD0030, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE7D4, on: 0x0816A76C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       - { address: 0x0FE7D8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE7E0, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }   # cave H (cave D's spawn call; PhysicalMeleeFists): with 0xFEBF0 reading FST1 and 0xFEBF4 an attack id + 1, a static attack object (type 8, no item) on the block's pose with that attack's node (the knife's, id 33), else on to FUN_005521B0 as before
+      - { address: 0x0FE7E4, on: 0x8D69EBF0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE7E8, on: 0x3C0A4653, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE7EC, on: 0x354A5431, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE7F0, on: 0x152A003D, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE7F4, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE7F8, on: 0x8D6CEBF4, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE7FC, on: 0x1180003A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE800, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE804, on: 0x27BDFFD0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE808, on: 0xAFBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE80C, on: 0xAFA40004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE810, on: 0xAFAC0008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE814, on: 0x3C0A0030, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE818, on: 0x854A65AC, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE81C, on: 0x848901E2, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE820, on: 0x152A002E, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE824, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE828, on: 0x0C15478C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE82C, on: 0x24040001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE830, on: 0x1040002A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE834, on: 0x8FA40004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE838, on: 0x24090001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE83C, on: 0xA0490000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE840, on: 0xA4490012, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE844, on: 0x24090009, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE848, on: 0xA0490002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE84C, on: 0x24090008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE850, on: 0xA0490004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE854, on: 0x3C090055, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE858, on: 0x25292940, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE85C, on: 0xAC490014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE860, on: 0x3C090034, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE864, on: 0x25291EB0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE868, on: 0xAC490018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE86C, on: 0xAC440028, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE870, on: 0x240900FF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE874, on: 0xA0490030, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE878, on: 0x878AA134, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE87C, on: 0x24090040, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE880, on: 0x012A4823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE884, on: 0xA0490031, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE888, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE88C, on: 0x8D69F080, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE890, on: 0xAC490038, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE894, on: 0x8D69F084, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE898, on: 0xAC49003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE89C, on: 0x8D69F088, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8A0, on: 0xAC490040, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8A4, on: 0x256AF040, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8A8, on: 0x244C0050, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8AC, on: 0x240D0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8B0, on: 0x8D490000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8B4, on: 0xAD890000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8B8, on: 0x254A0004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8BC, on: 0x25ADFFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8C0, on: 0x1DA0FFFB, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8C4, on: 0x258C0004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8C8, on: 0x8FA50008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8CC, on: 0x24A5FFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8D0, on: 0x00402021, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8D4, on: 0x0C16A658, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8D8, on: 0x00003021, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8DC, on: 0x8FBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8E0, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8E4, on: 0x27BD0030, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8E8, on: 0x0815486C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
+      - { address: 0x0FE8EC, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: PhysicalMeleeContact }
       # Hit jolt (VR setting MeleeHitJolt, off by default; with PhysicalMelee in contact mode, strictly offline; research/
       # 2026-10-14-vr-melee.md section 9): a contact hit pushes the zombie's struck body part the way the swing went. Cave G
       # (0xFE800) is called from the zombie's update instead of the game's own per-bone jolt FUN_00577870 (same arguments),
@@ -800,69 +868,112 @@ SLPM-65428:
       # less their rates. Only the matrices the game rebuilds
       # from the animation every frame; never the enemy's position, HP or AI. The site first (it checks the cave's first and
       # last words), then the cave.
-      - { address: 0x6644D0, on: 0x0C03FA00, off: 0x0C15DE1C, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE800, equals: 0x27BDFFE0 }, { address: 0xFE8D4, equals: 0x27BD0020 }], offlineOnly: true, whenSetting: MeleeHitJolt }   # the zombie's update: jal 0xFE800 (cave G) over jal FUN_00577870
-      - { address: 0x0FE800, on: 0x27BDFFE0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }   # cave G
-      - { address: 0x0FE804, on: 0xAFBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE808, on: 0x0C15DE1C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE80C, on: 0xAFA40004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE810, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE814, on: 0x8D69F100, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE818, on: 0x3C0A4A4C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE81C, on: 0x354A5431, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE820, on: 0x152A002A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE824, on: 0x2568F110, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE828, on: 0xAFA80008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE82C, on: 0x8D090000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE830, on: 0x8FAA0004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE834, on: 0x152A0020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE838, on: 0x91090005, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE83C, on: 0x1120001E, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE840, on: 0x910B0006, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE844, on: 0x11600004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE848, on: 0x914B013F, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE84C, on: 0x1160001A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE850, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE854, on: 0xA1000006, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE858, on: 0x2529FFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE85C, on: 0xA1090005, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE860, on: 0x8D490034, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE864, on: 0x11200014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE868, on: 0x91050004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE86C, on: 0x85290816, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE870, on: 0x00A9482B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE874, on: 0x11200010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE878, on: 0x01402021, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE87C, on: 0x0C157114, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE880, on: 0x25060008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE884, on: 0x8FA80008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE888, on: 0x85090008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE88C, on: 0x850A0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE890, on: 0x012A4823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE894, on: 0xA5090008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE898, on: 0x8509000A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE89C, on: 0x850A0012, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE8A0, on: 0x012A4823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE8A4, on: 0xA509000A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE8A8, on: 0x8509000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE8AC, on: 0x850A0014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE8B0, on: 0x012A4823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE8B4, on: 0xA509000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE8B8, on: 0x25080018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE8BC, on: 0x3C090010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE8C0, on: 0x2529F170, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE8C4, on: 0x1509FFD8, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE8C8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE8CC, on: 0x8FBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE8D0, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
-      - { address: 0x0FE8D4, on: 0x27BD0020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x6644D0, on: 0x0C03FA40, off: 0x0C15DE1C, when: [{ address: 0x540004, equals: 3 }, { address: 0xFE900, equals: 0x27BDFFE0 }, { address: 0xFE9D4, equals: 0x27BD0020 }], offlineOnly: true, whenSetting: MeleeHitJolt }   # the zombie's update: jal 0xFE900 (cave G) over jal FUN_00577870
+      - { address: 0x0FE900, on: 0x27BDFFE0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }   # cave G
+      - { address: 0x0FE904, on: 0xAFBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE908, on: 0x0C15DE1C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE90C, on: 0xAFA40004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE910, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE914, on: 0x8D69F100, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE918, on: 0x3C0A4A4C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE91C, on: 0x354A5431, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE920, on: 0x152A002A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE924, on: 0x2568F110, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE928, on: 0xAFA80008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE92C, on: 0x8D090000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE930, on: 0x8FAA0004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE934, on: 0x152A0020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE938, on: 0x91090005, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE93C, on: 0x1120001E, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE940, on: 0x910B0006, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE944, on: 0x11600004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE948, on: 0x914B013F, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE94C, on: 0x1160001A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE950, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE954, on: 0xA1000006, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE958, on: 0x2529FFFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE95C, on: 0xA1090005, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE960, on: 0x8D490034, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE964, on: 0x11200014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE968, on: 0x91050004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE96C, on: 0x85290816, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE970, on: 0x00A9482B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE974, on: 0x11200010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE978, on: 0x01402021, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE97C, on: 0x0C157114, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE980, on: 0x25060008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE984, on: 0x8FA80008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE988, on: 0x85090008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE98C, on: 0x850A0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE990, on: 0x012A4823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE994, on: 0xA5090008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE998, on: 0x8509000A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE99C, on: 0x850A0012, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE9A0, on: 0x012A4823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE9A4, on: 0xA509000A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE9A8, on: 0x8509000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE9AC, on: 0x850A0014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE9B0, on: 0x012A4823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE9B4, on: 0xA509000C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE9B8, on: 0x25080018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE9BC, on: 0x3C090010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE9C0, on: 0x2529F170, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE9C4, on: 0x1509FFD8, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE9C8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE9CC, on: 0x8FBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE9D0, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      - { address: 0x0FE9D4, on: 0x27BD0020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      # [VR] GunRayAim (tools/outbreak-vr/research/2026-10-14-vr-melee.md section 11): a shot hits along the VR gun's ray. The
+      # game's shot FUN_0062CF10 builds the bullet's frame from the gun's weapon object (its muzzle, moved back along the
+      # barrel by 0x6E6D30's per class and character offset, and the barrel's turn) and calls the attack spawn FUN_005521B0,
+      # whose gun branch makes a type-1 attack object (life 3) at that position and matrix; the frame's hit test then runs
+      # the gun's attack node (a capsule 10 m along the object's +Z, r 24 cm; if it misses, the object adds node id + 256,
+      # a wider line test of the game's own, r 2 m, type 4) on that object. Cave I sits on that one call: for the local record (block
+      # +0x08, the focus byte check) with a fresh block it hands the spawn the host's matrix (row 2 the VR barrel) and
+      # origin (the VR muzzle moved back by the game's own offset) instead. Damage, reactions, ammo, sound and the game's
+      # muzzle flash are the game's. Strictly offline (no online gate for it). The site first (it checks the cave's first and
+      # last non-zero words), then the cave.
+      - { address: 0x62D1CC, on: 0x0C03FA80, off: 0x0C15486C, when: [{ address: 0x540004, equals: 3 }, { address: 0xFEA00, equals: 0x3C0B0010 }, { address: 0xFEA74, equals: 0x0815486C }], offlineOnly: true, whenSetting: GunRayAim }   # the shot's attack spawn in FUN_0062CF10: jal 0xFEA00 (cave I) over jal FUN_005521B0
+      - { address: 0x0FEA00, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }   # cave I (0xFEA00): magic GUN1, a0 == block +0x08, a0 +0x03 == focus u8 0x3AEF74, stamp fresh -> a1, a2 = the VR ray's matrix and origin (block +0x10, +0x50), shots +1; then on to FUN_005521B0
+      - { address: 0x0FEA04, on: 0x8D69EB80, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA08, on: 0x3C0A4755, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA0C, on: 0x354A4E31, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA10, on: 0x152A0018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA14, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA18, on: 0x8D69EB88, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA1C, on: 0x15240015, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA20, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA24, on: 0x90890003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA28, on: 0x3C0A003B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA2C, on: 0x914AEF74, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA30, on: 0x152A0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA34, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA38, on: 0x3C0A0049, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA3C, on: 0x914ABF93, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA40, on: 0x9169EB84, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA44, on: 0x01494823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA48, on: 0x05210002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA4C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA50, on: 0x2529003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA54, on: 0x2D290007, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA58, on: 0x11200006, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA5C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA60, on: 0x8D69EB8C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA64, on: 0x25290001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA68, on: 0xAD69EB8C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA6C, on: 0x2565EB90, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA70, on: 0x2566EBD0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA74, on: 0x0815486C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      - { address: 0x0FEA78, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
     # The code caves the melee entries above write (nightly review M2, b2, d2). Each goes in all or nothing: its whole
     # range must read zero (or exactly these words) and holds exactly `words` silence entries; the body is written and
     # read back before any site that jumps into it (an entry whose `when` reads a word in the range) is patched. Sites
     # go back at once; a body is zeroed only once the game counter 0x48BF93 has moved 3 frames and the EE is not in it.
     caves:
       - { from: 0xFE000, to: 0xFE1E0, words: 99, counter: 0x48BF93 }    # A (0xFE000), C (0xFE100), B (0xFE170) (PhysicalMelee)
-      - { from: 0xFE200, to: 0xFE7DC, words: 312, counter: 0x48BF93 }   # D, E, F (PhysicalMeleeContact)
-      - { from: 0xFE800, to: 0xFE8D8, words: 54, counter: 0x48BF93 }    # G (MeleeHitJolt)
+      - { from: 0xFE200, to: 0xFE8F0, words: 380, counter: 0x48BF93 }   # D, E, F, H (PhysicalMeleeContact)
+      - { from: 0xFE900, to: 0xFE9D8, words: 54, counter: 0x48BF93 }    # G (MeleeHitJolt; at 0xFE800 before cave H)
+      - { from: 0xFEA00, to: 0xFEA7C, words: 31, counter: 0x48BF93 }    # I (GunRayAim)
     lookAt:
       eye: 0x306338
       target: 0x306344
@@ -1073,7 +1184,7 @@ SLPM-65428:
     jolt:
       block: 0xFF100
       magic: 0x4A4C5431
-      hook: { address: 0x6644D0, on: 0x0C03FA00 }
+      hook: { address: 0x6644D0, on: 0x0C03FA40 }
       bones: { pointer: 0x34, table: 0x820, count: 36, real: 0x816 }
       slow: 1.8
       fast: 6.0
@@ -1091,6 +1202,22 @@ SLPM-65428:
         # knees: the legs' root (below), waist; a hard hit the chest too
         - { sphere: 3, bones: [3, 10, 11], parents: [2, 2, 10], weights: [0.6, 0.3, 0.2], below: [3], hard: [11] }
 
+    # Fists (VR PhysicalMeleeFists, with contact, strictly offline; research/2026-10-14-vr-melee.md section 12): with bare
+    # hands (no item equipped) or a gun, a fast swing of the right hand strikes through cave D and cave H: the host writes
+    # magic at word and attack + 1 after it (the knife's attack, id 33: a sphere r 30 at (-10, 0, 0) in the object's frame,
+    # base 55, zombie class 0), and the block's pose puts that sphere's centre on the fist (point, metres in the hand's
+    # pointing frame: x right, y up, z back) or, with a gun, on the gun's butt (whip). The host's own test is a sphere of
+    # radius (game units) there; a touch at speed (m/s) or faster strikes, with the strength light rising to 1 by firm,
+    # times scale (0.2-0.4: 11-22 HP of the knife's 55, never above 1, so the class stays 0: a light flinch). wait: an
+    # enemy's u8 that must read 0 for the game's hit test to take it (FUN_005ABA30; non-zero while down or grabbing), for
+    # every contact strike.
+    fist: { word: 0xFEBF0, magic: 0x46535431, attack: 33, wait: 0x32, point: [0.0, 0.0, -0.04], whip: [0.0, -0.07, 0.03],
+            radius: 8, speed: 2.5, rearm: 1.0, firm: 6.0, light: 0.5, scale: 0.4 }
+    # Gun ray (VR GunRayAim, strictly offline; research/2026-10-14-vr-melee.md section 11): cave I's block (magic, the
+    # stamp, the local record, the shot count cave I keeps, the 4 x 4 matrix at +0x10, the origin at +0x50) and the game's
+    # own back offset for a shot's origin: f32 at table + stride * the weapon type's class byte (types + typeStride * type +
+    # class, contact.shape's table) + 4 * the record's character byte (+character); negative, along the barrel.
+    gunRay: { block: 0xFEB80, magic: 0x47554E31, back: { table: 0x6E6D30, stride: 0x20, class: 0x05, character: 0xB98 } }
   # VR controllers (only when launched with --vr; flat play is untouched).
   # A pad bound in Settings -> Controllers (e.g. a DualSense) keeps working alongside;
   # when both touch the same button, the latest change wins.

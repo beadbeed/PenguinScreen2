@@ -1398,6 +1398,15 @@ struct Pcsx2Config
 		// updates (0.17-0.33 s), on top of the game's own reaction. Only how this console draws the enemy (its bone
 		// matrices, rebuilt every frame); never its position, HP or AI. Ini only, off by default.
 		bool MeleeHitJolt = false;
+		// File #1 strictly offline (tools/outbreak-vr/research/2026-10-14-vr-melee.md section 11): a shot hits along the VR
+		// gun's own ray (the laser: from the gun model's muzzle along its barrel) through the game's own shot code (cave I
+		// hands the shot's attack spawn the VR ray instead of the character's gun), for the local player only; the damage,
+		// the reactions, ammo, sound and the game's own wider second test are the game's. Ini only.
+		bool GunRayAim = true;
+		// With PhysicalMelee in contact mode, strictly offline (section 12): a fast swing of the empty right fist, or of the gun
+		// hand as a pistol-whip, strikes through the contact path with the knife's attack at a fist-sized sphere, scaled to
+		// a light hit (cave H); no ammo or durability spent. Ini only, off by default.
+		bool PhysicalMeleeFists = false;
 		// First person, for profiles with a reach block: a light tick in the right hand and a short toast naming the item
 		// (and the button, "Kevin's 45 Auto  (A)") when something on the floor comes within reach of the character's own
 		// Circle press. Only reads the game's memory; shown in the headset only. Ini only for now.

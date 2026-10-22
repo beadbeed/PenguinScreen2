@@ -505,6 +505,103 @@ namespace VR::PhysicalMelee
 		return out;
 	}
 
+	FistKind ChooseFist(bool setting, bool has_fist, bool contact_offline, bool bare, bool gun, bool melee)
+	{
+		if (!setting || !has_fist || !contact_offline || melee)
+			return FistKind::None;
+		if (bare)
+			return FistKind::Fist;
+		return gun ? FistKind::Whip : FistKind::None;
+	}
+
+	bool FistFrame(const float pos[3], const float quat[4], const float point[3], float origin[3], float axes[3][3])
+	{
+		if (!Finite3(pos) || !Finite3(point) || !std::isfinite(quat[0]) || !std::isfinite(quat[1]) || !std::isfinite(quat[2]) ||
+			!std::isfinite(quat[3]))
+			return false;
+		float q[4] = {quat[0], quat[1], quat[2], quat[3]};
+		const float n = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+		if (!(n > 1.0e-6f))
+			return false;
+		for (float& c : q)
+			c /= n;
+		const auto rot = [&q](const float v[3], float out[3]) {
+			const float x = q[0], y = q[1], z = q[2], w = q[3];
+			const float tx = 2.0f * (y * v[2] - z * v[1]);
+			const float ty = 2.0f * (z * v[0] - x * v[2]);
+			const float tz = 2.0f * (x * v[1] - y * v[0]);
+			out[0] = v[0] + w * tx + (y * tz - z * ty);
+			out[1] = v[1] + w * ty + (z * tx - x * tz);
+			out[2] = v[2] + w * tz + (x * ty - y * tx);
+		};
+		const float ex[3] = {1.0f, 0.0f, 0.0f}, ey[3] = {0.0f, 1.0f, 0.0f}, ez[3] = {0.0f, 0.0f, 1.0f};
+		rot(ex, axes[0]);
+		rot(ey, axes[1]);
+		rot(ez, axes[2]);
+		float pw[3];
+		rot(point, pw);
+		for (int k = 0; k < 3; k++)
+			origin[k] = pos[k] + pw[k] + 0.10f * axes[0][k];
+		return true;
+	}
+
+	float FistStrength(float speed, const ContactParams& p, float scale)
+	{
+		const float s = std::min(Strength(speed, p), 1.0f);
+		const float k = std::isfinite(scale) ? std::clamp(scale, 0.0f, 1.0f) : 0.0f;
+		return s * k;
+	}
+
+	std::vector<std::string> SelfTestFists()
+	{
+		std::vector<std::string> fail;
+		const auto check = [&](bool ok, const char* name) {
+			if (!ok)
+				fail.emplace_back(name);
+		};
+		check(ChooseFist(true, true, true, true, false, false) == FistKind::Fist, "choose: bare hands are a fist");
+		check(ChooseFist(true, true, true, false, true, false) == FistKind::Whip, "choose: a gun is a pistol-whip");
+		check(ChooseFist(true, true, true, false, false, true) == FistKind::None, "choose: a melee weapon keeps its own shape");
+		check(ChooseFist(true, true, true, false, false, false) == FistKind::None, "choose: something else (a herb) is nothing");
+		check(ChooseFist(false, true, true, true, false, false) == FistKind::None, "choose: the setting off is nothing");
+		check(ChooseFist(true, false, true, true, false, false) == FistKind::None, "choose: no melee.fist is nothing");
+		check(ChooseFist(true, true, false, true, false, false) == FistKind::None, "choose: not contact strictly offline is nothing");
+		{
+			// A hand turned 90 deg about +Y (its x now along -Z): the knife sphere's centre (-10, 0, 0) cm lands on the point.
+			const float pos[3] = {0.2f, 1.1f, -0.4f};
+			const float h = std::sqrt(0.5f);
+			const float quat[4] = {0.0f, h, 0.0f, h};
+			const float point[3] = {0.0f, 0.0f, -0.04f};
+			float origin[3], axes[3][3];
+			check(FistFrame(pos, quat, point, origin, axes), "frame: built");
+			// The point in the base space: the hand's -Z turned is -X: (0.16, 1.1, -0.4).
+			float centre[3];
+			for (int k = 0; k < 3; k++)
+				centre[k] = origin[k] + 0.01f * (-10.0f) * axes[0][k];
+			check(std::fabs(centre[0] - 0.16f) < 1e-4f && std::fabs(centre[1] - 1.1f) < 1e-4f && std::fabs(centre[2] + 0.4f) < 1e-4f,
+				"frame: the knife sphere sits on the knuckles");
+			check(std::fabs(axes[0][2] + 1.0f) < 1e-4f && std::fabs(axes[1][1] - 1.0f) < 1e-4f, "frame: the axes are the hand's");
+			const float nanq[4] = {std::nanf(""), 0.0f, 0.0f, 1.0f};
+			check(!FistFrame(pos, nanq, point, origin, axes), "frame: a NaN pose fails");
+		}
+		{
+			ContactParams p;
+			p.speed = 2.5f;
+			p.rearm = 1.0f;
+			p.firm = 6.0f;
+			p.heavy = 19.0f;
+			p.light = 0.5f;
+			p.strong = 1.0f;
+			check(FistStrength(2.0f, p, 0.4f) == 0.0f, "strength: below speed, nothing");
+			check(std::fabs(FistStrength(2.5f, p, 0.4f) - 0.2f) < 1e-4f, "strength: at speed 0.2 (11 HP of the knife's 55)");
+			check(std::fabs(FistStrength(6.0f, p, 0.4f) - 0.4f) < 1e-4f, "strength: by firm 0.4 (22 HP)");
+			check(std::fabs(FistStrength(25.0f, p, 0.4f) - 0.4f) < 1e-4f, "strength: never more than the scale");
+			check(FistStrength(25.0f, p, 3.0f) <= 1.0f, "strength: never above 1 (the class stays the knife's)");
+			check(FistStrength(std::nanf(""), p, 0.4f) == 0.0f, "strength: NaN is nothing");
+		}
+		return fail;
+	}
+
 	// -----------------------------------------------------------------------------------------------------------------
 	// Self-test.
 	// -----------------------------------------------------------------------------------------------------------------
@@ -1162,6 +1259,20 @@ namespace VR::PhysicalMelee
 			return s_diag;
 		}
 
+		// --- Punches and pistol-whips: cave H's word (magic, then the attack id + 1), ours while armed. ---
+		bool s_fist_armed = false;
+		u32 s_fist_addr = 0, s_fist_magic = 0, s_fist_crc = 0;
+		void ClearFist()
+		{
+			if (s_fist_armed && VMManager::HasValidVM() && s_fist_addr + 8 <= Ps2MemSize::MainRam &&
+				VMManager::GetDiscCRC() == s_fist_crc && static_cast<u32>(memRead32(s_fist_addr)) == s_fist_magic)
+			{
+				memWrite32(s_fist_addr, 0);
+				memWrite32(s_fist_addr + 4, 0);
+			}
+			s_fist_armed = false;
+		}
+
 		// --- Contact mode's state (CPU thread). ---
 		bool s_contact_mode = false;
 		StrikeState s_contact;
@@ -1592,6 +1703,11 @@ namespace VR::PhysicalMelee
 				!Read(reader, base + mp.sphere_shapes, 4, &shapes) || !Read(reader, base + mp.sphere_centres, 4, &centres) ||
 				shapes == 0 || centres == 0 || shapes >= Ps2MemSize::MainRam || centres >= Ps2MemSize::MainRam)
 				return false;
+			// Not a target of the game's hit test this frame (FUN_005ABA30: its countdown non-zero, e.g. down or grabbing):
+			// no strike the game would not apply (research/2026-10-14-vr-melee.md section 10).
+			u32 wait = 0;
+			if (mp.enemy_wait != 0 && (!Read(reader, base + mp.enemy_wait, 1, &wait) || wait != 0))
+				return false;
 			e->id = static_cast<int>(i);
 			e->count = 0;
 			for (u32 k = 0; k < std::min<u32>(count, 8); k++)
@@ -1624,12 +1740,26 @@ namespace VR::PhysicalMelee
 		// Contact mode, every input poll with the block written this poll (can): the weapon's shape against the enemies'
 		// hurt spheres, a strike asked of cave D on first contact at speed, the cue, and the result logged.
 		void PollContact(GuestReader reader, const ProfileDB::MeleeParams& mp, u32 record, bool can, const float m[16],
-			const float origin[3], const float axes[3][3], u32 counter, float dt, bool jolt)
+			const float origin[3], const float axes[3][3], u32 counter, float dt, bool jolt, FistKind fist)
 		{
 			u32 wt = 0;
 			if (!Read(reader, record + mp.weapon_type_offset, 2, &wt))
 				can = false;
-			if (can && wt != s_shape_weapon)
+			// A punch or a pistol-whip: the knife's sphere at the fist (its centre (-10, 0, 0) on the block's frame), the
+			// host's own test sphere fist_radius there.
+			const u32 fist_key = fist == FistKind::None ? 0u : (fist == FistKind::Fist ? 0xF1570000u : 0xF1570001u);
+			if (can && fist != FistKind::None && s_shape_weapon != fist_key)
+			{
+				s_shape_weapon = fist_key;
+				s_shape = HitShape{};
+				s_shape.valid = true;
+				s_shape.p[0] = -10.0f;
+				s_shape.radius = mp.fist_radius;
+				Console.WriteLn("(VR) Melee: %s: the knife's attack (id %u) at the %s, test radius %.0f.",
+					fist == FistKind::Fist ? "punch" : "pistol-whip", mp.fist_attack, fist == FistKind::Fist ? "knuckles" : "gun's butt",
+					static_cast<double>(mp.fist_radius));
+			}
+			if (can && fist == FistKind::None && wt != s_shape_weapon)
 			{
 				s_shape_weapon = wt;
 				std::string why;
@@ -1645,7 +1775,7 @@ namespace VR::PhysicalMelee
 				else
 					Console.WriteLn("(VR) Melee: no contact for weapon type %u: %s.", wt, why.c_str());
 			}
-			const ContactParams cp = SanitizedContact(mp.ContactFor(static_cast<u16>(wt)));
+			const ContactParams cp = SanitizedContact(fist != FistKind::None ? mp.fist : mp.ContactFor(static_cast<u16>(wt)));
 			can = can && s_shape.valid;
 			u32 hook = 0;
 			const bool hooked = Read(reader, mp.hook, 4, &hook) && hook == mp.hook_on;
@@ -1734,7 +1864,9 @@ namespace VR::PhysicalMelee
 				const u32 blk = mp.block;
 				u32 w;
 				memWrite32(blk + 0x18, static_cast<u32>(cp.window_frames));
-				std::memcpy(&w, &so.strength, 4);
+				// A punch: the knife's damage scaled to a light hit (never above 1, so the knife's class 0 stays).
+				const float strength = fist != FistKind::None ? std::min(so.strength, 1.0f) * mp.fist_scale : so.strength;
+				std::memcpy(&w, &strength, 4);
 				memWrite32(blk + 0x1C, w);
 				memWrite32(blk + 0x28, counter & 0xFFu);
 				s_strike_seq++;
@@ -1754,7 +1886,7 @@ namespace VR::PhysicalMelee
 				s_pend_enemy = so.enemy;
 				s_pend_s = 0.0f;
 				s_pend_hp = hp;
-				s_pend_strength = so.strength;
+				s_pend_strength = strength;
 				s_pend_speed = s_tip_speed;
 				s_pend_sphere = sph;
 				// The jolt: the weapon's shape and the swing's velocity now; the sphere is the one the game's hit records.
@@ -1766,8 +1898,9 @@ namespace VR::PhysicalMelee
 					s_pend_vel[q] = s_vel_b[q];
 				}
 				s_strikes++;
-				Console.WriteLn("(VR) Melee: strike, enemy %d (sphere %d) at %.1f m/s, strength %.2f.", so.enemy, sph,
-					static_cast<double>(s_tip_speed), static_cast<double>(so.strength));
+				Console.WriteLn("(VR) Melee: %s, enemy %d (sphere %d) at %.1f m/s, strength %.2f.",
+					fist == FistKind::Fist ? "punch" : fist == FistKind::Whip ? "pistol-whip" : "strike", so.enemy, sph,
+					static_cast<double>(s_tip_speed), static_cast<double>(strength));
 				// Armed now, on the sphere touched: cave G starts it on the update the hit lands in.
 				s_jolt_wait_zone = -1;
 				if (s_pend_jolt && sph >= 0 && WriteJolt(reader, mp, so.enemy, sph, true))
@@ -2751,6 +2884,7 @@ namespace VR::PhysicalMelee
 		s_block_armed = s_block_addr != 0;
 		s_block_stale = true;
 		s_jolt_armed = s_jolt_addr != 0;
+		s_fist_armed = s_fist_addr != 0;
 		ClearSprings();
 		ResetContact();
 	}
@@ -2938,12 +3072,16 @@ namespace VR::PhysicalMelee
 		// (present, its own index, owned by the local slot), read here so it works with or without a headset session; how
 		// the game attaches its model, from the weapon reader (or the scenario's item table).
 		bool melee = false;
+		bool bare = false;     // nothing equipped (bare hands, the game's weapon type 0)
+		bool gun_item = false; // a gun equipped (ItemData::IsGun)
 		u16 item_id = 0;
 		HandModel::GameAttach attach;
 		if (env)
 		{
 			u32 eq = 0, present = 0, index = 0, owner = 0, id = 0;
-			if (slot_known && Read(reader, record + fb->weapon_equipped_offset, 1, &eq) && eq != 0)
+			const bool eq_read = slot_known && Read(reader, record + fb->weapon_equipped_offset, 1, &eq);
+			bare = eq_read && eq == 0;
+			if (eq_read && eq != 0)
 			{
 				const u64 r = static_cast<u64>(fb->weapon_table) + static_cast<u64>(eq) * fb->weapon_stride;
 				if (r + fb->weapon_stride <= Ps2MemSize::MainRam && Read(reader, static_cast<u32>(r), 1, &present) &&
@@ -2954,6 +3092,7 @@ namespace VR::PhysicalMelee
 				{
 					item_id = static_cast<u16>(id);
 					melee = ItemData::KindOf(item_id) == ItemData::Kind::Melee;
+					gun_item = ItemData::IsGun(ItemData::KindOf(item_id));
 				}
 			}
 			if (melee)
@@ -3100,11 +3239,17 @@ namespace VR::PhysicalMelee
 		float m[16] = {};
 		float origin[3] = {}, axes[3][3] = {};
 		u32 counter = 0;
-		if (usable && record_steady && Overrides(mode) && mp->has_override && hand && attach.valid)
+		// [VR] PhysicalMeleeFists: bare hands or a gun strike with the knife's attack at the fist or the gun's butt, in
+		// contact mode strictly offline (cave H; research/2026-10-14-vr-melee.md section 12).
+		const FistKind fist = ChooseFist(EmuConfig.VR.PhysicalMeleeFists, mp && mp->has_fist, contact && mode == Mode::Offline,
+			bare, gun_item, melee);
+		const bool fist_usable = fist != FistKind::None && (raised || normal);
+		if ((usable || fist_usable) && record_steady && Overrides(mode) && mp->has_override && hand && (attach.valid || fist_usable))
 		{
 			CameraDriver::Mapping map;
-			if (CameraDriver::GetMapping(&map) &&
-				HandModel::ModelFrame(attach, HandModel::Held::Melee, pos, quat, origin, axes) &&
+			const bool frame = fist_usable ? FistFrame(pos, quat, fist == FistKind::Fist ? mp->fist_point : mp->whip_point, origin, axes) :
+			                                 HandModel::ModelFrame(attach, HandModel::Held::Melee, pos, quat, origin, axes);
+			if (CameraDriver::GetMapping(&map) && frame &&
 				GameMatrix(origin, axes, MapPoint, &map, m) && Read(reader, mp->counter, 1, &counter))
 			{
 				const u32 b = mp->block;
@@ -3143,6 +3288,18 @@ namespace VR::PhysicalMelee
 		}
 		if (!wrote)
 			ClearBlock();
+		// Cave H's word: the attack while a fist or the gun hand may strike, else back to zero.
+		if (wrote && fist_usable)
+		{
+			memWrite32(mp->fist_word + 4, mp->fist_attack + 1);
+			memWrite32(mp->fist_word, mp->fist_magic);
+			s_fist_armed = true;
+			s_fist_addr = mp->fist_word;
+			s_fist_magic = mp->fist_magic;
+			s_fist_crc = VMManager::GetDiscCRC();
+		}
+		else
+			ClearFist();
 
 		// The hit jolt ([VR] MeleeHitJolt): strictly offline, with contact; otherwise its block goes back to zero.
 		const bool jolt = contact && mode == Mode::Offline && EmuConfig.VR.MeleeHitJolt && mp->has_jolt;
@@ -3161,7 +3318,8 @@ namespace VR::PhysicalMelee
 				PumpSprings(reader, *mp);
 		}
 		if (contact)
-			PollContact(reader, *mp, record, wrote && !screen && !swinging, m, origin, axes, counter, dt, jolt);
+			PollContact(reader, *mp, record, wrote && !screen && !swinging, m, origin, axes, counter, dt, jolt,
+				fist_usable ? fist : FistKind::None);
 		else
 			s_contact.Reset();
 

@@ -286,7 +286,7 @@ namespace VR::ProfileDB
 		// (no network adapter), or in private co-op only where SilenceSettingCoopLive allows it (PhysicalMelee and
 		// PhysicalMeleeContact with [VR] PhysicalMeleeOnline while this console runs the room's enemies; SeamlessDoors and
 		// MeleeHitJolt never). Known names (IsSilenceSettingName): SeamlessDoors, PhysicalMelee, PhysicalMeleeContact,
-		// MeleeHitJolt; an unknown name drops the entry. Off: a word we patched is put back.
+		// MeleeHitJolt, GunRayAim (strictly offline); an unknown name drops the entry. Off: a word we patched is put back.
 		std::string when_setting;
 		// Optional (keepThroughDisarm: true, needs whenSetting): patched while the switch is on, the profile's `when`
 		// guard passes and the game is offline, whether first person is armed or not (e.g. code that runs during a room
@@ -904,6 +904,34 @@ namespace VR::ProfileDB
 		u32 jolt_bone_count = 0;
 		u32 jolt_bone_real = 0; // the model's own u16 bone count (*(enemy + jolt_bones) + this; 0: not read), review d10
 		PhysicalMelee::JoltParams jolt;
+		// fist ([VR] PhysicalMeleeFists; needs contact): cave H's word (magic at fist_word, the attack id + 1 after it), the
+		// attack it spawns (the knife's, 33), an enemy's u8 that must read 0 for the game's hit test to take it (enemy_wait,
+		// 0: not read; it is read for every contact strike), where the strike's sphere sits in the right hand's pointing
+		// frame (metres; fist_point bare-handed, whip_point with a gun: the butt), the host's own test sphere (game units),
+		// the tuning (speed, rearm, firm, light; strong 1, nothing above) and the scale on the strength (0.2-0.4 of the
+		// knife's damage, never above 1: the reaction class stays the knife's 0).
+		bool has_fist = false;
+		u32 fist_word = 0;
+		u32 fist_magic = 0;
+		u32 fist_attack = 0;
+		u32 enemy_wait = 0;
+		float fist_point[3] = {0.0f, 0.0f, -0.04f};
+		float whip_point[3] = {0.0f, -0.07f, 0.03f};
+		float fist_radius = 8.0f;
+		float fist_scale = 0.4f;
+		PhysicalMelee::ContactParams fist;
+		// gunRay ([VR] GunRayAim; needs contact for the weapon-type table and the record's weapon type): cave I's block
+		// (magic at +0, the counter stamp at +4, the local record at +8, cave I's shot count at +0x0C, the 4 x 4 matrix at
+		// +0x10, the origin at +0x50) and the game's own back offset for a shot's origin (f32 at gun_back_table +
+		// gun_back_stride * the weapon type's class byte (shape_types + shape_type_stride * type + gun_class_offset) + 4 *
+		// the record's character byte at gun_character_offset).
+		bool has_gun_ray = false;
+		u32 gun_block = 0;
+		u32 gun_magic = 0;
+		u32 gun_back_table = 0;
+		u32 gun_back_stride = 0;
+		u32 gun_class_offset = 0;
+		u32 gun_character_offset = 0;
 		PhysicalMelee::DetectorParams detect;
 		PhysicalMelee::DriverParams drive;
 	};
