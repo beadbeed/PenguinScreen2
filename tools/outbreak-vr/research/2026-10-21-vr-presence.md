@@ -9,9 +9,9 @@ echo standing in for the partner). Nothing here is checked online, on a headset 
 In private co-op each console sees the other player only as the game's canned character animation: the game sends
 position, heading, action and aim (`2026-10-14-melee-coop.md`), never a head or a hand. With `VrPresence` on, two
 PenguinScreen2 consoles also send each other their players' VR head and both hands over a small side channel of their
-own, and each draws the partner's VR head (a simple shell with a dark visor) and hands (the CC0 hand model, a teal
-glove, curled by the grip) beside the partner's game character, moving as the partner really moves. The game's
-character stays as it is; the game's own netcode, memory and traffic are not touched.
+own; VR body ([VR] VrBody) then poses the partner's own game character with them (its head and arms move as the partner
+really moves; the placeholder head and hands this note first described are gone, see Drawing). The game's own netcode,
+memory and traffic are not touched by the channel.
 
 ## The protocol (`pcsx2/VR/VrPresence.*`, `tools/outbreak-vr/presence_echo.py`)
 
@@ -53,18 +53,16 @@ character stays as it is; the game's own netcode, memory and traffic are not tou
 - No game memory is written: `Poll` reads the local slot, the room and the records' positions, rooms and max HP.
 - The channel is not the game's connection (DEV9 is not involved; the game's packets are unchanged).
 
-## Drawing (`ZoneMarkers::kPartner`, `XRCompositor` BuildZoneLayers)
+## Drawing: replaced by VR body (branch `vrbody`, 2026-10-21)
 
-- One impostor image (256 x 256, the zone markers' size) holds the head and both hands, on one quad facing the eye from
-  their middle, just big enough for them (0.1 to 2.4 m). It is one more zone-marker slot: placed after the holster and
-  before the belt bag, the rings and the hand-targeting box when layers are short (`ZoneMarkers::Plan`).
-- **The 16-swapchain limit.** The partner's swapchain is made only once a partner has actually shown up (never with the
-  setting off, never before anyone is seen). If it cannot be made (SteamVR's limit) the partner is skipped for the
-  session with one log line, `(VR) Presence: no swapchain for the partner's head and hands ...`; the markers and
-  everything else keep theirs (unlike the other zone slots, whose failure turns the markers off).
-- It is drawn again at most at the packets' rate (33 ms), or when what it shows changes; between, the last image rides
-  with the partner's head. Cost: about the hands' (two hand meshes and two small ellipsoids, 2 x 2 samples).
-- Not drawn while a game screen is up (as the zone markers).
+The first version drew a placeholder here (a grey head shell with a dark visor and teal CC0 hands in one impostor,
+`ZoneMarkers::kPartner`). Alex wants the partner as the game's own character, so that is gone: `GetPartnerView` is
+always false (the compositor's partner slot never makes its swapchain or draws; its code stays inert until the
+compositor's owner removes it), `PlacePartner`, `RasterPartner` and `PartnerMarks` are stubs, and the dump is gone.
+Instead `GetPartnerGame` hands VR body ([VR] VrBody, `research/2026-10-21-vr-body.md`) the partner's record and its VR
+head and hands in the game's coordinates, moved onto this console's copy of the character as before; VR body poses that
+character's own skeleton from them. The channel, its safety and its logs are unchanged (the state line now says "a
+partner is placed").
 
 ## Logs
 
@@ -132,8 +130,8 @@ Setup (both):
 
 Steps:
 1. **Same room.** Both stand in J's Bar. Each log: `(VR) Presence: a partner is drawn (packet slot B ...)`. In the
-   headset, a grey head with a dark visor sits on the partner's character's head and two teal hands near its hands.
-   Wave, nod, look around, point: the other sees it as it happens (well under a quarter of a second).
+   headset (with `VrBody = true` on both, `research/2026-10-21-vr-body.md`), the partner's own character turns its head
+   and moves its arms as the partner does. Wave, nod, look around, point: the other sees it as it happens.
 2. **Distance and turning.** Walk apart, turn away and back: the head and hands stay on the character as it moves;
    your own turning does not move them in the world.
 3. **Rooms.** One walks into another room: the other's log says `the partner is in another room` and nothing is

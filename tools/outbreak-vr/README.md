@@ -621,17 +621,29 @@ VR presence (VR setting `VrPresence`, off by default, ini only, with `VrPresence
 research `2026-10-21-vr-presence.md`, which has the two-machine test). In private co-op two PenguinScreen2 consoles send
 each other their players' VR head and hands, in the game's coordinates (`CameraDriver::GameFromVr`), over a UDP side
 channel of their own (156-byte packets, 30 a second, a key hash, a session and a sequence number; never the game's
-connection), and each draws the partner's VR head (a shell and a dark visor) and teal CC0 hands on the partner's character
-in the same room, in one impostor (`ZoneMarkers::kPartner`; its swapchain only once a partner shows up, skipped with a log
-line when SteamVR has none left). The peer must be a private IPv4 address (LAN, Tailscale 100.64/10, 127/8; a name is
+connection); VR body (below) poses the partner's own character with them (the first version's placeholder head and
+hands are gone). The peer must be a private IPv4 address (LAN, Tailscale 100.64/10, 127/8; a name is
 resolved and checked); nothing is sent and no socket is open unless first person is armed in private co-op, or for the
 offline loopback test with `PCSX2_VR_PRESENCE_LOOPBACK=1`, the game offline and a 127/8 peer. Reads game memory only.
 Logs `(VR) Presence: ...` (on, live / waiting, channel open / closed with its counts, a partner is drawn or why not);
-`PCSX2_VR_PRESENCE_LOG=1` adds the positions every 2 s (always on in the loopback test); `PCSX2_VR_PRESENCE_DUMP=<dir>`
-writes one `presence_partner.png` (never commit it). `presence_echo.py` is the loopback partner (it sends each packet
+`PCSX2_VR_PRESENCE_LOG=1` adds the positions every 2 s (always on in the loopback test). `presence_echo.py` is the loopback partner (it sends each packet
 back as another slot); `presence_test.py <dev install> [slot] [--dump <dir>]` runs the whole loopback check headset-free
 (it sets the presence keys in that install's ini, refuses to start beside another emulator or SteamVR, and kills only its
-own emulator). `vr_selftests` runs `VR presence (side channel, partner head and hands)`.
+own emulator). `vr_selftests` runs `VR presence (side channel, partner poses)`.
+
+VR body (VR settings `VrBody` and `VrBodySelf`, off by default, ini only; File #1's profile `body` block and caves U and V
+in `camera.silence` / `camera.caves`; `VR/VrBody.cpp`, polled every vsync after VR presence; research
+`2026-10-21-vr-body.md`). The partner (from VR presence's poses, so in private co-op or its loopback test) is shown as
+the game's own character with its head and neck turned to the partner's VR head and each arm reaching the VR hand (a
+two-bone IK, clamps, back to the game's animation when a hand is not tracked or out of reach); legs, hips and walking
+stay the game's. The pose goes in as the bones' LOCAL matrices in the tick's world build (cave U at `0x346884`), so the
+game itself builds the world matrices, puts the held weapon in the posed hand and runs its hit tests on the posed body;
+the head's subtree goes in at the draw (cave V at `0x345314`) over the game's own head look. `VrBodySelf` (offline only):
+your own character's arms in first person, the rest of it still hidden (cave V zeroes the other bones' axes at the
+draw). Logs `(VR) Body: ...`; `PCSX2_VR_BODY_LOG=1` (always on in the loopback test) logs every 2 s each arm's wrist
+target, the solve and the wrist bone the game built, and the head bone's forward against the VR head's;
+`PCSX2_VR_BODY_DRAWTIME=1` is the fallback (every bone at the draw). `body_test.py <dev install> [slot] [--self]
+[--shots <dir>]` is the loopback check. `vr_selftests` runs `VR body (...)` and the caves interpreted.
 
 Rules when testing: never change emulation speed; never pause, savestate or dump RAM while online
 (obsrv drops clients after ~30 s without packets and bans speed changes); do not run the virtual pad
