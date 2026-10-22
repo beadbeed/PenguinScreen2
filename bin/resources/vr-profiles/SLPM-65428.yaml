@@ -92,12 +92,13 @@ SLPM-65428:
     # highlighted (the box shows dim for the nearest within show cm). A deliberate grip squeeze there arms block (magic,
     # the counter's stamp, the local record, the point) and presses Circle once; the cave at site / cave (camera.silence
     # above) makes that press search at the hand. The take-it prompt is told apart by overlay (u32 1), which (u8 1) and sub
-    # (u8 2), and the item by the local record's status (+0xC78, 1 = found) and result (+0xC7A, the item record index);
+    # (u8 2), and its item by the prompt's own item struct (prompt: +1 u8 the item record index, +2 u16 the item id, +8 the
+    # name; 2026-10-21 RAM reads, Handgun and Green Herb) and the local record's search result (+0xC7A, the record index);
     # it is confirmed (Circle) only with the grip still held and the prompt's cursor (grid u8 1, cursorNode / cursorIndex)
     # on a free cell of your own (cells: +0xC84, 0 = empty; cellNodes: cells 0-3, a 2 x 2 grid). No free cell: the game's
     # swap is the player's, nothing is pressed.
     pickup: { near: 6, show: 45, block: 0xFF200, magic: 0x48504B31, counter: 0x48BF93, site: 0x61DB94, siteOn: 0x0C03FB00,
-              cave: 0xFEC00, caveFirst: 0x3C0B0010, status: 0xC78, result: 0xC7A, cells: 0xC84, cellCount: 4,
+              cave: 0xFEC00, caveFirst: 0x3C0B0010, prompt: 0x722890, result: 0xC7A, cells: 0xC84, cellCount: 4,
               overlay: 0x720AA0, which: 0x720BE4, sub: 0x720BE2, grid: 0x723F94, cursorNode: 0x720B84, cursorIndex: 0x720B8C,
               cellNodes: [0x720C10, 0x720CA8, 0x720D40, 0x720DD8] }
   # Wrist card (VR only, first person): turn the left wrist to the face to read the character's condition

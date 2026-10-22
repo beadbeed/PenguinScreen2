@@ -961,6 +961,44 @@ namespace VR::ItemReach
 			if ((s_pickup_vsync++ % kHandEvalEveryVsyncs) != 0)
 				return;
 
+			// PCSX2_VR_PICKUP_DEBUG: once a second, every floor item's volume centre in the game and in the headset's space
+			// (test scripts place a scripted hand there).
+			static const bool debug = std::getenv("PCSX2_VR_PICKUP_DEBUG") != nullptr;
+			static u64 s_debug_ms = 0;
+			if (debug && now_ms >= s_debug_ms)
+			{
+				s_debug_ms = now_ms + 1000;
+				const Peek peek{&ReadGuest};
+				u32 walked = 0;
+				WalkTriggerList(peek, *params, &walked, [&](u32 node) {
+					u32 type = 0, mode = 0, enabled = 0, busy = 0, index = 0, id = 0;
+					double y0 = 0, y1 = 0;
+					Quad q{};
+					bool ok = peek(static_cast<u64>(node) + params->type_offset, 1, &type) &&
+					          peek(static_cast<u64>(node) + params->mode_offset, 1, &mode) &&
+					          peek(static_cast<u64>(node) + params->enabled_offset, 1, &enabled) &&
+					          peek(static_cast<u64>(node) + params->busy_offset, 1, &busy);
+					if (!ok || type != params->accept_type || mode != params->accept_mode || enabled == 0 || busy != 0)
+						return true;
+					ok = peek(static_cast<u64>(node) + params->item_offset, 4, &index) &&
+					     peek(static_cast<u64>(params->item_table) + static_cast<u64>(index) * params->item_stride + params->item_id_offset, 2, &id) &&
+					     peek.S32(static_cast<u64>(node) + params->y_min_offset, &y0) && peek.S32(static_cast<u64>(node) + params->y_max_offset, &y1);
+					for (int i = 0; i < 4 && ok; i++)
+						ok = peek.S32(static_cast<u64>(node) + params->quad_offset + i * 8, &q.x[i]) &&
+						     peek.S32(static_cast<u64>(node) + params->quad_offset + i * 8 + 4, &q.z[i]);
+					if (!ok)
+						return true;
+					const float c[3] = {static_cast<float>(0.25 * (q.x[0] + q.x[1] + q.x[2] + q.x[3])), static_cast<float>(0.5 * (y0 + y1)),
+						static_cast<float>(0.25 * (q.z[0] + q.z[1] + q.z[2] + q.z[3]))};
+					float v[3] = {};
+					if (CameraDriver::VrFromGame(map, c, v))
+						Console.WriteLn("(VR) Hand pickup debug: item node 0x%08X item %u record %u centre game (%.1f, %.1f, %.1f) VR (%.3f, %.3f, %.3f)",
+							node, id, index, static_cast<double>(c[0]), static_cast<double>(c[1]), static_cast<double>(c[2]),
+							static_cast<double>(v[0]), static_cast<double>(v[1]), static_cast<double>(v[2]));
+					return true;
+				});
+			}
+
 			HandTarget cand[2];
 			for (int h = 0; h < 2; h++)
 			{
@@ -989,6 +1027,7 @@ namespace VR::ItemReach
 			next.index = t.index;
 			next.item_id = t.item_id;
 			next.distance_cm = t.inside ? 0.0 : std::sqrt(t.horizontal_cm * t.horizontal_cm + t.vertical_cm * t.vertical_cm);
+			next.forward_agrees = t.forward_agrees;
 			if (highlighted)
 			{
 				double pt[3];
@@ -1035,10 +1074,10 @@ namespace VR::ItemReach
 					XRInput::QueuePulse(h, amp, kTickSeconds);
 				s_pickup_said_node = next.node;
 				Console.WriteLn("(VR) Hand pickup: item highlighted: %s hand, node 0x%08X, item %u (%s, record %u), %.1f cm from its "
-								"volume; search point (%.1f, %.1f, %.1f)",
+								"volume; search point (%.1f, %.1f, %.1f); the character's own Circle would take it: %s",
 					h == 1 ? "right" : "left", next.node, static_cast<u32>(next.item_id), ItemData::Name(next.item_id), next.index,
 					next.distance_cm, static_cast<double>(next.point[0]), static_cast<double>(next.point[1]),
-					static_cast<double>(next.point[2]));
+					static_cast<double>(next.point[2]), next.forward_agrees ? "yes" : "no");
 			}
 			else if (highlighted && !next.point_ok && (s_pickup_said_node != next.node || !was) && now_ms >= s_hand.next_log_ms)
 			{

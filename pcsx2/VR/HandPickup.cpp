@@ -224,7 +224,7 @@ namespace VR::HandPickup
 				}
 				if (!st.checked)
 				{
-					if (in.status != 1 || in.result != st.index)
+					if (in.prompt_record != st.index || in.prompt_id != st.item || in.result != st.index)
 					{
 						o.event = "the take-it prompt is not for the item under the hand (another item, a partner's hand-over): "
 						          "nothing confirmed";
@@ -548,7 +548,8 @@ namespace VR::HandPickup
 		const u32 rec = live.record;
 		if (live.armed && rec != 0)
 		{
-			Read(rec + p->pickup_status, 1, &in.status);
+			Read(p->pickup_prompt + 1, 1, &in.prompt_record);
+			Read(p->pickup_prompt + 2, 2, &in.prompt_id);
 			Read(rec + p->pickup_result, 1, &in.result);
 			in.cell_count = std::min<u32>(p->pickup_cell_count, 4);
 			for (u32 k = 0; k < in.cell_count; k++)
@@ -590,23 +591,23 @@ namespace VR::HandPickup
 		{
 			if (o.arm)
 				Console.WriteLn("(VR) Hand pickup: %s: %s hand, item %u (%s, record %u, node 0x%08X), search point (%.1f, %.1f, %.1f), "
-								"record 0x%X, block 0x%X request %u",
+								"record 0x%X, block 0x%X request %u; the character's own Circle would take it: %s",
 					o.event, s_state.hand == 1 ? "right" : "left", static_cast<u32>(s_state.item), ItemData::Name(s_state.item),
 					s_state.index, s_state.node, static_cast<double>(tg.point[0]), static_cast<double>(tg.point[1]),
-					static_cast<double>(tg.point[2]), rec, p->pickup_block, s_seq);
+					static_cast<double>(tg.point[2]), rec, p->pickup_block, s_seq, tg.forward_agrees ? "yes" : "no");
 			else if (o.taken_cell >= 0)
 				Console.WriteLn("(VR) Hand pickup: %s (cell %d holds record %u, %s)", o.event, o.taken_cell, s_state.index,
 					ItemData::Name(s_state.item));
 			else
-				Console.WriteLn("(VR) Hand pickup: %s [%s -> %s; prompt %s, status %u, result %u, cells %u %u %u %u, cursor %s%d]",
-					o.event, PhaseName(before), PhaseName(s_state.phase), in.take_prompt ? "up" : "no", in.status, in.result,
+				Console.WriteLn("(VR) Hand pickup: %s [%s -> %s; prompt %s (record %u, item %u), result %u, cells %u %u %u %u, cursor %s%d]",
+					o.event, PhaseName(before), PhaseName(s_state.phase), in.take_prompt ? "up" : "no", in.prompt_record, in.prompt_id, in.result,
 					in.cells[0], in.cells[1], in.cells[2], in.cells[3], in.cursor_in_grid ? "grid " : "off-grid ", in.cursor_cell);
 		}
 		else if (before == Phase::Reaching && s_state.phase == Phase::Prompt)
 		{
-			Console.WriteLn("(VR) Hand pickup: take-it prompt up: status %u, result %u (wanted %u), cells %u %u %u %u, cursor %s%d, "
+			Console.WriteLn("(VR) Hand pickup: take-it prompt up: record %u item %u, search result %u (wanted %u, item %u), cells %u %u %u %u, cursor %s%d, "
 							"grip %s",
-				in.status, in.result, s_state.index, in.cells[0], in.cells[1], in.cells[2], in.cells[3],
+				in.prompt_record, in.prompt_id, in.result, s_state.index, static_cast<u32>(s_state.item), in.cells[0], in.cells[1], in.cells[2], in.cells[3],
 				in.cursor_in_grid ? "grid " : "off-grid ", in.cursor_cell, s_state.held ? "held" : "let go");
 		}
 	}
@@ -795,7 +796,8 @@ namespace VR::HandPickup
 			run(in, st, 16, 60); // the reach animation, ~1 s
 			in.screen_up = true;
 			in.take_prompt = true;
-			in.status = 1;
+			in.prompt_record = 7;
+			in.prompt_id = 300;
 			in.result = 7;
 			in.cursor_in_grid = true;
 			in.cursor_cell = 1;  // free
@@ -824,9 +826,13 @@ namespace VR::HandPickup
 			o = run(in, st, 16, 1);
 			check(st.phase == Phase::Idle && !o.press_circle && o.event, "prompt: another item's prompt is not confirmed");
 			prompt(in, st);
-			in.status = 3;
+			in.prompt_record = 9;
 			o = run(in, st, 16, 1);
-			check(st.phase == Phase::Idle && !o.press_circle, "prompt: a failed search's stale result is not confirmed");
+			check(st.phase == Phase::Idle && !o.press_circle, "prompt: a prompt showing another record (a partner's hand-over) is not confirmed");
+			prompt(in, st);
+			in.prompt_id = 301;
+			o = run(in, st, 16, 1);
+			check(st.phase == Phase::Idle && !o.press_circle, "prompt: a prompt showing another item id is not confirmed");
 			prompt(in, st);
 			in.cells[1] = 4;
 			in.cells[3] = 6;
@@ -844,7 +850,8 @@ namespace VR::HandPickup
 			in.grip[1] = 1.0f; // and squeezed again: not the same deliberate hold
 			run(in, st, 16, 30);
 			in.screen_up = in.take_prompt = true;
-			in.status = 1;
+			in.prompt_record = 7;
+			in.prompt_id = 300;
 			in.result = 7;
 			in.cursor_in_grid = true;
 			in.cursor_cell = 1;
@@ -916,7 +923,7 @@ namespace VR::HandPickup
 						  r->pickup_site == 0x61DB94 && r->pickup_site_on == 0x0C03FB00 && r->pickup_cave == 0xFEC00 &&
 						  r->pickup_cave_first == 0x3C0B0010,
 					"profile: block 0xFF200 'HPK1', the counter, site 0x61DB94 -> jal 0xFEC00, the cave's first word");
-				check(r->pickup_status == 0xC78 && r->pickup_result == 0xC7A && r->pickup_cells == 0xC84 && r->pickup_cell_count == 4 &&
+				check(r->pickup_prompt == 0x722890 && r->pickup_result == 0xC7A && r->pickup_cells == 0xC84 && r->pickup_cell_count == 4 &&
 						  r->pickup_overlay == 0x720AA0 && r->pickup_which == 0x720BE4 && r->pickup_sub == 0x720BE2 &&
 						  r->pickup_grid == 0x723F94 && r->pickup_cursor_node == 0x720B84 && r->pickup_cursor_index == 0x720B8C &&
 						  r->pickup_cell_nodes[0] == 0x720C10 && r->pickup_cell_nodes[3] == 0x720DD8,

@@ -686,8 +686,8 @@ namespace VR::ProfileDB
 		u32 pickup_site_on = 0;
 		u32 pickup_cave = 0;               // the cave's first word and its value while in
 		u32 pickup_cave_first = 0;
-		u32 pickup_status = 0;             // record offsets: the last search's status byte (1 = found) and item record index
-		u32 pickup_result = 0;
+		u32 pickup_prompt = 0;             // the take-it prompt's item: +1 u8 its record index, +2 u16 its item id (+8 its name)
+		u32 pickup_result = 0;             // record offset: the last Circle search's item record index (u8)
 		u32 pickup_cells = 0;              // record offset of the item cells (u8 record index each, 0 = empty)
 		u32 pickup_cell_count = 4;
 		u32 pickup_overlay = 0;            // u32: a game screen is drawn

@@ -120,6 +120,7 @@ namespace VR::ItemReach
 		bool point_ok = false;
 		float point[3] = {};       // game cm: the search point for the cave
 		u32 serial = 0;            // counts every change of the highlighted node (an entry, a switch, a leave)
+		bool forward_agrees = false; // the character's own Circle (46 cm ahead) would take this item now (logs)
 	};
 	PickupTarget CurrentPickup();
 

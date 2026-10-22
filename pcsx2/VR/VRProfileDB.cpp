@@ -3072,7 +3072,7 @@ static std::optional<VR::ProfileDB::ReachParams> parseReach(const std::string_vi
 		else
 		{
 			warnUnknownKeys(serial, h, "reach.pickup", {"near", "show", "block", "magic", "counter", "site", "siteOn", "cave",
-				"caveFirst", "status", "result", "cells", "cellCount", "overlay", "which", "sub", "grid", "cursorNode",
+				"caveFirst", "prompt", "result", "cells", "cellCount", "overlay", "which", "sub", "grid", "cursorNode",
 				"cursorIndex", "cellNodes"});
 			const auto num = [&](const char* key, float lo, float hi, float& dst) {
 				if (!h.has_child(key))
@@ -3109,7 +3109,7 @@ static std::optional<VR::ProfileDB::ReachParams> parseReach(const std::string_vi
 			word("siteOn", rp.pickup_site_on, 0xFFFFFFFFu);
 			addr("cave", 4, 4, rp.pickup_cave);
 			word("caveFirst", rp.pickup_cave_first, 0xFFFFFFFFu);
-			word("status", rp.pickup_status, 0xFFFF);
+			addr("prompt", 4, 4, rp.pickup_prompt);
 			word("result", rp.pickup_result, 0xFFFF);
 			word("cells", rp.pickup_cells, 0xFFFF);
 			if (h.has_child("cellCount"))

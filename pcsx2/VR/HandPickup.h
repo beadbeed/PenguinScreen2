@@ -26,8 +26,8 @@ namespace VR::ItemReach
 // a 300 ms timeout, the hand leaving, a screen, a state load, the switch off or the network coming on.
 //
 // The confirm (Alex's approved exception, 2026-10-21; nothing else is ever confirmed for you): when the game's own take-it
-// prompt comes up (overlay u32 1, which 1, sub 2), its search result is this item (the record's status 1 and result its
-// record index), you have a free cell, the prompt's cursor sits on one of your own free cells (moved there with the D-pad,
+// prompt comes up (overlay u32 1, which 1, sub 2) showing this item (its item struct's record index and item id, and the
+// record's search result), you have a free cell, the prompt's cursor sits on one of your own free cells (moved there with the D-pad,
 // one closed-loop press at a time, if it rests on a full one) and the grip has been held all the way from the squeeze,
 // Circle is pressed once. A full inventory is the game's swap: nothing is pressed. Let go before the prompt, or press any
 // button yourself, and the prompt is yours. Any other screen, prompt or item: nothing.
@@ -80,8 +80,9 @@ namespace VR::HandPickup
 		u16 target_item = 0;
 		// Guest memory
 		bool block_armed = false;  // the block's armed word reads the magic
-		u32 status = 0;            // the local record's last search: status (1 = found) and item record index
-		u32 result = 0;
+		u32 result = 0;            // the local record's last Circle search: the item record index
+		u32 prompt_record = 0;     // the prompt's own item: its record index and item id
+		u32 prompt_id = 0;
 		u8 cells[4] = {};          // the local record's item cells (record index, 0 = empty)
 		u32 cell_count = 4;
 		bool cursor_in_grid = false; // the prompt's cursor is in your own grid ...
