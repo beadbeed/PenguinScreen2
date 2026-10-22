@@ -1,13 +1,15 @@
 """Real hand pickups ([VR] HandPickup), headset-free: a scripted right hand on a floor item, a scripted squeeze, and what
 the game did. File #1 offline only, normal speed, no OpenXR runtime (PCSX2_VR_TEST_INPUT, PCSX2_VR_PICKUP_DEBUG).
 
-    python -I pickuptest.py <portable dev install> <slot> <item id>[,<item id>...] [--turn DEG] [--release-early] [--no-squeeze] [--vr x,y,z]
+    python -I pickuptest.py <portable dev install> <slot> <item id>[,<item id>...] [--turn DEG] [--release-early] [--no-squeeze] [--vr x,y,z] [--screen-first [y|menu]]
     (several ids: one pickup after the other in the same run, e.g. to fill the last free cell and then try a full inventory)
 
 Runs that install (never D:\\Games\\PS2\\PenguinScreen2), loads the slot, finds the item's volume centre in the headset's
 space from the build's debug lines, optionally turns the head (and with it the character) DEG degrees to the left first,
 puts the right hand there, squeezes (and holds; --release-early lets go after 0.3 s),
 polls the take-it prompt flags and prints the "Hand pickup" log lines and the local record's item cells before and after.
+--screen-first [y|menu] (night review M1): presses Triangle (y, the item screen; default) or Start 0.15 s before the squeeze, so a screen
+is opening (melee.screenFlag 0x48BF7E up, the overlay not yet): nothing may be armed or pressed.
 It refuses to start while another pcsx2-qt.exe or vrserver.exe runs, and kills only the emulator it started."""
 import os, re, subprocess, sys, time
 os.environ["PCSX2_INI"] = os.path.join(sys.argv[1], "inis", "PenguinScreen2.ini")  # pine.py's offline check reads this ini
@@ -20,6 +22,9 @@ ITEMS = [int(x) for x in sys.argv[3].split(",")]
 TURN = float(sys.argv[sys.argv.index("--turn") + 1]) if "--turn" in sys.argv else 0.0
 EARLY = "--release-early" in sys.argv
 NO_SQUEEZE = "--no-squeeze" in sys.argv
+SCREEN_FIRST = "--screen-first" in sys.argv
+# the button that opens the screen: y (Triangle, the item screen; the default) or menu (Start)
+SCREEN_BUTTON = sys.argv[sys.argv.index("--screen-first") + 1] if SCREEN_FIRST and sys.argv.index("--screen-first") + 1 < len(sys.argv) else "y"
 # --vr x,y,z: put the hand there instead of the debug line's centre (HandPickup off prints no debug lines)
 AT = tuple(float(v) for v in sys.argv[sys.argv.index("--vr") + 1].split(",")) if "--vr" in sys.argv else None
 DUMP = sys.argv[sys.argv.index("--dump") + 1] if "--dump" in sys.argv else None  # the prompt's RAM (never committed)
@@ -132,6 +137,12 @@ def run(proc):
                 with open(DUMP + ".before", "wb") as f:
                     f.write(p.read_block(0x700000, 0x30000))
                     f.write(p.read_block(rec, 0x10E0))
+            if SCREEN_FIRST:
+                fc.set_hand(0, grip=pose(pos=(-0.3, -0.5, -0.2)), buttons=(SCREEN_BUTTON,))
+                time.sleep(0.15)
+                fc.set_hand(0, grip=pose(pos=(-0.3, -0.5, -0.2)))
+                print("%s pressed: screen flag" % SCREEN_BUTTON + " 0x48BF7E = %d, overlay 0x720AA0 = %d at the squeeze" %
+                      (p.read8(0x48BF7E), p.read32(0x720AA0)))
             if not NO_SQUEEZE:
                 fc.set_hand(1, grip=pose(pos=vr), squeeze=1.0)
             t0 = time.time()
