@@ -1400,6 +1400,16 @@ struct Pcsx2Config
 		// that brightens as the hand nears, and gives one light tick in the right hand on entering it. It writes nothing
 		// to the game and presses nothing; what it measures is in the emulog ("Hand targeting:" lines). Ini only.
 		bool HandTargeting = false;
+		// First person, File #1 strictly offline (not online, not private co-op): real hand pickups. A hand inside (or a few cm
+		// from) a floor item's trigger volume highlights it (the box HandTargeting draws, any floor item, either hand, a
+		// light tick on entering); a deliberate grip squeeze there presses Circle once on your own pad with a single-use word
+		// that makes the game's own Circle search (the cave at 0x61DB94, the local record only) look at the hand instead of
+		// in front of the character, so the item under the hand is the one taken whichever way the character faces. When the
+		// game's own "Will you take it?" prompt for that item comes up and the grip is still held, the build confirms it with
+		// Circle on a free cell (Alex's approved exception, 2026-10-21: the only confirm the build ever makes). A full
+		// inventory (the game's swap), any other screen or a different item: nothing is pressed. Ini only, off by default
+		// until checked in the headset (tools/outbreak-vr/research/2026-10-21-hand-pickup.md).
+		bool HandPickup = false;
 		// First person: the hands are the CC0 hand model (VR::HandMesh) and the weapon in the right hand, in the hip
 		// holster and slung over the shoulder is the game's own model read from the disc (VR::GameModels), at its real
 		// size and placed in the hand the way the game attaches it (its weapon table's grip offset and turn), drawn with

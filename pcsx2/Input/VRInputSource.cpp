@@ -14,6 +14,7 @@
 #include "VR/BeltPouches.h"
 #include "VR/CameraDriver.h"
 #include "VR/ControlQuads.h"
+#include "VR/HandPickup.h"
 #include "VR/MenuPointer.h"
 #include "VR/ReloadDriver.h"
 #include "VR/SplitState.h"
@@ -674,6 +675,38 @@ void VRInputSource::ApplyMelee(Instance& in, SC::ControlValues& values, const VR
 	}
 }
 
+// [VR] HandPickup (VR::HandPickup) on the VR Gamepad: while it presses Circle every control bound to Circle reads 1; while it
+// presses a D-pad direction (steering the take-it prompt's cursor to a free cell) the control bound to that direction reads
+// 1 and those bound to the other three read 0 (so the menu pointer's own D-pad press cannot cross it that poll). Otherwise
+// the player's own values go out untouched.
+void VRInputSource::ApplyPickup(Instance& in, SC::ControlValues& values)
+{
+	if (in.kind != SC::DeviceKind::Gamepad || in.spec.usb_port >= 0)
+		return;
+	const VR::HandPickup::Press pr = VR::HandPickup::CurrentPress();
+	if (!pr.circle && pr.dpad < 0)
+		return;
+	static constexpr const char* kDpad[4] = {"Up", "Down", "Left", "Right"};
+	const size_t count = std::min(in.spec.bind.size(), in.bind_ids.size());
+	for (size_t k = 0; k < count; ++k)
+	{
+		const u32 i = in.bind_ids[k];
+		if (i >= SC::kControlCount)
+			continue;
+		const std::string& target = in.spec.bind[k].target;
+		if (pr.circle && target == "Circle")
+			values[i] = 1.0f;
+		if (pr.dpad >= 0)
+		{
+			for (int d = 0; d < 4; ++d)
+			{
+				if (target == kDpad[d])
+					values[i] = (d == pr.dpad) ? 1.0f : 0.0f;
+			}
+		}
+	}
+}
+
 VRInputSource::VRInputSource() = default;
 
 VRInputSource::~VRInputSource()
@@ -1076,6 +1109,7 @@ void VRInputSource::PollEvents()
 		}
 		ApplyReload(in, values, reload);
 		ApplyMelee(in, values, melee);
+		ApplyPickup(in, values);
 		QueueHapticCues(in, hands_before, at_stop_before);
 		Emit(in, values);
 		publish_cards(values, true);

@@ -87,6 +87,19 @@ SLPM-65428:
     # A Handgun trigger whose centre is more than tolerance from centre is ignored. range / keep: a target appears with the
     # hand this near the volume's centre and stays until keep; near: the marker brightens this near the volume. Decimal cm.
     hand: { item: 0, centre: [8493.5, 140, 12922.5], tolerance: 10, range: 300, keep: 320, near: 30 }
+    # pickup: real hand pickups ([VR] HandPickup, off by default; File #1 strictly offline; research/2026-10-21-hand-pickup.md).
+    # Any floor item (the same list walk and filters as the cue) whose volume a hand is inside, or within near cm of, is
+    # highlighted (the box shows dim for the nearest within show cm). A deliberate grip squeeze there arms block (magic,
+    # the counter's stamp, the local record, the point) and presses Circle once; the cave at site / cave (camera.silence
+    # above) makes that press search at the hand. The take-it prompt is told apart by overlay (u32 1), which (u8 1) and sub
+    # (u8 2), and the item by the local record's status (+0xC78, 1 = found) and result (+0xC7A, the item record index);
+    # it is confirmed (Circle) only with the grip still held and the prompt's cursor (grid u8 1, cursorNode / cursorIndex)
+    # on a free cell of your own (cells: +0xC84, 0 = empty; cellNodes: cells 0-3, a 2 x 2 grid). No free cell: the game's
+    # swap is the player's, nothing is pressed.
+    pickup: { near: 6, show: 45, block: 0xFF200, magic: 0x48504B31, counter: 0x48BF93, site: 0x61DB94, siteOn: 0x0C03FB00,
+              cave: 0xFEC00, caveFirst: 0x3C0B0010, status: 0xC78, result: 0xC7A, cells: 0xC84, cellCount: 4,
+              overlay: 0x720AA0, which: 0x720BE4, sub: 0x720BE2, grid: 0x723F94, cursorNode: 0x720B84, cursorIndex: 0x720B8C,
+              cellNodes: [0x720C10, 0x720CA8, 0x720D40, 0x720DD8] }
   # Wrist card (VR only, first person): turn the left wrist to the face to read the character's condition
   # (FINE / CAUTION below 60% of max HP / DANGER below 20% / BLEED), an HP bar and the virus gauge. Reads
   # only. Local record offsets: HP u16 +0x544 of max +0x546; virus counter u32 +0xBAC over the u32 maximum
@@ -851,6 +864,54 @@ SLPM-65428:
       - { address: 0x0FE8CC, on: 0x8FBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
       - { address: 0x0FE8D0, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
       - { address: 0x0FE8D4, on: 0x27BD0020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      # Real hand pickups ([VR] HandPickup, off; strictly offline; research/2026-10-21-hand-pickup.md). The Circle pickup
+      # handler FUN_0061DB40 calls FUN_00631760(record, kind 1, mode 0) at 0x61DB94: the search 46 cm ahead of the
+      # character. The site calls the cave at 0xFEC00 instead; the cave runs that same call unless the kind is 1, the
+      # host's block 0xFF200 holds the armed word 'HPK1' for this very record, the record's slot (+0x03) is the camera focus
+      # u8 0x3AEF74 (the local slot) and the block's stamp is at most 18 game frames old: then it clears the armed word
+      # (single use) and calls the search core FUN_005ABBE0(block +0x10, record, 0) with radius 50, the hand's point. The
+      # cave tail-jumps both ways, so pc and $ra are never left inside it. The host arms the word only on a deliberate grip
+      # squeeze on a highlighted item and clears it on a 300 ms timeout, a screen, a state load, the hand leaving or the
+      # switch going off. RAM 0xFEC00-0xFEFFF only (another agent's caves use 0xFE900-0xFEBFF; PhysicalMelee's fake
+      # object starts at 0xFEE80, left clear); every File #1 dump reads zero there and at 0xFF200.
+      - { address: 0x61DB94, on: 0x0C03FB00, off: 0x0C18C5D8, when: [{ address: 0x540004, equals: 3 }, { address: 0xFEC00, equals: 0x3C0B0010 }], offlineOnly: true, whenSetting: HandPickup }   # the Circle pickup handler's kind-1 search: jal 0xFEC00 (the HandPickup cave) over jal 0x631760
+      - { address: 0x0FEC00, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }   # HandPickup cave (0xFEC00): kind 1, armed word 'HPK1', record == block +0x08, record +0x03 == focus 0x3AEF74, stamp fresh -> the search at the hand; else FUN_00631760
+      - { address: 0x0FEC04, on: 0x24080001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC08, on: 0x14A80020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC0C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC10, on: 0x8D69F200, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC14, on: 0x3C0A4850, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC18, on: 0x354A4B31, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC1C, on: 0x152A001B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC20, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC24, on: 0x8D69F208, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC28, on: 0x15240018, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC2C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC30, on: 0x90890003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC34, on: 0x3C0A003B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC38, on: 0x914AEF74, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC3C, on: 0x152A0013, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC40, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC44, on: 0x3C0A0049, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC48, on: 0x914ABF93, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC4C, on: 0x9169F204, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC50, on: 0x01494823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC54, on: 0x05210002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC58, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC5C, on: 0x2529003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC60, on: 0x2D290013, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC64, on: 0x11200009, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC68, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC6C, on: 0xAD60F200, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC70, on: 0x00802821, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC74, on: 0x2564F210, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC78, on: 0x00003021, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC7C, on: 0x3C084248, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC80, on: 0x44886000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC84, on: 0x0816AEF8, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC88, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC8C, on: 0x0818C5D8, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
+      - { address: 0x0FEC90, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: HandPickup }
     # The code caves the melee entries above write (nightly review M2, b2, d2). Each goes in all or nothing: its whole
     # range must read zero (or exactly these words) and holds exactly `words` silence entries; the body is written and
     # read back before any site that jumps into it (an entry whose `when` reads a word in the range) is patched. Sites
@@ -859,6 +920,7 @@ SLPM-65428:
       - { from: 0xFE000, to: 0xFE1E0, words: 99, counter: 0x48BF93 }    # A (0xFE000), C (0xFE100), B (0xFE170) (PhysicalMelee)
       - { from: 0xFE200, to: 0xFE7DC, words: 312, counter: 0x48BF93 }   # D, E, F (PhysicalMeleeContact)
       - { from: 0xFE800, to: 0xFE8D8, words: 54, counter: 0x48BF93 }    # G (MeleeHitJolt)
+      - { from: 0xFEC00, to: 0xFEC94, words: 37, counter: 0x48BF93 }   # HandPickup (the Circle search at the hand)
     lookAt:
       eye: 0x306338
       target: 0x306344

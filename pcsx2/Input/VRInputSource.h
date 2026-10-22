@@ -133,6 +133,7 @@ private:
 	void QueueHapticCues(Instance& in, const std::array<int, 2>& hands_before, const std::array<bool, 2>& at_stop_before);
 	static void ApplyReload(Instance& in, VR::SpatialControls::ControlValues& values, const VR::ReloadDriver::Frame& reload);
 	static void ApplyMelee(Instance& in, VR::SpatialControls::ControlValues& values, const VR::PhysicalMelee::Frame& melee);
+	static void ApplyPickup(Instance& in, VR::SpatialControls::ControlValues& values);
 
 	std::mutex m_mutex;
 	std::vector<Instance> m_instances;
