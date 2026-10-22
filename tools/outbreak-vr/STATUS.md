@@ -14,71 +14,63 @@ Details live elsewhere:
 Updated by the Windows PC session on 2026-10-13 at night: no headset session that day; everything below dated 10-13 is
 checked offline or on SteamVR's null headset only.
 
-**Morning of 2026-10-22 (second update), for Alex:** `D:\Games\PS2\Playtest\Slot5/6/7/9.cmd` now run `nightly` = the
-10-15 build + `truestereo` + `grabdoor` + `vraim` + `handpickup` + `nativefeel` + `vrbody` (with `vrpresence`) +
-`reatlas` (notes only): a local LTO build, 58 of 58 self-tests, the profile check passes. It runs in
-`D:\dev\PenguinScreen2-build\run-playtest-models` with its own settings. The previous exe is kept there as
-`pcsx2-qt.prev-626ef93.exe`.
+**Morning of 2026-10-22 (third update), for Alex:** `D:\Games\PS2\Playtest\Slot5/6/7/9.cmd` now run `nightly` (pushed) =
+the 10-15 build + `truestereo` + `grabdoor` + `vraim` + `handpickup` + `nativefeel` + `vrbody` (with `vrpresence`) +
+the night review's fixes + `gamecues` + `gunobject`: a local LTO build, 62 of 62 self-tests, the profile check passes. It
+runs in `D:\dev\PenguinScreen2-build\run-playtest-models` with its own settings (`inis\PenguinScreen2.ini`); your own
+install `D:\Games\PS2\PenguinScreen2` is untouched.
 
-In its `inis\PenguinScreen2.ini` `[VR]`:
-- set: `TrueStereo`, `PhysicalMeleeFists`, `HandPickup` and `VrBodySelf` (all `true`);
-- on by default: `GrabFirstPerson`, `DoorVeil`, `GunRayAim` and the five native-feel switches (`ScriptedShotsFirstPerson`,
-  `HeadInWall`, `SpatialAudio`, `GameRumbleEvents`, `FadeDim`);
-- off: `VrBody` and `VrPresence`, until the two-machine test.
+Tonight's additions, with their `[VR]` switch in the playtest ini:
+- `TrueStereo` (set `true`): each eye rendered from its own position, not one picture shifted;
+- `HandPickup` (set `true`): a squeeze of the hand on a highlighted item takes it through the game's own prompt;
+- `VrBodySelf` (set `true`): Kevin's own arms reach your hands. It needs `VrBody = true` too, which is still off;
+- `HeadInWall` (on): the eye stops at the game's walls, the view darkens past 15 cm into one;
+- `SpatialAudio` (on): sounds pan round your head, not just across the screen;
+- `GameRumbleEvents` (on): the game's own rumble events in the controllers;
+- `FadeDim` (on): the game's fades dim everything, the hands too;
+- `ScriptedShotsFirstPerson` (on): fixed cuts and camera shakes keep first person;
+- `GrabFirstPerson` (on): a zombie's grab stays in first person;
+- `DoorVeil` (on): doors are black through the load, no third-person flash;
+- `GunRayAim` (on): shots hit along the VR gun's ray;
+- `PhysicalMeleeFists` (set `true`): a fast swing pistol-whips with a gun, punches with nothing equipped;
+- `GameText` (on, new): the game's own text (subtitles, "X Obtained") at half size, nearer the middle of your view; our
+  pickup toast gives way to the game's take-it prompt;
+- `GunObjectAim` (new; set **`false`** in the playtest ini, so our own muzzle flash stays visible): the game's own muzzle
+  flash, shell and effects from the VR gun. Try `true` (item 10 below).
 
-`VrBodySelf` only works together with `VrBody`, so your own arms (item 4) need `VrBody = true` as well. With
-`VrPresence` off, no partner is posed; `VrBodySelf` is offline only.
+Still off: `VrBody` and `VrPresence`, until the two-machine test.
 
-The code caves no longer overlap:
-- A-C at 0xFE000;
-- D-F+H at 0xFE200-0xFE8F0;
-- G at 0xFE900;
-- I at 0xFEA00;
-- hand pickup at 0xFEC00-0xFEC94;
-- spatial audio at 0xFC000-0xFC12C;
-- VR body V/U at 0xFD000-0xFD374 (tables 0xFD400).
+**Roll back** (in `run-playtest-models`; keep the current exe aside first, the ini works with all of them):
+- `pcsx2-qt.prev-0557a8d.exe`: last night's second build (everything above but `GameText` and `GunObjectAim`);
+- `pcsx2-qt.prev-bb5a6c3.exe`: the same before the night review's fixes;
+- `pcsx2-qt.prev-626ef93.exe`: before tonight's merges;
+- `pcsx2-qt.prev-13e5427.exe`, `pcsx2-qt.prev-556007a.exe`: the 10-15 builds.
 
-The host blocks are 0xFEB80, 0xFEBF0 and 0xFF000-0xFF400.
+The code caves do not overlap: A-C 0xFE000; D-F+H 0xFE200-0xFE8F0; G 0xFE900; I 0xFEA00; O (gun object)
+0xFB000-0xFB0BC; hand pickup 0xFEC00-0xFEC94; spatial audio 0xFC000-0xFC12C; VR body V/U 0xFD000-0xFD374 (tables
+0xFD400). Host blocks: 0xFEB80, 0xFEBF0, 0xFF000-0xFF400, 0xFF500.
 
-What was checked, offline and headset-free:
-- slot 5: 255.6-255.8 counts/s of 0x48BF93 (normal speed), with all seven caves in and read back, and no errors;
-- slot 7: the scripted squeeze on the J's Bar Handgun took it into cell 0;
-- `VrBody` + `VrBodySelf` (loopback `body_test.py --self`, and alone without presence): Kevin's own wrists were built
-  by the game 0.1 cm from the targets.
-
-What was checked on SteamVR's null headset: slot 7 with these settings and TrueStereo on, scripted head and hands. There
-was no xrEndFrame or Vulkan error, and 55-60 frames/s were submitted at the null headset's 90 Hz, as before. The game ran
-at 255.7 counts/s, the hands were drawn, the menu panel was on, and the per-eye projection layer was sent. None of this
-has been in the headset yet.
+Checked offline and headset-free with this build: slot 5 at 255.8 counts/s of 0x48BF93 (normal speed, as before), every
+enabled cave in and read back (A-C, D-F+H, G, I, O, spatial audio), drained at the end, GameText and the gun object on,
+no errors. The earlier checks of 0557a8d (the slot 7 squeeze taking the Handgun, `VrBodySelf` in loopback, the null
+headset at 55-60 frames/s with TrueStereo) still stand. None of tonight's work has been in the headset.
 
 Headset checklist:
-1. **TrueStereo on/off** (slot 7): the counter and Handgun at arm's length, a zombie close (slot 5), leaning, rolling
-   your head, the HUD text, a menu (MenuPanel). Then `TrueStereo = false` for the same: which feels more solid? If
-   anything looks doubled or swims, say where.
-2. **Hand pickup** (`HandPickup`): in slot 7, put a hand on the Handgun on the counter, so the box shows. Squeeze and
-   keep squeezing: the prompt comes up and is taken for you. Let go early and the prompt is yours. In slot 8, try the
-   Green Herb on the bathroom sink, from close up and from across the room (there it should refuse: too far).
-3. **Head in wall** (`HeadInWall`, slot 7): lean into the J's Bar counter and a wall. The eye should stop at them and
-   the view should darken past 15 cm.
-4. **Kevin's own arms** (`VrBody = true` + `VrBodySelf = true`, slot 6 or 7): look down. You should see Kevin's arms
-   reaching your hands, and the rest of him should stay hidden.
-5. **360 degree sound** (`SpatialAudio`, slot 5): turn your head with the zombie groaning behind you. It should move
-   round you, not just left and right across the screen.
-6. **Game rumble** (`GameRumbleEvents`, slot 5): get grabbed and feel the game's own rumble in both hands; firing
-   rumbles on the gun hand.
-7. **Scripted shots** (`ScriptedShotsFirstPerson`): a fixed cut or a camera shake should keep first person. The shake
-   should move only the game's eye, not yours.
-8. **Grab** (slot 5, `GrabFirstPerson`): the zombie grabs from behind. You should stay in first person, turn round to
-   see it, and shake to break free as before.
-9. **Doors** (slot 9, the bathroom door; `DoorVeil` and `FadeDim`): open a door yourself. It should be black through
-   the load (the game's fade dims everything, the hands too), with no third-person flash of the room camera, then first
-   person in the next room.
-10. **Gun ray** (slot 5 or 6, `GunRayAim`): shots should hit where the laser points, also when the gun is off to the
-    side of where you face.
-    With `gunobject` (`GunObjectAim`, on), check the game's own muzzle flash: it should flash at the VR gun's muzzle, and
-    our own flash is gone. If you see no flash at all, set `GunObjectAim = false`.
-11. **Fists** (`PhysicalMeleeFists`): with a gun, a fast swing of the gun hand pistol-whips; with nothing equipped, a
-    fast punch. Slow moves should do nothing. If quick aiming ever triggers a whip, set it to `false`.
+1. **TrueStereo** (slot 7, then slot 5): things at arm's length and a close zombie, then `TrueStereo = false`: which
+   feels more solid? Anything doubled or swimming?
+2. **Hand pickup** (slot 7 Handgun, slot 8 Green Herb): hand on the item, squeeze and hold: it is taken. Too far away:
+   nothing.
+3. **Head in wall** (slot 7): lean into the counter and a wall.
+4. **Own arms** (`VrBody = true` as well, slot 6 or 7): look down.
+5. **360 sound** (slot 5): turn with the zombie behind you.
+6. **Rumble** (slot 5): the grab and firing.
+7. **Scripted shots, grab, doors** (slots 5, 9): first person through a cut, a grab and a door; black through the load.
+8. **Gun ray** (slot 5 or 6): shots hit where the laser points.
+9. **Fists**: fast swing whips or punches, slow moves do nothing.
+10. **Gun object**: set `GunObjectAim = true`, fire in slot 5 or 6: the game's flash should come from the VR muzzle. No
+    flash at all: set it back to `false`.
+11. **Game text**: pick something up (slot 7 or 8): is "X Obtained" easy to read without looking down? `GameText =
+    false` to compare.
 
 **Two-machine VR body test** (later, with a second PC running PenguinScreen2): both consoles need these settings:
 - `VrPresence = true`;
@@ -87,8 +79,12 @@ Headset checklist:
 - `VrBody = true`.
 
 Then in private co-op, each player should see the partner's character turn its head to their VR head and reach for
-their VR hands. The steps and what to watch are in `research/2026-10-21-vr-body.md` and
-`research/2026-10-21-vr-presence.md`.
+their VR hands (online the partner is posed at the draw only, after the hit tests). The steps and what to watch are in
+`research/2026-10-21-vr-body.md` and `research/2026-10-21-vr-presence.md`.
+
+**Reviews:** `audits/2026-10-15-nightly-review.md` and `audits/2026-10-22-night-review.md`. Of the second, C1, M1-M3,
+m1-m3 and m5 are fixed (its Fixed section); m4 and m6-m12 are still open. `gamecues` and `gunobject` came after it and
+have not been reviewed.
 
 **2026-10-13 in short:**
 - **Direction:** Alex chose PenguinScreen2 as the foundation. The native-port option (REO) was assessed and parked:
