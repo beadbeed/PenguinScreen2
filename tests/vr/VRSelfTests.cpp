@@ -24,6 +24,7 @@
 #include "VR/CameraDriver.h"
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
+#include "VR/HeadInWall.h"
 #include "VR/HudCards.h"
 #include "VR/ItemReach.h"
 #include "VR/MenuPanel.h"
@@ -1092,6 +1093,7 @@ int main(int argc, char* argv[])
 	RunLogged("Hands", VR::HandModel::SelfTest, "(VR) Hands self-test: ");
 	RunLogged("Pickup cue and hand targeting", VR::ItemReach::SelfTest, "(VR) Pickup cue self-test");
 	RunLogged("Zone markers", VR::ZoneMarkers::SelfTest, "(VR) Zone markers self-test");
+	RunLogged("Head in wall", +[]() { return VR::HeadInWall::SelfTest() == 0; }, "(VR) HeadInWall self-test");
 	RunLogged("MeshRaster", +[]() { return VR::MeshRaster::SelfTest() == 0; }, "(VR) MeshRaster self-test");
 	{
 		Begin("Reload gesture (ReloadGesture::SelfTest)");

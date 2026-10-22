@@ -1964,6 +1964,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEnumEx(PhysicalMeleeMode, "PhysicalMeleeMode", PhysicalMeleeModeNames);
 	SettingsWrapEntry(MeleeHitJolt);
 	SettingsWrapEntry(ScriptedShotsFirstPerson);
+	SettingsWrapEntry(HeadInWall);
 	SettingsWrapEntry(PickupCue);
 	SettingsWrapEntry(BeltPouches);
 	SettingsWrapEntry(HandTargeting);

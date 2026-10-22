@@ -196,8 +196,21 @@ namespace VR::HudCards
 	// triggers never lighten the view mid-blink. reason is for the log. Drawn only while a VR session runs.
 	bool Blink(const char* reason = "blink");
 
-	// Compositor: the blink's opacity now (0-1); false when no blink is on screen. Any thread.
+	// Compositor: the blink's opacity now (0-1); false when no blink is on screen. Any thread. It includes the view dims
+	// below (the darkest wins).
 	bool CurrentBlink(float* opacity);
+
+	// A head-locked dim of the whole view (0-1, already eased by its source), drawn with the blink's black: kViewDimWall
+	// for [VR] HeadInWall (the head pushed into a wall), kViewDimFade for [VR] FadeDim (the game's full-screen fades).
+	// A level not set again for 0.25 s counts as 0, so a source that stops running lets go. Any thread.
+	enum : int
+	{
+		kViewDimWall = 0,
+		kViewDimFade = 1,
+		kViewDimCount = 2,
+	};
+	void SetViewDim(int source, float level);
+	float ViewDim();
 
 	// Compositor, each frame: with PCSX2_VR_BLINK_TEST=1 a blink every 2 s.
 	void MaybeTestBlink();

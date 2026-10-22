@@ -707,6 +707,34 @@ namespace VR::HudCards
 		return true;
 	}
 
+	namespace
+	{
+		std::atomic<float> s_view_dim[kViewDimCount];
+		std::atomic<u64> s_view_dim_ms[kViewDimCount];
+	} // namespace
+
+	void SetViewDim(int source, float level)
+	{
+		if (source < 0 || source >= kViewDimCount)
+			return;
+		const float l = std::isfinite(level) ? std::clamp(level, 0.0f, 1.0f) : 0.0f;
+		s_view_dim[source].store(l, std::memory_order_relaxed);
+		s_view_dim_ms[source].store(NowMs(), std::memory_order_release);
+	}
+
+	float ViewDim()
+	{
+		const u64 now = NowMs();
+		float o = 0.0f;
+		for (int i = 0; i < kViewDimCount; i++)
+		{
+			const u64 at = s_view_dim_ms[i].load(std::memory_order_acquire);
+			if (at != 0 && now >= at && now - at <= 250)
+				o = std::max(o, s_view_dim[i].load(std::memory_order_relaxed));
+		}
+		return o;
+	}
+
 	bool CurrentBlink(float* opacity)
 	{
 		const u64 now = NowMs();
@@ -715,6 +743,7 @@ namespace VR::HudCards
 			std::lock_guard<std::mutex> lock(s_blink_mutex);
 			o = BlinkOpacityAt(s_blink_start_ms, now);
 		}
+		o = std::max(o, ViewDim());
 		if (opacity)
 			*opacity = o;
 		return o > 0.0f;

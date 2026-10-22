@@ -5,6 +5,7 @@
 #include "VR/MenuPanel.h"
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
+#include "VR/HeadInWall.h"
 #include "VR/HudCards.h"
 #include "VR/SpatialControls.h"
 #include "VR/HeadPose.h"
@@ -2382,6 +2383,13 @@ namespace VR::CameraDriver
 			}
 			float eye[3];
 			LookAtEye(mp, cam_base, yaw_cam, with_offset, s_last_dx, s_last_dy, s_last_dz, eye);
+			// [VR] HeadInWall: the eye stops short of the game's walls, seen from the character's head point (read-only
+			// copy of the player collision; the mapping above keeps the true head for the hands).
+			{
+				const float head_point[3] = {p[0], p[1] + la.eye_height, p[2]};
+				const bool ran = HeadInWall::Apply(VMManager::GetDiscCRC(), head_point, eye);
+				HudCards::SetViewDim(HudCards::kViewDimWall, ran ? HeadInWall::CurrentFade() : 0.0f);
+			}
 			mp.valid = with_offset && std::isfinite(mp.units_per_meter) && std::isfinite(mp.yaw_sign) && std::isfinite(mp.base_yaw) &&
 			           std::isfinite(mp.ref_yaw) && std::isfinite(mp.eye_height) && std::isfinite(mp.ref_pos[0]) &&
 			           std::isfinite(mp.ref_pos[1]) && std::isfinite(mp.ref_pos[2]);
