@@ -1400,6 +1400,10 @@ struct Pcsx2Config
 		// SpatialAudio: a code cave puts the game's stereo pan of positioned sounds round the whole head (behind you
 		// is centred, beside you fully left or right) instead of across the screen only. Offline only.
 		bool SpatialAudio = true;
+		// GameRumbleEvents: the game's own rumble player (its patterns for damage, firing, grabs...) drives the VR
+		// controllers, read from game memory: firing on the gun hand, the rest on both; our own hurt and shot pulses
+		// then sit out (the heartbeat, reload and empty clicks stay). Replaces the pad forwarding (GameRumble) while on.
+		bool GameRumbleEvents = true;
 		// First person, for profiles with a reach block: a light tick in the right hand and a short toast naming the item
 		// (and the button, "Kevin's 45 Auto  (A)") when something on the floor comes within reach of the character's own
 		// Circle press. Only reads the game's memory; shown in the headset only. Ini only for now.
