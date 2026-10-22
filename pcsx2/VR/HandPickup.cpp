@@ -222,7 +222,7 @@ namespace VR::HandPickup
 					ToIdle(st);
 					return o;
 				}
-				if (!st.checked)
+				// Every vsync, up to the press: the prompt still shows this item and a free cell is still there.
 				{
 					if (in.prompt_record != st.index || in.prompt_id != st.item || in.result != st.index)
 					{

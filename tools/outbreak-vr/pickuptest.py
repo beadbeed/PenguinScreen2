@@ -1,11 +1,12 @@
 """Real hand pickups ([VR] HandPickup), headset-free: a scripted right hand on a floor item, a scripted squeeze, and what
 the game did. File #1 offline only, normal speed, no OpenXR runtime (PCSX2_VR_TEST_INPUT, PCSX2_VR_PICKUP_DEBUG).
 
-    python -I pickuptest.py <portable dev install> <slot> <item id> [--turn DEG] [--release-early] [--no-squeeze]
+    python -I pickuptest.py <portable dev install> <slot> <item id>[,<item id>...] [--turn DEG] [--release-early] [--no-squeeze] [--vr x,y,z]
+    (several ids: one pickup after the other in the same run, e.g. to fill the last free cell and then try a full inventory)
 
 Runs that install (never D:\\Games\\PS2\\PenguinScreen2), loads the slot, finds the item's volume centre in the headset's
-space from the build's debug lines, optionally turns the character DEG degrees away first (writes the local record's
-heading, offline, a test step only), puts the right hand there, squeezes (and holds; --release-early lets go after 0.3 s),
+space from the build's debug lines, optionally turns the head (and with it the character) DEG degrees to the left first,
+puts the right hand there, squeezes (and holds; --release-early lets go after 0.3 s),
 polls the take-it prompt flags and prints the "Hand pickup" log lines and the local record's item cells before and after.
 It refuses to start while another pcsx2-qt.exe or vrserver.exe runs, and kills only the emulator it started."""
 import os, re, subprocess, sys, time
@@ -15,10 +16,12 @@ from pine import FakeController, wait_for_pine, require_offline, PineError, pose
 
 DEV = sys.argv[1]
 SLOT = int(sys.argv[2])
-ITEM = int(sys.argv[3])
+ITEMS = [int(x) for x in sys.argv[3].split(",")]
 TURN = float(sys.argv[sys.argv.index("--turn") + 1]) if "--turn" in sys.argv else 0.0
 EARLY = "--release-early" in sys.argv
 NO_SQUEEZE = "--no-squeeze" in sys.argv
+# --vr x,y,z: put the hand there instead of the debug line's centre (HandPickup off prints no debug lines)
+AT = tuple(float(v) for v in sys.argv[sys.argv.index("--vr") + 1].split(",")) if "--vr" in sys.argv else None
 DUMP = sys.argv[sys.argv.index("--dump") + 1] if "--dump" in sys.argv else None  # the prompt's RAM (never committed)
 EXE = os.path.join(DEV, "pcsx2-qt.exe")
 LOG = os.path.join(DEV, "logs", "emulog.txt")
@@ -105,61 +108,67 @@ def run(proc):
         print("cells before", before)
         mark = len(log())
         if TURN:
+            # The character turns with the head in first person (a heading written into the record is driven back at
+            # once), so the scripted head looks TURN degrees to the left and the hand stays on the item.
             h0 = p.read16(rec + 0x92)
-            h1 = (h0 + int(round(TURN / 360.0 * 65536))) & 0xFFFF
-            for _ in range(10):
-                p.write32(rec + 0x90, (p.read32(rec + 0x90) & 0x0000FFFF) | (h1 << 16))
-                time.sleep(0.1)
-            time.sleep(0.5)
-            print("heading %d -> %d, reads %d" % (h0, h1, p.read16(rec + 0x92)))
+            fc.set_head(pose(yaw_deg=TURN))
+            time.sleep(2.0)
+            h1 = p.read16(rec + 0x92)
+            d = ((h1 - h0 + 32768) % 65536 - 32768) * 360.0 / 65536
+            print("head turned %.0f deg left: heading %d -> %d (%.1f deg)" % (TURN, h0, h1, d))
             mark = len(log())
-        c = item_centre(mark, ITEM)
-        if not c:
-            print("item %d: no debug line (not in the trigger list?)" % ITEM)
-            for l in lines(0, "Hand pickup")[-15:]:
-                print("  ", l)
-            return
-        node, record, game, vr = c
-        print("item %d: node %s record %d centre game %s VR %s" % (ITEM, node, record, game, vr))
-        fc.set_hand(1, grip=pose(pos=vr), squeeze=0.0)
-        time.sleep(1.0)
-        if DUMP:
-            with open(DUMP + ".before", "wb") as f:
-                f.write(p.read_block(0x700000, 0x30000))
-                f.write(p.read_block(rec, 0x10E0))
-        if not NO_SQUEEZE:
-            fc.set_hand(1, grip=pose(pos=vr), squeeze=1.0)
-        t0 = time.time()
-        seen = []
-        released = False
-        dumped = False
-        while time.time() - t0 < 6.0:
-            if EARLY and not released and time.time() - t0 > 0.3:
-                fc.set_hand(1, grip=pose(pos=vr), squeeze=0.0)
-                released = True
-            s = (p.read32(0x720AA0), p.read8(0x720BE4), p.read8(0x720BE2), p.read8(0x723F94), p.read16(0x720B8C),
-                 p.read8(rec + 0xC78), p.read8(rec + 0xC7A), p.read8(rec + 0x54F))
-            if not seen or seen[-1][1] != s:
-                seen.append((round(time.time() - t0, 2), s))
-            if DUMP and s[0] == 1 and s[2] == 2 and not dumped:
-                time.sleep(0.4)
-                with open(DUMP, "wb") as f:
+        for item in ITEMS:
+            c = ("?", -1, None, AT) if AT else item_centre(mark, item)
+            if not c:
+                print("item %d: no debug line (not in the trigger list?)" % item)
+                for l in lines(0, "Hand pickup")[-15:]:
+                    print("  ", l)
+                continue
+            node, record, game, vr = c
+            print("item %d: node %s record %d centre game %s VR %s" % (item, node, record, game, vr))
+            fc.set_hand(1, grip=pose(pos=vr), squeeze=0.0)
+            time.sleep(1.0)
+            if DUMP:
+                with open(DUMP + ".before", "wb") as f:
                     f.write(p.read_block(0x700000, 0x30000))
                     f.write(p.read_block(rec, 0x10E0))
-                dumped = True
-                print("dumped the prompt's menu RAM to", DUMP)
-            time.sleep(0.05)
-        fc.set_hand(1, grip=pose(pos=vr), squeeze=0.0)
-        time.sleep(2.0)
-        after = cells(p, rec)
-        print("flags over time (t, (overlay, which, sub, grid, cursor index, status, result, action)):")
-        for t, s in seen:
-            print("  ", t, s)
-        print("cells after", after, "-> item record %d %s" % (record, "IN THE CELLS" if record in after and record not in before else "not taken"))
-        print("overlay now", p.read32(0x720AA0))
-        for l in lines(mark, "Hand pickup")[:]:
-            if "debug" not in l:
-                print("  ", l)
+            if not NO_SQUEEZE:
+                fc.set_hand(1, grip=pose(pos=vr), squeeze=1.0)
+            t0 = time.time()
+            seen = []
+            released = False
+            dumped = False
+            while time.time() - t0 < 6.0:
+                if EARLY and not released and time.time() - t0 > 0.3:
+                    fc.set_hand(1, grip=pose(pos=vr), squeeze=0.0)
+                    released = True
+                s = (p.read32(0x720AA0), p.read8(0x720BE4), p.read8(0x720BE2), p.read8(0x723F94), p.read16(0x720B8C),
+                     p.read8(rec + 0xC78), p.read8(rec + 0xC7A), p.read8(rec + 0x54F))
+                if not seen or seen[-1][1] != s:
+                    seen.append((round(time.time() - t0, 2), s))
+                if DUMP and s[0] == 1 and s[2] == 2 and not dumped:
+                    time.sleep(0.4)
+                    with open(DUMP, "wb") as f:
+                        f.write(p.read_block(0x700000, 0x30000))
+                        f.write(p.read_block(rec, 0x10E0))
+                    dumped = True
+                    print("dumped the prompt's menu RAM to", DUMP)
+                time.sleep(0.05)
+            fc.set_hand(1, grip=pose(pos=vr), squeeze=0.0)
+            time.sleep(2.0)
+            after = cells(p, rec)
+            print("flags over time (t, (overlay, which, sub, grid, cursor index, status, result, action)):")
+            for t, s in seen:
+                print("  ", t, s)
+            print("cells after", after, "-> item record %d %s" % (record, "IN THE CELLS" if record in after and record not in before else "not taken"))
+            print("overlay now", p.read32(0x720AA0))
+            for l in lines(mark, "Hand pickup")[:]:
+                if "debug" not in l:
+                    print("  ", l)
+            mark = len(log())
+            before = cells(p, rec)
+            fc.set_hand(1, grip=pose(pos=(0.3, -0.5, -0.2)), squeeze=0.0)
+            time.sleep(1.0)
 
 
 main()
