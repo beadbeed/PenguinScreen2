@@ -122,6 +122,11 @@ namespace VR::EyeProjection
 		return std::atan((y - cy) / half_h * fraction * tan_half) * (180.0f / 3.14159265358979323846f);
 	}
 
+	bool IsGameTextDraw(const GameTextDraw& d)
+	{
+		return d.tme && d.fst && d.sprite && d.z_const && d.z_layer && !d.samples_target && !d.fills;
+	}
+
 	bool SelfTest()
 	{
 		int checks = 0;
@@ -278,6 +283,32 @@ namespace VR::EyeProjection
 					  GameTextMapFixed(65535, 2048.0f, s) < 65535 && GameTextMapFixed(0, 2048.0f, s) > 0,
 				"game text: 12.4 vertices map toward the centre and stay in range");
 			check(GameTextMapFixed(1234, std::nanf(""), s) == 1234, "game text: no camera centre, the vertex is left alone");
+
+			// Which draws are text (review M1): a text sprite yes; a particle, a fade, a frame-buffer pass no.
+			GameTextDraw text;
+			text.tme = text.fst = text.sprite = text.z_const = text.z_layer = true;
+			check(IsGameTextDraw(text), "game text: a textured UV sprite on the 2D layer's Z is text");
+			GameTextDraw particle = text; // the muzzle flash, blood, sparks: sprites at their own depth in the room
+			particle.z_layer = false;
+			check(!IsGameTextDraw(particle), "game text: a world particle sprite (below the 2D layer's Z) is not text");
+			GameTextDraw strip = text; // particles of one draw at their own depths
+			strip.z_const = false;
+			check(!IsGameTextDraw(strip), "game text: sprites at several depths are not text");
+			GameTextDraw quad = text; // a particle or effect drawn as triangles
+			quad.sprite = false;
+			check(!IsGameTextDraw(quad), "game text: a UV triangle quad is not text");
+			GameTextDraw fade = text; // a textured fade over the picture
+			fade.fills = true;
+			check(!IsGameTextDraw(fade), "game text: a draw that fills the scissor (a fade) is not text");
+			GameTextDraw flat_fade = text; // an untextured fade or window over part of the picture
+			flat_fade.tme = false;
+			check(!IsGameTextDraw(flat_fade), "game text: an untextured fill is not text");
+			GameTextDraw feedback = text; // a blur or filter strip that samples the picture it draws into
+			feedback.samples_target = true;
+			check(!IsGameTextDraw(feedback), "game text: a draw sampling the frame buffer is not text");
+			GameTextDraw stq = text;
+			stq.fst = false;
+			check(!IsGameTextDraw(stq), "game text: an STQ draw is not text");
 		}
 
 		if (fails.empty())

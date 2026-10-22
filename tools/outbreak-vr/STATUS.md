@@ -41,6 +41,8 @@ Tonight's additions, with their `[VR]` switch in the playtest ini:
 Still off: `VrBody` and `VrPresence`, until the two-machine test.
 
 **Roll back** (in `run-playtest-models`; keep the current exe aside first, the ini works with all of them):
+- `pcsx2-qt.prev-d13607a.exe`: tonight's build before the late review's M1 fix (`GameText` then also shrank flat
+  effects; the current exe scales only the game's text: textured sprites on the 2D layer's Z);
 - `pcsx2-qt.prev-0557a8d.exe`: last night's second build (everything above but `GameText` and `GunObjectAim`);
 - `pcsx2-qt.prev-bb5a6c3.exe`: the same before the night review's fixes;
 - `pcsx2-qt.prev-626ef93.exe`: before tonight's merges;

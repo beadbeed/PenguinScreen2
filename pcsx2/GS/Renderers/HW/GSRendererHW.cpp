@@ -6426,6 +6426,60 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 	// Q); flat draws (FST, constant Q: the HUD, message text) go on a plane 1.5 m ahead; a draw that fills the target (a
 	// clear, a fade) stays as it is in both layers.
 	m_vr_true_draw = false;
+	// [VR] GameText's text test (EyeProjection::IsGameTextDraw; review 2026-10-22 M1): textured UV sprites on the 2D
+	// layer (one Z, at the depth format's maximum), not sampling the buffer they draw into, not filling the scissor.
+	bool vr_game_text = false;
+	if (st.enabled && st.first_person && vr_multiview_target && PRIM->FST && EmuConfig.VR.GameText &&
+		!VR::SpatialControls::MenuMode())
+	{
+		VR::EyeProjection::GameTextDraw gt;
+		gt.tme = PRIM->TME;
+		gt.fst = PRIM->FST;
+		gt.sprite = (m_vt.m_primclass == GS_SPRITE_CLASS);
+		gt.z_const = m_vt.m_eq.z;
+		// File #1's text: Z 0xFFFFFFFD on a Z32 buffer (subtitles and "Obtained", depth-tested GEQUAL), so within 15 of the
+		// format's maximum; nothing in the room is drawn that near.
+		const u32 z_max = (m_cached_ctx.ZBUF.PSM & 0x3) == 0 ? 0xFFFFFFFFu : (m_cached_ctx.ZBUF.PSM & 0x3) == 1 ? 0xFFFFFFu : 0xFFFFu;
+		gt.z_layer = m_vertex->next > 0 && m_vertex->buff[m_vertex->next - 1].XYZ.Z >= z_max - 15u;
+		const u32 tbp = m_cached_ctx.TEX0.TBP0;
+		gt.samples_target = PRIM->TME && (tbp == m_cached_ctx.FRAME.Block() || tbp == m_cached_ctx.ZBUF.Block());
+		const GSVector4i full = m_context->scissor.in;
+		const GSVector4i cover = m_r.rintersect(full);
+		gt.fills = !cover.rempty() && full.width() > 0 && full.height() > 0 &&
+				   cover.width() * 100 >= full.width() * 95 && cover.height() * 100 >= full.height() * 95;
+		vr_game_text = VR::EyeProjection::IsGameTextDraw(gt);
+		// First-seen log of each kind of FST draw: what GameText scaled and what it left alone (a headset run shows
+		// what was caught). PCSX2_VR_GAMETEXT_LOG=<n> logs up to n kinds (default 24).
+		static const u32 s_gt_log_max = []() -> u32 {
+			const char* e = std::getenv("PCSX2_VR_GAMETEXT_LOG");
+			return (e && *e) ? static_cast<u32>(std::clamp<long>(std::strtol(e, nullptr, 10), 0, 512)) : 24u;
+		}();
+		static std::vector<u64> s_gt_seen;
+		if (s_gt_seen.size() < s_gt_log_max)
+		{
+			const u64 key = (static_cast<u64>(vr_game_text) << 63) | (static_cast<u64>(gt.tme) << 62) |
+							(static_cast<u64>(gt.sprite) << 61) | (static_cast<u64>(gt.z_const) << 60) |
+							(static_cast<u64>(gt.z_layer) << 59) | (static_cast<u64>(gt.samples_target) << 58) |
+							(static_cast<u64>(gt.fills) << 57) | (static_cast<u64>(m_cached_ctx.TEX0.PSM & 0x3F) << 48) |
+							(static_cast<u64>(PRIM->TME ? tbp : 0u) << 32) |
+							(static_cast<u64>(PRIM->TME ? m_cached_ctx.TEX0.CBP : 0u) << 16) |
+							(static_cast<u64>((m_r.y >> 5) & 0xF) << 12) | static_cast<u64>(m_cached_ctx.FRAME.Block() & 0xFFF);
+			if (std::find(s_gt_seen.begin(), s_gt_seen.end(), key) == s_gt_seen.end())
+			{
+				s_gt_seen.push_back(key);
+				Console.WriteLn("(VR) GameText %s: tme=%d sprite=%d zc=%d zlayer=%d ztst=%d samples_target=%d fills=%d "
+								"tbp=0x%x psm=0x%x cbp=0x%x cpsm=0x%x fbp=0x%x z=0x%x zpsm=0x%x r=%d,%d-%d,%d sc=%d,%d-%d,%d",
+					vr_game_text ? "scales" : "leaves", gt.tme ? 1 : 0, gt.sprite ? 1 : 0, gt.z_const ? 1 : 0,
+					gt.z_layer ? 1 : 0,
+					m_cached_ctx.TEST.ZTE ? static_cast<int>(m_cached_ctx.TEST.ZTST) : -1, gt.samples_target ? 1 : 0,
+					gt.fills ? 1 : 0, PRIM->TME ? tbp : 0u, PRIM->TME ? static_cast<u32>(m_cached_ctx.TEX0.PSM) : 0u,
+					PRIM->TME ? static_cast<u32>(m_cached_ctx.TEX0.CBP) : 0u,
+					PRIM->TME ? static_cast<u32>(m_cached_ctx.TEX0.CPSM) : 0u, m_cached_ctx.FRAME.Block(),
+					m_vertex->next > 0 ? m_vertex->buff[m_vertex->next - 1].XYZ.Z : 0u,
+					static_cast<u32>(m_cached_ctx.ZBUF.PSM), m_r.x, m_r.y, m_r.z, m_r.w, full.x, full.y, full.z, full.w);
+			}
+		}
+	}
 	if (st.enabled && st.first_person && vr_multiview_target && VR::StereoState::TrueStereoActive())
 	{
 		VR::EyeProjection::GameCamera cam;
@@ -6522,8 +6576,7 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 				float flat_fx = cam.fx, flat_fy = cam.fy;
 				if (kind == 0.0f)
 				{
-					const float fraction = 0.9f * ((EmuConfig.VR.GameText && !VR::SpatialControls::MenuMode()) ?
-														  VR::EyeProjection::kGameTextScale : 1.0f);
+					const float fraction = 0.9f * (vr_game_text ? VR::EyeProjection::kGameTextScale : 1.0f);
 					float th = 10.0f, tv = 10.0f;
 					for (int e = 0; e < 2; e++)
 					{
@@ -6561,15 +6614,10 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 	// draws (FST: the game's text) are moved toward the picture's centre by EyeProjection::kGameTextScale, as TrueStereo
 	// sizes its flat plane. Not a draw that fills the target (a fade), not a screen split onto the menu panel, not while a
 	// menu is up (MenuPanel off: the screen keeps its size).
-	else if (st.enabled && st.first_person && vr_multiview_target && PRIM->FST && EmuConfig.VR.GameText &&
-			 !VR::SpatialControls::MenuMode() && !(EmuConfig.VR.MenuPanel && VR::MenuPanel::SplitOn()))
+	else if (vr_game_text && !(EmuConfig.VR.MenuPanel && VR::MenuPanel::SplitOn()))
 	{
 		float fx = 0.0f, fy = 0.0f, cx = 0.0f, cy = 0.0f;
-		const GSVector4i full = m_context->scissor.in;
-		const GSVector4i cover = m_r.rintersect(full);
-		const bool fills = !cover.rempty() && full.width() > 0 && full.height() > 0 &&
-						   cover.width() * 100 >= full.width() * 95 && cover.height() * 100 >= full.height() * 95;
-		if (!fills && VR::StereoState::GameCamera(&fx, &fy, &cx, &cy) && std::isfinite(cx) && std::isfinite(cy))
+		if (VR::StereoState::GameCamera(&fx, &fy, &cx, &cy) && std::isfinite(cx) && std::isfinite(cy))
 		{
 			const float s = VR::EyeProjection::kGameTextScale;
 			for (u32 i = 0; i < m_vertex->next; i++)

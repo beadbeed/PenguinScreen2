@@ -29,6 +29,18 @@ None.
 
 ### M1 (GameText; unverified): "2D text" is classified as any FST draw that does not fill the scissor, so world effects, strip-drawn screen effects and partial fades can be shrunk toward the centre too
 
+**FIXED (2026-10-22, after the review):** both paths now use one test, `EyeProjection::IsGameTextDraw`: a textured
+(`TME`) FST sprite at one Z within 15 of the depth format's maximum (the 2D layer: File #1's subtitles and "Obtained"
+are Z 0xFFFFFFFD on a Z32 buffer, depth-tested GEQUAL), not sampling the frame or depth buffer it draws into, not
+filling the scissor. TrueStereo's flat plane is halved only for those draws; every other flat draw keeps 0.9.
+`(VR) GameText scales/leaves` logs each first-seen kind (texture page, PSM, CLUT, Z, rows; `PCSX2_VR_GAMETEXT_LOG=<n>`,
+default 24). The font page is logged, not checked (one page, `TBP0 0x2A00` PSMT4, `CBP 0x2A02`, in every run, but the
+examine and system lines were not seen). Self-test: 8 new checks (text yes; particle, mixed-depth sprites, triangle
+quad, fade, untextured fill, frame-buffer sample, STQ no). Offline (`run-nulltest`, no OpenXR runtime): slot 7's
+subtitle (rows 322-342) and "Handgun Obtained" (382-402) scaled; slot 4's subtitle (322-342) scaled with
+`PCSX2_VR_TRUESTEREO_TEST`; slot 6, three shots with `GunObjectAim`: no FST draw at all (the flash is not FST, so
+neither path touches it now; TrueStereo halved it before). Not run: a door fade or the danger filter.
+
 **Where:**
 - `GSRendererHW.cpp:6564-6590`, without TrueStereo. The test is `PRIM->FST`, the multiview target, and
   `!fills`, where fills means at least 95% of `scissor.in`. Nothing else is checked.

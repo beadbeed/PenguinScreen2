@@ -80,6 +80,24 @@ namespace VR::EyeProjection
 	// A GS vertex coordinate (12.4 fixed, as in GSVertex XYZ) moved toward centre_px (GS pixels), rounded and clamped.
 	unsigned short GameTextMapFixed(unsigned short v, float centre_px, float s);
 
+	// Which draws GameText treats as the game's text (review 2026-10-22 M1: "FST and not filling the scissor" also
+	// caught particles, the game's muzzle flash, strip effects, partial fades). Text is a textured sprite draw with UV
+	// coordinates (FST) on the 2D layer: one Z, at the depth format's maximum (File #1's text: Z 0xFFFFFFFD of 32 bits,
+	// depth-tested GEQUAL, so they always pass; a world sprite such as blood, sparks or the flash sits at its own depth
+	// below that). Not sampling the frame or depth buffer it draws into (a feedback pass), not filling the scissor (a
+	// fade). The texture page is not checked: the game's text uses more than one (logged as GameText scales/leaves).
+	struct GameTextDraw
+	{
+		bool tme = false;            // textured
+		bool fst = false;            // UV coordinates
+		bool sprite = false;         // sprite primitives
+		bool z_const = false;        // one Z for every vertex
+		bool z_layer = false;        // that Z is within 15 of the depth format's maximum (the 2D layer)
+		bool samples_target = false; // the texture is the frame or depth buffer being drawn
+		bool fills = false;          // covers 95% or more of the scissor
+	};
+	bool IsGameTextDraw(const GameTextDraw& d);
+
 	// Degrees below the line of sight of 2D-screen row y (screen centre cy, half-height half_h, in the same unit), on a 2D
 	// layer drawn over `fraction` of a view whose half-height tangent is tan_half (TrueStereo: 0.9 * scale).
 	float GameTextDegreesBelow(float y, float cy, float half_h, float fraction, float tan_half);
