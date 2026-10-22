@@ -556,6 +556,21 @@ are, ...; GPU x ms mean, y ms max per display frame`. Offline test aids: `PCSX2_
 the warp's eyes to the head's right (the layers stay), `PCSX2_VR_DEPTHWARP_DUMP=<dir>` writes one `warp_source.ppm` /
 `warp_warped.ppm` pair of the first eye (never commit them).
 
+True per-eye rendering (`VR/EyeProjection`, research note `research/2026-10-21-true-stereo.md`). `[VR] TrueStereo` (off
+by default, read when VR starts; needs `PacerCopies` off; turns `DepthWarp` off; makes `FirstPersonFov` take Auto's fit):
+in first person each layer of the stereo target is that eye's own view. The GS maps every perspective vertex the game
+emitted for its one camera through the eye (the headset's IPD, cant, per-eye fov tangents and the head's roll; the game's
+intrinsics from the profile's `camera.lookAt.screenMatrix`), recomputing Z and Q; flat draws (the HUD, message text) go on
+a plane 1.5 m ahead sized to 90% of the view both eyes share (left where the game put them while `MenuPanel` splits a game
+screen); full-target fills stay as they are. The compositor sends the two layers as one projection layer of the eyes
+(with each eye's depth when `DepthLayer` is on) instead of the first-person screen; separation, convergence and the near
+floor are unused in first person. Logs `(VR) TrueStereo: on ...`, `first draw; game fx ...`, `first per-eye projection
+layer: ...` and `... with each eye's depth`. Headset-free checks, offline only: `PCSX2_VR_TRUESTEREO_TEST=<ipd m>[,<cant
+deg>]` turns the GS side on without a session (the camera's own tangents), `=pose,<x>,<y>,<z m>,<yaw deg>` puts both eyes
+at one pose in the camera frame, to compare with the game's own render from a moved camera; the stereo dump's sidecar
+carries the game's view matrix (`"view"`) for that. `PCSX2_VR_TRUESTEREO_PROBE=<cm>` (the 10-21 probe, the linear
+disparity branch) and `PCSX2_VR_PERFLOG=1` (thread shares every 0.5 s) are research aids.
+
 Depth layer and depth probe (`VR/DepthExport`, research note `research/2026-10-13-depth-export.md`). `[VR] DepthLayer`
 (off by default, read when VR starts): in first person the shown frame goes to the runtime as one projection layer at
 the pose it was rendered from instead of the two screen quads, with its depth chained to each view

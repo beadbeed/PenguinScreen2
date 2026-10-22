@@ -95,12 +95,14 @@ Runs (`PCSX2_VR_STEREODUMP`, slot 7, head scripted over PINE):
 
 - **Residuals:** the lamp's light glow and one small highlight on the counter. They are animated or view-dependent
   effects; not chased.
-- **Sign:** the probe's right layer matched head -5 cm, not +5 cm. Either the head's +x maps to the camera's -x here,
-  or the probe's sign is flipped. Fix the convention in Phase 2 with a test.
-- **Open:** the probe's left layer came out unshifted (it equals the head-0 render), though the shader gives view 0 the
-  opposite sign. The right layer alone carries the result above; why layer 0 stays put is not yet known.
-- **Not covered:** a pure sideways move keeps `w`. Rotation (a canted eye) and per-eye asymmetric projections change
-  `w` and need Z' and Q' recomputed. The math is standard, but no run has checked it yet.
+- **Sign and the "unshifted left layer": resolved (Phase 2, checked offline).** Both were artefacts of how the dumps
+  were labelled, not of the map. The dumps were matched to head poses by time, but the dump writer stalls for up to 25 s
+  (two slow PNG writes in flight), and the game itself disarms first person about 20 s after slot 7 loads (scenario byte
+  `0x48BF60` reads 4), so the "-5 cm" and "head 0" images were other poses. The stereo dump's sidecar now carries the
+  game's view matrix (`"view"`), and each pose reloads slot 7. With that, head +x moves the camera +x along its right
+  axis (+-4.98 game units for +-5 cm), and both layers are mapped: see section 7.
+- **Not covered by the probe** (covered in section 7): a pure sideways move keeps `w`; turns and asymmetric projections
+  change it.
 
 ## 4. Costs (checked offline)
 
@@ -193,3 +195,51 @@ scene's packet build was not measured; it is at most the 10 ms.
    This needs the frame's draws and textures kept.
 
 The probe code (`PCSX2_VR_TRUESTEREO_PROBE`, `PCSX2_VR_PERFLOG`) is committed, off by default; self-tests 42 of 42.
+
+## 7. Phase 2: `[VR] TrueStereo` (built 2026-10-21, off by default)
+
+What is built (branch `truestereo`, 43 of 43 self-tests):
+
+- **`VR::EyeProjection`** (pure; 17 self-test checks: identity, sideways shift, asymmetric corners, canted centre,
+  quaternion, roll, behind the eye, degenerate input).
+  - Inputs: the game camera (fx, fy, cx, cy and the 512x448 target), the headset's IPD, cant, per-eye fov tangents
+    (`XRCompositor::GetEyeInfo`), and the head's roll.
+  - Output per eye: the camera-to-eye map, the eye's intrinsics (its tangent window spans the target), and its OpenXR
+    pose and fov relative to the camera.
+- **Profile and CameraDriver.** `camera.lookAt.screenMatrix: 0x2771A0`; CameraDriver reads it every vsync and publishes the
+  intrinsics (`StereoState::PublishGameCamera`).
+- **The GS** (`GSRendererHW::DetermineVSConfig`, `vr_map_mode 3`; `tfx.glsl` both vertex paths).
+  - On the first-person multiview target every perspective vertex is mapped through its view's eye: w from the Z fit
+    (or Q), Z' through the fit, Q and S, T times w/w', so S/Q stays.
+  - Flat draws (FST, constant Q) go on a plane 1.5 m ahead, sized to 90% of the view both eyes share. While MenuPanel
+    splits a game screen they stay where the game drew them.
+  - Full-target fills (the depth clear, fades) are left alone. The draw area is widened to the scissor.
+- **The compositor** (`BuildTrueProjection`): the two eye quads go as one projection layer.
+  - View i is at `camera x eye_i`: the camera is the quad's yaw/pitch at `fp_head`, the eye pose from EyeProjection with
+    the render pose's roll, fov = the eye's tangents.
+  - Each eye's depth is chained when DepthLayer is on.
+  - No new swapchains: the eye chains are the quads' own.
+- **Interactions.**
+  - `PacerCopies` refuses TrueStereo.
+  - `DepthWarp` is turned off by it (the warp redraws a screen image).
+  - `FirstPersonFov` always takes Auto's fit, so each eye's window lies inside the game's view.
+  - Hands, HUD cards and the menu panel stay their own layers.
+  - The near cull is EE-side and unchanged.
+  - With the switch off nothing changes: N3 below shows no per-eye layer.
+
+Checks:
+
+| Check | Result | Label |
+|---|---|---|
+| Both layers, eye 5 cm left / right (`PCSX2_VR_TRUESTEREO_TEST=pose,...`) vs the game's render from the camera moved 5 cm (view matrices from the sidecars) | 181/181 and 184/184 tiles within 1 px, mean diff 0.51 / 0.53 (frame noise 0.45) | checked offline |
+| Both layers, eye 6.6 cm left turned 10 deg left / 6.8 cm right turned 10 deg right (the moved camera's exact relative pose) | 97% / 83% of tiles within 1 px, median 0 px, mean diff 2.4 / 2.1. Pixels off by > 16 are 19% / 11% in the outer sixth (outside the game's view, black by design), 1-5% elsewhere (a walking NPC, a subtitle only in one) | checked offline |
+| Regression after the HUD change: eye 5 cm right | 184/184 within 1 px | checked offline |
+| SteamVR null headset (90 Hz, views +-45 deg, IPD 63 mm) | projection layer accepted every frame, no xrEndFrame error. Eyes 63.0 mm apart; GS eye fx 256 px vs game fx 161. Each eye's depth chained (DepthLayer). MenuPanel on: no errors (no menu opened) | checked on the null headset |
+| Cost, null headset, TrueStereo on vs off (DepthLayer on) | EE 3.9 vs 3.5 ms (noise); GS thread 2.65 vs 2.15 ms per vsync; GPU 12.8 vs 11.3 ms per frame; 100% speed both | checked on the null headset |
+
+Not checked:
+- Asymmetric or canted real headset views: the unit tests only; the null headset is symmetric.
+- A real headset; the HUD text in a dump; a menu opened with MenuPanel.
+- Roll in a run.
+- Draws the Z fit misses: untextured draws with no depth test fall back to the flat plane.
+
