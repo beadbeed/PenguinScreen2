@@ -16,6 +16,7 @@
 #include "VR/DepthExport.h"
 #include "VR/MenuPanel.h"
 #include "VR/StereoState.h"
+#include "MemoryTypes.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -6383,6 +6384,35 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 			vr_roll_y = kRollYSign * std::sin(vr_roll) * aspect * fade;
 		}
 		m_conf.cb_vs.vr_splits = GSVector4(vr_floor, vr_roll_y, vr_roll_z, 0.0f);
+
+		// Research probe (tools/outbreak-vr/research/2026-10-21-true-stereo.md), off unless
+		// PCSX2_VR_TRUESTEREO_PROBE=<half baseline, game units (cm)>: each layer becomes the exact parallel-camera
+		// projection of an eye that far left/right of the game camera, X' = X -/+ fx * e / w (fx in GS pixels from
+		// the game's screen matrix at EE 0x2771A0, w = 1/q from the Z fit or Q): no convergence plane, no near floor,
+		// no roll. Used to compare a reprojected eye with the game rendering from a camera moved by e.
+		static const float s_vr_ts_probe_e = []() {
+			const char* v = std::getenv("PCSX2_VR_TRUESTEREO_PROBE");
+			return v ? static_cast<float>(std::atof(v)) : 0.0f;
+		}();
+		if (s_vr_ts_probe_e != 0.0f && vr_multiview_target) [[unlikely]]
+		{
+			float fx = 0.0f;
+			std::memcpy(&fx, eeMem->Main + 0x2771A0, sizeof(fx));
+			constexpr float kBig = 1.0e5f;
+			const float k_ndc = fx * s_vr_ts_probe_e * 16.0f * sx;
+			m_conf.cb_vs.vr_map_mode = 0;
+			m_conf.cb_vs.vr_stereo = vr_near_ok ? GSVector2(k_ndc / kBig, kBig) : GSVector2(0.0f, 0.0f);
+			m_conf.cb_vs.vr_splits = GSVector4(-1.0e9f, 0.0f, 0.0f, 0.0f);
+			static u32 s_ts_logged = 0;
+			if (s_ts_logged < 4 && vr_near_ok)
+			{
+				s_ts_logged++;
+				float m[16];
+				std::memcpy(m, eeMem->Main + 0x2771A0, sizeof(m));
+				Console.WriteLn("(VR) TRUESTEREO probe: e=%.2f fx=%.3f fy=%.3f cx=%.1f cy=%.1f sx=%.6g k_ndc=%.5f zfit=%d",
+					s_vr_ts_probe_e, m[0], m[5], -m[8], -m[9], sx, k_ndc, vr_zq_apply ? 1 : 0);
+			}
+		}
 	}
 
 	if (vr_zq_apply && VRZQFitVerbose()) [[unlikely]]

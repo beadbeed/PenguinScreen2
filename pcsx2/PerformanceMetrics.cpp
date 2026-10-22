@@ -3,6 +3,8 @@
 
 #include <chrono>
 #include <vector>
+#include <cstdlib>
+#include "common/Console.h"
 
 #include "common/Timer.h"
 #include "common/Threading.h"
@@ -225,6 +227,18 @@ void PerformanceMetrics::Update(bool gs_register_write, bool fb_blit, bool is_sk
 		thread.usage = static_cast<double>(delta) * pct_divider;
 		thread.time = static_cast<double>(delta) * time_divider;
 	}
+
+#ifdef ENABLE_VR
+	// Research probe (tools/outbreak-vr/research/2026-10-21-true-stereo.md), off unless PCSX2_VR_PERFLOG is set:
+	// the thread shares per update interval, for the per-eye rendering cost estimate.
+	static const bool s_vr_perflog = (std::getenv("PCSX2_VR_PERFLOG") != nullptr);
+	if (s_vr_perflog)
+	{
+		Console.WriteLn("(VR) PERF speed=%.1f vps=%.1f ifps=%.1f ee=%.1f%% %.2fms gs=%.1f%% %.2fms vu=%.1f%% %.2fms gpu=%.1f%% %.2fms",
+			s_fps / VMManager::GetFrameRate() * 100.0f, s_fps, s_internal_fps, s_cpu_thread_usage, s_cpu_thread_time,
+			s_gs_thread_usage, s_gs_thread_time, s_vu_thread_usage, s_vu_thread_time, s_gpu_usage, s_average_gpu_time);
+	}
+#endif
 
 	s_frames_since_last_update = 0;
 	s_unskipped_frames_since_last_update = 0;
