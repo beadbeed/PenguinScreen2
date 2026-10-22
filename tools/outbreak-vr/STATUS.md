@@ -412,7 +412,9 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 - **Our flash:** the hands no longer draw a muzzle flash while it is live.
 - **Free RAM:** 0xFB000-0xFBFFF (cave O) and 0xFF500 (its block); every File #1 savestate reads zero there.
 - **Not checked:**
-  - whether the game's flash is visible in first person (a window capture is slower than a flash);
+  - whether the game's flash is visible in first person. A window capture is slower than a flash, and two paused
+    captures came several frames late and showed none, so this is inconclusive. If the headset shows no flash, set
+    `GunObjectAim = false` to get our own flash back;
   - the shell's position (it comes from the matrix's row 3);
   - the headset.
 
