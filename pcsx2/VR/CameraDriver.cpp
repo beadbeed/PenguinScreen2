@@ -1256,11 +1256,12 @@ namespace VR::CameraDriver
 			In,
 			Draining,
 		};
+		constexpr u32 kDrainCounterUnseen = 0xFFFFFFFFu;
 		struct CaveRun
 		{
 			CaveState st = CaveState::Out;
 			u32 drain_vsyncs = 0;
-			u32 drain_counter = 0;
+			u32 drain_counter = 0; // kDrainCounterUnseen: not read yet (after a state load)
 			bool refused_logged = false;
 			bool broken_logged = false;
 			bool changed_logged = false;
@@ -1453,6 +1454,8 @@ namespace VR::CameraDriver
 						if (run.drain_vsyncs < 0xFFFFFFFFu)
 							run.drain_vsyncs++;
 						const u32 counter_now = cv.counter.has_value() ? memRead8(cv.counter.value()) : 0u;
+						if (run.drain_counter == kDrainCounterUnseen)
+							run.drain_counter = counter_now;
 						if (CaveDrainDone(cv.counter.has_value(), run.drain_counter, counter_now, run.drain_vsyncs, cpuRegs.pc,
 								cpuRegs.GPR.n.ra.UL[0], cv.from, cv.to))
 						{
@@ -1520,7 +1523,8 @@ namespace VR::CameraDriver
 				const u32 cur = static_cast<u32>(memRead32(sil.ee_address));
 				const bool active = SilenceSettingGateOpen(sil) && !(sil.offline_only && OnlineSafeNow()) &&
 				                    !(sil.coop_only && s_net_mode != NetMode::PrivateCoop) && CaveSiteOpen(i) &&
-				                    (sil.active_when.empty() || (base.has_value() && RecordChecksPass(sil.active_when, base.value())));
+				                    (sil.active_when.empty() || (base.has_value() && RecordChecksPass(sil.active_when, base.value()))) &&
+				                    (sil.active_guards.empty() || GuardListPass(sil.active_guards));
 				if (!active)
 				{
 					if (cur == sil.value_on && (s_silence_patched[i] || s_silence_repair))
@@ -1618,7 +1622,8 @@ namespace VR::CameraDriver
 				}
 				const u32 cur = static_cast<u32>(memRead32(sil.ee_address));
 				const bool active = first_person_on && SilenceSettingGateOpen(sil) && !(sil.offline_only && OnlineSafeNow()) &&
-				                    !(sil.coop_only && s_net_mode != NetMode::PrivateCoop) && CaveSiteOpen(i);
+				                    !(sil.coop_only && s_net_mode != NetMode::PrivateCoop) && CaveSiteOpen(i) &&
+				                    (sil.active_guards.empty() || GuardListPass(sil.active_guards));
 				if (!active)
 				{
 					if (cur == sil.value_on && (s_kept_patched[i] || s_kept_repair))
@@ -4549,7 +4554,7 @@ namespace VR::CameraDriver
 		{
 			run.st = CaveState::Draining;
 			run.drain_vsyncs = 0;
-			run.drain_counter = 0;
+			run.drain_counter = kDrainCounterUnseen; // seeded from the loaded memory's counter at the first drain vsync (m2)
 		}
 		s_silence_repair = true;
 		s_kept_repair = true;
@@ -4850,7 +4855,11 @@ namespace VR::CameraDriver
 	{
 		if (vsyncs < kCaveDrainMinVsyncs)
 			return false;
-		if (has_counter ? (((counter_now - counter_at_start) & 0xFFu) < kCaveDrainFrames) : (vsyncs < kCaveDrainNoCounterVsyncs))
+		// The game counter (File #1 0x48BF93) counts 0-59 and wraps to 0 (night review m2): frames passed mod 60 while both
+		// readings are in that range, else mod 256 (an 8-bit counter).
+		const u32 frames = (counter_at_start < 60 && counter_now < 60) ? (counter_now + 60 - counter_at_start) % 60 :
+		                                                                  ((counter_now - counter_at_start) & 0xFFu);
+		if (has_counter ? (frames < kCaveDrainFrames) : (vsyncs < kCaveDrainNoCounterVsyncs))
 			return false;
 		const auto inside = [&](u32 a) { return a >= from && a < to; };
 		return !inside(pc) && !inside(ra);
@@ -4933,6 +4942,10 @@ namespace VR::CameraDriver
 		check(!CaveDrainDone(true, 10, 12, 10, 0x200000, 0x200000, 0x1000, 0x1020), "the drain waits for the counter");
 		check(CaveDrainDone(true, 10, 13, 10, 0x200000, 0x200000, 0x1000, 0x1020), "three frames on, it is done");
 		check(CaveDrainDone(true, 0xFE, 0x01, 10, 0x200000, 0x200000, 0x1000, 0x1020), "the counter wraps");
+		check(!CaveDrainDone(true, 58, 0, 10, 0x200000, 0x200000, 0x1000, 0x1020) &&
+				  !CaveDrainDone(true, 59, 1, 10, 0x200000, 0x200000, 0x1000, 0x1020) &&
+				  CaveDrainDone(true, 58, 1, 10, 0x200000, 0x200000, 0x1000, 0x1020),
+			"the 0-59 game counter's wrap is two frames, not 198 (review m2)");
 		check(!CaveDrainDone(true, 10, 13, 2, 0x200000, 0x200000, 0x1000, 0x1020), "and for the minimum vsyncs");
 		check(!CaveDrainDone(true, 10, 20, 10, 0x1008, 0x200000, 0x1000, 0x1020), "not while pc is in the cave");
 		check(!CaveDrainDone(true, 10, 20, 10, 0x200000, 0x101C, 0x1000, 0x1020), "not while $ra returns into it");

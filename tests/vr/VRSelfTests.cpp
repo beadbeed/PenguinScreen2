@@ -1936,6 +1936,25 @@ int main(int argc, char* argv[])
 		}
 		return ok && enter_u == 1;
 	});
+	// Night review m1: FadeDim's fade colour is runtime state, an activeGuards check (a failing one puts the word back), and
+	// `when` holds only the code check.
+	RunSilent("FadeDim (File #1: the fade colour in activeGuards, review m1)", +[]() {
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		if (!p || !p->camera.has_value())
+			return false;
+		int found = 0;
+		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
+		{
+			if (sil.when_setting != "FadeDim")
+				continue;
+			found++;
+			if (sil.ee_address != 0x1B9DCCu || sil.when.size() != 1 || sil.when[0].ee_address != 0x1B9DA0u ||
+				sil.active_guards.size() != 1 || sil.active_guards[0].ee_address != 0x308898u || sil.active_guards[0].equals != 0u ||
+				sil.active_guards[0].not_equals || !sil.offline_only)
+				return false;
+		}
+		return found == 1;
+	});
 	// Night review M3: the host zeroes its block and tables only in the game it wrote them in, with its magic still there.
 	RunSilent("VR body clears only its own block (disc CRC and magic, review M3)", +[]() {
 		using namespace VR::VrBody;

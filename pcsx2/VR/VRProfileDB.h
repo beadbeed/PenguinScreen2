@@ -282,6 +282,10 @@ namespace VR::ProfileDB
 		// Optional: only patched while these pass too (e.g. the weapon is raised). While they fail, a word we
 		// patched is put back at once, so the game's own code runs again.
 		std::vector<RecordCheck> active_when;
+		// Optional (activeGuards): guest-memory guards on runtime state (e.g. a fade's colour), unlike `when` (the code
+		// is resident): only patched while they pass, and a word we patched is put back at once when they fail (night
+		// review m1: a failing `when` forgets the patch, which strands it).
+		std::vector<CameraGuard> active_guards;
 		// Never patched while online-safe (the VR setting, or the network adapter on); a patched word is put back.
 		bool offline_only = false;
 		// Only while first person runs in private co-op (CameraDriver's NetMode::PrivateCoop), e.g. patches that

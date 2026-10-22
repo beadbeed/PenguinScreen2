@@ -332,8 +332,10 @@ SLPM-65428:
       # non-zero, its alpha 255 x f32 0x30889C in the colour u32 0x308898 (set by the fade starters FUN_001B9BA0 / 9C30).
       # In first person the host dims the whole view by it instead (HudCards' view dim, head-locked, all of the view, the
       # hands too), so this skips the quad (beq v1,zero -> beq zero,zero at its on check) while first person is armed and
-      # the fade's colour is black. (u8 0x3065C0 and FUN_001BAB90 are the brightness option, not a fade: left alone.)
-      - { address: 0x1B9DCC, on: 0x10000029, off: 0x10600029, when: [{ address: 0x1B9DA0, equals: 0x27BDFFD0 }, { address: 0x308898, equals: 0 }], offlineOnly: true, whenSetting: FadeDim }   # FUN_001B9DA0: the fade quad not drawn
+      # the fade's colour is black. (u8 0x3065C0 and FUN_001BAB90 are the brightness option, not a fade: left alone.) The
+      # colour is runtime state, so it is an activeGuards check (a non-black fade puts the word back at once), not a `when`
+      # (which means the code is gone and would strand the patch; night review m1).
+      - { address: 0x1B9DCC, on: 0x10000029, off: 0x10600029, when: [{ address: 0x1B9DA0, equals: 0x27BDFFD0 }], activeGuards: [{ address: 0x308898, equals: 0 }], offlineOnly: true, whenSetting: FadeDim }   # FUN_001B9DA0: the fade quad not drawn
       # Spatial audio (VR setting SpatialAudio, on; tools/outbreak-vr/research/2026-10-22-native-feel.md). The game pans a
       # positioned sound by where it lands across the screen (FUN_001B7B50: through the view and the screen matrix, x 0-640
       # -> pan 0-127, a sound behind mirrored), so only sounds inside the view pan at all. The site calls a cave at 0xFC000
