@@ -29,6 +29,7 @@
 #include "VR/MenuPanel.h"
 #include "VR/MenuPointer.h"
 #include "VR/MeshRaster.h"
+#include "VR/GunRay.h"
 #include "VR/PhysicalMelee.h"
 #include "VR/ReloadGesture.h"
 #include "VR/SpatialControls.h"
@@ -469,8 +470,41 @@ namespace
 	};
 	HitNotice s_hit_notice; // what the hit test writes into the local record (notice 0: nothing hit)
 
+	// Cave H (PhysicalMeleeFists): FUN_00551E30 (the object allocator: a zeroed object, or none) and FUN_005A9960 (the
+	// attack node: appended at the list's tail, its object at +0x08).
+	constexpr u32 kFistObject = 0x3C6000, kFistNode = 0x3B9600, kGp = 0x400000;
+	bool s_h_alloc_ok = true;
+	struct CaveHCall
+	{
+		bool alloc = false, node = false;
+		u32 alloc_a0 = 0, node_a[3] = {};
+	};
+	CaveHCall s_h;
+
 	bool ContactStub(MiniEE& ee, u32 pc, u32* next)
 	{
+		if (pc == 0x551E30 || pc == 0x5A9960)
+		{
+			if (pc == 0x551E30)
+			{
+				s_h.alloc = true;
+				s_h.alloc_a0 = ee.r[4];
+				ee.r[2] = s_h_alloc_ok ? kFistObject : 0u;
+			}
+			else
+			{
+				s_h.node = true;
+				for (int k = 0; k < 3; k++)
+					s_h.node_a[k] = ee.r[4 + k];
+				ee.Store32(kTail, kFistNode);
+				ee.Store32(kFistNode + 0x08, ee.r[4]);
+				ee.r[2] = kFistNode;
+			}
+			for (int k : {1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13})
+				ee.r[k] = 0xDEAD0000u + static_cast<u32>(k);
+			*next = ee.r[31];
+			return true;
+		}
 		if (pc == 0x5521B0)
 		{
 			s_contact_run.spawned = true;
@@ -578,6 +612,12 @@ namespace
 		u8 focus = 0;             // u8 0x3AEF74
 		u32 window = 6;           // block +0x18
 		bool clear_mid_call = false;
+		// Cave H: 0xFEBF0 FST1 and 0xFEBF4 an attack id + 1 (fist), the current room and the record's, the allocator's
+		// answer.
+		bool fist = false;
+		u32 fist_magic = 0x46535431, fist_id1 = 34;
+		u16 room = 7, record_room = 7;
+		bool alloc_ok = true;
 	};
 	struct CaveDResult
 	{
@@ -587,6 +627,7 @@ namespace
 		u32 served = 0, left = 0, obj = 0, made = 0;
 		u16 life = 0;
 		u32 args[4] = {};
+		std::map<u32, u32> mem; // memory after
 	};
 	CaveDResult RunCaveD(const CaveDCase& c)
 	{
@@ -612,13 +653,28 @@ namespace
 		ee.Store8(kLocalRecord + 0x09, c.sub);
 		ee.Store8(kLocalRecord + 0xC7C, kItem);
 		ee.Store32(kTail, 0x3B0000); // the tail before the spawn
+		s_h = {};
+		s_h_alloc_ok = c.alloc_ok;
+		if (c.fist)
+		{
+			ee.Store32(0xFEBF0, c.fist_magic);
+			ee.Store32(0xFEBF4, c.fist_id1);
+			ee.Store16(0x3065AC, c.room);
+			ee.Store16(kLocalRecord + 0x1E2, c.record_room);
+			ee.r[28] = kGp;
+			ee.Store16(kGp - 0x5ECC, 3);
+			for (u32 k = 0; k < 16; k++)
+				ee.Store32(kBlock + 0x40 + 4 * k, 0x1000 + k); // the fist's matrix
+			for (u32 k = 0; k < 3; k++)
+				ee.Store32(kBlock + 0x80 + 4 * k, 0x2000 + k); // and its position
+		}
 		ee.r[31] = 0x5CDF6C;
 		const u32 sp = ee.r[29];
 		ee.r[16] = 0x11111111;
 		s_hit_tests = 0;
 		s_hit_notice = {};
 		const std::map<u32, u32> before = ee.mem;
-		const u32 out = ee.Run(0xFE200, 0xFE200, 0xFE800); // cave D, then cave F (nothing for it to do here), then back
+		const u32 out = ee.Run(0xFE200, 0xFE200, 0xFE900); // cave D, then cave F (nothing for it to do here), then back
 		res.ok = out == 0x5CDF6C && s_hit_tests == 1 && ee.r[29] == sp && ee.r[16] == 0x11111111;
 		res.untouched = ee.mem == before;
 		res.spawned = s_contact_run.spawned;
@@ -629,6 +685,7 @@ namespace
 		res.left = ee.Load32(kBlock + 0x20);
 		res.made = ee.Load32(kBlock + 0x24);
 		res.life = static_cast<u16>(ee.Load32(kObject + 0x10) >> 16);
+		res.mem = ee.mem;
 		return res;
 	}
 
@@ -734,7 +791,7 @@ namespace
 		const u32 sp = ee.r[29];
 		ee.r[16] = 0x11111111;
 		const std::map<u32, u32> before = ee.mem;
-		const u32 out = ee.Run(0xFE500, 0xFE500, 0xFE800);
+		const u32 out = ee.Run(0xFE500, 0xFE500, 0xFE900);
 		res.ok = out == 0x5CDF6C && s_hit_tests == 1 && ee.r[29] == sp && ee.r[16] == 0x11111111;
 		res.untouched = ee.mem == before;
 		res.notice = static_cast<u8>(ee.Load32(R + 0x114) >> 16);
@@ -895,6 +952,74 @@ namespace
 			c.left = 5; // still counting
 			r = RunCaveF(c);
 			check(r.ok && r.left == 4 && r.calls.empty());
+		}
+		return ok;
+	}
+
+	// Cave H (PhysicalMeleeFists; tools/outbreak-vr/research/2026-10-14-vr-melee.md section 12), reached from cave D's spawn
+	// call: with the fist word, a static attack object (type 8) on the block's pose with the attack's node and cave D's
+	// usual bookkeeping (the window as its life, the strike noted), never the game's spawn; a wrong room or no object:
+	// nothing made, the strike consumed; without the word: the game's spawn exactly as before.
+	bool MeleeCaveH()
+	{
+		bool ok = true;
+		const auto check = [&ok](bool c) { ok = ok && c; };
+		const auto b8 = [](const std::map<u32, u32>& m, u32 a) {
+			const auto it = m.find(a & ~3u);
+			return it == m.end() ? 0u : (it->second >> ((a & 3u) * 8u)) & 0xFFu;
+		};
+		const auto w32 = [](const std::map<u32, u32>& m, u32 a) {
+			const auto it = m.find(a);
+			return it == m.end() ? 0u : it->second;
+		};
+		{
+			CaveDCase c;
+			c.fist = true;
+			const CaveDResult r = RunCaveD(c);
+			const std::map<u32, u32>& m = r.mem;
+			bool pose = true;
+			for (u32 k = 0; k < 16; k++)
+				pose = pose && w32(m, kFistObject + 0x50 + 4 * k) == 0x1000 + k;
+			for (u32 k = 0; k < 3; k++)
+				pose = pose && w32(m, kFistObject + 0x38 + 4 * k) == 0x2000 + k;
+			check(r.ok && !r.spawned && s_h.alloc && s_h.alloc_a0 == 1 && s_h.node && s_h.node_a[0] == kFistObject &&
+				  s_h.node_a[1] == 33 && s_h.node_a[2] == 0);
+			check(b8(m, kFistObject + 0) == 1 && b8(m, kFistObject + 2) == 9 && b8(m, kFistObject + 3) == 0 &&
+				  b8(m, kFistObject + 4) == 8 && w32(m, kFistObject + 0x14) == 0x552940 && w32(m, kFistObject + 0x18) == 0x341EB0 &&
+				  w32(m, kFistObject + 0x28) == kLocalRecord && b8(m, kFistObject + 0x30) == 0xFF && b8(m, kFistObject + 0x31) == 61 &&
+				  pose);
+			// cave D's tail: the new node's object is this record's, so its life is the window and the strike is noted.
+			check(((w32(m, kFistObject + 0x10) >> 16) & 0xFFFFu) == 6 && r.obj == kFistObject && r.left == 6 && r.made == 1 &&
+				  r.served == 1);
+		}
+		{
+			CaveDCase c; // another room: nothing made
+			c.fist = true;
+			c.record_room = 8;
+			const CaveDResult r = RunCaveD(c);
+			check(r.ok && !r.spawned && !s_h.alloc && !s_h.node && r.obj == 0 && r.made == 0 && r.served == 1);
+			c.record_room = 7; // no object free
+			c.alloc_ok = false;
+			const CaveDResult r2 = RunCaveD(c);
+			check(r2.ok && !r2.spawned && s_h.alloc && !s_h.node && r2.obj == 0 && r2.made == 0);
+		}
+		{
+			CaveDCase c; // a foreign word, or an id of 0: the game's spawn as before
+			c.fist = true;
+			c.fist_magic = 0x12345678;
+			const CaveDResult r = RunCaveD(c);
+			check(r.ok && r.spawned && !s_h.alloc && r.args[1] == kLocalRecord + 0x50 && r.made == 1);
+			c.fist_magic = 0x46535431;
+			c.fist_id1 = 0;
+			const CaveDResult r2 = RunCaveD(c);
+			check(r2.ok && r2.spawned && !s_h.alloc && r2.made == 1);
+		}
+		{
+			CaveDCase c; // the d1 rule still holds: the block naming a partner (no fist either)
+			c.fist = true;
+			c.named = kPartnerRecord;
+			const CaveDResult r = RunCaveD(c);
+			check(r.ok && !r.spawned && !s_h.alloc && r.made == 0);
 		}
 		return ok;
 	}
@@ -1127,7 +1252,7 @@ int main(int argc, char* argv[])
 		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
 		{
 			if (sil.when_setting.empty() || sil.when_setting == "PhysicalMelee" || sil.when_setting == "PhysicalMeleeContact" ||
-				sil.when_setting == "MeleeHitJolt")
+				sil.when_setting == "MeleeHitJolt" || sil.when_setting == "GunRayAim")
 			{
 				if (sil.keep_through_disarm)
 					return false;
@@ -1269,7 +1394,7 @@ int main(int argc, char* argv[])
 		// The knives have their own (lower) speeds; the pipe takes the block's.
 		if (!(m.ContactFor(33).speed < m.ContactFor(34).speed) || m.ContactFor(34).speed != m.contact.speed)
 			return false;
-		int sites = 0, cave_d = 0, cave_e = 0, cave_f = 0;
+		int sites = 0, cave_d = 0, cave_e = 0, cave_f = 0, cave_h = 0;
 		size_t first_cave = 0, last_site = 0;
 		bool any_cave = false;
 		for (size_t i = 0; i < p->camera->silence.size(); i++)
@@ -1286,6 +1411,8 @@ int main(int argc, char* argv[])
 				cave_e++;
 			else if (a >= 0xFE500u && a < 0xFE7DCu)
 				cave_f++;
+			else if (a >= 0xFE7E0u && a < 0xFE8F0u)
+				cave_h++;
 			else if ((a == 0x5CDF64u && sil.value_off == 0x0C16A76Cu && sil.value_on == 0x0C03F880u) ||
 					 (a == 0x636990u && sil.value_off == 0x27BDFFD0u && sil.value_on == 0x0803F900u) ||
 					 (a == 0x636994u && sil.value_off == 0xFFBF0020u && sil.value_on == 0))
@@ -1304,9 +1431,33 @@ int main(int argc, char* argv[])
 				first_cave = i;
 			any_cave = true;
 		}
-		return sites == 3 && cave_d == 101 && cave_e == 28 && cave_f == 183 && last_site < first_cave;
+		return sites == 3 && cave_d == 101 && cave_e == 28 && cave_f == 183 && cave_h == 68 && last_site < first_cave;
 	});
 	RunSilent("Physical melee contact caves (D, E, F: File #1 profile words, interpreted)", MeleeContactCaves);
+	RunSilent("Physical melee fists cave H (File #1 profile words, interpreted with cave D)", MeleeCaveH);
+	{
+		Begin("Physical melee fists (PhysicalMelee::SelfTestFists)");
+		const std::vector<std::string> failed = VR::PhysicalMelee::SelfTestFists();
+		std::string all;
+		for (const std::string& f : failed)
+			all += (all.empty() ? "" : "; ") + f;
+		Record("Physical melee fists", failed.empty(),
+			failed.empty() ? std::string("passed (it names the failed checks only, no check count)") :
+							 "FAIL: " + std::to_string(failed.size()) + " check(s): " + all);
+	}
+	RunSilent("Physical melee fists (File #1 profile, melee.fist)", +[]() {
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		if (!p || !p->melee.has_value())
+			return false;
+		const VR::ProfileDB::MeleeParams& m = p->melee.value();
+		// The word inside 0xFE900-0xFEBFF and clear of the gun ray's block; the knife's attack; the wait byte; a light hit.
+		return m.has_fist && m.fist_word == 0xFEBF0 && m.fist_magic == 0x46535431 && m.fist_attack == 33 && m.enemy_wait == 0x32 &&
+		       m.fist_word + 8 <= 0xFEC00 && (m.fist_word >= m.gun_block + VR::GunRay::kBlockBytes || m.fist_word + 8 <= m.gun_block) &&
+		       m.fist_radius == 8.0f && m.fist_scale == 0.4f && m.fist.speed == 2.5f && m.fist.firm == 6.0f && m.fist.strong == 1.0f &&
+		       std::fabs(VR::PhysicalMelee::FistStrength(2.5f, m.fist, m.fist_scale) - 0.2f) < 1e-4f &&
+		       std::fabs(VR::PhysicalMelee::FistStrength(9.0f, m.fist, m.fist_scale) - 0.4f) < 1e-4f &&
+		       std::fabs(m.fist_point[2] + 0.04f) < 1e-6f && std::fabs(m.whip_point[1] + 0.07f) < 1e-6f;
+	});
 	// [VR] MeleeHitJolt (a prototype; tools/outbreak-vr/research/2026-10-14-vr-melee.md sections 8 and 9): the pure parts
 	// (the magnitude from the swing's speed, the chain for the struck sphere's bone, each bone's turn in its parent's
 	// frame, the entries as the cave reads them), File #1's melee.jolt and its MeleeHitJolt entries (the zombie's update
@@ -1334,7 +1485,7 @@ int main(int argc, char* argv[])
 			return false;
 		const VR::ProfileDB::MeleeParams& m = p->melee.value();
 		if (!m.has_jolt || m.jolt_block != 0xFF100 || m.jolt_magic != 0x4A4C5431 || m.jolt_hook != 0x6644D0 ||
-			m.jolt_hook_on != 0x0C03FA00 || m.jolt_bones != 0x34 || m.jolt_bone_table != 0x820 || m.jolt_bone_count != 36 || m.jolt_bone_real != 0x816 ||
+			m.jolt_hook_on != 0x0C03FA40 || m.jolt_bones != 0x34 || m.jolt_bone_table != 0x820 || m.jolt_bone_count != 36 || m.jolt_bone_real != 0x816 ||
 			m.jolt.chains.size() != 3)
 			return false;
 		const VR::PhysicalMelee::JoltChain* head = VR::PhysicalMelee::JoltChainFor(m.jolt, 21);
@@ -1342,7 +1493,7 @@ int main(int argc, char* argv[])
 		if (!head || head->bones[0] != 20 || head->parents[0] != 11 || !belly || belly->bones[0] != 10 || belly->parents[0] != 2 ||
 			!VR::PhysicalMelee::JoltChainFor(m.jolt, 3))
 			return false;
-		// The entries: the site, then the cave (54 words at 0xFE800, clear of cave F and of the melee block's 0x90 bytes).
+		// The entries: the site, then the cave (54 words at 0xFE900 since cave H took 0xFE7E0-0xFE8F0, clear of the melee block's 0x90 bytes).
 		MiniEE ee;
 		int site = -1, first_cave = -1, words = 0;
 		for (size_t i = 0; i < p->camera->silence.size(); i++)
@@ -1354,12 +1505,12 @@ int main(int argc, char* argv[])
 				return false;
 			if (sil.ee_address == 0x6644D0u)
 			{
-				if (sil.value_off != 0x0C15DE1Cu || sil.value_on != 0x0C03FA00u || sil.when.size() != 3 || first_cave >= 0)
+				if (sil.value_off != 0x0C15DE1Cu || sil.value_on != 0x0C03FA40u || sil.when.size() != 3 || first_cave >= 0)
 					return false;
 				site = static_cast<int>(i);
 				continue;
 			}
-			if (sil.ee_address < 0xFE800u || sil.ee_address >= 0xFE900u || sil.value_off != 0)
+			if (sil.ee_address < 0xFE900u || sil.ee_address >= 0xFEA00u || sil.value_off != 0)
 				return false;
 			if (first_cave < 0)
 				first_cave = static_cast<int>(i);
@@ -1414,7 +1565,7 @@ int main(int argc, char* argv[])
 			ee.r[29] = 0x01F00000;
 			ee.r[31] = 0x6644D8;
 			ee.r[16] = 0x5555;
-			return ee.Run(0xFE800, 0xFE800, 0xFE900) == 0x6644D8 && ee.r[29] == 0x01F00000 && ee.r[16] == 0x5555;
+			return ee.Run(0xFE900, 0xFE900, 0xFEA00) == 0x6644D8 && ee.r[29] == 0x01F00000 && ee.r[16] == 0x5555;
 		};
 		entry(0, kEnemy, 20, 3, 300, -60, 9);
 		entry(1, kOther, 20, 5, 1000, 0, 0);
@@ -1488,6 +1639,139 @@ int main(int argc, char* argv[])
 			   ((ee.Load32(kBlk + 0x2C) >> 8) & 0xFF) == 0;
 	});
 	RunGamepad();
+	// [VR] GunRayAim (tools/outbreak-vr/research/2026-10-14-vr-melee.md section 11): the pure parts (the VR ray to the
+	// game's space, the shot's frame as FUN_0062CF10 builds it), File #1's melee.gunRay and its GunRayAim entries (the
+	// shot's spawn call guarded by cave I's first and last non-zero words, before the cave; the cave range), and cave I run
+	// on the profile's words: for the local record with a fresh block the spawn gets the block's matrix and origin, the
+	// shot is counted and everything else is as the game had it; otherwise (no magic, another record, the focus on
+	// another slot, a stale stamp) the spawn gets the game's own frame and no byte of memory changes.
+	{
+		Begin("Gun ray (GunRay::SelfTest)");
+		const std::vector<std::string> failed = VR::GunRay::SelfTest();
+		std::string all;
+		for (const std::string& f : failed)
+			all += (all.empty() ? "" : "; ") + f;
+		Record("Gun ray", failed.empty(),
+			failed.empty() ? std::string("passed (it names the failed checks only, no check count)") :
+							 "FAIL: " + std::to_string(failed.size()) + " check(s): " + all);
+	}
+	RunSilent("Gun ray (File #1 profile, melee.gunRay, camera.caves, cave I interpreted)", +[]() {
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		if (!p || !p->melee.has_value() || !p->camera.has_value() || !VR::ProfileDB::IsSilenceSettingName("GunRayAim"))
+			return false;
+		const VR::ProfileDB::MeleeParams& m = p->melee.value();
+		if (!m.has_gun_ray || m.gun_block != 0xFEB80 || m.gun_magic != 0x47554E31 || m.gun_back_table != 0x6E6D30 ||
+			m.gun_back_stride != 0x20 || m.gun_class_offset != 0x05 || m.gun_character_offset != 0xB98)
+			return false;
+		// The block and cave I stay inside 0xFE900-0xFEBFF (the free region's share for this work).
+		if (m.gun_block < 0xFE900 || m.gun_block + VR::GunRay::kBlockBytes > 0xFEC00)
+			return false;
+		bool range = false;
+		for (const VR::ProfileDB::CameraCave& cv : p->camera->caves)
+			if (cv.from == 0xFEA00 && cv.to == 0xFEA7C && cv.usable)
+				range = true;
+		if (!range)
+			return false;
+		MiniEE ee;
+		int words = 0, sites = 0;
+		size_t site_at = 0, first_word = 0;
+		for (size_t i = 0; i < p->camera->silence.size(); i++)
+		{
+			const VR::ProfileDB::CameraSilence& sil = p->camera->silence[i];
+			if (sil.when_setting != "GunRayAim")
+				continue;
+			if (!sil.offline_only || sil.keep_through_disarm || sil.when.empty())
+				return false;
+			if (sil.ee_address == 0x62D1CCu)
+			{
+				if (sil.value_off != 0x0C15486Cu || sil.value_on != 0x0C03FA80u || sil.when.size() != 3 ||
+					sil.when[1].ee_address != 0xFEA00u || sil.when[2].ee_address != 0xFEA74u)
+					return false;
+				sites++;
+				site_at = i;
+				continue;
+			}
+			if (sil.ee_address < 0xFEA00u || sil.ee_address >= 0xFEA7Cu || sil.value_off != 0)
+				return false;
+			if (words == 0)
+				first_word = i;
+			ee.Store32(sil.ee_address, sil.value_on);
+			words++;
+		}
+		if (sites != 1 || words != 31 || site_at > first_word || ee.Load32(0xFEA00) != 0x3C0B0010u ||
+			ee.Load32(0xFEA74) != 0x0815486Cu)
+			return false;
+		constexpr u32 kBlk = 0xFEB80, kMat = 0x01F000C0, kPos = 0x01F00120;
+		struct Case
+		{
+			bool magic = true;
+			u32 named = kLocalRecord, a0 = kLocalRecord;
+			u8 focus = 0, counter = 30, stamp = 29;
+			bool redirect = true;
+		};
+		const auto run = [&](const Case& c) {
+			MiniEE e = ee;
+			MeleeIdentities(e, c.focus);
+			e.Store32(kBlk, c.magic ? 0x47554E31u : 0u);
+			e.Store8(kBlk + 4, c.stamp);
+			e.Store32(kBlk + 8, c.named);
+			e.Store32(kBlk + 0x0C, 5);
+			for (u32 k = 0; k < 16; k++)
+				e.Store32(kBlk + 0x10 + 4 * k, 0x1000 + k);
+			e.Store8(0x48BF93, c.counter);
+			const std::map<u32, u32> before = e.mem;
+			bool hit = false;
+			u32 args[4] = {};
+			e.stub = +[](MiniEE&, u32 pc, u32*) { return false; };
+			e.r[4] = c.a0;
+			e.r[5] = kMat;
+			e.r[6] = kPos;
+			e.r[7] = 11;
+			e.r[29] = 0x01F00000;
+			e.r[31] = 0x62D1D4;
+			e.r[16] = 0x5555;
+			const u32 out = e.Run(0xFEA00, 0xFEA00, 0xFEA7C);
+			hit = out == 0x5521B0;
+			for (int k = 0; k < 4; k++)
+				args[k] = e.r[4 + k];
+			if (!hit || e.r[31] != 0x62D1D4 || e.r[29] != 0x01F00000 || e.r[16] != 0x5555 || args[0] != c.a0 || args[3] != 11)
+				return false;
+			if (c.redirect)
+			{
+				// The spawn reads the block's matrix and origin; the shot is counted; nothing else changes.
+				std::map<u32, u32> want = before;
+				want[kBlk + 0x0C] = 6;
+				return args[1] == kBlk + 0x10 && args[2] == kBlk + 0x50 && e.mem == want;
+			}
+			return args[1] == kMat && args[2] == kPos && e.mem == before;
+		};
+		Case on;
+		Case off_magic;
+		off_magic.magic = false;
+		off_magic.redirect = false;
+		Case partner; // the block names Kevin, the shot is a partner's
+		partner.a0 = kPartnerRecord;
+		partner.redirect = false;
+		Case named_partner; // the block names a partner (a vsync that caught the slot flicker): its own shot
+		named_partner.named = kPartnerRecord;
+		named_partner.a0 = kPartnerRecord;
+		named_partner.redirect = false;
+		Case focus; // the camera focus on another slot
+		focus.focus = 1;
+		focus.redirect = false;
+		Case stale; // 7 frames old
+		stale.counter = 36;
+		stale.redirect = false;
+		Case wrap; // the counter wrapped (59 -> 2): 3 frames old, fresh
+		wrap.counter = 2;
+		wrap.stamp = 59;
+		Case wrap_stale;
+		wrap_stale.counter = 8;
+		wrap_stale.stamp = 59;
+		wrap_stale.redirect = false;
+		return run(on) && run(off_magic) && run(partner) && run(named_partner) && run(focus) && run(stale) && run(wrap) &&
+		       run(wrap_stale);
+	});
 	RunSilent("CameraDriver::SelfTestAssembler (hook)", VR::CameraDriver::SelfTestAssembler);
 	RunSilent("CameraDriver::SelfTestMath (math, predict, comfort, FOV)", VR::CameraDriver::SelfTestMath);
 	RunSilent("CameraDriver::SelfTestStableSlot (the debounced local slot, review M1)", VR::CameraDriver::SelfTestStableSlot);

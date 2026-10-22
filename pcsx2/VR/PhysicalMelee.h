@@ -288,6 +288,29 @@ namespace VR::PhysicalMelee
 	// Strength, the geometry and the strike logic on scripted swings. Returns the failed checks.
 	std::vector<std::string> SelfTestContact();
 
+	// --- Punches and pistol-whips ([VR] PhysicalMeleeFists; research/2026-10-14-vr-melee.md section 12). Pure. ---
+	//
+	// With contact strictly offline, bare hands (no item equipped) or a gun: the right hand's own strike through cave D and
+	// cave H, with the knife's attack (id 33: a sphere r 30 at (-10, 0, 0) in the attack object's frame) at a fist-sized
+	// point on the hand, or on the gun's butt; the strength scaled to a light hit. A melee weapon keeps its own shape.
+	enum class FistKind : u8
+	{
+		None,
+		Fist, // bare hands: the knuckles
+		Whip, // a gun in the hand: its butt
+	};
+	// What the right hand strikes with: None unless the setting, the profile's melee.fist and contact strictly offline
+	// (contact_offline) all hold; a melee weapon is never a fist; bare hands a fist, a gun a whip, anything else none.
+	FistKind ChooseFist(bool setting, bool has_fist, bool contact_offline, bool bare, bool gun, bool melee);
+	// The attack object's frame for a strike at point (metres, in the hand's pointing frame: x right, y up, z back) of
+	// the hand at pos / quat (the XR base space): the hand's axes, and an origin put so that the knife sphere's centre
+	// (-10, 0, 0) cm lands on the point (origin = point + 0.10 m along the hand's x). False for a non-finite pose.
+	bool FistFrame(const float pos[3], const float quat[4], const float point[3], float origin[3], float axes[3][3]);
+	// The strike's strength: the contact strength (light rising to 1 by firm, never above) times scale, 0 below speed.
+	float FistStrength(float speed, const ContactParams& p, float scale);
+	// ChooseFist, FistFrame and FistStrength on scripted cases. Returns the failed checks.
+	std::vector<std::string> SelfTestFists();
+
 	// --- Hit jolt ([VR] MeleeHitJolt, a prototype; research/2026-10-14-vr-melee.md sections 8 and 9). Pure. ---
 	//
 	// A contact hit pushes the struck body part the way the swing went: a few bones near the hit get a rotation that

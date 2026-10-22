@@ -1963,6 +1963,8 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(PhysicalMeleeOnline);
 	SettingsWrapEnumEx(PhysicalMeleeMode, "PhysicalMeleeMode", PhysicalMeleeModeNames);
 	SettingsWrapEntry(MeleeHitJolt);
+	SettingsWrapEntry(GunRayAim);
+	SettingsWrapEntry(PhysicalMeleeFists);
 	SettingsWrapEntry(PickupCue);
 	SettingsWrapEntry(BeltPouches);
 	SettingsWrapEntry(HandTargeting);
@@ -2023,7 +2025,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 
 bool Pcsx2Config::VROptions::operator==(const VROptions& right) const
 {
-	// SnapTurn, ComfortBlink, LaserSight, ZoneMarkers, MenuPointer, MenuTablet, MenuPanel, MenuPanelRoom, MenuPanelRoomBrightness, SeamlessDoors, PhysicalMelee, PhysicalMeleeOnline, PhysicalMeleeMode, MeleeHitJolt, PickupCue, BeltPouches, HandTargeting, GameWeaponModels, WeaponSceneLighting, ComfortVignette,
+	// SnapTurn, ComfortBlink, LaserSight, ZoneMarkers, MenuPointer, MenuTablet, MenuPanel, MenuPanelRoom, MenuPanelRoomBrightness, SeamlessDoors, PhysicalMelee, PhysicalMeleeOnline, PhysicalMeleeMode, MeleeHitJolt, GunRayAim, PhysicalMeleeFists, PickupCue, BeltPouches, HandTargeting, GameWeaponModels, WeaponSceneLighting, ComfortVignette,
 	// VignetteStrength, OnlineSafe, FirstPersonAutoStereo, FirstPersonStereoStrength, FirstPersonFov,
 	// FirstPersonFovMarginDeg, Brightness, GameRumble and HapticStrength are read from EmuConfig every vsync (ReloadGesture every input poll; EdgeFill,
 	// HeadsetRateSubmit, OpaqueBackground, HandsDisplayRate, PacerCopies, DepthLayer and DepthWarp when VR starts, DedicatedXrQueue when the GS

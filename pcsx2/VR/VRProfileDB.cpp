@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/VRProfileDB.h"
+#include "VR/GunRay.h"
 
 #include "Config.h"
 #include "MemoryTypes.h"
@@ -3654,7 +3655,7 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 	using VR::ProfileDB::MeleeParams;
 	warnUnknownKeys(serial, node, "melee", {"attackButton", "screenFlag", "swing", "enemies", "override", "online", "tip", "speed", "rest", "endMs",
 		"travel", "straightness", "strokeMs", "pressMs", "pressMaxMs", "raiseMs", "swingMs", "contactMs", "cooldownMs", "contact",
-		"jolt", "notes"});
+		"jolt", "gunRay", "fist", "notes"});
 	MeleeParams mp;
 	if (node.has_child("attackButton"))
 	{
@@ -4112,6 +4113,107 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 		else
 			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee jolt needs contact, block (16-byte aligned), a non-zero magic, "
 							   "hook and bones (pointer inside an enemy's record, count 1-255); ignoring it.", serial);
+	}
+	// fist ([VR] PhysicalMeleeFists): cave H's word, the attack, the enemy's wait byte, the points and the tuning; needs
+	// contact.
+	if (node.has_child("fist"))
+	{
+		const ryml::ConstNodeRef fs = node["fist"];
+		MeleeParams o = mp;
+		bool ok = fs.is_map() && mp.has_contact;
+		if (ok)
+		{
+			warnUnknownKeys(serial, fs, "melee.fist", {"word", "magic", "attack", "wait", "point", "whip", "radius", "speed", "rearm",
+				"firm", "light", "scale", "notes"});
+			ok = read_hex(fs, "word", o.fist_word) && read_hex(fs, "magic", o.fist_magic) && fs.has_child("attack");
+			if (ok)
+			{
+				const std::optional<s64> a = parseDecOrHex(nodeVal(fs["attack"]));
+				ok = a.has_value() && a.value() >= 0 && a.value() < 255;
+				if (ok)
+					o.fist_attack = static_cast<u32>(a.value());
+			}
+			if (ok && fs.has_child("wait"))
+				ok = read_hex(fs, "wait", o.enemy_wait) && o.enemy_wait > 0 && o.enemy_wait < mp.enemy_stride;
+			const auto vec = [&](const char* key, float out[3]) {
+				if (!fs.has_child(key))
+					return true;
+				const ryml::ConstNodeRef v = fs[key];
+				if (!v.is_seq() || v.num_children() != 3)
+					return false;
+				for (int k = 0; k < 3; k++)
+				{
+					const std::optional<float> x = StringUtil::FromChars<float>(nodeVal(v[k]));
+					if (!x.has_value() || !std::isfinite(x.value()) || std::fabs(x.value()) > 0.3f)
+						return false;
+					out[k] = x.value();
+				}
+				return true;
+			};
+			ok = ok && vec("point", o.fist_point) && vec("whip", o.whip_point);
+			const auto num = [&](const char* key, float lo, float hi, float& dst) {
+				if (!fs.has_child(key))
+					return true;
+				const std::optional<float> x = StringUtil::FromChars<float>(nodeVal(fs[key]));
+				if (!x.has_value() || !std::isfinite(x.value()) || x.value() < lo || x.value() > hi)
+					return false;
+				dst = x.value();
+				return true;
+			};
+			VR::PhysicalMelee::ContactParams c = mp.contact;
+			c.speed = 2.5f;
+			c.rearm = 1.0f;
+			c.firm = 6.0f;
+			c.light = 0.5f;
+			ok = ok && num("radius", 2.0f, 30.0f, o.fist_radius) && num("speed", 0.5f, 15.0f, c.speed) &&
+			     num("rearm", 0.05f, 10.0f, c.rearm) && num("firm", 0.5f, 20.0f, c.firm) && num("light", 0.1f, 1.0f, c.light) &&
+			     num("scale", 0.05f, 1.0f, o.fist_scale);
+			ok = ok && o.fist_magic != 0 && (o.fist_word % 4) == 0 && o.fist_word + 8 <= Ps2MemSize::MainRam && c.rearm < c.speed &&
+			     c.firm >= c.speed;
+			c.heavy = std::max(c.firm, 19.0f);
+			c.strong = 1.0f;
+			o.fist = VR::PhysicalMelee::SanitizedContact(c);
+		}
+		if (ok)
+		{
+			o.has_fist = true;
+			mp = o;
+		}
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee fist needs contact, word (aligned), a non-zero magic, an attack "
+							   "(0-254), and in range: wait inside an enemy's record, point and whip (3 numbers, metres, under "
+							   "0.3), radius 2-30, rearm < speed <= firm, light 0.1-1, scale 0.05-1; ignoring it, so "
+							   "PhysicalMeleeFists does nothing here.", serial);
+	}
+	// gunRay ([VR] GunRayAim): cave I's block and the game's back offset for a shot's origin; needs contact (the
+	// weapon-type table and the record's weapon type).
+	if (node.has_child("gunRay"))
+	{
+		const ryml::ConstNodeRef gr = node["gunRay"];
+		MeleeParams o = mp;
+		bool ok = gr.is_map() && mp.has_contact && gr.has_child("back") && gr["back"].is_map();
+		if (ok)
+		{
+			warnUnknownKeys(serial, gr, "melee.gunRay", {"block", "magic", "back", "notes"});
+			const ryml::ConstNodeRef bk = gr["back"];
+			warnUnknownKeys(serial, bk, "melee.gunRay.back", {"table", "stride", "class", "character", "notes"});
+			ok = read_hex(gr, "block", o.gun_block) && read_hex(gr, "magic", o.gun_magic) && read_hex(bk, "table", o.gun_back_table) &&
+			     read_hex(bk, "stride", o.gun_back_stride) && read_hex(bk, "class", o.gun_class_offset) &&
+			     read_hex(bk, "character", o.gun_character_offset);
+			ok = ok && o.gun_magic != 0 && (o.gun_block % 16) == 0 &&
+			     static_cast<u64>(o.gun_block) + VR::GunRay::kBlockBytes <= Ps2MemSize::MainRam && o.gun_back_table % 4 == 0 &&
+			     o.gun_back_table + 0x1000 <= Ps2MemSize::MainRam && o.gun_back_stride >= 4 && o.gun_back_stride <= 0x100 &&
+			     o.gun_class_offset < mp.shape_type_stride && o.gun_character_offset < 0x2000;
+		}
+		if (ok)
+		{
+			o.has_gun_ray = true;
+			mp = o;
+		}
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee gunRay needs contact, block (16-byte aligned), a non-zero magic "
+							   "and back (table, stride 4-256, class inside a weapon-type entry, character); ignoring it, so "
+							   "GunRayAim does nothing here.", serial);
 	}
 	// Decimal tuning in the key's unit, stored scaled (milliseconds to seconds).
 	const auto read_float = [&](const char* key, float lo, float hi, float scale, float& dst) {
@@ -5414,7 +5516,8 @@ static int CountMultibandResolveMismatches(bool log)
 
 bool VR::ProfileDB::IsSilenceSettingName(std::string_view name)
 {
-	return name == "SeamlessDoors" || name == "PhysicalMelee" || name == "PhysicalMeleeContact" || name == "MeleeHitJolt";
+	return name == "SeamlessDoors" || name == "PhysicalMelee" || name == "PhysicalMeleeContact" || name == "MeleeHitJolt" ||
+	       name == "GunRayAim";
 }
 
 bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
@@ -5430,6 +5533,9 @@ bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
 	// The hit jolt's cave G: on top of contact mode, strictly offline (SilenceSettingCoopLive says no for it).
 	if (name == "MeleeHitJolt")
 		return EmuConfig.VR.MeleeHitJolt && SilenceSettingOn("PhysicalMeleeContact");
+	// The gun ray's cave I: strictly offline (SilenceSettingCoopLive says no for it).
+	if (name == "GunRayAim")
+		return EmuConfig.VR.GunRayAim;
 	return false;
 }
 

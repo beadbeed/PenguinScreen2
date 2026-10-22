@@ -4,6 +4,7 @@
 #include "VR/GameFeedback.h"
 #include "VR/CameraDriver.h"
 #include "VR/GameModels.h"
+#include "VR/GunRay.h"
 #include "VR/HandModel.h"
 #include "VR/ItemData.h"
 #include "VR/ItemReach.h"
@@ -958,6 +959,7 @@ namespace VR::GameFeedback
 	{
 		ItemReach::OnStateLoaded();
 		PhysicalMelee::OnStateLoaded();
+		GunRay::OnStateLoaded();
 		ReloadDriver::OnStateLoaded();
 		s_cues = CueState{};
 		ResetWeaponBaseline(s_weapon);

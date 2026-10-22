@@ -14,6 +14,7 @@
 #include "VR/BeltPouches.h"
 #include "VR/CameraDriver.h"
 #include "VR/ControlQuads.h"
+#include "VR/GunRay.h"
 #include "VR/MenuPointer.h"
 #include "VR/ReloadDriver.h"
 #include "VR/SplitState.h"
@@ -887,6 +888,8 @@ void VRInputSource::PollEvents()
 	// [VR] PhysicalMelee: a swing of the right controller to the game's own attack, and the VR weapon's pose for the game's
 	// hit test; before the instances compose, so this poll's presses go out with them.
 	const VR::PhysicalMelee::Frame melee = VR::PhysicalMelee::Poll(snap, reader, dt);
+	// [VR] GunRayAim: the VR gun's ray for the game's own shot (cave I); writes only its block.
+	VR::GunRay::Poll(snap, reader, dt);
 
 	// Belt pouches: before the menu pointer, so a pouch squeeze's cell request and the pouch hands' grips reach it this
 	// poll, and before the instances compose, so the zones see a hand in a pouch as gone and an open press goes out now.
