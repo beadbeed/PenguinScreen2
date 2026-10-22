@@ -199,6 +199,11 @@ namespace VR::HudCards
 	// Compositor: the blink's opacity now (0-1); false when no blink is on screen. Any thread.
 	bool CurrentBlink(float* opacity);
 
+	// The veil ([VR] DoorVeil): while on, the blink's black is held (rising over kBlinkRiseMs from where a blink is),
+	// whatever the ComfortBlink setting says; let go, it clears as a blink does (held kBlinkHoldMs, then kBlinkFallMs).
+	// Any thread; CurrentBlink reports it. Drawn only while a VR session runs.
+	void SetVeil(bool on);
+
 	// Compositor, each frame: with PCSX2_VR_BLINK_TEST=1 a blink every 2 s.
 	void MaybeTestBlink();
 

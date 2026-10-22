@@ -1355,6 +1355,17 @@ struct Pcsx2Config
 		// The door, its locks and keys, the load and partners are unchanged. Never online (not even private co-op).
 		// Ini only for now.
 		bool SeamlessDoors = false;
+		// With SeamlessDoors: the room change around a door you open yourself is shown black (the first-person view darkens
+		// as the load starts and clears once the first frame drawn from the head in the next room is on screen), so none of
+		// the game's own room-camera frames of the fade out, the load or the fade in show. Display only: the game runs on.
+		bool DoorVeil = true;
+		// First person, while a zombie holds you (the profile's breakout.grabbed checks: grabbed, not down or dead): the head
+		// keeps driving the camera, camera only (no heading, aim or body writes; the stick still turns the view), instead of
+		// handing back to the game camera on the flat screen. Shaking to break free and the bite haptics are unchanged.
+		bool GrabFirstPerson = true;
+		// With GrabFirstPerson: the view eases round toward the zombie holding you (yaw only, at most 20 deg/s, the comfort
+		// vignette on while it turns). Off by default: an artificial turn the head did not make.
+		bool GrabFacePull = false;
 		// First person, File #1 offline only (profiles with a melee block and camera.silence entries marked whenSetting:
 		// PhysicalMelee): with a melee weapon equipped, a deliberate swing of the right controller presses the game's own
 		// attack (Circle; R1 too if the weapon is down), and while the game's swing is live its hit test is run on the VR

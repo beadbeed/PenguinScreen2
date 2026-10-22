@@ -247,6 +247,10 @@ SLPM-65428:
     # The camera update flips the mode byte to 3 and back inside a frame about 12 times a second;
     # only hand the camera back once the guards have failed for 0.1 s.
     disarmAfterVsyncs: 6
+    # The room change: scenario status 3 runs the fade out (32 frames), the load and the fade in, then goes back to 2
+    # (research/2026-10-14-doors.md). With VR SeamlessDoors and DoorVeil (on), one that starts while first person is armed
+    # is shown black until first person's own frames are back on screen, so none of the room camera's frames show.
+    roomLoad: [{ address: 0x48BF60, equals: 3, width: 1 }]
     silence:
       - { address: 0x58EAEC, on: 0x00000000, off: 0x0C163B1C, when: [{ address: 0x540004, equals: 3 }] }   # fixed-cut handler
       - { address: 0x58EAFC, on: 0x00000000, off: 0x0C163C8C, when: [{ address: 0x540004, equals: 3 }] }   # spline cut handler

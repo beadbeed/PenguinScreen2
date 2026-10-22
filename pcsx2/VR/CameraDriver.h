@@ -322,4 +322,53 @@ namespace VR::CameraDriver
 	bool SelfTestAssembler();
 
 	bool SelfTestMath();
+
+	// [VR] DoorVeil (with SeamlessDoors): the room change around a door is shown black. Started by a room load
+	// (camera.roomLoad) that begins while first person is armed; held through the load and until first person is back
+	// and the frame on screen is one drawn from the head (a matched render pose) for kShownVsyncs; let go if first person
+	// does not come back within kNoReturnVsyncs of the load's end, and after kMaxVsyncs in all. Pure: Apply feeds it.
+	struct DoorVeil
+	{
+		enum class Phase : u8
+		{
+			Idle,
+			Loading, // the room load runs
+			Waiting, // the load is over; waiting for first person's own frames on screen
+		};
+		struct In
+		{
+			bool enabled = false;      // the switches (SeamlessDoors, DoorVeil, VR + HeadCamera) and the VM running
+			bool fp_before = false;    // first person was armed on the previous vsync (its disarm grace included)
+			bool loading = false;      // camera.roomLoad holds
+			bool armed = false;        // first person armed this vsync
+			bool ours_shown = false;   // the frame on screen is one drawn from the head (a matched render pose)
+		};
+		static constexpr u32 kShownVsyncs = 2;
+		static constexpr u32 kNoReturnVsyncs = 90;
+		static constexpr u32 kMaxVsyncs = 1800;
+		Phase phase = Phase::Idle;
+		u32 total = 0;   // vsyncs since the veil began
+		u32 waited = 0;  // vsyncs since the load ended
+		u32 shown = 0;   // vsyncs in a row first person's own frames have been on screen
+		bool gave_up = false; // the last veil ended on a timeout
+		// This vsync: whether the view is held black.
+		bool Step(const In& in);
+	};
+
+	// [VR] GrabFacePull: the camera's yaw anchor eased toward target (radians, game yaw) over dt seconds, at most
+	// kGrabPullMaxDegS and kGrabPullGain times the error (so it slows into the target), and nothing within
+	// kGrabPullDoneDeg. *rate_frac: the turn's share of the top speed (for the comfort vignette).
+	static constexpr float kGrabPullMaxDegS = 20.0f;
+	static constexpr float kGrabPullGain = 1.5f;
+	static constexpr float kGrabPullDoneDeg = 3.0f;
+	float GrabPullStep(float anchor, float target, float dt, float* rate_frac = nullptr);
+
+	// [VR] GrabFirstPerson: whether lookAt.releaseWhen hands the camera back this vsync. released: an entry holds;
+	// grabbed: the profile's breakout.grabbed checks all hold (grabbed and still in normal play, so never down or dead).
+	constexpr bool LookAtReleasedFor(bool released, bool grabbed, bool grab_first_person)
+	{
+		return released && !(grab_first_person && grabbed);
+	}
+
+	bool SelfTestGrabDoor();
 }

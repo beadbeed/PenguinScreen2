@@ -2212,8 +2212,11 @@ namespace VR::CameraDriver
 		// camera_only ([VR] MenuPanel, a game screen up): the camera alone is written from the head. No stick turn (the
 		// right stick is the menu's D-pad), no aim, no walk-and-shoot, no body-follow heading, no walking for the
 		// vignette; the hands hold nothing. The yaw anchor stays where it was, so the view is the same when the screen goes.
+		// allow_turn (with camera_only; [VR] GrabFirstPerson, grabbed): the stick still turns the view (the camera's own yaw
+		// anchor; nothing of the character is written), as the sticks are not a menu's then.
 		bool ApplyLookAt(const ProfileDB::CameraLookAt& la, const std::optional<u32>& base, const EulerAngles& e,
-			const EulerAngles& e_cam, const HeadPose::Snapshot& pose, LookAtWrite* out, bool camera_only = false)
+			const EulerAngles& e_cam, const HeadPose::Snapshot& pose, LookAtWrite* out, bool camera_only = false,
+			bool allow_turn = false)
 		{
 			s_aim_moving = false;
 			s_screen_turn_rate.store(0.0f, std::memory_order_release);
@@ -2247,7 +2250,9 @@ namespace VR::CameraDriver
 			const bool smooth = la.smooth_turn_deg_s > 0.0f && !EmuConfig.VR.SnapTurn;
 			const bool snap = !smooth && (la.snap_turn_deg > 0.0f || la.smooth_turn_deg_s > 0.0f);
 			const float snap_deg = (la.snap_turn_deg > 0.0f) ? la.snap_turn_deg : 30.0f;
-			const bool want_input = !camera_only && la.yaw_anchor && (((smooth || snap) && la.snap_stick_hand >= 0) || la.has_aim);
+			const bool turn_ok = !camera_only || allow_turn;
+			const bool want_input =
+				la.yaw_anchor && ((turn_ok && (smooth || snap) && la.snap_stick_hand >= 0) || (!camera_only && la.has_aim));
 			if (want_input)
 				input = GetInputSnapshot();
 			const float turn_dt = TurnDt();
@@ -3496,8 +3501,224 @@ namespace VR::CameraDriver
 		return deflection;
 	}
 
+	bool DoorVeil::Step(const In& in)
+	{
+		if (!in.enabled)
+		{
+			phase = Phase::Idle;
+			return false;
+		}
+		if (phase == Phase::Idle)
+		{
+			if (!(in.loading && in.fp_before))
+				return false;
+			phase = Phase::Loading;
+			total = waited = shown = 0;
+			gave_up = false;
+			return true;
+		}
+		if (++total > kMaxVsyncs)
+		{
+			phase = Phase::Idle;
+			gave_up = true;
+			return false;
+		}
+		if (in.loading)
+		{
+			// The load (or another one straight after it): black throughout.
+			phase = Phase::Loading;
+			waited = shown = 0;
+			return true;
+		}
+		if (phase == Phase::Loading)
+		{
+			phase = Phase::Waiting;
+			waited = shown = 0;
+		}
+		waited++;
+		shown = (in.armed && in.ours_shown) ? shown + 1 : 0;
+		if (shown >= kShownVsyncs)
+		{
+			phase = Phase::Idle;
+			return false;
+		}
+		// First person did not come back (a cutscene, a scripted shot in the new room): show the game's own picture.
+		if (!(in.armed && in.ours_shown) && waited > kNoReturnVsyncs)
+		{
+			phase = Phase::Idle;
+			gave_up = true;
+			return false;
+		}
+		return true;
+	}
+
+	float GrabPullStep(float anchor, float target, float dt, float* rate_frac)
+	{
+		if (rate_frac)
+			*rate_frac = 0.0f;
+		if (!std::isfinite(anchor) || !std::isfinite(target) || !std::isfinite(dt) || dt <= 0.0f)
+			return anchor;
+		const float err = WrapPi(target - anchor);
+		const float done = kGrabPullDoneDeg * (PI_F / 180.0f);
+		if (std::abs(err) <= done)
+			return anchor;
+		const float max_rate = kGrabPullMaxDegS * (PI_F / 180.0f);
+		const float rate = std::min(max_rate, kGrabPullGain * std::abs(err));
+		const float step = std::min(rate * std::min(dt, 0.1f), std::abs(err));
+		if (rate_frac)
+			*rate_frac = std::clamp(rate / max_rate, 0.0f, 1.0f);
+		return WrapPi(anchor + std::copysign(step, err));
+	}
+
+	bool SelfTestGrabDoor()
+	{
+		bool ok = true;
+		const auto c = [&ok](bool v, const char* what) {
+			if (!v)
+			{
+				ok = false;
+				Console.Error("(VR) GrabDoor self-test FAIL: %s", what);
+			}
+		};
+		// LookAtReleasedFor: a grab keeps first person only with the switch; down, dead or turned (not "grabbed" in the
+		// profile's sense) still release.
+		c(!LookAtReleasedFor(false, false, true), "nothing holds: not released");
+		c(LookAtReleasedFor(true, false, true), "down/dead (not grabbed): released");
+		c(!LookAtReleasedFor(true, true, true), "grabbed, switch on: kept");
+		c(LookAtReleasedFor(true, true, false), "grabbed, switch off: released as before");
+		// DoorVeil: a door from first person.
+		{
+			DoorVeil v;
+			DoorVeil::In in;
+			in.enabled = true;
+			in.fp_before = true;
+			in.armed = true;
+			c(!v.Step(in), "no load: no veil");
+			in.loading = true;
+			c(v.Step(in), "the load starts from first person: black at once (the disarm grace still holds the view)");
+			in.fp_before = in.armed = false;
+			bool all = true;
+			for (int i = 0; i < 600; i++)
+				all = all && v.Step(in);
+			c(all, "black through a 10 s load");
+			in.loading = false;
+			for (int i = 0; i < 30; i++)
+				all = all && v.Step(in);
+			c(all && v.phase == DoorVeil::Phase::Waiting, "black after the load while first person is still off");
+			in.armed = true;
+			for (int i = 0; i < 8; i++)
+				all = all && v.Step(in);
+			c(all, "black while first person is armed but its own frames are not on screen yet");
+			in.ours_shown = true;
+			c(v.Step(in), "first own frame on screen: still black for the margin");
+			c(!v.Step(in) && v.phase == DoorVeil::Phase::Idle && !v.gave_up, "second own frame: the veil lets go");
+			c(!v.Step(in), "stays clear");
+		}
+		{
+			DoorVeil v;
+			DoorVeil::In in;
+			in.enabled = true;
+			in.loading = true;
+			c(!v.Step(in), "a load that starts with first person off (a cutscene, the door shot): no veil");
+			in.fp_before = true;
+			c(v.Step(in), "first person on as a load starts: veil");
+			in.enabled = false;
+			c(!v.Step(in) && v.phase == DoorVeil::Phase::Idle, "switched off mid-load: clear at once");
+		}
+		{
+			DoorVeil v;
+			DoorVeil::In in;
+			in.enabled = in.fp_before = in.loading = true;
+			v.Step(in);
+			in.loading = in.fp_before = false;
+			int n = 0;
+			while (v.Step(in) && n < 1000)
+				n++;
+			c(v.gave_up && n == static_cast<int>(DoorVeil::kNoReturnVsyncs),
+				"first person never comes back: the game's picture after kNoReturnVsyncs");
+			in.loading = true;
+			c(!v.Step(in), "after giving up, a load with first person off does not veil");
+		}
+		{
+			DoorVeil v;
+			DoorVeil::In in;
+			in.enabled = in.fp_before = in.loading = true;
+			int n = 0;
+			while (v.Step(in) && n < 5000)
+				n++;
+			c(v.gave_up && n == static_cast<int>(DoorVeil::kMaxVsyncs) + 1, "a load that never ends: clear after kMaxVsyncs");
+		}
+		{
+			// Own frames flicker (a vsync without the matched pose): the margin counts again.
+			DoorVeil v;
+			DoorVeil::In in;
+			in.enabled = in.fp_before = in.loading = true;
+			v.Step(in);
+			in.loading = false;
+			in.armed = true;
+			in.ours_shown = true;
+			v.Step(in);
+			in.ours_shown = false;
+			c(v.Step(in), "own frame lost again: still black");
+			in.ours_shown = true;
+			c(v.Step(in) && !v.Step(in), "two in a row again: clear");
+		}
+		// GrabPullStep: slow, eases in, never overshoots, the short way round, nothing near the target.
+		{
+			const float d = PI_F / 180.0f;
+			float r = 0.0f;
+			float a = GrabPullStep(0.0f, 90.0f * d, 1.0f / 60.0f, &r);
+			c(std::abs(a - (kGrabPullMaxDegS / 60.0f) * d) < 1e-4f && std::abs(r - 1.0f) < 1e-4f, "far: the top speed");
+			a = GrabPullStep(0.0f, 2.0f * d, 1.0f / 60.0f, &r);
+			c(a == 0.0f && r == 0.0f, "within 3 deg: no turn");
+			a = GrabPullStep(0.0f, 6.0f * d, 1.0f / 60.0f, &r);
+			c(a > 0.0f && a < (6.0f * kGrabPullGain / 60.0f + 0.01f) * d && r < 0.5f, "near: slower");
+			a = GrabPullStep(170.0f * d, -170.0f * d, 1.0f / 60.0f, &r);
+			c(a > 170.0f * d, "across the wrap: the short way");
+			float x = 0.0f;
+			float worst = 0.0f;
+			for (int i = 0; i < 1200; i++)
+			{
+				const float nx = GrabPullStep(x, 120.0f * d, 1.0f / 60.0f, &r);
+				worst = std::max(worst, std::abs(WrapPi(nx - x)) * 60.0f / d);
+				x = nx;
+			}
+			c(worst <= kGrabPullMaxDegS + 0.01f, "never faster than the top speed");
+			c(std::abs(WrapPi(120.0f * d - x)) <= kGrabPullDoneDeg * d + 1e-4f, "reaches the target (within 3 deg) in 20 s");
+			c(GrabPullStep(1.0f, std::numeric_limits<float>::quiet_NaN(), 0.016f, &r) == 1.0f && r == 0.0f, "NaN: unchanged");
+		}
+		Console.WriteLn("(VR) GrabDoor self-test: %s.", ok ? "passed" : "FAILED");
+		return ok;
+	}
+
 	namespace
 	{
+		// [VR] DoorVeil and [VR] GrabFirstPerson state, and their log lines.
+		DoorVeil s_door_veil;
+		bool s_door_veil_on = false;
+		u64 s_door_veil_vsync = 0;
+		u32 s_door_log_tail = 0; // PCSX2_VR_DOORLOG: vsyncs left to log after the last interesting one
+		bool s_grab_fp_logged = false;
+		u64 s_grab_fp_vsync = 0;
+
+		void SetDoorVeil(bool on, const char* why)
+		{
+			if (on == s_door_veil_on)
+				return;
+			s_door_veil_on = on;
+			HudCards::SetVeil(on);
+			if (on)
+			{
+				s_door_veil_vsync = s_vsync_counter;
+				Console.WriteLn("(VR) CameraDriver: the room change goes black ([VR] DoorVeil): %s.", why);
+			}
+			else
+			{
+				Console.WriteLn("(VR) CameraDriver: the room change's black lets go after %.2f s: %s.",
+					static_cast<double>(s_vsync_counter - s_door_veil_vsync) / 59.94, why);
+			}
+		}
+
 		// [VR] MenuPanelRoom = Freeze: one line as the camera's hold begins and one as it ends, with how far the head
 		// had turned from the held view and for how long.
 		void LogRoomFreeze(bool began, bool ended, const HeadPose::Snapshot& head)
@@ -3608,6 +3829,8 @@ namespace VR::CameraDriver
 			s_base.valid = false;
 			s_padlook = PadLookState{};
 			s_any_guard_fail_vsyncs = 0xFFFFFFFFu;
+			s_door_veil = DoorVeil{};
+			SetDoorVeil(false, "no VM");
 			ResetDeltaState();
 			PadLook::Publish(0.0f);
 			return;
@@ -3634,6 +3857,8 @@ namespace VR::CameraDriver
 			s_base.valid = false;
 			s_padlook = PadLookState{};
 			s_any_guard_fail_vsyncs = 0xFFFFFFFFu;
+			s_door_veil = DoorVeil{};
+			SetDoorVeil(false, "no camera profile");
 			if (vm_state == VMState::Running)
 			{
 				for (AnchorState& a : s_anchor)
@@ -3661,7 +3886,16 @@ namespace VR::CameraDriver
 
 		// releaseWhen (grabbed, down, dead) counts as a failed guard, so the usual disarm grace hands the camera
 		// back and first person returns, facing the way the character does, once it lets go.
-		if (GuardsPass(cam) && !LookAtReleased(cam, crc))
+		// [VR] GrabFirstPerson: grabbed (the profile's breakout.grabbed checks: grabbed and still in normal play) keeps
+		// first person instead, camera only; releaseWhen's other entries (down, dead, turned) still hand it back.
+		bool grab_keeps = false;
+		if (EmuConfig.VR.GrabFirstPerson && profile->breakout.has_value() && !profile->breakout->grabbed.empty() &&
+			vm_state == VMState::Running)
+		{
+			const std::optional<u32> grab_base = GetBase(cam, crc);
+			grab_keeps = grab_base.has_value() && RecordChecksPass(profile->breakout->grabbed, grab_base.value());
+		}
+		if (GuardsPass(cam) && !LookAtReleasedFor(LookAtReleased(cam, crc), grab_keeps, EmuConfig.VR.GrabFirstPerson))
 			s_guard_fail_vsyncs = 0;
 		else if (s_guard_fail_vsyncs < 0xFFFFFFFFu)
 			s_guard_fail_vsyncs++;
@@ -3729,6 +3963,55 @@ namespace VR::CameraDriver
 		                  (vm_state != VMState::Running) ? DisarmReason::NotRunning :
 		                  !pose.valid                    ? DisarmReason::NoHeadPose :
 		                                                   DisarmReason::GuardFailed;
+
+		// [VR] DoorVeil (with SeamlessDoors): a room load that starts in first person is shown black until first person's
+		// own frames are back on screen. Display only. Paused: held as it is.
+		if (vm_state == VMState::Running)
+		{
+			const bool room_loading = !cam.room_load.empty() && GuardListPass(cam.room_load);
+			DoorVeil::In vi;
+			vi.enabled = switched_on && EmuConfig.VR.SeamlessDoors && EmuConfig.VR.DoorVeil && !cam.room_load.empty();
+			vi.fp_before = s_armed_logged;
+			vi.loading = room_loading;
+			vi.armed = armed;
+			vi.ours_shown = armed && s_render_published && s_lookat_active.load(std::memory_order_relaxed);
+			const bool veil = s_door_veil.Step(vi);
+			SetDoorVeil(veil, veil ? "a room load from first person" :
+			                  !vi.enabled         ? "switched off" :
+			                  s_door_veil.gave_up ? "first person did not come back in time; the game's own picture" :
+			                                        "first person's own frames are on screen");
+			static const bool s_doorlog = (std::getenv("PCSX2_VR_DOORLOG") != nullptr);
+			if (s_doorlog)
+			{
+				const bool interesting = veil || room_loading || !GuardsPass(cam) || armed != s_armed_logged;
+				s_door_log_tail = interesting ? 240u : (s_door_log_tail ? s_door_log_tail - 1 : 0u);
+				if (s_door_log_tail)
+				{
+					std::string gv;
+					for (const ProfileDB::CameraGuard& g : cam.guards)
+					{
+						char b[24];
+						std::snprintf(b, sizeof(b), " %X", g.is_chain ? 0xFFFFFFFFu : ReadSized(g.ee_address, g.width));
+						gv += b;
+					}
+					float o = 0.0f;
+					HudCards::CurrentBlink(&o);
+					const bool la = s_lookat_active.load(std::memory_order_relaxed);
+					// What the compositor shows (as of the last vsync's drive): black under the veil or a blink, else the
+					// first-person screen with its own (matched) frame or a frame it cannot place (the game's camera, as
+					// after a re-arm), else the world screen with the game's own picture.
+					const char* shown = (o >= 0.99f)               ? "black" :
+					                    (la && s_render_published) ? "fp-own" :
+					                    la                         ? "fp-unmatched" :
+					                                                 "world";
+					Console.WriteLn("(VR) doorlog: v%llu guards%s load %d armed %d gfail %u lookat %d pub %d veil %d/%u blink %.2f "
+									"shown %s",
+						static_cast<unsigned long long>(s_vsync_counter), gv.c_str(), room_loading ? 1 : 0, armed ? 1 : 0,
+						s_guard_fail_vsyncs, la ? 1 : 0, s_render_published ? 1 : 0, static_cast<int>(s_door_veil.phase),
+						s_door_veil.total, o, shown);
+				}
+			}
+		}
 
 		if (armed != s_armed_logged)
 		{
@@ -3847,7 +4130,9 @@ namespace VR::CameraDriver
 		}
 		else
 			s_base_unresolved_vsyncs = 0;
-		s_local_record_valid = base.has_value();
+		// Grabbed in first person ([VR] GrabFirstPerson): the record is not handed out as first person's, so everything
+		// that waits on it (melee, the reload, the pickup cue, the wrist card) stands down as it did when a grab disarmed.
+		s_local_record_valid = base.has_value() && !grab_keeps;
 		s_local_guards_now = (s_guard_fail_vsyncs == 0);
 		s_local_record_base = base.value_or(0u);
 
@@ -3995,7 +4280,7 @@ namespace VR::CameraDriver
 			// The camera from the head, this vsync. camera_only ([VR] MenuPanel, a game screen up): nothing but the camera
 			// is written; the sticks, the aim and the body stay the menu's. held ([VR] MenuPanelRoom = Freeze): the pose to
 			// write it from instead of the head (the view as the screen came up), not predicted (it does not move).
-			const auto drive_camera = [&](bool camera_only, const HeadPose::Snapshot* held = nullptr) {
+			const auto drive_camera = [&](bool camera_only, const HeadPose::Snapshot* held = nullptr, bool allow_turn = false) {
 				const HeadPose::Snapshot& head_pose = held ? *held : pose;
 				// lookAt recenters yaw only, so pitch and roll stay level with gravity whatever the head was
 				// doing at the recenter.
@@ -4011,7 +4296,7 @@ namespace VR::CameraDriver
 				const EulerAngles look_cam{WrapPi(head_cam.yaw - s_ref_yaw), head_cam.pitch, head_cam.roll};
 				TrackRenderPose(la);
 				LookAtWrite w;
-				const bool wrote = ApplyLookAt(la, base, look, look_cam, head_pose, &w, camera_only);
+				const bool wrote = ApplyLookAt(la, base, look, look_cam, head_pose, &w, camera_only, allow_turn);
 				if (wrote)
 				{
 					w.fov_deg = fov_sizes_screen ? fov_now : 0.0f;
@@ -4066,7 +4351,47 @@ namespace VR::CameraDriver
 				bool began = false, ended = false;
 				s_room_freeze.Step(false, false, nullptr, pose, &began, &ended);
 				LogRoomFreeze(began, ended, pose);
-				drive_camera(false);
+				if (grab_keeps)
+				{
+					// [VR] GrabFirstPerson: grabbed. The camera from the head, camera only: nothing of the character is
+					// written (the grab moves Kevin; the eye follows his position as ever), the stick still turns the view.
+					if (!s_grab_fp_logged)
+					{
+						s_grab_fp_logged = true;
+						s_grab_fp_vsync = s_vsync_counter;
+						Console.WriteLn("(VR) CameraDriver: grabbed; first person holds, camera only ([VR] GrabFirstPerson%s).",
+							EmuConfig.VR.GrabFacePull ? ", the view eases toward the way you are held ([VR] GrabFacePull)" : "");
+					}
+					// [VR] GrabFacePull: the view's yaw anchor eases toward the character's heading (the grab turns him to
+					// face the zombie), so a seated player sees it straight ahead; the vignette covers the turn.
+					float pull = 0.0f;
+					if (EmuConfig.VR.GrabFacePull && la.yaw_anchor && s_yaw_anchor_valid && la.has_heading && base.has_value())
+					{
+						const s64 ha = static_cast<s64>(base.value()) + la.heading_offset;
+						if (ha >= 0 && ha + 2 <= static_cast<s64>(Ps2MemSize::MainRam))
+						{
+							const float heading =
+								static_cast<float>(static_cast<s16>(static_cast<u16>(memRead16(static_cast<u32>(ha))))) *
+								(2.0f * PI_F / 65536.0f);
+							s_yaw_anchor = GrabPullStep(s_yaw_anchor, heading, 1.0f / 59.94f, &pull);
+						}
+					}
+					drive_camera(true, nullptr, true);
+					// The comfort vignette for a stick turn or the pull (camera only skips its own sampling).
+					s_comfort_turn = std::max(s_comfort_turn, pull);
+					s_comfort_walk = 0.0f;
+					s_comfort_sampled = true;
+				}
+				else
+				{
+					if (s_grab_fp_logged)
+					{
+						s_grab_fp_logged = false;
+						Console.WriteLn("(VR) CameraDriver: no longer grabbed; first person as usual (camera only for %.2f s).",
+							static_cast<double>(s_vsync_counter - s_grab_fp_vsync) / 59.94);
+					}
+					drive_camera(false);
+				}
 			}
 		}
 		else if (s_lookat_active.load(std::memory_order_relaxed))
