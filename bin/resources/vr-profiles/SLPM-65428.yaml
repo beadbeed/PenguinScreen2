@@ -243,7 +243,15 @@ SLPM-65428:
     guards:
       - { address: 0x540004, equals: 3 }             # GAME overlay resident
       - { address: 0x48BF60, equals: 2, width: 1 }   # scenario status: in game
-      - { address: 0x3AEF75, equals: 0, width: 1 }   # room camera in normal mode (not a scripted shot)
+      - { address: 0x3AEF75, equals: 0, width: 1, alsoEquals: [4, 5], alsoWhenSetting: ScriptedShotsFirstPerson }   # room camera in normal mode (not a scripted shot)
+      # The room camera's modes (u8 0x3AEF75, dispatcher FUN_0058E420 from 0x5CDEF0): 0 the room's cuts, 1 a door, 2 an
+      # arrival, 3 grabbed, 4 a fixed cut (FUN_0058EB70: cut u8 0x3AEF55 for u16 0x3AEF56 frames, 0xFFFF until script op
+      # 0x15 lets go; it also holds the player's input, u8 0x48C019 = 1, every frame it runs), 5 the camera shake
+      # (FUN_0058EC30; the task FUN_005A94E0 adds a table's offsets to the eye's and target's y). With [VR]
+      # ScriptedShotsFirstPerson (on) modes 4 and 5 pass too: in mode 4 the room camera only picks the cut, through the same
+      # three cut handlers the silence entries below skip, so the VR eye stays the camera; the scripts that start them (op
+      # 0x13 / 0x16 and 37 game call sites) and the ones that wait on them (op 0x14 / 0x17 test the mode byte, which the game
+      # still sets and clears itself) run as before. Modes 1-3 and cutscenes (status 4) still hand over to the world screen.
     # The camera update flips the mode byte to 3 and back inside a frame about 12 times a second;
     # only hand the camera back once the guards have failed for 0.1 s.
     disarmAfterVsyncs: 6
@@ -296,6 +304,11 @@ SLPM-65428:
       # first word, so they are never left patched when the overlay changes, yet still put back after a savestate
       # load (only guarded entries are). Draw-only: no character record is written, so they apply online too.
       - { address: 0x590304, on: 0x00000000, off: 0x10400003, when: [{ address: 0x540004, equals: 3 }] }   # near-camera cull: always "not culled"
+      # The camera shake (mode 5, see the guards) moves the game's eye and target up and down; in first person the eye is
+      # your head, so with ScriptedShotsFirstPerson its two stores are skipped while first person is armed (offline). The
+      # rumble that comes with it (0x575550's pattern 1) still plays.
+      - { address: 0x5A95E4, on: 0x00000000, off: 0xE421633C, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: ScriptedShotsFirstPerson }   # shake task FUN_005A94E0: swc1 f1, eye y
+      - { address: 0x5A95F0, on: 0x00000000, off: 0xE4206348, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: ScriptedShotsFirstPerson }   # shake task: swc1 f0, target y
       - { address: 0x3452E0, on: 0x00000000, off: 0x1060000B, when: [{ address: 0x345210, equals: 0x27BDFFE0 }] }   # body pass: the focus character returns before its draw
       - { address: 0x3450F8, on: 0x00000000, off: 0x10600014, when: [{ address: 0x345020, equals: 0x27BDFFE0 }] }   # first pass: the focus character returns before its draw
       - { address: 0x560C74, on: 0x10620030, off: 0x10620008, when: [{ address: 0x540004, equals: 3 }] }   # held objects: owner == focus -> next object

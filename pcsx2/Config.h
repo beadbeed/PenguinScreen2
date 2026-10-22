@@ -1387,6 +1387,12 @@ struct Pcsx2Config
 		// updates (0.17-0.33 s), on top of the game's own reaction. Only how this console draws the enemy (its bone
 		// matrices, rebuilt every frame); never its position, HP or AI. Ini only, off by default.
 		bool MeleeHitJolt = false;
+		// First person, File #1 (the native-feel switches, tools/outbreak-vr/research/2026-10-22-native-feel.md). Ini only.
+		// ScriptedShotsFirstPerson: the game's scripted camera shots (room camera mode 4, a fixed cut for a while, and 5,
+		// the camera shake) keep first person: scripts run as before (their waits see the mode the game sets) and the VR eye
+		// stays the camera; the shake moves only the game's eye, not yours (its two stores are skipped, offline).
+		// Cutscenes (status 4) keep the world screen.
+		bool ScriptedShotsFirstPerson = true;
 		// First person, for profiles with a reach block: a light tick in the right hand and a short toast naming the item
 		// (and the button, "Kevin's 45 Auto  (A)") when something on the floor comes within reach of the character's own
 		// Circle press. Only reads the game's memory; shown in the headset only. Ini only for now.

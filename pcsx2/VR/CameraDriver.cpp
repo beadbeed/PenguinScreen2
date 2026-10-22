@@ -1004,6 +1004,16 @@ namespace VR::CameraDriver
 			return std::nullopt;
 		}
 
+		// A guard's alsoEquals values pass too while its alsoWhenSetting switch is on ([VR] ScriptedShotsFirstPerson: the
+		// room camera's scripted shot modes 4 and 5). The switch alone: first person itself is what keeps this offline or in
+		// private co-op, and the camera is only ever this console's.
+		bool GuardAlsoPasses(const ProfileDB::CameraGuard& g, u32 v)
+		{
+			if (g.also_equals.empty() || g.not_equals || !ProfileDB::SilenceSettingOn(g.also_when_setting))
+				return false;
+			return std::find(g.also_equals.begin(), g.also_equals.end(), v) != g.also_equals.end();
+		}
+
 		bool GuardListPass(const std::vector<ProfileDB::CameraGuard>& guards)
 		{
 			for (const ProfileDB::CameraGuard& g : guards)
@@ -1026,15 +1036,45 @@ namespace VR::CameraDriver
 					case 2: v = memRead16(address); break;
 					default: v = memRead32(address); break;
 				}
-				if ((v == g.equals) == g.not_equals)
+				if ((v == g.equals) == g.not_equals && !GuardAlsoPasses(g, v))
 					return false;
 			}
 			return true;
 		}
 
+		// The alsoEquals value a camera guard passed on last (0xFFFFFFFF: none), for the log when a scripted shot keeps
+		// first person ([VR] ScriptedShotsFirstPerson) and when it ends.
+		u32 s_also_value = 0xFFFFFFFFu;
+
 		bool GuardsPass(const ProfileDB::CameraProfile& cam)
 		{
-			return GuardListPass(cam.guards);
+			const bool pass = GuardListPass(cam.guards);
+			u32 also = 0xFFFFFFFFu;
+			u32 also_addr = 0;
+			if (pass)
+			{
+				for (const ProfileDB::CameraGuard& g : cam.guards)
+				{
+					if (g.also_equals.empty() || g.is_chain)
+						continue;
+					const u32 v = ReadSized(g.ee_address, g.width);
+					if (v != g.equals && GuardAlsoPasses(g, v))
+					{
+						also = v;
+						also_addr = g.ee_address;
+					}
+				}
+			}
+			if (also != s_also_value)
+			{
+				if (also != 0xFFFFFFFFu)
+					Console.WriteLn("(VR) CameraDriver: scripted shot (0x%08X reads %u) keeps first person "
+									"(ScriptedShotsFirstPerson); the game's script runs on.", also_addr, also);
+				else if (s_also_value != 0xFFFFFFFFu)
+					Console.WriteLn("(VR) CameraDriver: scripted shot %u over.", s_also_value);
+				s_also_value = also;
+			}
+			return pass;
 		}
 
 		u32 ReadSized(u32 address, u8 width)
@@ -1106,7 +1146,7 @@ namespace VR::CameraDriver
 					address = static_cast<u32>(a);
 				}
 				const u32 v = ReadSized(address, g.width);
-				if ((v == g.equals) == g.not_equals)
+				if ((v == g.equals) == g.not_equals && !GuardAlsoPasses(g, v))
 				{
 					std::snprintf(buf, sizeof(buf), "guard %zu (0x%08X, %u byte(s)) reads 0x%X, wants %s0x%X", i + 1, address,
 						static_cast<unsigned>(g.width), v, g.not_equals ? "not " : "", g.equals);

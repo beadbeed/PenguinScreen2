@@ -181,6 +181,11 @@ namespace VR::ProfileDB
 		u32 pointer_addr = 0;
 		std::vector<s32> deref_offsets;
 		s32 offset = 0;
+		// alsoEquals / alsoWhenSetting: while that VR switch is on (ProfileDB::SilenceSettingOn), the guard also passes on
+		// these values (an equals guard only). E.g. the room camera mode guard also takes the scripted shots, modes 4 and 5,
+		// with [VR] ScriptedShotsFirstPerson.
+		std::vector<u32> also_equals;
+		std::string also_when_setting;
 	};
 
 	struct CameraWriteOp
