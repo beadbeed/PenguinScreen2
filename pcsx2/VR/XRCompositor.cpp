@@ -7157,6 +7157,10 @@ namespace VR::XRCompositor
 					r.fov.angleUp * kDeg, r.fov.angleDown * kDeg, l.subImage.imageRect.extent.width,
 					l.subImage.imageRect.extent.height, l.next ? "with depth" : "no depth");
 			}
+			static std::atomic_bool s_depth_logged{false};
+			if (set.fp_views[0].next && set.fp_views[1].next && !s_depth_logged.exchange(true))
+				Console.WriteLn("(VR) TrueStereo: first per-eye projection layer with each eye's depth (%.3f..%.1f m).",
+					set.fp_depth_info[0].nearZ, set.fp_depth_info[0].farZ);
 			return true;
 		}
 

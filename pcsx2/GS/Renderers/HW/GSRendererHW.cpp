@@ -6436,6 +6436,7 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 		bool ok = VR::StereoState::GameCamera(&cam.fx, &cam.fy, &cam.cx, &cam.cy);
 		float test_pose[4] = {};
 		bool has_test_pose = false;
+		float eye_tan[2][4] = {};
 		if (ok)
 		{
 			VR::EyeProjection::EyeSpec spec;
@@ -6481,6 +6482,7 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 			if (VR::StereoState::HeadRoll(&roll) && std::isfinite(roll))
 				spec.roll_rad = roll;
 			ok = VR::EyeProjection::Build(cam, spec, eyes);
+			std::memcpy(eye_tan, spec.tan, sizeof(eye_tan));
 			if (ok && has_test_pose)
 			{
 				for (int e = 0; e < 2; e++)
@@ -6497,7 +6499,10 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 			const GSVector4i cover = m_r.rintersect(full);
 			const bool fills = kind == 0.0f && !cover.rempty() && full.width() > 0 && full.height() > 0 &&
 							   cover.width() * 100 >= full.width() * 95 && cover.height() * 100 >= full.height() * 95;
-			if (fills)
+			// A game screen split onto the menu panel ([VR] MenuPanel): its flat draws stay where the game put them, so
+			// the panel shows them as it does without TrueStereo; the room under them is still drawn per eye.
+			const bool panel_flat = kind == 0.0f && EmuConfig.VR.MenuPanel && VR::MenuPanel::SplitOn();
+			if (fills || panel_flat)
 			{
 				m_conf.cb_vs.vr_map_mode = 0;
 				m_conf.cb_vs.vr_stereo = GSVector2(0.0f, 0.0f);
@@ -6509,7 +6514,24 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 				m_conf.cb_vs.vr_map_mode = 3;
 				m_conf.cb_vs.vr_stereo = GSVector2(0.0f, 0.0f);
 				m_conf.cb_vs.vr_band[0].w = 0.0f;
-				m_conf.cb_vs.vr_eye_in = GSVector4(cam.fx, cam.fy, cam.cx, cam.cy);
+				// Flat draws: the game's 2D screen as a plane 1.5 m ahead, sized to 90% of the view both eyes share, so
+				// the HUD's edges stay in sight whatever the headset's field of view.
+				float flat_fx = cam.fx, flat_fy = cam.fy;
+				if (kind == 0.0f)
+				{
+					float th = 10.0f, tv = 10.0f;
+					for (int e = 0; e < 2; e++)
+					{
+						th = std::min(th, std::min(-eye_tan[e][0], eye_tan[e][1]));
+						tv = std::min(tv, std::min(eye_tan[e][2], -eye_tan[e][3]));
+					}
+					if (th > 0.05f && tv > 0.05f)
+					{
+						flat_fx = cam.half_w / (0.9f * th);
+						flat_fy = -cam.half_h / (0.9f * tv);
+					}
+				}
+				m_conf.cb_vs.vr_eye_in = GSVector4(flat_fx, flat_fy, cam.cx, cam.cy);
 				m_conf.cb_vs.vr_eye_fit = GSVector4(s_vr_zqfit.a0, s_vr_zqfit.beta, 1.5f * cam.units_per_m, kind);
 				for (int e = 0; e < 2; e++)
 				{

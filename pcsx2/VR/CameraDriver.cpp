@@ -2926,8 +2926,11 @@ namespace VR::CameraDriver
 			                          !screen.curved &&
 			                          ScreenMatchesFov(profile.fp_screen_distance.value_or(1.5f), profile.fp_screen_height.value(),
 										  profile_fov);
+			// [VR] TrueStereo draws each eye's own window out of the game camera's view, so the view must cover both eyes:
+			// it always takes Auto's fit (the union of both eyes' angles and the cant, plus the margin).
 			const bool want_auto =
-				sizes_screen && EmuConfig.VR.FirstPersonFov == Pcsx2Config::VROptions::FirstPersonFovMode::Auto;
+				sizes_screen && (EmuConfig.VR.FirstPersonFov == Pcsx2Config::VROptions::FirstPersonFovMode::Auto ||
+									StereoState::TrueStereoActive());
 			const XRCompositor::EyeInfo eyes = XRCompositor::GetEyeInfo();
 			const EyeReach reach = eyes.valid ? ReachOf(eyes.fov_deg, eyes.cant_deg) : EyeReach{};
 			const float margin = std::isfinite(EmuConfig.VR.FirstPersonFovMarginDeg) ?
