@@ -1407,6 +1407,28 @@ struct Pcsx2Config
 		// hand as a pistol-whip, strikes through the contact path with the knife's attack at a fist-sized sphere, scaled to
 		// a light hit (cave H); no ammo or durability spent. Ini only, off by default.
 		bool PhysicalMeleeFists = false;
+		// First person, File #1 (the native-feel switches, tools/outbreak-vr/research/2026-10-22-native-feel.md). Ini only.
+		// ScriptedShotsFirstPerson: the game's scripted camera shots (room camera mode 4, a fixed cut for a while, and 5,
+		// the camera shake) keep first person: scripts run as before (their waits see the mode the game sets) and the VR eye
+		// stays the camera; the shake moves only the game's eye, not yours (its two stores are skipped, offline).
+		// Cutscenes (status 4) keep the world screen.
+		bool ScriptedShotsFirstPerson = true;
+		// HeadInWall: the VR eye stops short of the game's own walls (a read-only copy of the room's player collision,
+		// grid A and the moving faces; nothing is written but the eye first person already writes), and the view
+		// darkens past 15 cm into a wall.
+		bool HeadInWall = true;
+		// SpatialAudio: a code cave puts the game's stereo pan of positioned sounds round the whole head (behind you
+		// is centred, beside you fully left or right) instead of across the screen only. Offline only.
+		bool SpatialAudio = true;
+		// GameRumbleEvents: the game's own rumble player (its patterns for damage, firing, grabs...) drives the VR
+		// controllers, read from game memory: firing on the gun hand, the rest on both; our own hurt and shot pulses
+		// then sit out (the heartbeat, reload and empty clicks stay). Replaces the pad forwarding (GameRumble) while on.
+		bool GameRumbleEvents = true;
+		// FadeDim: the game's full-screen fades (the fade quad FUN_001B9DA0 draws from u32 0x308894 on, f32 0x30889C level,
+		// u32 0x308898 colour) dim the whole first-person view instead (head-locked, eased; black fades only), and the
+		// game's quad is skipped while first person draws (offline). The brightness option's own pass (u8 0x3065C0) is
+		// left alone.
+		bool FadeDim = true;
 		// First person, for profiles with a reach block: a light tick in the right hand and a short toast naming the item
 		// (and the button, "Kevin's 45 Auto  (A)") when something on the floor comes within reach of the character's own
 		// Circle press. Only reads the game's memory; shown in the headset only. Ini only for now.

@@ -544,6 +544,31 @@ static bool parseGuardList(const std::string_view serial, const ryml::ConstNodeR
 		guard.equals = eq.value();
 		warnHexTrap(serial, eq_raw, eq.value(), what);
 		warnWidthFit(serial, eq.value(), guard.width, what);
+		if (g.has_child("alsoEquals") || g.has_child("alsoWhenSetting"))
+		{
+			const std::string setting = g.has_child("alsoWhenSetting") ? std::string(nodeVal(g["alsoWhenSetting"])) : std::string();
+			bool ok = !has_ne && g.has_child("alsoEquals") && g["alsoEquals"].is_seq() && VR::ProfileDB::IsSilenceSettingName(setting);
+			if (ok)
+			{
+				for (const ryml::ConstNodeRef& vn : g["alsoEquals"].children())
+				{
+					const std::optional<u32> v = parseHexU32(nodeVal(vn));
+					if (!v.has_value() || guard.also_equals.size() >= 8)
+					{
+						ok = false;
+						break;
+					}
+					guard.also_equals.push_back(v.value());
+				}
+			}
+			if (!ok || guard.also_equals.empty())
+			{
+				Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a {} with a bad alsoEquals / alsoWhenSetting (an equals guard, "
+								   "up to 8 values and a known switch); skipping it.", serial, what);
+				continue;
+			}
+			guard.also_when_setting = setting;
+		}
 		out.push_back(guard);
 	}
 	return out.size() - before == seen;
@@ -5644,7 +5669,8 @@ bool VR::ProfileDB::IsSilenceSettingName(std::string_view name)
 {
 	return name == "SeamlessDoors" || name == "PhysicalMelee" || name == "PhysicalMeleeContact" || name == "MeleeHitJolt" ||
 	       name == "GunRayAim" ||
-	       name == "HandPickup";
+	       name == "HandPickup" ||
+	       name == "ScriptedShotsFirstPerson" || name == "SpatialAudio" || name == "FadeDim";
 }
 
 bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
@@ -5666,6 +5692,12 @@ bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
 	// Real hand pickups' cave (the Circle search at the hand): strictly offline (SilenceSettingCoopLive says no for it).
 	if (name == "HandPickup")
 		return EmuConfig.VR.HandPickup;
+	if (name == "ScriptedShotsFirstPerson")
+		return EmuConfig.VR.ScriptedShotsFirstPerson;
+	if (name == "SpatialAudio")
+		return EmuConfig.VR.SpatialAudio;
+	if (name == "FadeDim")
+		return EmuConfig.VR.FadeDim;
 	return false;
 }
 

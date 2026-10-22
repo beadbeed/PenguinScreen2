@@ -291,6 +291,58 @@ namespace VR::GameFeedback
 		float s_rumble_small = 0.0f;
 		bool s_rumble_buzzing = false;
 
+		// [VR] GameRumbleEvents: the game's own rumble player (File #1: u8 0x2F87D0 +0 the pad can rumble, +1 playing,
+		// s16 +0xC frames left in the step, s16 +0xE the next step, u32 +0x10 the pattern; a step is 8 bytes, s16 frames and
+		// a pointer to the two motor bytes FUN_001B8F10 sends: small on (bit 0), large 0-255; the 9 patterns at 0x217220;
+		// the game's vibration option u8 0x3065BF). Read every vsync, nothing written.
+		constexpr u32 kRumblePlayer = 0x2F87D0u;
+		constexpr u32 kRumbleOption = 0x3065BFu;
+		constexpr u32 kRumblePatterns = 0x217220u;
+		constexpr u32 kRumblePatternCount = 9;
+		constexpr u64 kRumbleShotWindowMs = 300; // a pattern starting this near a shot is the shot's (the gun hand)
+		constexpr u64 kRumbleHurtWindowMs = 300;
+		struct GameRumbleState
+		{
+			bool live = false; // the switch on, File #1, the pad and the option let the game rumble
+			bool playing = false;
+			u32 pattern = 0;
+			int index = -1; // in the pattern table, -1 unknown
+			u64 start_ms = 0;
+			bool gun = false; // on the gun hand only (the pattern came with a shot)
+			float left = 0.0f, right = 0.0f;
+			bool logged_live = false;
+			bool logged_off = false;
+			std::vector<u16> shot_items; // weapons the game was seen to rumble for on a shot: our kick sits out for them
+			bool hurt = false; // the game was seen to rumble on a hit: our hurt pulse sits out
+		};
+		GameRumbleState s_game_rumble;
+		u64 s_last_shot_ms = 0;
+		u16 s_last_shot_item = 0;
+		u64 s_last_hurt_ms = 0;
+
+		bool GameRumbleTakesShot(u16 item)
+		{
+			return s_game_rumble.live &&
+			       std::find(s_game_rumble.shot_items.begin(), s_game_rumble.shot_items.end(), item) != s_game_rumble.shot_items.end();
+		}
+		bool GameRumbleTakesHurt()
+		{
+			return s_game_rumble.live && s_game_rumble.hurt;
+		}
+
+		// [VR] GameRumbleEvents, pure: the game's two motors (small on/off, large 0-255) to the hands. Large is the
+		// strength (0xFF full, 0x7F half); small alone a light buzz (0.2). A shot's pattern goes to the gun (right) hand
+		// only, the rest to both.
+		void MapGameRumble(bool small_on, u8 large, bool gun, float strength, float* left, float* right)
+		{
+			float amp = static_cast<float>(large) / 255.0f;
+			if (small_on)
+				amp = std::max(amp, 0.2f);
+			amp = std::clamp(amp * strength, 0.0f, 1.0f);
+			*right = amp;
+			*left = gun ? 0.0f : amp;
+		}
+
 		void Pulse(int hand, float amplitude, float seconds, float strength)
 		{
 			const float a = std::clamp(amplitude * strength, 0.0f, 1.0f);
@@ -391,8 +443,13 @@ namespace VR::GameFeedback
 			{
 				const float amp = kHurtBase + kHurtGain * frac;
 				const float ms = kHurtMinMs + (kHurtMaxMs - kHurtMinMs) * frac;
-				Pulse(kLeft, amp, ms / 1000.0f, s.strength);
-				Pulse(kRight, amp, ms / 1000.0f, s.strength);
+				s_last_hurt_ms = s.now_ms;
+				// [VR] GameRumbleEvents: once the game's own hit rumble has been seen, it is the hit's buzz.
+				if (!GameRumbleTakesHurt())
+				{
+					Pulse(kLeft, amp, ms / 1000.0f, s.strength);
+					Pulse(kRight, amp, ms / 1000.0f, s.strength);
+				}
 				u32 skipped = 0;
 				if (s.log && TakeLog(s_log_hurt, s.now_ms, kLogIntervalMs, &skipped))
 					Console.WriteLn("(VR) Feedback: hurt, HP %u -> %u of %u, both hands %.2f for %.0f ms%s.",
@@ -440,10 +497,15 @@ namespace VR::GameFeedback
 				{
 					st.view.shot_serial++;
 					st.view.shot_ms = w.now_ms;
-					Pulse(w.aim_hand, kick.amp, kick.seconds, w.strength);
+					s_last_shot_ms = w.now_ms;
+					s_last_shot_item = w.item_id;
+					// [VR] GameRumbleEvents: a weapon the game was seen to rumble for gets the game's own firing rumble.
+					const bool game_kick = GameRumbleTakesShot(w.item_id);
+					if (!game_kick)
+						Pulse(w.aim_hand, kick.amp, kick.seconds, w.strength);
 					// A long gun's kick reaches the left hand too while it holds the fore-end.
 					const bool supported = w.support && kick.support_amp > 0.0f && w.aim_hand != kLeft;
-					if (supported)
+					if (supported && !game_kick)
 						Pulse(kLeft, kick.support_amp, kick.seconds, w.strength);
 					u32 skipped = 0;
 					if (w.log && TakeLog(s_log_shot, w.now_ms, kLogIntervalMs, &skipped))
@@ -587,6 +649,106 @@ namespace VR::GameFeedback
 				Console.WriteLn("(VR) Feedback: the game's rumble on pad %d goes to the VR controllers.", port + 1);
 			else
 				Console.WriteLn("(VR) Feedback: game rumble forwarding stopped.");
+		}
+
+		bool IsFile1Crc(u32 crc)
+		{
+			return crc == 0x32088394u || crc == 0x198EFDC1u || crc == 0x03C8F393u || crc == 0x32097C02u || crc == 0x03C90C05u;
+		}
+
+		// [VR] GameRumbleEvents: the game's rumble player each vsync -> both controllers (or the gun hand for a shot).
+		void PollGameRumble(bool run, float strength)
+		{
+			GameRumbleState& g = s_game_rumble;
+			const u64 now = CameraDriver::SteadyNowMs();
+			bool live = run && EmuConfig.VR.GameRumbleEvents && VMManager::GetState() == VMState::Running &&
+			            IsFile1Crc(VMManager::GetDiscCRC());
+			if (live)
+			{
+				const u32 cap = memRead8(kRumblePlayer);
+				const u32 option = memRead8(kRumbleOption);
+				live = (cap == 1 && option != 0);
+				if (!live && !g.logged_off)
+				{
+					g.logged_off = true;
+					Console.Warning("(VR) Feedback: the game's rumble player is off (pad can rumble %u, vibration option %u); "
+									"the pad rumble forwarding and our own cues stay.", cap, option);
+				}
+			}
+			float left = 0.0f, right = 0.0f;
+			if (live)
+			{
+				if (!g.logged_live)
+				{
+					g.logged_live = true;
+					g.logged_off = false;
+					Console.WriteLn("(VR) Feedback: the game's own rumble player drives the controllers (GameRumbleEvents).");
+				}
+				const bool playing = memRead8(kRumblePlayer + 1) != 0;
+				const u32 pattern = memRead32(kRumblePlayer + 0x10);
+				const s16 step = static_cast<s16>(memRead16(kRumblePlayer + 0xE));
+				const u32 pat = pattern & 0x1FFFFFFFu;
+				if (playing && pattern != 0 && pat + 0x200 < Ps2MemSize::MainRam && step >= 1 && step < 64)
+				{
+					if (!g.playing || pattern != g.pattern)
+					{
+						g.playing = true;
+						g.pattern = pattern;
+						g.start_ms = now;
+						g.index = -1;
+						for (u32 i = 0; i < kRumblePatternCount; i++)
+							if (memRead32(kRumblePatterns + i * 4) == pattern)
+								g.index = static_cast<int>(i);
+						g.gun = (now >= s_last_shot_ms && now - s_last_shot_ms <= kRumbleShotWindowMs);
+						if (now >= s_last_hurt_ms && now - s_last_hurt_ms <= kRumbleHurtWindowMs && !g.gun && !g.hurt)
+						{
+							g.hurt = true;
+							Console.WriteLn("(VR) Feedback: the game rumbles on a hit (pattern %d); our hurt pulse sits out.", g.index);
+						}
+						u32 skipped = 0;
+						if (TakeLog(s_log_rumble, now, kLogIntervalMs, &skipped))
+							Console.WriteLn("(VR) Feedback: game rumble pattern %d (0x%08X) starts, %s%s.", g.index, pattern,
+								g.gun ? "the gun hand (with a shot)" : "both hands", MoreSuffix(skipped).text);
+					}
+					// A shot seen just after the pattern started makes it the shot's too.
+					if (!g.gun && s_last_shot_ms >= g.start_ms && s_last_shot_ms - g.start_ms <= kRumbleShotWindowMs)
+						g.gun = true;
+					if (g.gun && s_last_shot_item != 0 &&
+						std::find(g.shot_items.begin(), g.shot_items.end(), s_last_shot_item) == g.shot_items.end())
+					{
+						g.shot_items.push_back(s_last_shot_item);
+						Console.WriteLn("(VR) Feedback: the game rumbles when item %u fires (pattern %d); our kick sits out for it.",
+							s_last_shot_item, g.index);
+					}
+					const u32 at = memRead32(pat + static_cast<u32>(step - 1) * 8u + 4u) & 0x1FFFFFFFu;
+					if (at + 2 <= Ps2MemSize::MainRam)
+					{
+						const u32 small_on = memRead8(at) & 1u;
+						const u32 large = memRead8(at + 1);
+						MapGameRumble(small_on != 0, static_cast<u8>(large), g.gun, strength, &left, &right);
+					}
+				}
+				else
+				{
+					g.playing = false;
+					g.pattern = 0;
+				}
+			}
+			else
+			{
+				g.playing = false;
+				g.pattern = 0;
+				g.logged_live = false;
+			}
+			g.live = live;
+			std::lock_guard<std::mutex> lock(s_rumble_mutex);
+			if (left != g.left || right != g.right)
+			{
+				XRInput::QueueHaptic(kLeft, left);
+				XRInput::QueueHaptic(kRight, right);
+				g.left = left;
+				g.right = right;
+			}
 		}
 
 		// The pickup cue (profile reach:): what ItemReach needs from the camera driver this vsync. It reads its own memory
@@ -794,6 +956,8 @@ namespace VR::GameFeedback
 		const float strength = HapticStrength();
 		s_strength.store(strength, std::memory_order_relaxed);
 		UpdateRumbleTarget(profile, fb);
+		// The game's own rumble player: in a session, or under the headset-free scripted input (for its log).
+		PollGameRumble(session || XRInput::TestInputActive(), strength);
 
 		// The pickup cue and hand targeting also run under the headset-free scripted test input (PINE, PCSX2_VR_TEST_INPUT,
 		// never online), so the test kit can reach them; rumble and the other cues stay session-only.
@@ -926,6 +1090,9 @@ namespace VR::GameFeedback
 		const int port = s_rumble_port.load(std::memory_order_acquire);
 		if (port < 0 || pad != static_cast<u32>(port))
 			return;
+		// [VR] GameRumbleEvents reads the game's rumble player itself (same CPU thread); the pad copy would double it.
+		if (s_game_rumble.live)
+			return;
 		const float large = std::isfinite(large_motor) ? std::clamp(large_motor, 0.0f, 1.0f) : 0.0f;
 		const float small_level = std::isfinite(small_motor) ? std::clamp(small_motor, 0.0f, 1.0f) : 0.0f;
 
@@ -956,6 +1123,13 @@ namespace VR::GameFeedback
 	{
 		std::lock_guard<std::mutex> lock(s_rumble_mutex);
 		StopRumbleLocked();
+		if (s_game_rumble.left > 0.0f || s_game_rumble.right > 0.0f)
+		{
+			XRInput::QueueHaptic(kLeft, 0.0f);
+			XRInput::QueueHaptic(kRight, 0.0f);
+		}
+		s_game_rumble.left = 0.0f;
+		s_game_rumble.right = 0.0f;
 	}
 
 	void OnStateLoaded()
@@ -992,6 +1166,23 @@ namespace VR::GameFeedback
 		};
 
 		none(); // drop anything already queued
+
+		// [VR] GameRumbleEvents: the game's motors to the hands.
+		{
+			float l = -1.0f, r = -1.0f;
+			MapGameRumble(false, 0xFF, false, 1.0f, &l, &r);
+			check(approx(l, 1.0f) && approx(r, 1.0f), "game rumble: large 0xFF -> both hands full");
+			MapGameRumble(false, 0xBF, false, 1.0f, &l, &r);
+			check(approx(l, 0.749f) && approx(r, 0.749f), "game rumble: large 0xBF -> 0.75");
+			MapGameRumble(true, 0, false, 1.0f, &l, &r);
+			check(approx(l, 0.2f) && approx(r, 0.2f), "game rumble: small alone -> a light 0.2 buzz");
+			MapGameRumble(true, 0x7F, true, 1.0f, &l, &r);
+			check(approx(l, 0.0f) && approx(r, 0.498f), "game rumble: a shot's pattern on the gun hand only");
+			MapGameRumble(false, 0xFF, false, 0.5f, &l, &r);
+			check(approx(l, 0.5f) && approx(r, 0.5f), "game rumble: HapticStrength scales it");
+			MapGameRumble(false, 0, false, 1.0f, &l, &r);
+			check(l == 0.0f && r == 0.0f, "game rumble: motors off -> nothing");
+		}
 
 		// Hit: the first read is a baseline; a drop pulses both hands at 0.4 + 0.6 d/max for 120-250 ms.
 		CueState st;

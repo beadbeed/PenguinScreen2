@@ -1068,6 +1068,7 @@ set(pcsx2VRSources
 	VR/GameFeedback.cpp
 	VR/GameModels.cpp
 	VR/GrabBreakout.cpp
+	VR/HeadInWall.cpp
 	VR/HandMesh.cpp
 	VR/HandModel.cpp
 	VR/HudCards.cpp
@@ -1075,6 +1076,7 @@ set(pcsx2VRSources
 	VR/HandPickup.cpp
 	VR/ItemReach.cpp
 	VR/MenuPointer.cpp
+	VR/SpatialAudio.cpp
 	VR/SplitState.cpp
 	VR/SeatCast.cpp
 	VR/SeatSession.cpp
@@ -1112,6 +1114,7 @@ set(pcsx2VRHeaders
 	VR/GameFeedback.h
 	VR/GameModels.h
 	VR/GrabBreakout.h
+	VR/HeadInWall.h
 	VR/HandMesh.h
 	VR/HandModel.h
 	VR/HudCards.h
@@ -1119,6 +1122,7 @@ set(pcsx2VRHeaders
 	VR/HandPickup.h
 	VR/ItemReach.h
 	VR/MenuPointer.h
+	VR/SpatialAudio.h
 	VR/SplitState.h
 	VR/SeatCast.h
 	VR/SeatSession.h

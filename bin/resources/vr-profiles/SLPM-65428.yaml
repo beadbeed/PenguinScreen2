@@ -258,7 +258,15 @@ SLPM-65428:
     guards:
       - { address: 0x540004, equals: 3 }             # GAME overlay resident
       - { address: 0x48BF60, equals: 2, width: 1 }   # scenario status: in game
-      - { address: 0x3AEF75, equals: 0, width: 1 }   # room camera in normal mode (not a scripted shot)
+      - { address: 0x3AEF75, equals: 0, width: 1, alsoEquals: [4, 5], alsoWhenSetting: ScriptedShotsFirstPerson }   # room camera in normal mode (not a scripted shot)
+      # The room camera's modes (u8 0x3AEF75, dispatcher FUN_0058E420 from 0x5CDEF0): 0 the room's cuts, 1 a door, 2 an
+      # arrival, 3 grabbed, 4 a fixed cut (FUN_0058EB70: cut u8 0x3AEF55 for u16 0x3AEF56 frames, 0xFFFF until script op
+      # 0x15 lets go; it also holds the player's input, u8 0x48C019 = 1, every frame it runs), 5 the camera shake
+      # (FUN_0058EC30; the task FUN_005A94E0 adds a table's offsets to the eye's and target's y). With [VR]
+      # ScriptedShotsFirstPerson (on) modes 4 and 5 pass too: in mode 4 the room camera only picks the cut, through the same
+      # three cut handlers the silence entries below skip, so the VR eye stays the camera; the scripts that start them (op
+      # 0x13 / 0x16 and 37 game call sites) and the ones that wait on them (op 0x14 / 0x17 test the mode byte, which the game
+      # still sets and clears itself) run as before. Modes 1-3 and cutscenes (status 4) still hand over to the world screen.
     # The camera update flips the mode byte to 3 and back inside a frame about 12 times a second;
     # only hand the camera back once the guards have failed for 0.1 s.
     disarmAfterVsyncs: 6
@@ -315,6 +323,101 @@ SLPM-65428:
       # first word, so they are never left patched when the overlay changes, yet still put back after a savestate
       # load (only guarded entries are). Draw-only: no character record is written, so they apply online too.
       - { address: 0x590304, on: 0x00000000, off: 0x10400003, when: [{ address: 0x540004, equals: 3 }] }   # near-camera cull: always "not culled"
+      # The camera shake (mode 5, see the guards) moves the game's eye and target up and down; in first person the eye is
+      # your head, so with ScriptedShotsFirstPerson its two stores are skipped while first person is armed (offline). The
+      # rumble that comes with it (0x575550's pattern 1) still plays.
+      - { address: 0x5A95E4, on: 0x00000000, off: 0xE421633C, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: ScriptedShotsFirstPerson }   # shake task FUN_005A94E0: swc1 f1, eye y
+      - { address: 0x5A95F0, on: 0x00000000, off: 0xE4206348, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: ScriptedShotsFirstPerson }   # shake task: swc1 f0, target y
+      # Fades (VR setting FadeDim, on): the game's full-screen fade is a quad FUN_001B9DA0 draws while u32 0x308894 is
+      # non-zero, its alpha 255 x f32 0x30889C in the colour u32 0x308898 (set by the fade starters FUN_001B9BA0 / 9C30).
+      # In first person the host dims the whole view by it instead (HudCards' view dim, head-locked, all of the view, the
+      # hands too), so this skips the quad (beq v1,zero -> beq zero,zero at its on check) while first person is armed and
+      # the fade's colour is black. (u8 0x3065C0 and FUN_001BAB90 are the brightness option, not a fade: left alone.)
+      - { address: 0x1B9DCC, on: 0x10000029, off: 0x10600029, when: [{ address: 0x1B9DA0, equals: 0x27BDFFD0 }, { address: 0x308898, equals: 0 }], offlineOnly: true, whenSetting: FadeDim }   # FUN_001B9DA0: the fade quad not drawn
+      # Spatial audio (VR setting SpatialAudio, on; tools/outbreak-vr/research/2026-10-22-native-feel.md). The game pans a
+      # positioned sound by where it lands across the screen (FUN_001B7B50: through the view and the screen matrix, x 0-640
+      # -> pan 0-127, a sound behind mirrored), so only sounds inside the view pan at all. The site calls a cave at 0xFC000
+      # instead of FUN_00191A10: it runs that projection as before, then, while the host block at 0xFF400 reads 'SPA1'
+      # (VR::SpatialAudio, written offline while first person is armed), writes x = 322.5 + 320 sin(azimuth) of the emitter
+      # in view space (0x3062E0, your head in first person) and w = +1: ahead and behind centred, beside you full left or
+      # right. Volume stays the game's (distance). The site first, then the cave (camera.caves: all or nothing). Main-program
+      # code, guarded by FUN_001B7B50's first word.
+      - { address: 0x1B7C28, on: 0x0C03F000, off: 0x0C064684, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }, { address: 0xFC000, equals: 0x27BDFFD0 }], offlineOnly: true, whenSetting: SpatialAudio }   # FUN_001B7B50: jal 0xFC000 (the cave) over jal 0x191A10
+      - { address: 0x0FC000, on: 0x27BDFFD0, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # addiu sp,sp,-48
+      - { address: 0x0FC004, on: 0xFFBF0000, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # sd ra,0(sp)
+      - { address: 0x0FC008, on: 0xFFB00010, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # sd s0,16(sp)
+      - { address: 0x0FC00C, on: 0xFFB10018, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # sd s1,24(sp)
+      - { address: 0x0FC010, on: 0x0080802D, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # daddu s0,a0,zero (out: x y z w)
+      - { address: 0x0FC014, on: 0x00A0882D, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # daddu s1,a1,zero (the emitter's position)
+      - { address: 0x0FC018, on: 0x0C064684, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # jal 0x191A10 (the game's own projection, as before)
+      - { address: 0x0FC01C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # nop
+      - { address: 0x0FC020, on: 0x3C080010, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lui t0,0x0010
+      - { address: 0x0FC024, on: 0x8D09F400, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lw t1,-0xC00(t0) (block 0xFF400 +0: magic)
+      - { address: 0x0FC028, on: 0x3C0A5350, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lui t2,0x5350
+      - { address: 0x0FC02C, on: 0x354A4131, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # ori t2,t2,0x4131 ('SPA1')
+      - { address: 0x0FC030, on: 0x152A0039, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # bne t1,t2,done (no magic: the game's pan)
+      - { address: 0x0FC034, on: 0x00000000, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # nop
+      - { address: 0x0FC038, on: 0x3C0B0030, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lui t3,0x0030 (view 0x3062E0)
+      - { address: 0x0FC03C, on: 0xC6200000, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lwc1 f0,0(s1) px
+      - { address: 0x0FC040, on: 0xC6210004, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lwc1 f1,4(s1) py
+      - { address: 0x0FC044, on: 0xC6220008, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lwc1 f2,8(s1) pz
+      - { address: 0x0FC048, on: 0xC56362E0, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lwc1 f3,0x62E0(t3)
+      - { address: 0x0FC04C, on: 0xC56462F0, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lwc1 f4,0x62F0(t3)
+      - { address: 0x0FC050, on: 0xC5656300, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lwc1 f5,0x6300(t3)
+      - { address: 0x0FC054, on: 0xC5666310, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lwc1 f6,0x6310(t3)
+      - { address: 0x0FC058, on: 0x460301C2, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # mul.s f7,f0,f3
+      - { address: 0x0FC05C, on: 0x46040A02, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # mul.s f8,f1,f4
+      - { address: 0x0FC060, on: 0x460839C0, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # add.s f7,f7,f8
+      - { address: 0x0FC064, on: 0x46051202, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # mul.s f8,f2,f5
+      - { address: 0x0FC068, on: 0x460839C0, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # add.s f7,f7,f8
+      - { address: 0x0FC06C, on: 0x460639C0, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # add.s f7,f7,f6 (xv)
+      - { address: 0x0FC070, on: 0xC56362E8, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lwc1 f3,0x62E8(t3)
+      - { address: 0x0FC074, on: 0xC56462F8, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lwc1 f4,0x62F8(t3)
+      - { address: 0x0FC078, on: 0xC5656308, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lwc1 f5,0x6308(t3)
+      - { address: 0x0FC07C, on: 0xC5666318, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lwc1 f6,0x6318(t3)
+      - { address: 0x0FC080, on: 0x46030242, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # mul.s f9,f0,f3
+      - { address: 0x0FC084, on: 0x46040A02, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # mul.s f8,f1,f4
+      - { address: 0x0FC088, on: 0x46084A40, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # add.s f9,f9,f8
+      - { address: 0x0FC08C, on: 0x46051202, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # mul.s f8,f2,f5
+      - { address: 0x0FC090, on: 0x46084A40, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # add.s f9,f9,f8
+      - { address: 0x0FC094, on: 0x46064A40, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # add.s f9,f9,f6 (zv)
+      - { address: 0x0FC098, on: 0x46073A82, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # mul.s f10,f7,f7
+      - { address: 0x0FC09C, on: 0x46094A02, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # mul.s f8,f9,f9
+      - { address: 0x0FC0A0, on: 0x46085280, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # add.s f10,f10,f8
+      - { address: 0x0FC0A4, on: 0x460A0284, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # sqrt.s f10,f10 (r)
+      - { address: 0x0FC0A8, on: 0x3C0C3F80, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lui t4,0x3F80
+      - { address: 0x0FC0AC, on: 0x448C5800, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # mtc1 t4,f11 (1.0)
+      - { address: 0x0FC0B0, on: 0x460B5034, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # c.lt.s f10,f11
+      - { address: 0x0FC0B4, on: 0x45010002, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # bc1t centre (at the head: centred)
+      - { address: 0x0FC0B8, on: 0x44804000, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # mtc1 zero,f8 (delay slot: s = 0)
+      - { address: 0x0FC0BC, on: 0x460A3A03, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # div.s f8,f7,f10 (s = xv / r = sin(azimuth))
+      - { address: 0x0FC0C0, on: 0xC50CF404, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lwc1 f12,-0xBFC(t0) (block +4: the sign, +1 or -1)
+      - { address: 0x0FC0C4, on: 0x460C4202, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # mul.s f8,f8,f12
+      - { address: 0x0FC0C8, on: 0x3C0C43A0, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lui t4,0x43A0
+      - { address: 0x0FC0CC, on: 0x448C5800, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # mtc1 t4,f11 (320.0)
+      - { address: 0x0FC0D0, on: 0x460B4202, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # mul.s f8,f8,f11
+      - { address: 0x0FC0D4, on: 0x3C0C43A1, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lui t4,0x43A1
+      - { address: 0x0FC0D8, on: 0x358C4000, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # ori t4,t4,0x4000
+      - { address: 0x0FC0DC, on: 0x448C5800, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # mtc1 t4,f11 (322.5)
+      - { address: 0x0FC0E0, on: 0x460B4200, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # add.s f8,f8,f11 (x = 322.5 + 320 s)
+      - { address: 0x0FC0E4, on: 0x8E0D0000, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lw t5,0(s0) (the game's x)
+      - { address: 0x0FC0E8, on: 0xAD0DF410, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # sw t5,-0xBF0(t0) (block +0x10)
+      - { address: 0x0FC0EC, on: 0x8E0D000C, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lw t5,12(s0) (the game's w)
+      - { address: 0x0FC0F0, on: 0xAD0DF414, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # sw t5,-0xBEC(t0) (block +0x14)
+      - { address: 0x0FC0F4, on: 0xE508F418, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # swc1 f8,-0xBE8(t0) (block +0x18: ours)
+      - { address: 0x0FC0F8, on: 0xE507F420, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # swc1 f7,-0xBE0(t0) (block +0x20: xv)
+      - { address: 0x0FC0FC, on: 0xE509F424, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # swc1 f9,-0xBDC(t0) (block +0x24: zv)
+      - { address: 0x0FC100, on: 0x8D0DF41C, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lw t5,-0xBE4(t0)
+      - { address: 0x0FC104, on: 0x25AD0001, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # addiu t5,t5,1
+      - { address: 0x0FC108, on: 0xAD0DF41C, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # sw t5,-0xBE4(t0) (block +0x1C: count)
+      - { address: 0x0FC10C, on: 0xE6080000, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # swc1 f8,0(s0) (x)
+      - { address: 0x0FC110, on: 0x3C0C3F80, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # lui t4,0x3F80
+      - { address: 0x0FC114, on: 0xAE0C000C, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # sw t4,12(s0) (w = +1: never mirrored)
+      - { address: 0x0FC118, on: 0xDFBF0000, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # ld ra,0(sp)
+      - { address: 0x0FC11C, on: 0xDFB00010, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # ld s0,16(sp)
+      - { address: 0x0FC120, on: 0xDFB10018, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # ld s1,24(sp)
+      - { address: 0x0FC124, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # jr ra
+      - { address: 0x0FC128, on: 0x27BD0030, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # addiu sp,sp,48
       - { address: 0x3452E0, on: 0x00000000, off: 0x1060000B, when: [{ address: 0x345210, equals: 0x27BDFFE0 }] }   # body pass: the focus character returns before its draw
       - { address: 0x3450F8, on: 0x00000000, off: 0x10600014, when: [{ address: 0x345020, equals: 0x27BDFFE0 }] }   # first pass: the focus character returns before its draw
       - { address: 0x560C74, on: 0x10620030, off: 0x10620008, when: [{ address: 0x540004, equals: 3 }] }   # held objects: owner == focus -> next object
@@ -1038,6 +1141,7 @@ SLPM-65428:
       - { from: 0xFE900, to: 0xFE9D8, words: 54, counter: 0x48BF93 }    # G (MeleeHitJolt; at 0xFE800 before cave H)
       - { from: 0xFEA00, to: 0xFEA7C, words: 31, counter: 0x48BF93 }    # I (GunRayAim)
       - { from: 0xFEC00, to: 0xFEC94, words: 37, counter: 0x48BF93 }   # HandPickup (the Circle search at the hand)
+      - { from: 0xFC000, to: 0xFC12C, words: 75, counter: 0x48BF93 }    # spatial audio (SpatialAudio)
     lookAt:
       eye: 0x306338
       target: 0x306344

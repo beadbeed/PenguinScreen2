@@ -26,6 +26,7 @@
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
 #include "VR/HandPickup.h"
+#include "VR/HeadInWall.h"
 #include "VR/HudCards.h"
 #include "VR/ItemReach.h"
 #include "VR/MenuPanel.h"
@@ -34,6 +35,7 @@
 #include "VR/GunRay.h"
 #include "VR/PhysicalMelee.h"
 #include "VR/ReloadGesture.h"
+#include "VR/SpatialAudio.h"
 #include "VR/SpatialControls.h"
 #include "VR/StereoAuto.h"
 #include "VR/VRProfileDB.h"
@@ -1225,6 +1227,8 @@ int main(int argc, char* argv[])
 	RunLogged("Pickup cue and hand targeting", VR::ItemReach::SelfTest, "(VR) Pickup cue self-test");
 	RunLogged("Hand pickup", VR::HandPickup::SelfTest, "(VR) Hand pickup self-test");
 	RunLogged("Zone markers", VR::ZoneMarkers::SelfTest, "(VR) Zone markers self-test");
+	RunLogged("Head in wall", +[]() { return VR::HeadInWall::SelfTest() == 0; }, "(VR) HeadInWall self-test");
+	RunLogged("Spatial audio (pan law)", +[]() { return VR::SpatialAudio::SelfTest() == 0; }, "(VR) SpatialAudio self-test");
 	RunLogged("MeshRaster", +[]() { return VR::MeshRaster::SelfTest() == 0; }, "(VR) MeshRaster self-test");
 	{
 		Begin("Reload gesture (ReloadGesture::SelfTest)");
@@ -1250,6 +1254,29 @@ int main(int argc, char* argv[])
 		       f.hold_muzzle_offset == 0x34 && f.hold_items == 0x716980 && f.hold_item_stride == 0x18 &&
 		       f.hold_item_id == 0x12 && f.hold_item_type == 0x0F;
 	});
+	// [VR] ScriptedShotsFirstPerson: File #1's room camera mode guard also takes modes 4 and 5 under the switch, and the
+	// camera shake's two eye stores are silenced under it (tools/outbreak-vr/research/2026-10-22-native-feel.md).
+	RunSilent("Scripted shots (File #1 camera guard alsoEquals, shake silence)", +[]() {
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		if (!p || !p->camera.has_value() || !VR::ProfileDB::IsSilenceSettingName("ScriptedShotsFirstPerson"))
+			return false;
+		bool guard = false;
+		for (const VR::ProfileDB::CameraGuard& g : p->camera->guards)
+		{
+			if (g.ee_address == 0x3AEF75u)
+				guard = g.equals == 0 && g.width == 1 && g.also_equals == std::vector<u32>{4u, 5u} &&
+				        g.also_when_setting == "ScriptedShotsFirstPerson";
+		}
+		int shake = 0;
+		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
+		{
+			if (sil.when_setting == "ScriptedShotsFirstPerson" && sil.offline_only && sil.value_on == 0 &&
+				((sil.ee_address == 0x5A95E4u && sil.value_off == 0xE421633Cu) ||
+					(sil.ee_address == 0x5A95F0u && sil.value_off == 0xE4206348u)))
+				shake++;
+		}
+		return guard && shake == 2;
+	});
 	// [VR] SeamlessDoors: File #1's camera.silence entries gated on the switch (whenSetting), the arrival ones kept
 	// through disarm; each NOPs one jal 0x590B40 (tools/outbreak-vr/research/2026-10-14-doors.md).
 	RunSilent("Seamless doors (File #1 profile, camera.silence whenSetting)", +[]() {
@@ -1262,7 +1289,9 @@ int main(int argc, char* argv[])
 		{
 			if (sil.when_setting.empty() || sil.when_setting == "PhysicalMelee" || sil.when_setting == "PhysicalMeleeContact" ||
 				sil.when_setting == "MeleeHitJolt" || sil.when_setting == "GunRayAim" ||
-				sil.when_setting == "HandPickup")
+				sil.when_setting == "HandPickup" ||
+				sil.when_setting == "ScriptedShotsFirstPerson" ||
+				sil.when_setting == "SpatialAudio" || sil.when_setting == "FadeDim")
 			{
 				if (sil.keep_through_disarm)
 					return false;

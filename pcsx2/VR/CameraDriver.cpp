@@ -5,7 +5,9 @@
 #include "VR/MenuPanel.h"
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
+#include "VR/HeadInWall.h"
 #include "VR/HudCards.h"
+#include "VR/SpatialAudio.h"
 #include "VR/SpatialControls.h"
 #include "VR/HeadPose.h"
 #include "VR/PadLook.h"
@@ -1004,6 +1006,16 @@ namespace VR::CameraDriver
 			return std::nullopt;
 		}
 
+		// A guard's alsoEquals values pass too while its alsoWhenSetting switch is on ([VR] ScriptedShotsFirstPerson: the
+		// room camera's scripted shot modes 4 and 5). The switch alone: first person itself is what keeps this offline or in
+		// private co-op, and the camera is only ever this console's.
+		bool GuardAlsoPasses(const ProfileDB::CameraGuard& g, u32 v)
+		{
+			if (g.also_equals.empty() || g.not_equals || !ProfileDB::SilenceSettingOn(g.also_when_setting))
+				return false;
+			return std::find(g.also_equals.begin(), g.also_equals.end(), v) != g.also_equals.end();
+		}
+
 		bool GuardListPass(const std::vector<ProfileDB::CameraGuard>& guards)
 		{
 			for (const ProfileDB::CameraGuard& g : guards)
@@ -1026,15 +1038,45 @@ namespace VR::CameraDriver
 					case 2: v = memRead16(address); break;
 					default: v = memRead32(address); break;
 				}
-				if ((v == g.equals) == g.not_equals)
+				if ((v == g.equals) == g.not_equals && !GuardAlsoPasses(g, v))
 					return false;
 			}
 			return true;
 		}
 
+		// The alsoEquals value a camera guard passed on last (0xFFFFFFFF: none), for the log when a scripted shot keeps
+		// first person ([VR] ScriptedShotsFirstPerson) and when it ends.
+		u32 s_also_value = 0xFFFFFFFFu;
+
 		bool GuardsPass(const ProfileDB::CameraProfile& cam)
 		{
-			return GuardListPass(cam.guards);
+			const bool pass = GuardListPass(cam.guards);
+			u32 also = 0xFFFFFFFFu;
+			u32 also_addr = 0;
+			if (pass)
+			{
+				for (const ProfileDB::CameraGuard& g : cam.guards)
+				{
+					if (g.also_equals.empty() || g.is_chain)
+						continue;
+					const u32 v = ReadSized(g.ee_address, g.width);
+					if (v != g.equals && GuardAlsoPasses(g, v))
+					{
+						also = v;
+						also_addr = g.ee_address;
+					}
+				}
+			}
+			if (also != s_also_value)
+			{
+				if (also != 0xFFFFFFFFu)
+					Console.WriteLn("(VR) CameraDriver: scripted shot (0x%08X reads %u) keeps first person "
+									"(ScriptedShotsFirstPerson); the game's script runs on.", also_addr, also);
+				else if (s_also_value != 0xFFFFFFFFu)
+					Console.WriteLn("(VR) CameraDriver: scripted shot %u over.", s_also_value);
+				s_also_value = also;
+			}
+			return pass;
 		}
 
 		u32 ReadSized(u32 address, u8 width)
@@ -1106,7 +1148,7 @@ namespace VR::CameraDriver
 					address = static_cast<u32>(a);
 				}
 				const u32 v = ReadSized(address, g.width);
-				if ((v == g.equals) == g.not_equals)
+				if ((v == g.equals) == g.not_equals && !GuardAlsoPasses(g, v))
 				{
 					std::snprintf(buf, sizeof(buf), "guard %zu (0x%08X, %u byte(s)) reads 0x%X, wants %s0x%X", i + 1, address,
 						static_cast<unsigned>(g.width), v, g.not_equals ? "not " : "", g.equals);
@@ -2347,6 +2389,13 @@ namespace VR::CameraDriver
 			}
 			float eye[3];
 			LookAtEye(mp, cam_base, yaw_cam, with_offset, s_last_dx, s_last_dy, s_last_dz, eye);
+			// [VR] HeadInWall: the eye stops short of the game's walls, seen from the character's head point (read-only
+			// copy of the player collision; the mapping above keeps the true head for the hands).
+			{
+				const float head_point[3] = {p[0], p[1] + la.eye_height, p[2]};
+				const bool ran = HeadInWall::Apply(VMManager::GetDiscCRC(), head_point, eye);
+				HudCards::SetViewDim(HudCards::kViewDimWall, ran ? HeadInWall::CurrentFade() : 0.0f);
+			}
 			mp.valid = with_offset && std::isfinite(mp.units_per_meter) && std::isfinite(mp.yaw_sign) && std::isfinite(mp.base_yaw) &&
 			           std::isfinite(mp.ref_yaw) && std::isfinite(mp.eye_height) && std::isfinite(mp.ref_pos[0]) &&
 			           std::isfinite(mp.ref_pos[1]) && std::isfinite(mp.ref_pos[2]);
@@ -4135,6 +4184,7 @@ namespace VR::CameraDriver
 				for (AnchorState& a : s_anchor)
 					RestoreAnchoredScalar(a);
 			}
+			SpatialAudio::Poll(crc, false);
 			s_padlook = PadLookState{};
 			ResetDeltaState( vm_state != VMState::Running);
 			PadLook::Publish(0.0f);
@@ -4145,6 +4195,7 @@ namespace VR::CameraDriver
 		const std::optional<u32> base = GetBase(cam, crc);
 		ApplySilence(cam, crc, base);
 		ApplyCodeHooks(cam, crc);
+		SpatialAudio::Poll(crc, true);
 
 		if (cam.base.has_value() && !base.has_value())
 		{
