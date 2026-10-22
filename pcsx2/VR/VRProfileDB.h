@@ -679,6 +679,7 @@ namespace VR::ProfileDB
 		bool has_pickup = false;
 		float pickup_near = 6.0f;          // a hand inside a floor item's volume or this close to it highlights the item
 		float pickup_show = 45.0f;         // the box shows (dim) for the nearest item within this of a hand
+		float pickup_max_reach = 85.0f;    // a hand farther than this (on the floor plane) from the character's body is out of reach
 		u32 pickup_block = 0;              // the host block the cave reads: +0 magic, +4 stamp (u8), +8 record, +0x10 point (3 f32)
 		u32 pickup_magic = 0;              // the armed word's value (the cave compares its own copy)
 		u32 pickup_counter = 0;            // u8 game frame counter (wraps at 60): the block's stamp

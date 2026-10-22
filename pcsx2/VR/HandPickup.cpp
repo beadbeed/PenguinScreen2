@@ -930,6 +930,7 @@ namespace VR::HandPickup
 					"profile: the record's result and cells, the prompt's flags and cursor");
 				check(r->pickup_near > 0.0f && r->pickup_near <= 10.0f && r->pickup_show >= r->pickup_near,
 					"profile: highlighted within a few cm, the box shown farther");
+				check(r->pickup_max_reach == 85.0f, "profile: arm's reach 85 cm");
 			}
 		}
 

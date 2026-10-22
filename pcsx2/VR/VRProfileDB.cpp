@@ -3071,7 +3071,7 @@ static std::optional<VR::ProfileDB::ReachParams> parseReach(const std::string_vi
 			pk_bad("is not a map");
 		else
 		{
-			warnUnknownKeys(serial, h, "reach.pickup", {"near", "show", "block", "magic", "counter", "site", "siteOn", "cave",
+			warnUnknownKeys(serial, h, "reach.pickup", {"near", "show", "maxReach", "block", "magic", "counter", "site", "siteOn", "cave",
 				"caveFirst", "prompt", "result", "cells", "cellCount", "overlay", "which", "sub", "grid", "cursorNode",
 				"cursorIndex", "cellNodes"});
 			const auto num = [&](const char* key, float lo, float hi, float& dst) {
@@ -3102,6 +3102,7 @@ static std::optional<VR::ProfileDB::ReachParams> parseReach(const std::string_vi
 			};
 			num("near", 0.0f, 50.0f, rp.pickup_near);
 			num("show", 0.0f, 500.0f, rp.pickup_show);
+			num("maxReach", 20.0f, 300.0f, rp.pickup_max_reach);
 			addr("block", 4, 0x20, rp.pickup_block);
 			word("magic", rp.pickup_magic, 0xFFFFFFFFu);
 			addr("counter", 1, 1, rp.pickup_counter);

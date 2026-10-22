@@ -588,6 +588,16 @@ namespace VR::ItemReach
 		return false;
 	}
 
+	bool WithinArmReach(const double hand_game[3], double body_x, double body_z, double max_cm)
+	{
+		if (!hand_game || !std::isfinite(hand_game[0]) || !std::isfinite(hand_game[2]) || !std::isfinite(body_x) ||
+			!std::isfinite(body_z) || !std::isfinite(max_cm))
+			return false;
+		const double dx = hand_game[0] - body_x;
+		const double dz = hand_game[2] - body_z;
+		return dx * dx + dz * dz <= max_cm * max_cm;
+	}
+
 	int ChoosePickupHand(const HandTarget cand[2], double near_cm, double show_cm, bool* highlighted)
 	{
 		int best = -1;
@@ -999,6 +1009,12 @@ namespace VR::ItemReach
 				});
 			}
 
+			// Arm's reach: from the character's own position (its record's x, z).
+			double body_x = 0.0, body_z = 0.0;
+			const Peek body_peek{&ReadGuest};
+			const bool have_body = body_peek.F32(static_cast<u64>(live.record) + params->position_offset, &body_x) &&
+			                       body_peek.F32(static_cast<u64>(live.record) + params->position_offset + 8, &body_z);
+			bool out_of_reach = false;
 			HandTarget cand[2];
 			for (int h = 0; h < 2; h++)
 			{
@@ -1007,6 +1023,11 @@ namespace VR::ItemReach
 				if (!grip.valid || !CameraDriver::GameFromVr(map, grip.position_xyz.data(), hand_game))
 					continue;
 				const double hand[3] = {hand_game[0], hand_game[1], hand_game[2]};
+				if (!have_body || !WithinArmReach(hand, body_x, body_z, params->pickup_max_reach))
+				{
+					out_of_reach = true;
+					continue;
+				}
 				cand[h] = EvaluateHandTarget(*params, live.record, hand, nullptr, nullptr, 0.0, true);
 			}
 			bool highlighted = false;
@@ -1014,7 +1035,8 @@ namespace VR::ItemReach
 			if (h < 0)
 			{
 				PickupStop();
-				PickupWait("no floor item near a hand");
+				PickupWait(out_of_reach ? "no floor item near a hand within arm's reach (reach.pickup.maxReach)" :
+				                          "no floor item near a hand");
 				return;
 			}
 			PickupWait(nullptr);
@@ -2013,6 +2035,18 @@ namespace VR::ItemReach
 			c[1].horizontal_cm = 0.0;
 			c[1].vertical_cm = 5.0;
 			check(ChoosePickupHand(c, 6.0, 45.0, &hl) == 1 && hl, "hand: 5 cm above the volume is within near");
+
+			// Arm's reach (85 cm on the floor plane from the character's position; the height does not count).
+			const double near_hand[3] = {8493.5, 140.0, 12950.0};
+			check(WithinArmReach(near_hand, 8496.8, 13026.6, 85.0), "reach: the J's Bar Handgun from Kevin's spot (77 cm) is in reach");
+			const double far_hand[3] = {9601.5, 156.0, 13072.5};
+			check(!WithinArmReach(far_hand, 9450.8, 12951.5, 85.0), "reach: the bathroom herb from the door (1.9 m) is not");
+			const double edge[3] = {85.0, 0.0, 0.0};
+			const double past[3] = {85.1, -500.0, 0.0};
+			check(WithinArmReach(edge, 0.0, 0.0, 85.0) && !WithinArmReach(past, 0.0, 0.0, 85.0),
+				"reach: exactly 85 counts, 85.1 does not (whatever the height)");
+			const double nan_hand[3] = {std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0};
+			check(!WithinArmReach(nan_hand, 0.0, 0.0, 85.0) && !WithinArmReach(nullptr, 0.0, 0.0, 85.0), "reach: no number, no reach");
 		}
 
 		// --- The cue itself. ---

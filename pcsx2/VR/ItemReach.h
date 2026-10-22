@@ -129,6 +129,10 @@ namespace VR::ItemReach
 	// within near (0 inside). Returns the hand (or -1).
 	int ChoosePickupHand(const HandTarget cand[2], double near_cm, double show_cm, bool* highlighted);
 
+	// Pure: the hand (game cm) is within max_cm of the character's position on the floor plane (x, z), arm's reach: farther,
+	// it highlights nothing (reach.pickup.maxReach). False for a non-finite input.
+	bool WithinArmReach(const double hand_game[3], double body_x, double body_z, double max_cm);
+
 	// What the caller knows about this vsync (GameFeedback::Poll fills it from CameraDriver and SpatialControls).
 	struct Live
 	{
