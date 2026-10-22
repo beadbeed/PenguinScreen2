@@ -172,6 +172,12 @@ Headset check: lean into the J's Bar counter and a wall (slot 7); turn your head
 get grabbed (slot 5: the game's rumble in both hands); walk through a door with `SeamlessDoors` (the fade should dim
 everything, the hands too).
 
+**Last change of the night (04:00, 2026-10-22):** the late review (`audits/2026-10-22-late-review.md`: 0 critical, 1 major) found that
+`GameText` may also shrink small 2D effects that aren't text, so the playtest ini now has `GameText = false` (try `true` to see
+the game's text raised to a comfortable height) as well as `GunObjectAim = false` (try `true` for the game's own muzzle flash at
+your VR gun). For Kevin's own arms set `VrBody = true` alongside `VrBodySelf = true`. Fix list for next time: GameText's text test
+(M1), then the minors in the three audits.
+
 ## Where things are
 
 | | |
