@@ -1967,6 +1967,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(HeadInWall);
 	SettingsWrapEntry(SpatialAudio);
 	SettingsWrapEntry(GameRumbleEvents);
+	SettingsWrapEntry(FadeDim);
 	SettingsWrapEntry(PickupCue);
 	SettingsWrapEntry(BeltPouches);
 	SettingsWrapEntry(HandTargeting);

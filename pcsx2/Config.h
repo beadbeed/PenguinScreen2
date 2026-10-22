@@ -1404,6 +1404,11 @@ struct Pcsx2Config
 		// controllers, read from game memory: firing on the gun hand, the rest on both; our own hurt and shot pulses
 		// then sit out (the heartbeat, reload and empty clicks stay). Replaces the pad forwarding (GameRumble) while on.
 		bool GameRumbleEvents = true;
+		// FadeDim: the game's full-screen fades (the fade quad FUN_001B9DA0 draws from u32 0x308894 on, f32 0x30889C level,
+		// u32 0x308898 colour) dim the whole first-person view instead (head-locked, eased; black fades only), and the
+		// game's quad is skipped while first person draws (offline). The brightness option's own pass (u8 0x3065C0) is
+		// left alone.
+		bool FadeDim = true;
 		// First person, for profiles with a reach block: a light tick in the right hand and a short toast naming the item
 		// (and the button, "Kevin's 45 Auto  (A)") when something on the floor comes within reach of the character's own
 		// Circle press. Only reads the game's memory; shown in the headset only. Ini only for now.

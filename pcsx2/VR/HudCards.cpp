@@ -14,6 +14,7 @@
 #include "common/Console.h"
 
 #include <algorithm>
+#include <bit>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -735,6 +736,66 @@ namespace VR::HudCards
 		return o;
 	}
 
+	float FadeDimFor(u32 on, float level, u32 colour)
+	{
+		if (on == 0 || !std::isfinite(level))
+			return 0.0f;
+		if ((colour & 0xFFu) > 0x40u || ((colour >> 8) & 0xFFu) > 0x40u || ((colour >> 16) & 0xFFu) > 0x40u)
+			return 0.0f;
+		return std::clamp(level * 255.0f / 128.0f, 0.0f, 1.0f);
+	}
+
+	namespace
+	{
+		// [VR] FadeDim: the game's fade (File #1) as the view dim, while first person draws. CPU thread (Poll).
+		float s_fade_dim = 0.0f;
+		u64 s_fade_last_ms = 0;
+		bool s_fade_on_logged = false;
+		float s_fade_peak = 0.0f;
+
+		void PollFadeDim()
+		{
+			const u64 now = NowMs();
+			const float dt = (s_fade_last_ms != 0 && now > s_fade_last_ms) ? std::min(0.1f, (now - s_fade_last_ms) / 1000.0f) : 0.0f;
+			s_fade_last_ms = now;
+			const u32 crc = VMManager::GetDiscCRC();
+			const bool file1 = crc == 0x32088394u || crc == 0x198EFDC1u || crc == 0x03C8F393u || crc == 0x32097C02u ||
+			                   crc == 0x03C90C05u;
+			float target = 0.0f;
+			u32 on = 0, colour = 0;
+			float level = 0.0f;
+			if (EmuConfig.VR.FadeDim && file1 && VMManager::GetState() == VMState::Running && CameraDriver::LookAtActive())
+			{
+				on = memRead32(0x308894u);
+				colour = memRead32(0x308898u);
+				level = std::bit_cast<float>(static_cast<u32>(memRead32(0x30889Cu)));
+				target = FadeDimFor(on, level, colour);
+			}
+			// The game steps its fade at 30 frames a second; about 40 ms of easing keeps the steps out of a 90 Hz view.
+			const float k = std::min(1.0f, dt * 25.0f);
+			s_fade_dim += (target - s_fade_dim) * k;
+			if (target == 0.0f && s_fade_dim < 0.004f)
+				s_fade_dim = 0.0f;
+			SetViewDim(kViewDimFade, s_fade_dim);
+			if (target > 0.0f)
+			{
+				s_fade_peak = std::max(s_fade_peak, target);
+				if (!s_fade_on_logged)
+				{
+					s_fade_on_logged = true;
+					Console.WriteLn("(VR) FadeDim: the game's fade (colour 0x%06X, level %.2f) dims the first-person view.",
+						colour & 0xFFFFFFu, static_cast<double>(level));
+				}
+			}
+			else if (s_fade_on_logged && s_fade_dim == 0.0f)
+			{
+				Console.WriteLn("(VR) FadeDim: the fade is over (darkest %.2f).", static_cast<double>(s_fade_peak));
+				s_fade_on_logged = false;
+				s_fade_peak = 0.0f;
+			}
+		}
+	} // namespace
+
 	bool CurrentBlink(float* opacity)
 	{
 		const u64 now = NowMs();
@@ -768,6 +829,7 @@ namespace VR::HudCards
 		// Read live (the setting is not part of the VR config comparison), and only here: the compositor's
 		// GS thread must not touch EmuConfig.
 		s_blink_enabled.store(EmuConfig.VR.ComfortBlink, std::memory_order_relaxed);
+		PollFadeDim();
 		s_laser_enabled.store(EmuConfig.VR.LaserSight, std::memory_order_relaxed);
 		s_menu_pointer_enabled.store(EmuConfig.VR.MenuPointer, std::memory_order_relaxed);
 		s_menu_tablet_enabled.store(EmuConfig.VR.MenuTablet, std::memory_order_relaxed);
@@ -1339,6 +1401,18 @@ namespace VR::HudCards
 		check(std::abs(BlinkOpacityAt(again, 1140) - 0.5f) < 0.03f && BlinkOpacityAt(again, 1141) >= BlinkOpacityAt(again, 1140),
 			"a trigger while clearing goes dark again from where it was");
 		check(BlinkRestartAt(1000, 1300) == 1300u, "a trigger after a blink starts a new one");
+		// [VR] FadeDim's mapping and the view dims (HeadInWall, FadeDim) on the blink.
+		check(FadeDimFor(0, 1.0f, 0) == 0.0f && std::abs(FadeDimFor(1, 0.25f, 0) - 0.498f) < 0.01f &&
+				  FadeDimFor(99, 0.6f, 0x000000) == 1.0f && FadeDimFor(1, 1.0f, 0xFFFFFF) == 0.0f &&
+				  FadeDimFor(1, 1.0f, 0x101010) == 1.0f && FadeDimFor(1, -0.5f, 0) == 0.0f,
+			"fade dim: alpha 255 x level, 0x80 opaque, black fades only, off when the quad is off");
+		SetViewDim(kViewDimFade, 0.4f);
+		SetViewDim(kViewDimWall, 0.7f);
+		float vd = 0.0f;
+		check(std::abs(ViewDim() - 0.7f) < 1e-4f && CurrentBlink(&vd) && vd >= 0.7f - 1e-4f, "view dims: the darkest wins, on the blink");
+		SetViewDim(kViewDimFade, 0.0f);
+		SetViewDim(kViewDimWall, 0.0f);
+		check(ViewDim() == 0.0f, "view dims: back to none");
 		std::vector<u32> bimg;
 		RasterBlink(bimg);
 		bool black = (bimg.size() == static_cast<size_t>(kBlinkImageSize) * kBlinkImageSize);

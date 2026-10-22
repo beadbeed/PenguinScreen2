@@ -211,6 +211,9 @@ namespace VR::HudCards
 	};
 	void SetViewDim(int source, float level);
 	float ViewDim();
+	// [VR] FadeDim, pure: the view dim for the game's fade quad (on flag, level 0-1, colour 0xBBGGRR): its alpha is
+	// 255 x level with 0x80 as opaque, a black fade only (a channel over 0x40 is not dimmed).
+	float FadeDimFor(u32 on, float level, u32 colour);
 
 	// Compositor, each frame: with PCSX2_VR_BLINK_TEST=1 a blink every 2 s.
 	void MaybeTestBlink();
