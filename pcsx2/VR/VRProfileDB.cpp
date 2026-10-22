@@ -5825,7 +5825,7 @@ bool VR::ProfileDB::IsSilenceSettingName(std::string_view name)
 	       name == "GunRayAim" ||
 	       name == "HandPickup" ||
 	       name == "ScriptedShotsFirstPerson" || name == "SpatialAudio" || name == "FadeDim" ||
-	       name == "VrBody" || name == "VrBodySelf";
+	       name == "VrBody" || name == "VrBodySelf" || name == "VrBodyLocals";
 }
 
 bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
@@ -5858,6 +5858,9 @@ bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
 		return EmuConfig.VR.VrBody;
 	if (name == "VrBodySelf")
 		return EmuConfig.VR.VrBody && EmuConfig.VR.VrBodySelf;
+	// Cave U's site (the bones' locals in the characters' update, before the hit tests): strictly offline, never co-op live.
+	if (name == "VrBodyLocals")
+		return EmuConfig.VR.VrBody;
 	return false;
 }
 
@@ -5867,8 +5870,11 @@ bool VR::ProfileDB::SilenceSettingCoopLive(std::string_view name)
 		return EmuConfig.VR.PhysicalMelee && EmuConfig.VR.PhysicalMeleeOnline && VR::PhysicalMelee::CoopOverrideLive();
 	if (name == "PhysicalMeleeContact")
 		return SilenceSettingOn(name) && EmuConfig.VR.PhysicalMeleeOnline && VR::PhysicalMelee::CoopOverrideLive();
-	// VR body poses the partner in private co-op: cave V only rewrites the bone matrices the game rebuilds every frame
-	// for its draw (after the update and the hit tests, before VU1), never a record or the game's traffic.
+	// VR body poses the partner in private co-op at the draw only: "VrBody" gates cave V and its draw site, which rewrite
+	// only the world matrices the game rebuilds every tick, after the update and the hit tests and before VU1 (render
+	// only), never a record or the game's traffic. Cave U's site ("VrBodyLocals": the bones' locals in the update, BEFORE
+	// the world build, the held items and the hit tests, so hurt spheres and the held weapon follow it) is never co-op live
+	// (night review C1), and online the host never sets its flag 8 for any slot (VrBody::UseLocals).
 	if (name == "VrBody")
 		return SilenceSettingOn(name);
 	return false;

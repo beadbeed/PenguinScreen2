@@ -193,6 +193,17 @@ namespace VR::VrBody
 	// Into the slot's 16 little-endian words. Pure.
 	void PackSlot(const BlockSlot& s, u32 words[16]);
 
+	// Whether a slot may use cave U (kFlagLocals: the bones' LOCAL matrices written in the tick's world build, before the
+	// world matrices, the held items and the hit tests; night review C1). Only strictly offline (no network adapter, the
+	// camera driver's net mode Offline) and not in the draw-time fallback. Online (private co-op, or anywhere) never, for no
+	// slot, the local one included: there the hurt spheres and the held weapon of every character stay the game's own and
+	// hits stay one-to-one with what each console simulates; the partner is posed at the draw only (cave V, render-only,
+	// after the hit tests). The profile closes cave U's site online too (whenSetting VrBodyLocals, never co-op live). Pure.
+	bool UseLocals(bool offline, bool eth_enabled, bool drawtime);
+	// The slot's flags: si 0 the partner, 1 the local character (kSelf | kCollapse); with locals kFlagLocals, else at the
+	// draw (the partner's held items re-attached while an arm is posed). Pure.
+	u8 SlotFlags(int si, bool locals, bool arms);
+
 	// CPU thread, every vsync after VR presence's Poll: writes or clears the host block. Reads the bones; writes only the
 	// block, its matrix tables (both in free RAM) and nothing else.
 	void Poll();

@@ -1308,7 +1308,7 @@ int main(int argc, char* argv[])
 				sil.when_setting == "HandPickup" ||
 				sil.when_setting == "ScriptedShotsFirstPerson" ||
 				sil.when_setting == "SpatialAudio" || sil.when_setting == "FadeDim" ||
-				sil.when_setting == "VrBody" || sil.when_setting == "VrBodySelf")
+				sil.when_setting == "VrBody" || sil.when_setting == "VrBodySelf" || sil.when_setting == "VrBodyLocals")
 			{
 				if (sil.keep_through_disarm)
 					return false;
@@ -1644,7 +1644,7 @@ int main(int argc, char* argv[])
 	RunSilent("VR body (File #1 profile, body, caves U and V interpreted)", +[]() {
 		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
 		if (!p || !p->body.has_value() || !p->camera.has_value() || !VR::ProfileDB::IsSilenceSettingName("VrBody") ||
-			!VR::ProfileDB::IsSilenceSettingName("VrBodySelf"))
+			!VR::ProfileDB::IsSilenceSettingName("VrBodySelf") || !VR::ProfileDB::IsSilenceSettingName("VrBodyLocals"))
 			return false;
 		const VR::ProfileDB::BodyParams& bp = p->body.value();
 		if (bp.block != 0xFF300 || bp.tables != 0xFD400 || bp.hook != 0x345314 || bp.hook_on != 0x0C03F400 || bp.chest != 11 ||
@@ -1657,15 +1657,18 @@ int main(int argc, char* argv[])
 		u32 update_on = 0;
 		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
 		{
-			if (sil.when_setting != "VrBody" && sil.when_setting != "VrBodySelf")
+			if (sil.when_setting != "VrBody" && sil.when_setting != "VrBodySelf" && sil.when_setting != "VrBodyLocals")
 				continue;
-			if (sil.offline_only || sil.keep_through_disarm || sil.when.empty())
+			// Cave U's site alone is offlineOnly (and VrBodyLocals, never co-op live: night review C1).
+			if (sil.offline_only != (sil.ee_address == 0x346884u) || sil.keep_through_disarm || sil.when.empty())
+				return false;
+			if ((sil.when_setting == "VrBodyLocals") != (sil.ee_address == 0x346884u))
 				return false;
 			if (sil.ee_address == 0x345314u)
 				draw_site = sil.value_on == 0x0C03F400u && sil.value_off == 0x0040F809u && sil.when.size() == 3 && sil.when_setting == "VrBody";
 			else if (sil.ee_address == 0x346884u)
 			{
-				update_site = sil.value_off == 0x0C1699C8u && sil.when.size() == 3 && sil.when_setting == "VrBody";
+				update_site = sil.value_off == 0x0C1699C8u && sil.when.size() == 3 && sil.when_setting == "VrBodyLocals";
 				update_on = sil.value_on;
 			}
 			else if (sil.ee_address == 0x3452E8u)
@@ -1889,6 +1892,49 @@ int main(int argc, char* argv[])
 		ee.r[31] = 0x34688C;
 		ok &= ee.Run(kU, 0xFD000, 0xFD374) == 0x34688C && s_calls.size() == 1 && s_calls[0].pc == 0x5A6720;
 		return ok;
+	});
+	// Night review C1: cave U (the bones' locals before the hit tests) only strictly offline; online the partner is posed at
+	// the draw only (cave V), for no slot does the host set flag 8, and cave U's site is never co-op live.
+	RunSilent("VR body online gate (cave U strictly offline, review C1)", +[]() {
+		using namespace VR::VrBody;
+		bool ok = true;
+		ok &= UseLocals(true, false, false);
+		ok &= !UseLocals(false, false, false); // private co-op or restricted
+		ok &= !UseLocals(true, true, false);   // the adapter on
+		ok &= !UseLocals(false, true, false);
+		ok &= !UseLocals(true, false, true);   // the draw-time fallback
+		for (int si = 0; si < kSlots; si++)
+			for (bool arms : {false, true})
+			{
+				ok &= (SlotFlags(si, false, arms) & kFlagLocals) == 0;
+				ok &= (SlotFlags(si, true, arms) & kFlagLocals) != 0;
+			}
+		ok &= SlotFlags(0, false, true) == kFlagAttach && SlotFlags(0, false, false) == 0;
+		ok &= SlotFlags(1, false, true) == (kFlagSelf | kFlagCollapse);
+		ok &= SlotFlags(0, true, true) == kFlagLocals && SlotFlags(1, true, false) == (kFlagLocals | kFlagSelf | kFlagCollapse);
+		// The switches: VrBodyLocals on with VrBody, never co-op live (even with VrBody and the adapter on); cave V's is.
+		const bool body = EmuConfig.VR.VrBody, eth = EmuConfig.DEV9.EthEnable;
+		EmuConfig.VR.VrBody = true;
+		EmuConfig.DEV9.EthEnable = true;
+		ok &= VR::ProfileDB::SilenceSettingOn("VrBodyLocals") && !VR::ProfileDB::SilenceSettingCoopLive("VrBodyLocals");
+		ok &= VR::ProfileDB::SilenceSettingCoopLive("VrBody") && !VR::ProfileDB::SilenceSettingCoopLive("VrBodySelf");
+		EmuConfig.VR.VrBody = false;
+		ok &= !VR::ProfileDB::SilenceSettingOn("VrBodyLocals");
+		EmuConfig.VR.VrBody = body;
+		EmuConfig.DEV9.EthEnable = eth;
+		// The shipped profile: the one site that enters cave U is VrBodyLocals and offlineOnly.
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		int enter_u = 0;
+		if (!p || !p->camera.has_value())
+			return false;
+		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
+		{
+			if (sil.value_on != (0x0C000000u | (0x0FD290u >> 2)) && sil.value_on != (0x08000000u | (0x0FD290u >> 2)))
+				continue;
+			enter_u++;
+			ok &= sil.when_setting == "VrBodyLocals" && sil.offline_only;
+		}
+		return ok && enter_u == 1;
 	});
 	RunSilent("Physical melee hit jolt (File #1 profile, melee.jolt, cave G interpreted)", +[]() {
 		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);

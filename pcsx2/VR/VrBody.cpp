@@ -634,6 +634,19 @@ namespace VR::VrBody
 		std::memcpy(out, t, sizeof(t));
 	}
 
+	bool UseLocals(bool offline, bool eth_enabled, bool drawtime)
+	{
+		return offline && !eth_enabled && !drawtime;
+	}
+
+	u8 SlotFlags(int si, bool locals, bool arms)
+	{
+		const u8 self = (si == 1) ? static_cast<u8>(kFlagSelf | kFlagCollapse) : static_cast<u8>(0);
+		if (locals)
+			return static_cast<u8>(kFlagLocals | self);
+		return (si == 1) ? self : static_cast<u8>(arms ? kFlagAttach : 0);
+	}
+
 	void PackSlot(const BlockSlot& s, u32 w[16])
 	{
 		u8 b[64] = {};
@@ -996,6 +1009,8 @@ namespace VR::VrBody
 			const char* e = std::getenv("PCSX2_VR_BODY_DRAWTIME");
 			return e && e[0] == '1';
 		}();
+		// Cave U only strictly offline (night review C1): online every slot is posed at the draw (cave V) only.
+		const bool use_locals = UseLocals(CameraDriver::NetworkOffline(), EmuConfig.DEV9.EthEnable, s_drawtime);
 		const u64 now = CameraDriver::SteadyNowMs();
 		const bool log_now = (s_log_env || s_loopback_env) && now - s_log_ms >= 2000;
 		if (log_now)
@@ -1101,10 +1116,7 @@ namespace VR::VrBody
 			bs.count = 0;
 			bs.ref = static_cast<u8>(map.chest);
 			const bool arms = st.w.arm[0] > 0.0 || st.w.arm[1] > 0.0;
-			if (s_drawtime)
-				bs.flags = (si == 1) ? static_cast<u8>(kFlagSelf | kFlagCollapse) : static_cast<u8>(arms ? kFlagAttach : 0);
-			else
-				bs.flags = static_cast<u8>(kFlagLocals | ((si == 1) ? (kFlagSelf | kFlagCollapse) : 0));
+			bs.flags = SlotFlags(si, use_locals, arms);
 			// The held items go back on the hands (the game's own FUN_006313A0 with the record's item slots, as its update
 			// does: the item slot byte +0xC7C on the -X wrist, +0xC7D on the +X wrist).
 			bs.attach_offset[0] = 0xC7C;
@@ -1113,7 +1125,7 @@ namespace VR::VrBody
 			bs.attach_bone[1] = static_cast<u8>(map.arm[0].wrist);
 			for (int k = 0; k < pose.count; k++)
 			{
-				if (s_drawtime)
+				if (!use_locals)
 				{
 					bs.bones[k] = static_cast<u8>(pose.bone[k]);
 					ToGame(pose.rel[k], tables[si][k]);
@@ -1124,7 +1136,7 @@ namespace VR::VrBody
 				else
 					bs.keep[1] |= 1u << (pose.bone[k] - 32);
 			}
-			if (s_drawtime)
+			if (!use_locals)
 				bs.count = static_cast<u8>(pose.count);
 			else
 			{

@@ -653,7 +653,10 @@ the game's own character with its head and neck turned to the partner's VR head 
 two-bone IK, clamps, back to the game's animation when a hand is not tracked or out of reach); legs, hips and walking
 stay the game's. The pose goes in as the bones' LOCAL matrices in the tick's world build (cave U at `0x346884`), so the
 game itself builds the world matrices, puts the held weapon in the posed hand and runs its hit tests on the posed body;
-the head's subtree goes in at the draw (cave V at `0x345314`) over the game's own head look. `VrBodySelf` (offline only):
+the head's subtree goes in at the draw (cave V at `0x345314`) over the game's own head look. Cave U is strictly offline
+(its site's `whenSetting: VrBodyLocals` is never co-op live, and online the host never sets its flag): online the partner
+is posed at the draw only (cave V, after the hit tests, render only), so their hurt spheres and weapon stay the game's.
+`VrBodySelf` (offline only):
 your own character's arms in first person, the rest of it still hidden (cave V zeroes the other bones' axes at the
 draw). Logs `(VR) Body: ...`; `PCSX2_VR_BODY_LOG=1` (always on in the loopback test) logs every 2 s each arm's wrist
 target, the solve and the wrist bone the game built, and the head bone's forward against the VR head's;

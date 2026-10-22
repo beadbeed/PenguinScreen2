@@ -1141,7 +1141,7 @@ SLPM-65428:
       # gets world = table[k] x the chest's world (the game's FUN_00190C50); flag 2 zeroes the axes of every bone not kept
       # (its vertices fall onto its joint: only the arms show); flag 1 runs the game's own FUN_006313A0 again (its first
       # word checked) so the held items sit in the posed hands; then the draw. Only the matrices the game rebuilds every
-      # update; never a record, never the game's traffic, so it runs in private co-op too (the partner). VrBodySelf
+      # update; never a record, never the game's traffic, so cave V runs in private co-op too (the partner). VrBodySelf
       # (offline only): the focus character's skip at 0x3452E8 (`beq zero, zero, <return>`, ld ra in its delay slot) jumps
       # to cave V's SELF instead, which draws it through V only for a slot with flag 4 naming it (your own arms), else
       # takes the same return. Cave U (the normal way, flag 8): the characters' update FUN_00346810 calls FUN_005A6720
@@ -1152,9 +1152,11 @@ SLPM-65428:
       # animation (0x638850) writes every local again after it. Cave V at the draw writes the rest of the entries as
       # world matrices (the head's subtree, over the game's own head look FUN_0062F790, which runs after the world build)
       # and zeroes the axes of the bones not kept for your own arms (VrBodySelf), or, as the fallback
-      # (PCSX2_VR_BODY_DRAWTIME=1), writes world matrices itself. The sites first (each checks the cave's first and last
-      # words), then the cave.
-      - { address: 0x346884, on: 0x0C03F4A4, off: 0x0C1699C8, when: [{ address: 0x346810, equals: 0x27BDFFD0 }, { address: 0xFD000, equals: 0x27BDFFC0 }, { address: 0xFD370, equals: 0x27BD0020 }], whenSetting: VrBody }   # characters' update: jal 0xFD290 (cave U) over jal FUN_005A6720
+      # (PCSX2_VR_BODY_DRAWTIME=1), writes world matrices itself. Cave U moves hurt spheres and the held weapon, so its site
+      # is strictly offline (whenSetting VrBodyLocals, never co-op live; night review C1): online the partner is posed at the
+      # draw only (cave V, after the hit tests), and the host never sets flag 8 online. The sites first (each checks the
+      # cave's first and last words), then the cave.
+      - { address: 0x346884, on: 0x0C03F4A4, off: 0x0C1699C8, when: [{ address: 0x346810, equals: 0x27BDFFD0 }, { address: 0xFD000, equals: 0x27BDFFC0 }, { address: 0xFD370, equals: 0x27BD0020 }], offlineOnly: true, whenSetting: VrBodyLocals }   # characters' update: jal 0xFD290 (cave U) over jal FUN_005A6720; strictly offline (night review C1)
       - { address: 0x345314, on: 0x0C03F400, off: 0x0040F809, when: [{ address: 0x345210, equals: 0x27BDFFE0 }, { address: 0xFD000, equals: 0x27BDFFC0 }, { address: 0xFD370, equals: 0x27BD0020 }], whenSetting: VrBody }   # body pass: jal 0xFD000 (cave V) over jalr *(record + 0x18)
       - { address: 0x3452E8, on: 0x0803F48A, off: 0x10000024, when: [{ address: 0x345210, equals: 0x27BDFFE0 }, { address: 0xFD000, equals: 0x27BDFFC0 }, { address: 0xFD370, equals: 0x27BD0020 }], whenSetting: VrBodySelf }   # the focus character's skip: j 0xFD228 (cave V's SELF)
       - { address: 0x0FD000, on: 0x27BDFFC0, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # cave V
