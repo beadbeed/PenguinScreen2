@@ -1304,7 +1304,7 @@ int main(int argc, char* argv[])
 		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
 		{
 			if (sil.when_setting.empty() || sil.when_setting == "PhysicalMelee" || sil.when_setting == "PhysicalMeleeContact" ||
-				sil.when_setting == "MeleeHitJolt" || sil.when_setting == "GunRayAim" ||
+				sil.when_setting == "MeleeHitJolt" || sil.when_setting == "GunRayAim" || sil.when_setting == "GunObjectAim" ||
 				sil.when_setting == "HandPickup" ||
 				sil.when_setting == "ScriptedShotsFirstPerson" ||
 				sil.when_setting == "SpatialAudio" || sil.when_setting == "FadeDim" ||
@@ -2258,6 +2258,157 @@ int main(int argc, char* argv[])
 		wrap_stale.redirect = false;
 		return run(on) && run(off_magic) && run(partner) && run(named_partner) && run(focus) && run(stale) && run(wrap) &&
 		       run(wrap_stale);
+	});
+	// [VR] GunObjectAim (section 13 of the vr-melee note): File #1's melee.gunObject, its GunObjectAim entries (two sites,
+	// each guarded by cave O's words, before the 48 cave words; the cave range) and cave O run on the profile's words: for
+	// the local record with a fresh block the shot's weapon object s0 becomes the fake object (block + 0x40 - 0x1C0) and
+	// the shot is counted; otherwise (no magic, another record, the focus elsewhere, a stale stamp, no object at all) s0
+	// is the game's own object and no byte changes. The flash stub copies the flash's origin for the block's record only
+	// and always goes on to FUN_005AC8D0.
+	RunSilent("Gun object (File #1 profile, melee.gunObject, camera.caves, cave O interpreted)", +[]() {
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		if (!p || !p->melee.has_value() || !p->camera.has_value() || !VR::ProfileDB::IsSilenceSettingName("GunObjectAim"))
+			return false;
+		const VR::ProfileDB::MeleeParams& m = p->melee.value();
+		if (!m.has_gun_object || m.gun_object_block != 0xFF500 || m.gun_object_magic != 0x474F4231 || m.gun_object_muzzle != 0x38)
+			return false;
+		bool range = false;
+		for (const VR::ProfileDB::CameraCave& cv : p->camera->caves)
+		{
+			if (cv.from == 0xFB000 && cv.to == 0xFB0C0 && cv.usable)
+				range = true;
+			// No other cave overlaps cave O or the block.
+			else if (cv.from < 0xFB0C0 && cv.to > 0xFB000)
+				return false;
+		}
+		if (!range)
+			return false;
+		MiniEE ee;
+		int words = 0, sites = 0;
+		size_t last_site = 0, first_word = static_cast<size_t>(-1);
+		for (size_t i = 0; i < p->camera->silence.size(); i++)
+		{
+			const VR::ProfileDB::CameraSilence& sil = p->camera->silence[i];
+			if (sil.when_setting != "GunObjectAim")
+				continue;
+			if (!sil.offline_only || sil.keep_through_disarm || sil.when.empty())
+				return false;
+			if (sil.ee_address == 0x62CF94u || sil.ee_address == 0x62D294u)
+			{
+				const bool obj = sil.ee_address == 0x62CF94u;
+				if (sil.value_off != (obj ? 0x00641821u : 0x0C16B234u) || sil.value_on != (obj ? 0x0C03EC00u : 0x0C03EC21u) ||
+					sil.when.size() != 3 || sil.when[1].ee_address != (obj ? 0xFB000u : 0xFB084u) || sil.when[2].ee_address != 0xFB0B8u)
+					return false;
+				sites++;
+				last_site = i;
+				continue;
+			}
+			if (sil.ee_address < 0xFB000u || sil.ee_address >= 0xFB0C0u || sil.value_off != 0)
+				return false;
+			first_word = std::min(first_word, i);
+			ee.Store32(sil.ee_address, sil.value_on);
+			words++;
+		}
+		if (sites != 2 || words != 48 || last_site > first_word || ee.Load32(0xFB000) != 0x00641821u ||
+			ee.Load32(0xFB084) != 0x3C0B0010u || ee.Load32(0xFB0B8) != 0x0816B234u)
+			return false;
+		constexpr u32 kBlk = 0xFF500, kFake = 0xFF500 + 0x40 - 0x1C0, kItems = 0x3967EC, kGameObj = 0x3CE360;
+		struct Case
+		{
+			bool magic = true;
+			u32 named = kLocalRecord, rec = kLocalRecord, object = kGameObj;
+			u8 focus = 0, counter = 30, stamp = 29;
+			bool redirect = true;
+		};
+		const auto run = [&](const Case& c) {
+			MiniEE e = ee;
+			MeleeIdentities(e, c.focus);
+			e.Store32(kBlk, c.magic ? 0x474F4231u : 0u);
+			e.Store8(kBlk + 4, c.stamp);
+			e.Store32(kBlk + 8, c.named);
+			e.Store32(kBlk + 0x0C, 5);
+			e.Store32(kItems + 60 * 2, c.object);
+			e.Store8(0x48BF93, c.counter);
+			const std::map<u32, u32> before = e.mem;
+			e.stub = +[](MiniEE&, u32, u32*) { return false; };
+			// As at 0x62CF94: v1 the item table, a0 60 * item (item 2), s2 the record, ra after the site's delay slot.
+			e.r[3] = kItems;
+			e.r[4] = 60 * 2;
+			e.r[16] = 0x5555;
+			e.r[18] = c.rec;
+			e.r[29] = 0x01F00000;
+			e.r[31] = 0x62CF9C;
+			const u32 out = e.Run(0xFB000, 0xFB000, 0xFB0C0);
+			if (out != 0x62CF9C || e.r[31] != 0x62CF9C || e.r[29] != 0x01F00000 || e.r[18] != c.rec || e.r[3] != kItems + 120)
+				return false;
+			if (c.redirect)
+			{
+				std::map<u32, u32> want = before;
+				want[kBlk + 0x0C] = 6;
+				return e.r[16] == kFake && e.mem == want;
+			}
+			return e.r[16] == c.object && e.mem == before;
+		};
+		Case on;
+		Case off_magic;
+		off_magic.magic = false;
+		off_magic.redirect = false;
+		Case partner;
+		partner.rec = kPartnerRecord;
+		partner.redirect = false;
+		Case named_partner;
+		named_partner.named = kPartnerRecord;
+		named_partner.rec = kPartnerRecord;
+		named_partner.redirect = false;
+		Case focus;
+		focus.focus = 1;
+		focus.redirect = false;
+		Case stale;
+		stale.counter = 36;
+		stale.redirect = false;
+		Case wrap;
+		wrap.counter = 2;
+		wrap.stamp = 59;
+		Case wrap_stale;
+		wrap_stale.counter = 8;
+		wrap_stale.stamp = 59;
+		wrap_stale.redirect = false;
+		Case none; // no weapon object: the game's own return path
+		none.object = 0;
+		none.redirect = false;
+		if (!(run(on) && run(off_magic) && run(partner) && run(named_partner) && run(focus) && run(stale) && run(wrap) &&
+				run(wrap_stale) && run(none)))
+			return false;
+		// The flash stub: the block's record has its origin copied and counted; another record's is not; both go on.
+		const auto flash = [&](u32 rec, bool copy) {
+			MiniEE e = ee;
+			e.Store32(kBlk, 0x474F4231u);
+			e.Store32(kBlk + 8, kLocalRecord);
+			e.Store32(kBlk + 0x10, 2);
+			e.Store32(0x01F000D0, 0x11111111u);
+			e.Store32(0x01F000D4, 0x22222222u);
+			e.Store32(0x01F000D8, 0x33333333u);
+			const std::map<u32, u32> before = e.mem;
+			e.stub = +[](MiniEE&, u32, u32*) { return false; };
+			e.r[4] = rec;
+			e.r[5] = 0x01F00040;
+			e.r[6] = 0x01F000D0;
+			e.r[7] = 3;
+			e.r[31] = 0x62D29C;
+			const u32 out = e.Run(0xFB084, 0xFB000, 0xFB0C0);
+			if (out != 0x5AC8D0 || e.r[31] != 0x62D29C || e.r[4] != rec || e.r[5] != 0x01F00040 || e.r[6] != 0x01F000D0 || e.r[7] != 3)
+				return false;
+			std::map<u32, u32> want = before;
+			if (copy)
+			{
+				want[kBlk + 0x10] = 3;
+				want[kBlk + 0x14] = 0x11111111u;
+				want[kBlk + 0x18] = 0x22222222u;
+				want[kBlk + 0x1C] = 0x33333333u;
+			}
+			return e.mem == want;
+		};
+		return flash(kLocalRecord, true) && flash(kPartnerRecord, false);
 	});
 	RunSilent("CameraDriver::SelfTestAssembler (hook)", VR::CameraDriver::SelfTestAssembler);
 	RunSilent("CameraDriver::SelfTestMath (math, predict, comfort, FOV)", VR::CameraDriver::SelfTestMath);

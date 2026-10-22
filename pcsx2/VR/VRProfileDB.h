@@ -998,6 +998,13 @@ namespace VR::ProfileDB
 		u32 gun_back_stride = 0;
 		u32 gun_class_offset = 0;
 		u32 gun_character_offset = 0;
+		// gunObject ([VR] GunObjectAim, on top of gunRay): cave O's block (VR::GunRay::kObjOff*; the fake weapon object is
+		// the block + 0x40 - 0x1C0) and the muzzle's offset inside a weapon-type entry (shape_types + shape_type_stride *
+		// type + gun_object_muzzle: 3 f32, the model-space muzzle FUN_0062CF10 puts through the object's matrix).
+		bool has_gun_object = false;
+		u32 gun_object_block = 0;
+		u32 gun_object_magic = 0;
+		u32 gun_object_muzzle = 0;
 		PhysicalMelee::DetectorParams detect;
 		PhysicalMelee::DriverParams drive;
 	};

@@ -1085,6 +1085,69 @@ SLPM-65428:
       - { address: 0x0FEA70, on: 0x2566EBD0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
       - { address: 0x0FEA74, on: 0x0815486C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
       - { address: 0x0FEA78, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunRayAim }
+      # [VR] GunObjectAim (on top of GunRayAim; tools/outbreak-vr/research/2026-10-14-vr-melee.md section 13): the shot's
+      # weapon object. FUN_0062CF10 loads the gun's weapon object at 0x62CF98 (lw s0,0(v1): the item's +0x1C) and takes
+      # from it the muzzle (the weapon type's +0x38 through its matrix +0x1C0, plus its position +0x200), the bullet's
+      # frame (that matrix turned by -pi/2 about y and +pi/2 about x), the muzzle flash FUN_005AC8D0 (that frame and
+      # muzzle), the shell FUN_0055E400 (the matrix; its row 3 the position) and FUN_006801A0 (the position). Cave O
+      # (0xFB000) is called at 0x62CF94 instead of its addu (the lw in the delay slot reads item 0's slot, harmless; the
+      # cave does the addu and the lw again): for the local record (s2 == block +0x08, s2 +0x03 == focus u8 0x3AEF74) with
+      # the magic GOB1 and a stamp at most 6 frames old (counter 0x48BF93), s0 becomes the fake object 0xFF380 (block 0xFF500
+      # + 0x40 - 0x1C0), which the host poses as the VR gun, and the shot is counted; otherwise s0 is the game's object.
+      # The flash stub (0xFB084) is called at 0x62D294 instead of jal FUN_005AC8D0: for the block's record it copies the
+      # flash's origin (a2) into block +0x14 and counts it (+0x10, the evidence the flash came from the VR muzzle), then
+      # j FUN_005AC8D0. Both return through ra into the game (jr ra / j), so neither pc nor ra is left inside the cave.
+      # Strictly offline; RAM 0xFB000-0xFBFFF and 0xFF500-0xFF5FF read zero in every File #1 savestate. Sites first.
+      - { address: 0x62CF94, on: 0x0C03EC00, off: 0x00641821, when: [{ address: 0x540004, equals: 3 }, { address: 0xFB000, equals: 0x00641821 }, { address: 0xFB0B8, equals: 0x0816B234 }], offlineOnly: true, whenSetting: GunObjectAim }   # the shot's weapon object in FUN_0062CF10: jal 0xFB000 (cave O) over addu v1,v1,a0
+      - { address: 0x62D294, on: 0x0C03EC21, off: 0x0C16B234, when: [{ address: 0x540004, equals: 3 }, { address: 0xFB084, equals: 0x3C0B0010 }, { address: 0xFB0B8, equals: 0x0816B234 }], offlineOnly: true, whenSetting: GunObjectAim }   # the aimed shot's muzzle flash: jal 0xFB084 (cave O's flash stub) over jal FUN_005AC8D0
+      - { address: 0x0FB000, on: 0x00641821, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }   # cave O (0xFB000): addu, lw s0; magic GOB1, s2 == block +0x08, s2 +0x03 == focus u8 0x3AEF74, stamp fresh -> s0 = the fake object 0xFF380, shots +1; jr ra
+      - { address: 0x0FB004, on: 0x8C700000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB008, on: 0x1200001C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB00C, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB010, on: 0x8D69F500, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB014, on: 0x3C0A474F, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB018, on: 0x354A4231, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB01C, on: 0x152A0017, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB020, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB024, on: 0x8D69F508, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB028, on: 0x15320014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB02C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB030, on: 0x92490003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB034, on: 0x3C0A003B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB038, on: 0x914AEF74, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB03C, on: 0x152A000F, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB040, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB044, on: 0x3C0A0049, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB048, on: 0x914ABF93, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB04C, on: 0x9169F504, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB050, on: 0x01494823, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB054, on: 0x05210002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB058, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB05C, on: 0x2529003C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB060, on: 0x2D290007, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB064, on: 0x11200005, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB068, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB06C, on: 0x8D69F50C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB070, on: 0x25290001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB074, on: 0xAD69F50C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB078, on: 0x2570F380, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB07C, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB080, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB084, on: 0x3C0B0010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }   # the flash stub (0xFB084): a0 == block +0x08 -> block +0x14 = the flash origin (a2), flashes +1; j FUN_005AC8D0
+      - { address: 0x0FB088, on: 0x8D69F508, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB08C, on: 0x1524000A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB090, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB094, on: 0x8CC90000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB098, on: 0xAD69F514, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB09C, on: 0x8CC90004, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB0A0, on: 0xAD69F518, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB0A4, on: 0x8CC90008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB0A8, on: 0xAD69F51C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB0AC, on: 0x8D69F510, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB0B0, on: 0x25290001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB0B4, on: 0xAD69F510, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB0B8, on: 0x0816B234, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
+      - { address: 0x0FB0BC, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: GunObjectAim }
       # Real hand pickups ([VR] HandPickup, off; strictly offline; research/2026-10-21-hand-pickup.md). The Circle pickup
       # handler FUN_0061DB40 calls FUN_00631760(record, kind 1, mode 0) at 0x61DB94: the search 46 cm ahead of the
       # character. The site calls the cave at 0xFEC00 instead; the cave runs that same call unless the kind is 1, the
@@ -1391,6 +1454,7 @@ SLPM-65428:
       - { from: 0xFE200, to: 0xFE8F0, words: 380, counter: 0x48BF93 }   # D, E, F, H (PhysicalMeleeContact)
       - { from: 0xFE900, to: 0xFE9D8, words: 54, counter: 0x48BF93 }    # G (MeleeHitJolt; at 0xFE800 before cave H)
       - { from: 0xFEA00, to: 0xFEA7C, words: 31, counter: 0x48BF93 }    # I (GunRayAim)
+      - { from: 0xFB000, to: 0xFB0C0, words: 48, counter: 0x48BF93 }    # O (GunObjectAim: the shot's weapon object, the flash stub)
       - { from: 0xFEC00, to: 0xFEC94, words: 37, counter: 0x48BF93 }   # HandPickup (the Circle search at the hand)
       - { from: 0xFC000, to: 0xFC12C, words: 75, counter: 0x48BF93 }    # spatial audio (SpatialAudio)
       - { from: 0xFD000, to: 0xFD374, words: 221, counter: 0x48BF93 }    # V (VrBody)
@@ -1638,6 +1702,11 @@ SLPM-65428:
     # own back offset for a shot's origin: f32 at table + stride * the weapon type's class byte (types + typeStride * type +
     # class, contact.shape's table) + 4 * the record's character byte (+character); negative, along the barrel.
     gunRay: { block: 0xFEB80, magic: 0x47554E31, back: { table: 0x6E6D30, stride: 0x20, class: 0x05, character: 0xB98 } }
+    # Gun object (VR GunObjectAim, on top of gunRay; section 13): cave O's block (magic GOB1, the stamp, the local record,
+    # cave O's shot count, the flash stub's count and the flash's origin, the fake object's matrix at +0x40 and position at
+    # +0x80; the fake object is the block + 0x40 - 0x1C0) and the model-space muzzle's offset in a weapon-type entry
+    # (contact.shape's types table: 3 f32, the 45 Auto's (-9.5, 0, 5.1)).
+    gunObject: { block: 0xFF500, magic: 0x474F4231, muzzle: 0x38 }
   # VR controllers (only when launched with --vr; flat play is untouched).
   # A pad bound in Settings -> Controllers (e.g. a DualSense) keeps working alongside;
   # when both touch the same button, the latest change wins.

@@ -1403,6 +1403,10 @@ struct Pcsx2Config
 		// hands the shot's attack spawn the VR ray instead of the character's gun), for the local player only; the damage,
 		// the reactions, ammo, sound and the game's own wider second test are the game's. Ini only.
 		bool GunRayAim = true;
+		// On top of GunRayAim, File #1 strictly offline (section 13): the local player's shot also takes the game's own muzzle
+		// flash, shell and effects from the VR gun (cave O hands FUN_0062CF10 a fake weapon object posed as the VR gun's
+		// muzzle); the hands then draw no flash of their own. Ini only.
+		bool GunObjectAim = true;
 		// With PhysicalMelee in contact mode, strictly offline (section 12): a fast swing of the empty right fist, or of the gun
 		// hand as a pistol-whip, strikes through the contact path with the knife's attack at a fist-sized sphere, scaled to
 		// a light hit (cave H); no ammo or durability spent. Ini only, off by default.
