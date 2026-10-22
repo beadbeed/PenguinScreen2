@@ -32,6 +32,7 @@
 #include "VR/MeshRaster.h"
 #include "VR/PhysicalMelee.h"
 #include "VR/ReloadGesture.h"
+#include "VR/SpatialAudio.h"
 #include "VR/SpatialControls.h"
 #include "VR/StereoAuto.h"
 #include "VR/VRProfileDB.h"
@@ -1094,6 +1095,7 @@ int main(int argc, char* argv[])
 	RunLogged("Pickup cue and hand targeting", VR::ItemReach::SelfTest, "(VR) Pickup cue self-test");
 	RunLogged("Zone markers", VR::ZoneMarkers::SelfTest, "(VR) Zone markers self-test");
 	RunLogged("Head in wall", +[]() { return VR::HeadInWall::SelfTest() == 0; }, "(VR) HeadInWall self-test");
+	RunLogged("Spatial audio (pan law)", +[]() { return VR::SpatialAudio::SelfTest() == 0; }, "(VR) SpatialAudio self-test");
 	RunLogged("MeshRaster", +[]() { return VR::MeshRaster::SelfTest() == 0; }, "(VR) MeshRaster self-test");
 	{
 		Begin("Reload gesture (ReloadGesture::SelfTest)");

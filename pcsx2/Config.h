@@ -1397,6 +1397,9 @@ struct Pcsx2Config
 		// grid A and the moving faces; nothing is written but the eye first person already writes), and the view
 		// darkens past 15 cm into a wall.
 		bool HeadInWall = true;
+		// SpatialAudio: a code cave puts the game's stereo pan of positioned sounds round the whole head (behind you
+		// is centred, beside you fully left or right) instead of across the screen only. Offline only.
+		bool SpatialAudio = true;
 		// First person, for profiles with a reach block: a light tick in the right hand and a short toast naming the item
 		// (and the button, "Kevin's 45 Auto  (A)") when something on the floor comes within reach of the character's own
 		// Circle press. Only reads the game's memory; shown in the headset only. Ini only for now.

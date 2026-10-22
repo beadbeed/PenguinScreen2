@@ -7,6 +7,7 @@
 #include "VR/HandModel.h"
 #include "VR/HeadInWall.h"
 #include "VR/HudCards.h"
+#include "VR/SpatialAudio.h"
 #include "VR/SpatialControls.h"
 #include "VR/HeadPose.h"
 #include "VR/PadLook.h"
@@ -3869,6 +3870,7 @@ namespace VR::CameraDriver
 				for (AnchorState& a : s_anchor)
 					RestoreAnchoredScalar(a);
 			}
+			SpatialAudio::Poll(crc, false);
 			s_padlook = PadLookState{};
 			ResetDeltaState( vm_state != VMState::Running);
 			PadLook::Publish(0.0f);
@@ -3879,6 +3881,7 @@ namespace VR::CameraDriver
 		const std::optional<u32> base = GetBase(cam, crc);
 		ApplySilence(cam, crc, base);
 		ApplyCodeHooks(cam, crc);
+		SpatialAudio::Poll(crc, true);
 
 		if (cam.base.has_value() && !base.has_value())
 		{

@@ -1965,6 +1965,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(MeleeHitJolt);
 	SettingsWrapEntry(ScriptedShotsFirstPerson);
 	SettingsWrapEntry(HeadInWall);
+	SettingsWrapEntry(SpatialAudio);
 	SettingsWrapEntry(PickupCue);
 	SettingsWrapEntry(BeltPouches);
 	SettingsWrapEntry(HandTargeting);

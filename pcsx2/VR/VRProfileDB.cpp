@@ -5440,7 +5440,7 @@ static int CountMultibandResolveMismatches(bool log)
 bool VR::ProfileDB::IsSilenceSettingName(std::string_view name)
 {
 	return name == "SeamlessDoors" || name == "PhysicalMelee" || name == "PhysicalMeleeContact" || name == "MeleeHitJolt" ||
-	       name == "ScriptedShotsFirstPerson";
+	       name == "ScriptedShotsFirstPerson" || name == "SpatialAudio";
 }
 
 bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
@@ -5458,6 +5458,8 @@ bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
 		return EmuConfig.VR.MeleeHitJolt && SilenceSettingOn("PhysicalMeleeContact");
 	if (name == "ScriptedShotsFirstPerson")
 		return EmuConfig.VR.ScriptedShotsFirstPerson;
+	if (name == "SpatialAudio")
+		return EmuConfig.VR.SpatialAudio;
 	return false;
 }
 
