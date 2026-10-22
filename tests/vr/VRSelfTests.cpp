@@ -21,6 +21,7 @@
 #include "VR/BeltPouches.h"
 #include "VR/DepthExport.h"
 #include "VR/DepthWarp.h"
+#include "VR/EyeProjection.h"
 #include "VR/CameraDriver.h"
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
@@ -1102,6 +1103,7 @@ int main(int argc, char* argv[])
 	}
 	RunLogged("Depth export", VR::DepthExport::SelfTest, "(VR) Depth export self-test");
 	RunLogged("Depth warp", VR::DepthWarp::SelfTest, "(VR) Depth warp self-test");
+	RunLogged("Eye projection", VR::EyeProjection::SelfTest, "(VR) Eye projection self-test");
 	RunLogged("Menu panel", VR::MenuPanel::SelfTest, "(VR) Menu panel self-test");
 	RunLogged("Menu panel room and placement", VR::MenuPanel::FeelSelfTest, "(VR) Menu panel feel self-test");
 	// [VR] GameWeaponModels: File #1's profile names the game's weapon-type table and the scenario's item table, with the

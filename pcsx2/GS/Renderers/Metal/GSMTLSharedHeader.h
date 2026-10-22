@@ -104,6 +104,9 @@ struct GSMTLMainVSUniform
 	uint vr_band_count;
 	vector_float4 vr_splits;
 	vector_float4 vr_band[4];
+	vector_float4 vr_eye_in;
+	vector_float4 vr_eye_fit;
+	vector_float4 vr_eye[8];
 };
 
 struct GSMTLMainPSUniform

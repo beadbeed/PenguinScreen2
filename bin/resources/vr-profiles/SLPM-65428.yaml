@@ -931,6 +931,10 @@ SLPM-65428:
       # (measured on SteamVR's null headset with a fake swaying head: world wobble 2-3 px at 2 frames
       # back, 6-11 px at 0, 1 or 3, 10 px with the old 40 ms guess).
       viewMatrix: 0x3062E0
+      # The screen matrix the game projects with (projection x viewport, row vectors, built by 0x18F0E0 every frame:
+      # X = m[0] x / w + 2048 in GS pixels, fx 161.1 at the first-person FOV), read by [VR] TrueStereo to map each eye's
+      # vertices (tools/outbreak-vr/research/2026-10-21-true-stereo.md).
+      screenMatrix: 0x2771A0
       syncFramesBack: 2
       # A smooth stick turn is rendered ahead by how late frames reach the screen (measured, at most
       # 120 ms), so its leading edge shows no black band; heading, aim and walking keep the true yaw.

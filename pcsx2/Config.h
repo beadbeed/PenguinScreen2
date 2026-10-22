@@ -1507,6 +1507,14 @@ struct Pcsx2Config
 		// first person, menus, the first frames) goes as it is. Needs PacerCopies off and HeadsetRateSubmit on; takes
 		// precedence over DepthLayer. Read when VR starts. Render-only: nothing in the game changes.
 		bool DepthWarp = false;
+		// First person: true per-eye rendering (tools/outbreak-vr/research/2026-10-21-true-stereo.md). Each layer of the
+		// stereo target is drawn with that eye's own view and projection: the GS maps every perspective vertex the game's VU1
+		// emitted for its one camera through the eye (VR/EyeProjection.h), recomputing Z and Q, and the compositor sends the
+		// two layers as a projection layer with the headset's per-eye poses and fields of view instead of the first-person
+		// screen; separation, convergence and the near floor are unused in first person. 2D draws (the HUD, message text)
+		// stay flat on a plane 1.5 m ahead. Needs PacerCopies off; DepthWarp is not used with it (DepthLayer adds depth).
+		// Read when VR starts. Render-only: nothing in the game changes.
+		bool TrueStereo = false;
 
 		VROptions();
 		void LoadSave(SettingsWrapper& wrap);

@@ -16,6 +16,11 @@
 #include "VR/DepthExport.h"
 #include "VR/MenuPanel.h"
 #include "VR/StereoState.h"
+#include "MemoryTypes.h"
+#include "VR/EyeProjection.h"
+#include "VR/XRCompositor.h"
+#include <cstdio>
+#include <cstring>
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -6383,6 +6388,169 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 			vr_roll_y = kRollYSign * std::sin(vr_roll) * aspect * fade;
 		}
 		m_conf.cb_vs.vr_splits = GSVector4(vr_floor, vr_roll_y, vr_roll_z, 0.0f);
+
+		// Research probe (tools/outbreak-vr/research/2026-10-21-true-stereo.md), off unless
+		// PCSX2_VR_TRUESTEREO_PROBE=<half baseline, game units (cm)>: each layer becomes the exact parallel-camera
+		// projection of an eye that far left/right of the game camera, X' = X -/+ fx * e / w (fx in GS pixels from
+		// the game's screen matrix at EE 0x2771A0, w = 1/q from the Z fit or Q): no convergence plane, no near floor,
+		// no roll. Used to compare a reprojected eye with the game rendering from a camera moved by e.
+		static const float s_vr_ts_probe_e = []() {
+			const char* v = std::getenv("PCSX2_VR_TRUESTEREO_PROBE");
+			return v ? static_cast<float>(std::atof(v)) : 0.0f;
+		}();
+		if (s_vr_ts_probe_e != 0.0f && vr_multiview_target) [[unlikely]]
+		{
+			float fx = 0.0f;
+			std::memcpy(&fx, eeMem->Main + 0x2771A0, sizeof(fx));
+			constexpr float kBig = 1.0e5f;
+			const float k_ndc = fx * s_vr_ts_probe_e * 16.0f * sx;
+			m_conf.cb_vs.vr_map_mode = 0;
+			m_conf.cb_vs.vr_stereo = vr_near_ok ? GSVector2(k_ndc / kBig, kBig) : GSVector2(0.0f, 0.0f);
+			m_conf.cb_vs.vr_splits = GSVector4(-1.0e9f, 0.0f, 0.0f, 0.0f);
+			static u32 s_ts_logged = 0;
+			if (s_ts_logged < 4 && vr_near_ok)
+			{
+				s_ts_logged++;
+				float m[16];
+				std::memcpy(m, eeMem->Main + 0x2771A0, sizeof(m));
+				Console.WriteLn("(VR) TRUESTEREO probe: e=%.2f fx=%.3f fy=%.3f cx=%.1f cy=%.1f sx=%.6g k_ndc=%.5f zfit=%d",
+					s_vr_ts_probe_e, m[0], m[5], -m[8], -m[9], sx, k_ndc, vr_zq_apply ? 1 : 0);
+			}
+		}
+	}
+
+
+	// [VR] TrueStereo (VR/EyeProjection.h, research/2026-10-21-true-stereo.md): in first person each layer of the stereo
+	// target is that eye's own view. Perspective draws are mapped vertex by vertex through the eye (w from the Z fit or
+	// Q); flat draws (FST, constant Q: the HUD, message text) go on a plane 1.5 m ahead; a draw that fills the target (a
+	// clear, a fade) stays as it is in both layers.
+	m_vr_true_draw = false;
+	if (st.enabled && st.first_person && vr_multiview_target && VR::StereoState::TrueStereoActive())
+	{
+		VR::EyeProjection::GameCamera cam;
+		const GSVector2i res = PCRTCDisplays.GetResolution();
+		cam.half_w = 0.5f * static_cast<float>(std::max(res.x, 1));
+		cam.half_h = 0.5f * static_cast<float>(std::max(res.y, 1));
+		cam.units_per_m = (st.fp_units_per_meter > 0.0f) ? st.fp_units_per_meter : 100.0f;
+		VR::EyeProjection::Eye eyes[2];
+		bool ok = VR::StereoState::GameCamera(&cam.fx, &cam.fy, &cam.cx, &cam.cy);
+		float test_pose[4] = {};
+		bool has_test_pose = false;
+		float eye_tan[2][4] = {};
+		if (ok)
+		{
+			VR::EyeProjection::EyeSpec spec;
+			const VR::XRCompositor::EyeInfo ei = VR::XRCompositor::GetEyeInfo();
+			constexpr float kRad = 3.14159265358979323846f / 180.0f;
+			if (ei.valid)
+			{
+				spec.ipd_m = (ei.ipd_m > 0.04f && ei.ipd_m < 0.09f) ? ei.ipd_m : 0.064f;
+				spec.cant_rad = ei.cant_deg * kRad;
+				for (int e = 0; e < 2; e++)
+					for (int k = 0; k < 4; k++)
+						spec.tan[e][k] = std::tan(ei.fov_deg[e][k] * kRad);
+			}
+			else
+			{
+				spec.ipd_m = (st.fp_ipd_m > 0.0f) ? st.fp_ipd_m : 0.064f;
+				VR::EyeProjection::CameraTangents(cam, spec.tan[0]);
+				VR::EyeProjection::CameraTangents(cam, spec.tan[1]);
+			}
+			// Headset-free checks, with the camera's own tangents: PCSX2_VR_TRUESTEREO_TEST=<ipd m>[,<cant deg>], or
+			// =pose,<x>,<y>,<z m>,<yaw deg> to put both eyes at one pose in the camera frame (against a moved camera).
+			static const char* s_test = std::getenv("PCSX2_VR_TRUESTEREO_TEST");
+			if (s_test && *s_test)
+			{
+				float ipd = 0.064f, cant = 0.0f;
+				if (std::strncmp(s_test, "pose,", 5) == 0 &&
+					std::sscanf(s_test + 5, "%f,%f,%f,%f", &test_pose[0], &test_pose[1], &test_pose[2], &test_pose[3]) == 4)
+				{
+					has_test_pose = true;
+					spec.ipd_m = 0.0f;
+					VR::EyeProjection::CameraTangents(cam, spec.tan[0]);
+					VR::EyeProjection::CameraTangents(cam, spec.tan[1]);
+				}
+				else if (std::sscanf(s_test, "%f,%f", &ipd, &cant) >= 1)
+				{
+					spec.ipd_m = ipd;
+					spec.cant_rad = cant * kRad;
+					VR::EyeProjection::CameraTangents(cam, spec.tan[0]);
+					VR::EyeProjection::CameraTangents(cam, spec.tan[1]);
+				}
+			}
+			float roll = 0.0f;
+			if (VR::StereoState::HeadRoll(&roll) && std::isfinite(roll))
+				spec.roll_rad = roll;
+			ok = VR::EyeProjection::Build(cam, spec, eyes);
+			std::memcpy(eye_tan, spec.tan, sizeof(eye_tan));
+			if (ok && has_test_pose)
+			{
+				for (int e = 0; e < 2; e++)
+					VR::EyeProjection::PlaceEye(cam, test_pose, test_pose[3] * kRad, 0.0f, &eyes[e]);
+			}
+		}
+		if (ok)
+		{
+			const bool persp_q = PRIM->TME && !PRIM->FST && !m_vt.m_eq.q;
+			const bool zfit_ok = !PRIM->FST && !vr_pin_screen && s_vr_zqfit.valid &&
+								 (vr_z_globally_constrained || persp_q);
+			const float kind = zfit_ok ? 1.0f : (persp_q && !vr_pin_screen) ? 2.0f : 0.0f;
+			const GSVector4i full = m_context->scissor.in;
+			const GSVector4i cover = m_r.rintersect(full);
+			const bool fills = kind == 0.0f && !cover.rempty() && full.width() > 0 && full.height() > 0 &&
+							   cover.width() * 100 >= full.width() * 95 && cover.height() * 100 >= full.height() * 95;
+			// A game screen split onto the menu panel ([VR] MenuPanel): its flat draws stay where the game put them, so
+			// the panel shows them as it does without TrueStereo; the room under them is still drawn per eye.
+			const bool panel_flat = kind == 0.0f && EmuConfig.VR.MenuPanel && VR::MenuPanel::SplitOn();
+			if (fills || panel_flat)
+			{
+				m_conf.cb_vs.vr_map_mode = 0;
+				m_conf.cb_vs.vr_stereo = GSVector2(0.0f, 0.0f);
+				m_conf.cb_vs.vr_band[0].w = 0.0f;
+			}
+			else
+			{
+				m_vr_true_draw = true;
+				m_conf.cb_vs.vr_map_mode = 3;
+				m_conf.cb_vs.vr_stereo = GSVector2(0.0f, 0.0f);
+				m_conf.cb_vs.vr_band[0].w = 0.0f;
+				// Flat draws: the game's 2D screen as a plane 1.5 m ahead, sized to 90% of the view both eyes share, so
+				// the HUD's edges stay in sight whatever the headset's field of view.
+				float flat_fx = cam.fx, flat_fy = cam.fy;
+				if (kind == 0.0f)
+				{
+					float th = 10.0f, tv = 10.0f;
+					for (int e = 0; e < 2; e++)
+					{
+						th = std::min(th, std::min(-eye_tan[e][0], eye_tan[e][1]));
+						tv = std::min(tv, std::min(eye_tan[e][2], -eye_tan[e][3]));
+					}
+					if (th > 0.05f && tv > 0.05f)
+					{
+						flat_fx = cam.half_w / (0.9f * th);
+						flat_fy = -cam.half_h / (0.9f * tv);
+					}
+				}
+				m_conf.cb_vs.vr_eye_in = GSVector4(flat_fx, flat_fy, cam.cx, cam.cy);
+				m_conf.cb_vs.vr_eye_fit = GSVector4(s_vr_zqfit.a0, s_vr_zqfit.beta, 1.5f * cam.units_per_m, kind);
+				for (int e = 0; e < 2; e++)
+				{
+					for (int r = 0; r < 3; r++)
+						m_conf.cb_vs.vr_eye[e * 4 + r] =
+							GSVector4(eyes[e].m[r][0], eyes[e].m[r][1], eyes[e].m[r][2], eyes[e].m[r][3]);
+					m_conf.cb_vs.vr_eye[e * 4 + 3] = GSVector4(eyes[e].fx, eyes[e].fy, eyes[e].cx, eyes[e].cy);
+				}
+			}
+			static bool s_ts_logged = false;
+			if (!s_ts_logged)
+			{
+				s_ts_logged = true;
+				Console.WriteLn("(VR) TrueStereo: first draw; game fx %.3f fy %.3f centre %.1f,%.1f, target %.0fx%.0f; "
+								"right eye fx %.3f cx %.2f, offset %.4f m",
+					cam.fx, cam.fy, cam.cx, cam.cy, 2.0f * cam.half_w, 2.0f * cam.half_h, eyes[1].fx, eyes[1].cx,
+					eyes[1].pos_m[0]);
+			}
+		}
 	}
 
 	if (vr_zq_apply && VRZQFitVerbose()) [[unlikely]]
@@ -9398,6 +9566,11 @@ __ri void GSRendererHW::DrawPrims(GSTextureCache::Target* rt, GSTextureCache::Ta
 	const GSVector4i scissor(GSVector4i(GSVector4(rtscale) * GSVector4(hacked_scissor)).rintersect(GSVector4i::loadh(rtsize)));
 
 	m_conf.drawarea = m_channel_shuffle ? scissor : scissor.rintersect(ComputeBoundingBoxRT(rtsize, rtscale));
+#ifdef ENABLE_VR
+	// [VR] TrueStereo: an eye's vertices land outside the draw's own (camera) bounding box.
+	if (m_vr_true_draw)
+		m_conf.drawarea = scissor;
+#endif
 
 	const GSVector4i tex_region = tex ? tex->GetRegionRect() : GSVector4i::zero();
 	m_conf.samplearea = m_channel_shuffle ? scissor :

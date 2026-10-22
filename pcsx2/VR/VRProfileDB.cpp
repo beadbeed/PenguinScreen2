@@ -1830,6 +1830,14 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 				else
 					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt viewMatrix is not an aligned main-RAM address; ignoring it.", serial);
 			}
+			if (ln.has_child("screenMatrix"))
+			{
+				const std::optional<u32> sm = parseAddress(nodeVal(ln["screenMatrix"]));
+				if (sm.has_value() && inMainRam(sm.value(), 64) && (sm.value() % 4) == 0)
+					la.screen_matrix_address = sm.value();
+				else
+					Console.WarningFmt("(VR) ProfileDB: Serial '{}' camera.lookAt screenMatrix is not an aligned main-RAM address; ignoring it.", serial);
+			}
 			if (ln.has_child("syncFramesBack"))
 			{
 				const std::optional<u32> sf = StringUtil::FromChars<u32>(nodeVal(ln["syncFramesBack"]));

@@ -72,6 +72,16 @@ calm, is 0.55 dim right, try `Dim` / `Live`).
   doorway opened it: the walk-in trigger, room 1 to 4. First person did not interfere (`research/2026-10-14-doors.md`,
   "Door by stick"). Nothing changed in code for it.
 
+**2026-10-21 branch `truestereo`** (from `nightly`; local build, 43 of 43 self-tests; checked offline headset-free and on
+SteamVR's null headset only): **`[VR] TrueStereo`** (off), road step 5's real step. Each eye's layer is drawn with that
+eye's own view and projection (the GS maps the game's VU1 vertices through the eye) and goes to the runtime as a projection
+layer of the eyes, with no first-person screen. Against the game's own renders from a moved camera: +-5 cm, 99-100% of
+tiles within 1 px; +-10 deg turns, 83-97% (the rest is the strip outside the game's view, a walking NPC, subtitle timing).
+Null headset: the layer is accepted every frame, eyes 63 mm apart, each eye's depth chained with `DepthLayer`; GS thread
++0.5 ms per vsync, GPU +1.6 ms per frame. Next: Alex in the headset with `TrueStereo = true` (and `DepthLayer = true`):
+the counter and Handgun at arm's length, a zombie close, leaning, rolling the head, the HUD text, a menu with `MenuPanel`.
+Research and the plan: `research/2026-10-21-true-stereo.md`.
+
 ## Where things are
 
 | | |

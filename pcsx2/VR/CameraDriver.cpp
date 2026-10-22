@@ -2741,6 +2741,17 @@ namespace VR::CameraDriver
 		// from one of the earlier writes. Match it and queue that write's head pose for the frame.
 		void TrackRenderPose(const ProfileDB::CameraLookAt& la)
 		{
+			// [VR] TrueStereo: the game's screen intrinsics, for the GS's per-eye vertex map (VR/EyeProjection.h).
+			if (la.screen_matrix_address != 0)
+			{
+				const auto rd = [&la](u32 i) {
+					return std::bit_cast<float>(static_cast<u32>(memRead32(la.screen_matrix_address + i * 4)));
+				};
+				const float fx = rd(0), fy = rd(5), cx = -rd(8), cy = -rd(9);
+				if (std::isfinite(fx) && std::isfinite(fy) && std::isfinite(cx) && std::isfinite(cy) && std::abs(fx) > 1.0f &&
+					std::abs(fy) > 1.0f)
+					StereoState::PublishGameCamera(fx, fy, cx, cy);
+			}
 			if (la.view_matrix_address == 0)
 				return;
 			float m[16];
@@ -2915,8 +2926,11 @@ namespace VR::CameraDriver
 			                          !screen.curved &&
 			                          ScreenMatchesFov(profile.fp_screen_distance.value_or(1.5f), profile.fp_screen_height.value(),
 										  profile_fov);
+			// [VR] TrueStereo draws each eye's own window out of the game camera's view, so the view must cover both eyes:
+			// it always takes Auto's fit (the union of both eyes' angles and the cant, plus the margin).
 			const bool want_auto =
-				sizes_screen && EmuConfig.VR.FirstPersonFov == Pcsx2Config::VROptions::FirstPersonFovMode::Auto;
+				sizes_screen && (EmuConfig.VR.FirstPersonFov == Pcsx2Config::VROptions::FirstPersonFovMode::Auto ||
+									StereoState::TrueStereoActive());
 			const XRCompositor::EyeInfo eyes = XRCompositor::GetEyeInfo();
 			const EyeReach reach = eyes.valid ? ReachOf(eyes.fov_deg, eyes.cant_deg) : EyeReach{};
 			const float margin = std::isfinite(EmuConfig.VR.FirstPersonFovMarginDeg) ?

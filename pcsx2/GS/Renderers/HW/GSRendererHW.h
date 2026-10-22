@@ -292,6 +292,8 @@ private:
 	int m_skip_offset = 0;
 
 	bool m_process_texture = false;
+	// [VR] TrueStereo: this draw's vertices are mapped per eye (DetermineVSConfig), so its draw area is the scissor.
+	bool m_vr_true_draw = false;
 	bool m_downscale_source = false;
 
 	TextureShuffleInfo m_texture_shuffle;

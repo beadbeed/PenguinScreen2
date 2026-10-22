@@ -17,6 +17,8 @@
 #include "common/Path.h"
 
 #include "fmt/format.h"
+#include "fmt/ranges.h"
+#include "MemoryTypes.h"
 
 #include <atomic>
 #include <chrono>
@@ -96,6 +98,8 @@ namespace VR::StereoDump
 			float ease = 1.0f;
 			float ndc_ratio = 1.0f;
 			u64 t_ms = 0;
+			// The game's view matrix (EE 0x3062E0, File #1) at capture: which camera the held pose rendered from.
+			float view[16] = {};
 		};
 
 		// Persistently mapped host-visible readback buffer (GS thread only).
@@ -184,11 +188,12 @@ namespace VR::StereoDump
 				"  \"near_floor\": {:.6f},\n  \"roll_deg\": {:.4f},\n  \"roll_parallax\": {},\n  \"roll_valid\": {},\n"
 				"  \"aspect\": {:.6f},\n  \"auto\": {},\n  \"ipd_mm\": {:.3f},\n  \"screen_w_m\": {:.4f},\n  \"screen_h_m\": {:.4f},\n"
 				"  \"screen_d_m\": {:.4f},\n  \"strength\": {:.4f},\n  \"sep_target\": {:.8f},\n  \"ease\": {:.6f},\n"
-				"  \"ndc_ratio\": {:.4f},\n  \"t_ms\": {}\n}}\n",
+				"  \"ndc_ratio\": {:.4f},\n  \"t_ms\": {},\n  \"view\": [{}]\n}}\n",
 				info.frame, info.width, info.height, info.separation, info.convergence, info.near_floor, info.roll_deg,
 				info.roll_parallax ? "true" : "false", info.roll_valid ? "true" : "false", info.aspect,
 				info.fp_auto ? "true" : "false", info.ipd_mm, info.screen_w_m, info.screen_h_m, info.screen_d_m, info.strength,
-				info.sep_target, info.ease, info.ndc_ratio, info.t_ms);
+				info.sep_target, info.ease, info.ndc_ratio, info.t_ms,
+				fmt::format("{:.5f}", fmt::join(info.view, ", ")));
 			FileSystem::WriteStringToFile(path.c_str(), json);
 		}
 
@@ -369,6 +374,7 @@ namespace VR::StereoDump
 		info.sep_target = st.fp_sep_target;
 		info.ease = st.fp_ease;
 		info.ndc_ratio = st.fp_ndc_ratio;
+		std::memcpy(info.view, eeMem->Main + 0x3062E0, sizeof(info.view));
 		info.t_ms = static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
 			std::chrono::steady_clock::now().time_since_epoch()).count());
 

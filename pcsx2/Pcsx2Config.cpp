@@ -1989,6 +1989,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(PacerCopies);
 	SettingsWrapEntry(DepthLayer);
 	SettingsWrapEntry(DepthWarp);
+	SettingsWrapEntry(TrueStereo);
 	SettingsWrapEntry(XrSeatRuntimeDirs);
 	SettingsWrapEntry(XrSeatRuntimeJsons);
 
