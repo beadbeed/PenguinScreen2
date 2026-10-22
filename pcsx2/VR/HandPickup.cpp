@@ -6,6 +6,7 @@
 #include "VR/CameraDriver.h"
 #include "VR/ItemData.h"
 #include "VR/ItemReach.h"
+#include "VR/SpatialControls.h"
 #include "VR/VRInput.h"
 #include "VR/VRProfileDB.h"
 #include "VR/ZoneMarkers.h"
@@ -84,7 +85,70 @@ namespace VR::HandPickup
 			st.checked = false;
 			st.steers = 0;
 			st.steer_from = -1;
+			st.steer_to = -1;
+			st.steer_moved = false;
+			st.cursor_seen = false;
 		}
+
+		bool CursorMoved(const In& in, const State& st)
+		{
+			return st.cursor_seen &&
+			       (in.cursor_grid != st.cursor_grid || in.cursor_node != st.cursor_node || in.cursor_index != st.cursor_index);
+		}
+
+		void SeeCursor(const In& in, State& st)
+		{
+			st.cursor_seen = true;
+			st.cursor_grid = in.cursor_grid;
+			st.cursor_node = in.cursor_node;
+			st.cursor_index = in.cursor_index;
+			st.cursor_since = in.now_ms;
+		}
+
+		// The cell a D-pad press takes the cursor to in the 2 x 2 grid (0 1 / 2 3), -1 off the grid.
+		int SteerTarget(int from, int dpad)
+		{
+			if (from < 0 || from > 3)
+				return -1;
+			switch (dpad)
+			{
+				case 0: return (from >> 1) == 1 ? from - 2 : -1;
+				case 1: return (from >> 1) == 0 ? from + 2 : -1;
+				case 2: return (from & 1) == 1 ? from - 1 : -1;
+				case 3: return (from & 1) == 0 ? from + 1 : -1;
+				default: return -1;
+			}
+		}
+	}
+
+	const char* PressFault(PressKind kind, const PressView& v, const PressExpect& e)
+	{
+		switch (kind)
+		{
+			case PressKind::None:
+				return nullptr;
+			case PressKind::Arm:
+				if (v.screen_flag || v.overlay_up || v.menu_mode)
+					return "a game screen rose under the arming Circle";
+				return nullptr;
+			case PressKind::Steer:
+				if (!v.take_prompt)
+					return "the take-it prompt went away under the D-pad press";
+				if (v.player_input)
+					return "the player pressed something under the D-pad press";
+				return nullptr;
+			case PressKind::Confirm:
+				if (!v.take_prompt)
+					return "the take-it prompt went away under the confirm";
+				if (v.player_input)
+					return "the player pressed something under the confirm";
+				if (v.grid != 1 || v.node != e.node || v.index != e.index)
+					return "the prompt's cursor moved under the confirm";
+				if (v.cell != 0)
+					return "the cell under the cursor is no longer free";
+				return nullptr;
+		}
+		return nullptr;
 	}
 
 	Out Step(const Tuning& t, const In& in, State& st)
@@ -108,6 +172,18 @@ namespace VR::HandPickup
 				st.released[h] = false;
 				edge[h] = true;
 			}
+		}
+
+		// Night review M1: when a screen flag was last up and the player's own Circle last down (kept through ToIdle).
+		if (in.screen_up || in.screen_flag)
+		{
+			st.screen_seen = true;
+			st.screen_ms = in.now_ms;
+		}
+		if (in.player_circle)
+		{
+			st.own_circle_seen = true;
+			st.own_circle_at = in.now_ms;
 		}
 
 		if (!in.enabled)
@@ -143,6 +219,14 @@ namespace VR::HandPickup
 						continue;
 					if (in.screen_up)
 						o.event = "squeeze with a game screen up: nothing armed";
+					else if (in.screen_flag)
+						o.event = "squeeze while a game screen is opening (the screen flag is up): nothing armed";
+					else if (st.screen_seen && in.now_ms - st.screen_ms < t.screen_clear_ms)
+						o.event = "squeeze just after a game screen (the flags not clear long enough): nothing armed";
+					else if (in.busy)
+						o.event = "squeeze while the character is busy (a pickup, an examine or another action under way): nothing armed";
+					else if (st.own_circle_seen && in.now_ms - st.own_circle_at < t.own_circle_ms)
+						o.event = "squeeze just after your own Circle (a pickup of yours may be under way): nothing armed";
 					else if (in.weapon_raised)
 						o.event = "squeeze with the weapon raised (Circle fires): nothing armed";
 					else if (in.hand_in_zone[h])
@@ -168,7 +252,21 @@ namespace VR::HandPickup
 			}
 
 			case Phase::Armed:
-				if (!in.block_armed)
+				if (in.press_dropped)
+				{
+					o.clear = true;
+					o.stop_press = true;
+					o.event = "the arming Circle was dropped (a game screen rose under it); cleared";
+					ToIdle(st);
+				}
+				else if (in.screen_flag || in.screen_up)
+				{
+					o.clear = true;
+					o.stop_press = true;
+					o.event = "a game screen came up before the search; cleared, the Circle let go";
+					ToIdle(st);
+				}
+				else if (!in.block_armed)
 				{
 					st.phase = Phase::Reaching;
 					st.t0 = in.now_ms;
@@ -178,12 +276,6 @@ namespace VR::HandPickup
 				{
 					o.clear = true;
 					o.event = "timeout: the press did not reach the game's pickup search; cleared";
-					ToIdle(st);
-				}
-				else if (in.screen_up)
-				{
-					o.clear = true;
-					o.event = "a game screen came up before the search; cleared";
 					ToIdle(st);
 				}
 				else if (!in.target_highlighted || in.target_node != st.node)
@@ -199,8 +291,10 @@ namespace VR::HandPickup
 				{
 					st.phase = Phase::Prompt;
 					st.t0 = in.now_ms;
+					st.prompt_t0 = in.now_ms;
 					st.checked = false;
 					st.steers = 0;
+					SeeCursor(in, st);
 				}
 				else if (in.screen_up)
 				{
@@ -239,6 +333,26 @@ namespace VR::HandPickup
 					}
 					st.checked = true;
 				}
+				if (in.press_dropped)
+				{
+					o.stop_press = true;
+					o.event = "a press of ours was dropped on the prompt: nothing more is pressed";
+					ToIdle(st);
+					return o;
+				}
+				// Night review M2: the cursor struct moving is never ours here (the game placing it at the prompt's start
+				// aside): the prompt is the player's.
+				if (CursorMoved(in, st))
+				{
+					if (in.now_ms - st.prompt_t0 >= t.cursor_place_ms)
+					{
+						o.stop_press = true;
+						o.event = "the prompt's cursor moved (not by a press of ours): nothing confirmed";
+						ToIdle(st);
+						return o;
+					}
+					SeeCursor(in, st);
+				}
 				if (in.player_buttons)
 				{
 					o.event = "the player pressed a button on the prompt: it is theirs";
@@ -261,9 +375,12 @@ namespace VR::HandPickup
 				}
 				if (in.cells[in.cursor_cell] == 0)
 				{
+					if (in.now_ms - st.cursor_since < t.cursor_still_ms)
+						return o; // the cursor still this long first
 					st.phase = Phase::Confirming;
 					st.t0 = in.now_ms;
 					o.press_circle = true;
+					o.confirm = true;
 					o.event = "take-it prompt for the item, grip held, cursor on a free cell: confirmed (Circle)";
 					return o;
 				}
@@ -283,6 +400,8 @@ namespace VR::HandPickup
 				st.phase = Phase::Steering;
 				st.t0 = in.now_ms;
 				st.steer_from = in.cursor_cell;
+				st.steer_to = SteerTarget(in.cursor_cell, o.press_dpad);
+				st.steer_moved = false;
 				st.steers++;
 				o.event = "the prompt's cursor is on a full cell: one D-pad press toward a free one";
 				return o;
@@ -293,30 +412,69 @@ namespace VR::HandPickup
 					o.event = "the prompt closed while steering: nothing confirmed";
 					ToIdle(st);
 				}
+				else if (in.press_dropped)
+				{
+					o.stop_press = true;
+					o.event = "the D-pad press was dropped: nothing confirmed";
+					ToIdle(st);
+				}
 				else if (in.player_buttons)
 				{
+					o.stop_press = true;
 					o.event = "the player pressed a button on the prompt: it is theirs";
 					ToIdle(st);
 				}
 				else if (!st.held)
 				{
+					o.stop_press = true;
 					o.event = "the grip was let go: the prompt is the player's";
 					ToIdle(st);
 				}
-				else if (since >= t.press_ms && in.cursor_cell != st.steer_from)
+				else
 				{
-					// Back to the prompt's checks with the settle already served (a short one for the cursor's draw).
-					st.phase = Phase::Prompt;
-					st.t0 = in.now_ms - (t.settle_ms > t.press_ms ? t.settle_ms - t.press_ms : 0);
-				}
-				else if (since >= t.steer_wait_ms)
-				{
-					o.event = "the cursor did not answer the D-pad: nothing confirmed";
-					ToIdle(st);
+					// Night review M2: one move, to the cell the press sends it to; any other move is not ours.
+					if (CursorMoved(in, st))
+					{
+						if (st.steer_moved || in.cursor_cell != st.steer_to)
+						{
+							o.stop_press = true;
+							o.event = "the prompt's cursor went where the D-pad press did not send it: nothing confirmed";
+							ToIdle(st);
+							return o;
+						}
+						st.steer_moved = true;
+						SeeCursor(in, st);
+					}
+					if (st.steer_moved && since >= t.press_ms)
+					{
+						// Back to the prompt's checks with the settle already served (a short one for the cursor's draw).
+						st.phase = Phase::Prompt;
+						st.t0 = in.now_ms - (t.settle_ms > t.press_ms ? t.settle_ms - t.press_ms : 0);
+					}
+					else if (since >= t.steer_wait_ms)
+					{
+						o.event = "the cursor did not answer the D-pad: nothing confirmed";
+						ToIdle(st);
+					}
 				}
 				return o;
 
 			case Phase::Confirming:
+				if (in.press_dropped)
+				{
+					o.stop_press = true;
+					o.event = "the confirm was dropped (the cursor, the prompt or the cell changed, or the player pressed): "
+					          "nothing more is pressed";
+					ToIdle(st);
+					return o;
+				}
+				if (since < t.press_ms && in.take_prompt && (CursorMoved(in, st) || in.player_buttons))
+				{
+					o.stop_press = true;
+					o.event = "the cursor moved or the player pressed under the confirm: the Circle let go";
+					ToIdle(st);
+					return o;
+				}
 				if (!in.screen_up)
 				{
 					for (u32 k = 0; k < std::min<u32>(in.cell_count, 4); k++)
@@ -362,6 +520,49 @@ namespace VR::HandPickup
 		std::atomic<u64> s_circle_until{0};
 		std::atomic<u64> s_dpad_until{0};
 		std::atomic<int> s_dpad_dir{-1};
+		// Night review M1 / M2: what the press out now is (re-checked at every input poll), whether the pad is the
+		// prompt's alone (Prompt, Steering), and a press CurrentPress dropped since the last vsync.
+		std::atomic<int> s_press_kind{static_cast<int>(PressKind::None)};
+		std::atomic<bool> s_exclusive{false};
+		std::atomic<bool> s_dropped{false};
+		std::atomic<const char*> s_drop_why{nullptr};
+		// The guest addresses CurrentPress re-reads (written on the CPU thread before the press starts; CurrentPress runs
+		// on the CPU thread's input poll too).
+		struct PressGuard
+		{
+			bool valid = false;
+			u32 overlay = 0, which = 0, sub = 0, grid = 0, node = 0, index = 0;
+			bool has_screen_flag = false;
+			u32 screen_flag = 0;
+			u32 cell = 0; // the record's cell the confirm was checked on
+			PressExpect expect;
+		};
+		PressGuard s_guard;
+
+		// The player's own input on either controller: any button, the trigger, a D-pad direction or a stick pushed past
+		// half (in menu mode the right stick drives the D-pad; the left stick moves menu cursors too).
+		bool PlayerInput(const VRInputSnapshot& snap)
+		{
+			if (snap.generation == 0 || !snap.actions_active)
+				return false;
+			bool any = false;
+			for (const VRHandState& hs : snap.hands)
+			{
+				any = any || hs.a || hs.b || hs.x || hs.y || hs.menu || hs.view || hs.bumper || hs.thumbstick_click ||
+				      hs.dpad_up || hs.dpad_down || hs.dpad_left || hs.dpad_right || hs.trigger >= 0.5f ||
+				      std::fabs(hs.thumbstick_x) >= 0.5f || std::fabs(hs.thumbstick_y) >= 0.5f;
+			}
+			return any;
+		}
+
+		// The player's own Circle (the VR Gamepad: ButtonA and RightTriggerPress).
+		bool PlayerCircle(const VRInputSnapshot& snap)
+		{
+			if (snap.generation == 0 || !snap.actions_active)
+				return false;
+			const VRHandState& r = snap.hands[VRInputSnapshot::RIGHT];
+			return r.a || r.trigger >= 0.5f;
+		}
 
 		bool Read(u32 address, u8 width, u32* v)
 		{
@@ -421,8 +622,9 @@ namespace VR::HandPickup
 			memWrite32(p.pickup_block, p.pickup_magic);
 		}
 
-		void StartPress(bool circle, int dpad, u64 now, u64 ms)
+		void StartPress(bool circle, int dpad, u64 now, u64 ms, PressKind kind)
 		{
+			s_press_kind.store(static_cast<int>(kind), std::memory_order_release);
 			if (circle)
 				s_circle_until.store(now + ms, std::memory_order_release);
 			if (dpad >= 0 && dpad < 4)
@@ -434,6 +636,7 @@ namespace VR::HandPickup
 
 		void StopPresses()
 		{
+			s_press_kind.store(static_cast<int>(PressKind::None), std::memory_order_release);
 			s_circle_until.store(0, std::memory_order_release);
 			s_dpad_until.store(0, std::memory_order_release);
 			s_dpad_dir.store(-1, std::memory_order_release);
@@ -451,6 +654,8 @@ namespace VR::HandPickup
 			s_state = State{};
 			s_block_ok = false;
 			StopPresses();
+			s_exclusive.store(false, std::memory_order_release);
+			s_dropped.store(false, std::memory_order_release);
 			return;
 		}
 		const u64 now = CameraDriver::SteadyNowMs();
@@ -518,16 +723,25 @@ namespace VR::HandPickup
 		Read(p->pickup_sub, 1, &sub);
 		in.screen_up = overlay == 1 || live.screen_up;
 		in.take_prompt = overlay == 1 && which == 1 && sub == 2;
+		// Night review M1: melee.screenFlag (0x48BF7E) rises 0.55-0.65 s before the overlay on the item screen and the map.
+		const bool has_screen_flag = profile->melee.has_value() && profile->melee->screen_flag.has_value();
+		if (has_screen_flag)
+		{
+			u32 v = 0;
+			in.screen_flag = !Read(profile->melee->screen_flag.value(), 1, &v) || v != 0;
+		}
 		in.weapon_raised = live.weapon_raised;
 		const VRInputSnapshot snap = GetInputSnapshot();
 		const bool hands_live = snap.generation != 0 && snap.actions_active;
 		for (int h = 0; h < 2; h++)
+			in.grip[h] = hands_live ? snap.hands[h].grip : 0.0f;
+		in.player_buttons = PlayerInput(snap);
+		in.player_circle = PlayerCircle(snap);
+		in.press_dropped = s_dropped.exchange(false, std::memory_order_acq_rel);
+		if (in.press_dropped)
 		{
-			const VRHandState& hs = snap.hands[h];
-			in.grip[h] = hands_live ? hs.grip : 0.0f;
-			in.player_buttons = in.player_buttons ||
-			                    (hands_live && (hs.a || hs.b || hs.x || hs.y || hs.trigger >= 0.5f || hs.dpad_up || hs.dpad_down ||
-			                                       hs.dpad_left || hs.dpad_right));
+			const char* why = s_drop_why.load(std::memory_order_acquire);
+			Console.WriteLn("(VR) Hand pickup: a press of ours was dropped as it went out: %s", why ? why : "?");
 		}
 		for (ZoneMarkers::Zone z : {ZoneMarkers::Zone::Holster, ZoneMarkers::Zone::Belt, ZoneMarkers::Zone::Backpack})
 		{
@@ -546,6 +760,13 @@ namespace VR::HandPickup
 		in.target_item = tg.item_id;
 		in.block_armed = Read32(p->pickup_block) == p->pickup_magic;
 		const u32 rec = live.record;
+		// Night review M1: the action byte (feedback.weapon.action, +0x54F): 0 idle, 1 walk, 3 run; anything else (9 the
+		// pickup reach, an examine, a reload) is an action under way.
+		if (live.armed && rec != 0 && profile->feedback.has_value() && profile->feedback->weapon_action_offset != 0)
+		{
+			u32 action = 0;
+			in.busy = !Read(rec + profile->feedback->weapon_action_offset, 1, &action) || !(action == 0 || action == 1 || action == 3);
+		}
 		if (live.armed && rec != 0)
 		{
 			Read(p->pickup_prompt + 1, 1, &in.prompt_record);
@@ -565,6 +786,9 @@ namespace VR::HandPickup
 			Read(p->pickup_cursor_node, 4, &node);
 			Read(p->pickup_cursor_index, 2, &index);
 			in.cursor_in_grid = grid == 1;
+			in.cursor_grid = grid;
+			in.cursor_node = node;
+			in.cursor_index = index;
 			for (u32 k = 0; k < in.cell_count; k++)
 			{
 				if (node == p->pickup_cell_nodes[k] && index == k)
@@ -583,8 +807,31 @@ namespace VR::HandPickup
 			s_record = rec;
 			ArmBlock(*p, rec, tg.point);
 		}
+		if (o.stop_press)
+			StopPresses();
 		if (o.press_circle || o.press_dpad >= 0)
-			StartPress(o.press_circle, o.press_dpad, now, s_tuning.press_ms);
+		{
+			// What CurrentPress re-reads at every poll while the press is out.
+			PressGuard g;
+			g.valid = true;
+			g.overlay = p->pickup_overlay;
+			g.which = p->pickup_which;
+			g.sub = p->pickup_sub;
+			g.grid = p->pickup_grid;
+			g.node = p->pickup_cursor_node;
+			g.index = p->pickup_cursor_index;
+			g.has_screen_flag = has_screen_flag;
+			g.screen_flag = has_screen_flag ? profile->melee->screen_flag.value() : 0;
+			g.cell = (o.confirm && in.cursor_cell >= 0) ? rec + p->pickup_cells + static_cast<u32>(in.cursor_cell) : 0;
+			g.expect.node = in.cursor_node;
+			g.expect.index = in.cursor_index;
+			s_guard = g;
+			const PressKind kind = o.confirm ? PressKind::Confirm : (o.press_dpad >= 0 ? PressKind::Steer : PressKind::Arm);
+			StartPress(o.press_circle, o.press_dpad, now, s_tuning.press_ms, kind);
+		}
+		// Night review M2: while the prompt is checked or steered, the pad is the prompt's (the menu pointer's D-pad and
+		// every other synthetic value read 0); the confirm press holds it too (CurrentPress).
+		s_exclusive.store(s_state.phase == Phase::Prompt || s_state.phase == Phase::Steering, std::memory_order_release);
 		if (s_state.phase == Phase::Idle && before != Phase::Idle && !o.press_circle)
 			s_dpad_until.store(0, std::memory_order_release);
 		if (o.event)
@@ -620,6 +867,8 @@ namespace VR::HandPickup
 		s_load_pending = true;
 		s_block_ok = false;
 		StopPresses();
+		s_exclusive.store(false, std::memory_order_release);
+		s_dropped.store(false, std::memory_order_release);
 	}
 
 	Press CurrentPress()
@@ -629,6 +878,45 @@ namespace VR::HandPickup
 		pr.circle = now < s_circle_until.load(std::memory_order_acquire);
 		if (now < s_dpad_until.load(std::memory_order_acquire))
 			pr.dpad = s_dpad_dir.load(std::memory_order_acquire);
+		const PressKind kind = static_cast<PressKind>(s_press_kind.load(std::memory_order_acquire));
+		if ((pr.circle || pr.dpad >= 0) && kind != PressKind::None)
+		{
+			// Re-checked at the instant it goes out (night review M1 / M2): a fault drops it, and the next vsync ends the take.
+			const char* why = "no game";
+			if (s_guard.valid && VMManager::HasValidVM())
+			{
+				PressView v;
+				u32 overlay = 0, which = 0, sub = 0, flag = 0, cell = 0;
+				Read(s_guard.overlay, 4, &overlay);
+				Read(s_guard.which, 1, &which);
+				Read(s_guard.sub, 1, &sub);
+				Read(s_guard.grid, 1, &v.grid);
+				Read(s_guard.node, 4, &v.node);
+				Read(s_guard.index, 2, &v.index);
+				v.screen_flag = s_guard.has_screen_flag && (!Read(s_guard.screen_flag, 1, &flag) || flag != 0);
+				v.overlay_up = overlay == 1;
+				v.menu_mode = SpatialControls::MenuMode();
+				v.take_prompt = overlay == 1 && which == 1 && sub == 2;
+				v.cell = 0xFF;
+				if (s_guard.cell != 0 && Read(s_guard.cell, 1, &cell))
+					v.cell = static_cast<u8>(cell);
+				else if (kind != PressKind::Confirm)
+					v.cell = 0;
+				v.player_input = kind != PressKind::Arm && PlayerInput(GetInputSnapshot());
+				why = PressFault(kind, v, s_guard.expect);
+			}
+			if (why)
+			{
+				StopPresses();
+				s_drop_why.store(why, std::memory_order_release);
+				s_dropped.store(true, std::memory_order_release);
+				pr.circle = false;
+				pr.dpad = -1;
+			}
+			else
+				pr.exclusive = kind != PressKind::Arm;
+		}
+		pr.exclusive = pr.exclusive || s_exclusive.load(std::memory_order_acquire);
 		return pr;
 	}
 }
@@ -744,6 +1032,7 @@ namespace VR::HandPickup
 
 		// Arms the ready scene (right hand) and returns the state in Armed.
 		const auto armed = [&](In& in, State& st) {
+			st = State{};
 			in = ready();
 			Step(t, in, st);
 			in.grip[1] = 1.0f;
@@ -788,8 +1077,16 @@ namespace VR::HandPickup
 			check(o.clear && idle.phase == Phase::Idle, "idle: an armed word that is not ours to keep (a loaded state's) is cleared");
 		}
 
+		// The prompt's cursor struct on cell k of your grid (its node, index and the grid byte as the game has them).
+		const auto cursor = [](In& in, int k) {
+			in.cursor_in_grid = true;
+			in.cursor_cell = k;
+			in.cursor_grid = 1;
+			in.cursor_node = 0x720C10u + 0x50u * static_cast<u32>(k);
+			in.cursor_index = static_cast<u32>(k);
+		};
 		// To the prompt: armed, the cave takes it, the reach, the prompt up with this item's result.
-		const auto prompt = [&](In& in, State& st) {
+		const auto prompt = [&](In& in, State& st, int cell = 1) {
 			armed(in, st);
 			in.block_armed = false;
 			run(in, st, 16, 1);  // Reaching
@@ -799,8 +1096,7 @@ namespace VR::HandPickup
 			in.prompt_record = 7;
 			in.prompt_id = 300;
 			in.result = 7;
-			in.cursor_in_grid = true;
-			in.cursor_cell = 1;  // free
+			cursor(in, cell);    // 1: free
 			run(in, st, 16, 1);  // Prompt
 		};
 		// --- The prompt: the confirm and every refusal. ---
@@ -853,8 +1149,7 @@ namespace VR::HandPickup
 			in.prompt_record = 7;
 			in.prompt_id = 300;
 			in.result = 7;
-			in.cursor_in_grid = true;
-			in.cursor_cell = 1;
+			cursor(in, 1);
 			o = run(in, st, 16, 40);
 			check(!o.press_circle && st.phase == Phase::Idle, "prompt: a grip let go during the reach and closed again is not held");
 			prompt(in, st);
@@ -887,17 +1182,15 @@ namespace VR::HandPickup
 		{
 			State st;
 			In in;
-			prompt(in, st);
-			in.cursor_cell = 0; // full
+			prompt(in, st, 0); // full
 			Out o = run(in, st, 16, 19);
 			check(st.phase == Phase::Steering && o.press_dpad == 3 && !o.press_circle, "steer: from full cell 0 right to free cell 1");
-			in.cursor_cell = 1;
+			cursor(in, 1);
 			o = run(in, st, 16, 7);
 			check(st.phase == Phase::Prompt, "steer: the cursor moved: back to the prompt's checks");
 			o = run(in, st, 16, 8);
 			check(st.phase == Phase::Confirming && o.press_circle, "steer: then confirmed on the free cell");
-			prompt(in, st);
-			in.cursor_cell = 0;
+			prompt(in, st, 0);
 			run(in, st, 16, 19);
 			o = run(in, st, 16, 40); // the cursor never moves
 			check(st.phase == Phase::Idle && !o.press_circle, "steer: a cursor that does not answer: nothing confirmed");
@@ -912,6 +1205,162 @@ namespace VR::HandPickup
 			check(DpadTowardFree(0, c3, 4) == -1 && DpadTowardFree(-1, c2, 4) == -1 && DpadTowardFree(4, c2, 4) == -1,
 				"route: none with no free cell or no cell");
 		}
+		// --- Night review M1: the arming Circle never reaches a screen that is opening, nor a pickup under way. ---
+		{
+			const auto squeeze_at = [&](In in, State& st) {
+				in.grip[1] = 0.0f;
+				Step(t, in, st);
+				in.grip[1] = 1.0f;
+				in.now_ms += 16;
+				return Step(t, in, st);
+			};
+			State st;
+			In in = ready();
+			in.screen_flag = true;
+			check(!squeeze_at(in, st).arm, "M1: not while the screen flag (0x48BF7E) is up, before the overlay");
+			st = State{};
+			in = ready();
+			in.screen_up = true;
+			Step(t, in, st); // a screen up, then gone
+			in.screen_up = false;
+			in.now_ms += 100;
+			check(!squeeze_at(in, st).arm, "M1: not within 200 ms of a screen");
+			in.now_ms += 200;
+			check(squeeze_at(in, st).arm, "M1: arms once the screens have been clear 200 ms");
+			st = State{};
+			in = ready();
+			in.screen_flag = true;
+			Step(t, in, st);
+			in.screen_flag = false;
+			in.now_ms += 150;
+			check(!squeeze_at(in, st).arm, "M1: the screen flag counts for the 200 ms too");
+			st = State{};
+			in = ready();
+			in.busy = true;
+			check(!squeeze_at(in, st).arm, "M1: not while the character is busy (the reach of a pickup under way)");
+			st = State{};
+			in = ready();
+			in.player_circle = true;
+			Step(t, in, st);
+			in.player_circle = false;
+			in.now_ms += 1000;
+			check(!squeeze_at(in, st).arm, "M1: not within 1.5 s of your own Circle");
+			in.now_ms += 600;
+			check(squeeze_at(in, st).arm, "M1: arms 1.5 s after your own Circle");
+			// Armed: the screen flag rising drops the Circle and clears the word.
+			In a;
+			armed(a, st);
+			a.screen_flag = true;
+			Out o = run(a, st, 16, 1);
+			check(st.phase == Phase::Idle && o.clear && o.stop_press, "M1: armed, the screen flag rising: cleared, the Circle let go");
+			armed(a, st);
+			a.press_dropped = true;
+			o = run(a, st, 16, 1);
+			check(st.phase == Phase::Idle && o.clear && o.stop_press, "M1: armed, the arming press dropped as it went out: cleared");
+			// The press as it goes out.
+			PressView v;
+			const PressExpect e;
+			check(PressFault(PressKind::Arm, v, e) == nullptr, "M1: the arming Circle goes out with every screen flag clear");
+			v.screen_flag = true;
+			check(PressFault(PressKind::Arm, v, e) != nullptr, "M1: the arming Circle is dropped once the screen flag rises");
+			v = PressView{};
+			v.overlay_up = true;
+			check(PressFault(PressKind::Arm, v, e) != nullptr, "M1: ... once the overlay rises");
+			v = PressView{};
+			v.menu_mode = true;
+			check(PressFault(PressKind::Arm, v, e) != nullptr, "M1: ... once menu mode (pauseWhen) is on");
+		}
+		// --- Night review M2: the confirm lands only on the checked free cell; any cursor move or player input aborts. ---
+		{
+			State st;
+			In in;
+			prompt(in, st);
+			run(in, st, 16, 8); // 128 ms: past the cursor's placing
+			cursor(in, 3);      // free too, but not moved by us
+			Out o = run(in, st, 16, 30);
+			check(st.phase == Phase::Idle && !o.press_circle, "M2: the cursor moved on the prompt (not by us): nothing confirmed");
+			prompt(in, st);
+			cursor(in, 3); // the game placing its cursor in the prompt's first 100 ms
+			o = run(in, st, 16, 30);
+			check(st.phase == Phase::Confirming && o.press_circle && o.confirm, "M2: a cursor placed in the first 100 ms is the game's");
+			prompt(in, st);
+			run(in, st, 16, 18); // 288 ms
+			cursor(in, 3);       // moved just before the press
+			o = run(in, st, 16, 3);
+			check(st.phase == Phase::Idle && !o.press_circle, "M2: a move just before the press: nothing confirmed");
+			prompt(in, st);
+			o = run(in, st, 16, 19);
+			check(st.phase == Phase::Confirming && o.press_circle, "M2: the confirm (setup)");
+			cursor(in, 3);
+			o = run(in, st, 16, 1);
+			check(st.phase == Phase::Idle && o.stop_press, "M2: the cursor moving under the confirm press lets Circle go");
+			prompt(in, st);
+			run(in, st, 16, 19);
+			in.player_buttons = true;
+			o = run(in, st, 16, 1);
+			check(st.phase == Phase::Idle && o.stop_press, "M2: the player's input under the confirm press lets Circle go");
+			prompt(in, st);
+			run(in, st, 16, 19);
+			in.press_dropped = true;
+			o = run(in, st, 16, 1);
+			check(st.phase == Phase::Idle && o.stop_press, "M2: a confirm dropped as it went out ends the take");
+			prompt(in, st);
+			in.press_dropped = true;
+			o = run(in, st, 16, 1);
+			check(st.phase == Phase::Idle && !o.press_circle, "M2: a press dropped on the prompt ends the take");
+			// Steering: one move, to the cell the press sends the cursor to.
+			prompt(in, st, 0);
+			run(in, st, 16, 19);
+			check(st.phase == Phase::Steering && st.steer_to == 1, "M2: steering right from cell 0 must reach cell 1");
+			cursor(in, 2); // somewhere else
+			o = run(in, st, 16, 1);
+			check(st.phase == Phase::Idle && o.stop_press && !o.press_circle, "M2: the cursor going elsewhere while steering: nothing");
+			prompt(in, st, 0);
+			run(in, st, 16, 19);
+			cursor(in, 1);
+			run(in, st, 16, 2);
+			cursor(in, 3); // and on again before the checks
+			o = run(in, st, 16, 20);
+			check(st.phase == Phase::Idle && !o.press_circle, "M2: a second move while steering: nothing confirmed");
+			prompt(in, st, 0);
+			run(in, st, 16, 19);
+			in.player_buttons = true;
+			o = run(in, st, 16, 1);
+			check(st.phase == Phase::Idle && o.stop_press, "M2: the player's input while steering lets the D-pad go");
+			// The press as it goes out.
+			PressView v;
+			v.take_prompt = true;
+			v.grid = 1;
+			v.node = 0x720C60;
+			v.index = 1;
+			PressExpect e;
+			e.node = 0x720C60;
+			e.index = 1;
+			check(PressFault(PressKind::Confirm, v, e) == nullptr, "M2: the confirm goes out on the checked free cell");
+			PressView w = v;
+			w.node = 0x720CB0;
+			check(PressFault(PressKind::Confirm, w, e) != nullptr, "M2: dropped: the cursor's node changed");
+			w = v;
+			w.index = 2;
+			check(PressFault(PressKind::Confirm, w, e) != nullptr, "M2: dropped: the cursor's index changed");
+			w = v;
+			w.grid = 0;
+			check(PressFault(PressKind::Confirm, w, e) != nullptr, "M2: dropped: the cursor left your grid (the partner's panel)");
+			w = v;
+			w.cell = 9;
+			check(PressFault(PressKind::Confirm, w, e) != nullptr, "M2: dropped: the cell filled (the swap)");
+			w = v;
+			w.player_input = true;
+			check(PressFault(PressKind::Confirm, w, e) != nullptr, "M2: dropped: the player's input");
+			w = v;
+			w.take_prompt = false;
+			check(PressFault(PressKind::Confirm, w, e) != nullptr, "M2: dropped: the prompt went");
+			w = v;
+			w.player_input = true;
+			check(PressFault(PressKind::Steer, w, e) != nullptr && PressFault(PressKind::Steer, v, e) == nullptr,
+				"M2: the D-pad press is dropped on the player's input only");
+		}
+
 		// --- The shipped File #1 block. ---
 		{
 			const ProfileDB::Profile* f1 = ProfileDB::Lookup("SLPM-65428", 0);

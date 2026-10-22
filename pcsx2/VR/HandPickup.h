@@ -58,6 +58,16 @@ namespace VR::HandPickup
 		u32 max_steer = 3;           // at most this many D-pad presses per prompt
 		u64 close_timeout_ms = 2000; // the prompt must close within this of the confirm
 		u64 cell_wait_ms = 600;      // and the item show in a cell within this of the close
+		// Night review M1: the arming Circle only once every screen flag (the overlay, MenuMode and melee.screenFlag, which
+		// rises 0.55-0.65 s before the overlay) has read clear this long, and not this soon after the player's own Circle
+		// (a pickup of theirs may be under way: its reach has no screen up).
+		u64 screen_clear_ms = 200;
+		u64 own_circle_ms = 1500;
+		// Night review M2: the prompt's cursor struct changing in the first cursor_place_ms of the prompt is the game placing
+		// it; any change after that, other than the one cell a D-pad press of ours sends it to, aborts. The cursor must
+		// have been still this long when the confirm is pressed.
+		u64 cursor_place_ms = 100;
+		u64 cursor_still_ms = 100;
 	};
 
 	// One vsync of what the game and the hands say.
@@ -67,11 +77,17 @@ namespace VR::HandPickup
 		bool enabled = false;      // the switch, File #1 offline, first person armed, the cave and site in, the block ours
 		bool guards_now = false;   // the camera guards held this vsync (not just their grace)
 		bool screen_up = false;    // a game screen is drawn (overlay u32), or menu mode
+		bool screen_flag = false;  // melee.screenFlag (File #1 0x48BF7E) non-zero: a screen is opening (before the overlay)
+		bool busy = false;         // the local record's action byte (+0x54F) is not idle, walk or run: an action under way
+		bool player_circle = false; // the player's own Circle (A or the trigger) this vsync
 		bool take_prompt = false;  // ... and it is a take-it prompt (which 1, sub 2)
 		bool weapon_raised = false;
 		float grip[2] = {};        // VRInputSnapshot::LEFT / RIGHT
 		bool hand_in_zone[2] = {}; // a body zone (holster, belt, backpack) has that hand: its squeeze is the zone's
-		bool player_buttons = false; // the player's own A, B, X, Y, trigger or D-pad: they answer the prompt themselves
+		bool player_buttons = false; // the player's own A, B, X, Y, trigger, D-pad, bumper, menu, view, stick click or a stick
+		                             // pushed past half: they answer the prompt themselves
+		bool press_dropped = false;  // CurrentPress dropped a press of ours since the last vsync (a screen rose, the cursor
+		                             // moved, the player pressed): nothing more is pressed
 		// ItemReach::CurrentPickup
 		bool target_highlighted = false;
 		int target_hand = -1;
@@ -87,6 +103,7 @@ namespace VR::HandPickup
 		u32 cell_count = 4;
 		bool cursor_in_grid = false; // the prompt's cursor is in your own grid ...
 		int cursor_cell = -1;        // ... on this cell (its node and index match), -1 otherwise
+		u32 cursor_grid = 0, cursor_node = 0, cursor_index = 0; // the cursor struct as read (a move is any change)
 	};
 
 	struct Out
@@ -94,6 +111,8 @@ namespace VR::HandPickup
 		bool arm = false;          // write the block (the target's search point) and arm the word
 		bool clear = false;        // clear the armed word
 		bool press_circle = false; // one Circle press of press_ms
+		bool confirm = false;      // ... and it is the confirm (CurrentPress re-checks the cursor cell at every poll)
+		bool stop_press = false;   // drop any press of ours at once
 		int press_dpad = -1;       // one D-pad press of press_ms: 0 up, 1 down, 2 left, 3 right
 		int taken_cell = -1;       // the item showed in this cell
 		const char* event = nullptr; // what happened, for the log (nullptr: nothing to say)
@@ -112,10 +131,48 @@ namespace VR::HandPickup
 		bool checked = false;      // the prompt's item and cells have been checked
 		u32 steers = 0;
 		int steer_from = -1;
+		int steer_to = -1;         // the cell the D-pad press must take the cursor to
+		bool steer_moved = false;
+		// Night review M1: when a screen flag was last up, when the player's own Circle was last down.
+		bool screen_seen = false;
+		u64 screen_ms = 0;
+		bool own_circle_seen = false;
+		u64 own_circle_at = 0;
+		// Night review M2: the prompt's cursor struct as last seen, and since when.
+		bool cursor_seen = false;
+		u32 cursor_grid = 0, cursor_node = 0, cursor_index = 0;
+		u64 cursor_since = 0;
+		u64 prompt_t0 = 0;         // when the take-it prompt came up
 	};
 
 	// Pure: one vsync. The caller writes the block on arm (and on clear), starts the presses and logs the event.
 	Out Step(const Tuning& t, const In& in, State& st);
+
+	// A press of ours as it goes out, re-checked at every input poll against guest memory (CurrentPress).
+	enum class PressKind : u8
+	{
+		None,
+		Arm,     // the arming Circle: dropped once any screen flag rises (night review M1)
+		Steer,   // a D-pad press on the take-it prompt: dropped once the prompt goes or the player presses
+		Confirm, // the confirm: dropped once the prompt goes, the cursor struct leaves the checked free cell, that cell
+		         // fills or the player presses (night review M2)
+	};
+	struct PressView
+	{
+		bool screen_flag = false; // melee.screenFlag non-zero
+		bool overlay_up = false;  // the overlay u32 reads 1
+		bool menu_mode = false;   // SpatialControls::MenuMode (pauseWhen)
+		bool take_prompt = false; // overlay 1, which 1, sub 2
+		u32 grid = 0, node = 0, index = 0; // the cursor struct
+		u8 cell = 0;              // the record's cell the confirm was checked on (0 = still free)
+		bool player_input = false;
+	};
+	struct PressExpect
+	{
+		u32 node = 0, index = 0; // the cursor's node and index when the confirm was decided
+	};
+	// Pure: why the press must be dropped now (nullptr: it may go on).
+	const char* PressFault(PressKind kind, const PressView& v, const PressExpect& e);
 
 	// Pure: the D-pad direction from cell `from` toward the nearest free cell in a 2 x 2 grid (0 1 / 2 3; never right of
 	// the right column, the partner's panel, nor down from the bottom row, the equipped box), -1 when no free cell or
@@ -130,10 +187,16 @@ namespace VR::HandPickup
 
 	// The presses this poll, for VRInputSource (the CPU thread's input poll): Circle, or a D-pad direction (0 up, 1 down,
 	// 2 left, 3 right; -1 none), on the VR Gamepad's own pad. Only ever presses; the player's own values go out otherwise.
+	// exclusive: while the take-it prompt is being checked, steered or confirmed (Prompt, Steering, a confirm press), every
+	// other value on the pad reads 0 but these presses (the menu pointer's D-pad, the grab breakout, any zone; night
+	// review M2). Each poll re-checks a press against guest memory before it goes out: the arming Circle is dropped once
+	// a screen flag rises (M1), the confirm once the prompt, the cursor struct or the cell under it changes, or the
+	// player presses anything (M2); a dropped press ends the take (Step's press_dropped).
 	struct Press
 	{
 		bool circle = false;
 		int dpad = -1;
+		bool exclusive = false;
 	};
 	Press CurrentPress();
 

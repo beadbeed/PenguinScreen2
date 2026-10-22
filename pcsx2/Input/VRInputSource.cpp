@@ -678,21 +678,29 @@ void VRInputSource::ApplyMelee(Instance& in, SC::ControlValues& values, const VR
 
 // [VR] HandPickup (VR::HandPickup) on the VR Gamepad: while it presses Circle every control bound to Circle reads 1; while it
 // presses a D-pad direction (steering the take-it prompt's cursor to a free cell) the control bound to that direction reads
-// 1 and those bound to the other three read 0 (so the menu pointer's own D-pad press cannot cross it that poll). Otherwise
-// the player's own values go out untouched.
+// 1 and those bound to the other three read 0 (so the menu pointer's own D-pad press cannot cross it that poll). While the
+// take-it prompt is being checked, steered or confirmed (Press::exclusive; night review M2) every control of every PS2-pad
+// instance reads 0 but those presses: the menu pointer's D-pad, the grab breakout, the reload and melee drivers and the
+// zones cannot move the prompt's cursor or answer it (the player's own input ends the take first). Otherwise the player's
+// own values go out untouched.
 void VRInputSource::ApplyPickup(Instance& in, SC::ControlValues& values)
 {
-	if (in.kind != SC::DeviceKind::Gamepad || in.spec.usb_port >= 0)
+	if (in.spec.usb_port >= 0)
 		return;
 	const VR::HandPickup::Press pr = VR::HandPickup::CurrentPress();
-	if (!pr.circle && pr.dpad < 0)
+	if (!pr.circle && pr.dpad < 0 && !pr.exclusive)
 		return;
+	const bool gamepad = in.kind == SC::DeviceKind::Gamepad;
 	static constexpr const char* kDpad[4] = {"Up", "Down", "Left", "Right"};
 	const size_t count = std::min(in.spec.bind.size(), in.bind_ids.size());
 	for (size_t k = 0; k < count; ++k)
 	{
 		const u32 i = in.bind_ids[k];
 		if (i >= SC::kControlCount)
+			continue;
+		if (pr.exclusive)
+			values[i] = 0.0f;
+		if (!gamepad)
 			continue;
 		const std::string& target = in.spec.bind[k].target;
 		if (pr.circle && target == "Circle")
