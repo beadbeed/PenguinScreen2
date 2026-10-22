@@ -3546,7 +3546,7 @@ static std::optional<VR::ProfileDB::BreakoutParams> parseBreakout(const std::str
 {
 	using VR::ProfileDB::BreakoutParams;
 	warnUnknownKeys(serial, node, "breakout", {"grabbed", "shakeSpeed", "reversals", "reversalWindowMs", "reversalSpeed",
-		"holdMs", "stickHz", "pressHz", "pressMs", "buzz", "buzzMs"});
+		"holdMs", "stickHz", "pressHz", "pressMs", "buzz", "buzzMs", "facePull"});
 	const auto reject = [serial](const char* why) -> std::optional<BreakoutParams> {
 		Console.WarningFmt("(VR) ProfileDB: Serial '{}' breakout {}; the whole block is IGNORED, so shaking never breaks "
 						   "free of a grab in this game.", serial, why);
@@ -3558,6 +3558,37 @@ static std::optional<VR::ProfileDB::BreakoutParams> parseBreakout(const std::str
 	if (!parseRecordCheckList(serial, node["grabbed"], "breakout.grabbed", bp.grabbed) ||
 		bp.grabbed.size() != node["grabbed"].num_children())
 		return reject("has a grabbed entry that does not parse");
+
+	// facePull ([VR] GrabFacePull): optional; a bad entry drops only it (the view then never turns by itself).
+	if (node.has_child("facePull") && node["facePull"].is_map())
+	{
+		const ryml::ConstNodeRef fp = node["facePull"];
+		warnUnknownKeys(serial, fp, "breakout.facePull", {"enemies", "stride", "count", "present", "position", "within"});
+		BreakoutParams::FacePull f;
+		bool ok = true;
+		const auto hex = [&](const char* key, u32 lo, u32 hi, u32& dst) {
+			const std::optional<u32> v = fp.has_child(key) ? parseAddress(nodeVal(fp[key])) : std::nullopt;
+			if (v.has_value() && v.value() >= lo && v.value() <= hi)
+				dst = v.value();
+			else
+				ok = false;
+		};
+		hex("enemies", 1, 0x1FFFFFF, f.table);
+		hex("stride", 4, 0x10000, f.stride);
+		hex("count", 1, 256, f.count);
+		hex("present", 0, 0xFFFF, f.present);
+		hex("position", 0, 0xFFF0, f.position);
+		const std::optional<float> w = fp.has_child("within") ? StringUtil::FromChars<float>(nodeVal(fp["within"])) : std::nullopt;
+		if (w.has_value() && std::isfinite(w.value()) && w.value() > 0.0f && w.value() <= 1000.0f)
+			f.within = w.value();
+		else
+			ok = false;
+		if (ok && static_cast<u64>(f.table) + static_cast<u64>(f.stride) * f.count <= Ps2MemSize::MainRam)
+			bp.face_pull = f;
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' breakout.facePull needs enemies, stride, count, present, position "
+							   "(hex) and within (game units, decimal) inside RAM; ignoring it.", serial);
+	}
 
 	VR::GrabBreakout::Params& sp = bp.shake;
 	// Decimal, in the key's own unit; stored scaled (milliseconds to seconds).

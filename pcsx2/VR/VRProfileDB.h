@@ -802,6 +802,19 @@ namespace VR::ProfileDB
 	{
 		std::vector<RecordCheck> grabbed; // all must hold; at least one
 		GrabBreakout::Params shake;
+		// facePull ([VR] GrabFacePull): where the enemies are, to turn the view toward the one holding you: the table, its
+		// stride and count, the present byte and the f32 x, y, z position (record offsets), and how near (game units across
+		// the floor) the nearest must be. Reads only.
+		struct FacePull
+		{
+			u32 table = 0;
+			u32 stride = 0;
+			u32 count = 0;
+			u32 present = 0;
+			u32 position = 0;
+			float within = 0.0f;
+		};
+		std::optional<FacePull> face_pull;
 	};
 
 	// melee: [VR] PhysicalMelee (VR::PhysicalMelee; tools/outbreak-vr/research/2026-10-14-melee.md). Where the local record

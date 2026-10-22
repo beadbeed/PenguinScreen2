@@ -1508,7 +1508,9 @@ int main(int argc, char* argv[])
 			stance = stance || (c.offset == 0x08 && !c.has_range && c.equals == 5u);
 			status = status || (c.offset == 0xBA0 && c.has_range && c.max < 0x18u);
 		}
-		return stance && status;
+		const auto& fp = p->breakout->face_pull;
+		return stance && status && fp.has_value() && fp->table == 0x3FFCA0u && fp->stride == 0xD90u && fp->count == 64u &&
+		       fp->position == 0x38u && fp->within == 120.0f;
 	});
 	RunSilent("ProfileDB::SelfTestMultibandResolve", VR::ProfileDB::SelfTestMultibandResolve);
 	RunAutoStereo();

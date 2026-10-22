@@ -4362,19 +4362,36 @@ namespace VR::CameraDriver
 						Console.WriteLn("(VR) CameraDriver: grabbed; first person holds, camera only ([VR] GrabFirstPerson%s).",
 							EmuConfig.VR.GrabFacePull ? ", the view eases toward the way you are held ([VR] GrabFacePull)" : "");
 					}
-					// [VR] GrabFacePull: the view's yaw anchor eases toward the character's heading (the grab turns him to
-					// face the zombie), so a seated player sees it straight ahead; the vignette covers the turn.
+					// [VR] GrabFacePull: the view's yaw anchor eases toward the nearest enemy (breakout.facePull), so with the
+					// head at its recentred forward a seated player faces it; the vignette covers the turn. Not toward the
+					// character's heading: a zombie grabbing from behind (File #1 slot 5) leaves Kevin facing away from it.
 					float pull = 0.0f;
-					if (EmuConfig.VR.GrabFacePull && la.yaw_anchor && s_yaw_anchor_valid && la.has_heading && base.has_value())
+					const auto& fpull = profile->breakout->face_pull;
+					if (EmuConfig.VR.GrabFacePull && fpull.has_value() && la.yaw_anchor && s_yaw_anchor_valid && base.has_value())
 					{
-						const s64 ha = static_cast<s64>(base.value()) + la.heading_offset;
-						if (ha >= 0 && ha + 2 <= static_cast<s64>(Ps2MemSize::MainRam))
+						const s64 pa = static_cast<s64>(base.value()) + la.position_offset;
+						const float kx = std::bit_cast<float>(static_cast<u32>(memRead32(static_cast<u32>(pa))));
+						const float kz = std::bit_cast<float>(static_cast<u32>(memRead32(static_cast<u32>(pa) + 8)));
+						float best = fpull->within;
+						bool found = false;
+						float bearing = 0.0f;
+						for (u32 k = 0; k < fpull->count && std::isfinite(kx) && std::isfinite(kz); k++)
 						{
-							const float heading =
-								static_cast<float>(static_cast<s16>(static_cast<u16>(memRead16(static_cast<u32>(ha))))) *
-								(2.0f * PI_F / 65536.0f);
-							s_yaw_anchor = GrabPullStep(s_yaw_anchor, heading, 1.0f / 59.94f, &pull);
+							const u32 e = fpull->table + k * fpull->stride;
+							if (memRead8(e + fpull->present) == 0)
+								continue;
+							const float ex = std::bit_cast<float>(static_cast<u32>(memRead32(e + fpull->position)));
+							const float ez = std::bit_cast<float>(static_cast<u32>(memRead32(e + fpull->position + 8)));
+							const float d = std::hypot(ex - kx, ez - kz);
+							if (std::isfinite(d) && d <= best && d > 1.0f)
+							{
+								best = d;
+								found = true;
+								bearing = std::atan2(ex - kx, ez - kz);
+							}
 						}
+						if (found)
+							s_yaw_anchor = GrabPullStep(s_yaw_anchor, bearing, 1.0f / 59.94f, &pull);
 					}
 					drive_camera(true, nullptr, true);
 					// The comfort vignette for a stick turn or the pull (camera only skips its own sampling).
@@ -4407,8 +4424,10 @@ namespace VR::CameraDriver
 		// weapon is raised (walk-and-shoot moves the character itself; online-safe the game aims with the stick).
 		// Same grace as above: lookAt keeps its flag while the guard byte flickers, so the run isn't dropped then.
 		// [VR] MenuPanel keeps lookAt active under a game screen: the latch lets go there too (s_menu_hold covers the grace).
+		// Grabbed in first person ([VR] GrabFirstPerson): let go too, as when a grab disarmed, so a latched run never holds
+		// Cross through the breakout's own Cross presses.
 		SpatialControls::SetSprintBlocked(cam.look_at.has_value() &&
-			(!s_lookat_active.load(std::memory_order_relaxed) || s_aim_moving || s_weapon_raised ||
+			(!s_lookat_active.load(std::memory_order_relaxed) || s_aim_moving || s_weapon_raised || grab_keeps ||
 				(EmuConfig.VR.MenuPanel && (s_pause_hit || s_menu_hold))));
 
 		WriteCodeHookScratch(cam, euler, pose);

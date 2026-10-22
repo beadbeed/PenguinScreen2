@@ -978,6 +978,11 @@ SLPM-65428:
     pressMs: 60
     buzz: 0.35
     buzzMs: 20
+    # VR GrabFacePull (off by default): while grabbed in first person (VR GrabFirstPerson), the view eases round toward the
+    # nearest enemy within `within` game units across the floor (20 deg/s at most). Reads only: the enemy table (melee's),
+    # its present byte and its f32 x, y, z position at +0x38 (offline 2026-10-21, slot 5: the grabbing zombie 32-35 units
+    # from Kevin, behind him: bearing 131 deg against his heading 311).
+    facePull: { enemies: 0x3FFCA0, stride: 0xD90, count: 0x40, present: 0x00, position: 0x38, within: 120 }
   # Physical melee (VR setting PhysicalMelee, off by default; tools/outbreak-vr/research/2026-10-14-melee.md). With a melee
   # weapon equipped, a deliberate swing of the right controller presses Circle on your own pad (R1 too, first, if the weapon
   # is down: the game swings only from the raised stance, 0.6 s later), and the camera.silence entries above put the game's
