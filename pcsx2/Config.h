@@ -1493,7 +1493,8 @@ struct Pcsx2Config
 		std::string VrPresencePeer;
 		// The UDP port this console listens on (1024-65535); the peer's own VrPresencePort is the port in its address.
 		int VrPresencePort = 47800;
-		// A shared word both consoles set alike (empty is a word too); packets carrying another word's hash are dropped.
+		// A shared word both consoles set alike (required: empty keeps VR presence off); packets carrying another word's hash
+		// are dropped.
 		std::string VrPresenceKey;
 		// VR body (tools/outbreak-vr/research/2026-10-21-vr-body.md): a VR player is shown as the game's own character model,
 		// its own skeleton posed by the player's real head and hands (the head and neck turned to the VR head, each arm

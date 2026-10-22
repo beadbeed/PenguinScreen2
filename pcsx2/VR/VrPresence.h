@@ -85,6 +85,8 @@ namespace VR::Presence
 
 	// FNV-1a of the text. Pure.
 	u32 KeyHash(std::string_view text);
+	// The key is a word (not empty or blanks only: that hash is a fixed public value; night review m5). Pure.
+	bool KeyUsable(std::string_view text);
 
 	// host order (a.b.c.d is a << 24 | ...). 10/8, 172.16/12, 192.168/16, 100.64/10 and 127/8 only. Pure.
 	bool IsPrivateIPv4(u32 addr);

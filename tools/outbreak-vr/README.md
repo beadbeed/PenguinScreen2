@@ -639,7 +639,10 @@ channel of their own (156-byte packets, 30 a second, a key hash, a session and a
 connection); VR body (below) poses the partner's own character with them (the first version's placeholder head and
 hands are gone). The peer must be a private IPv4 address (LAN, Tailscale 100.64/10, 127/8; a name is
 resolved and checked); nothing is sent and no socket is open unless first person is armed in private co-op, or for the
-offline loopback test with `PCSX2_VR_PRESENCE_LOOPBACK=1`, the game offline and a 127/8 peer. Reads game memory only.
+offline loopback test with `PCSX2_VR_PRESENCE_LOOPBACK=1`, the game offline and a 127/8 peer. `VrPresenceKey` must be
+a word (empty keeps presence off); the socket listens only on the local address that routes to the peer (127.0.0.1 for
+a loopback peer, never 0.0.0.0) and takes packets only from the peer's address and port. On first use Windows Firewall
+may ask about the port: answer it before putting the headset on. Reads game memory only.
 Logs `(VR) Presence: ...` (on, live / waiting, channel open / closed with its counts, a partner is drawn or why not);
 `PCSX2_VR_PRESENCE_LOG=1` adds the positions every 2 s (always on in the loopback test). `presence_echo.py` is the loopback partner (it sends each packet
 back as another slot); `presence_test.py <dev install> [slot] [--dump <dir>]` runs the whole loopback check headset-free

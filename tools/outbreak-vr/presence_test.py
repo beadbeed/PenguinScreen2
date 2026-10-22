@@ -113,7 +113,7 @@ def main():
         sys.exit("another pcsx2-qt.exe or vrserver.exe is running: wait for it (shared PINE slot, SteamVR untouched).")
     require_offline()
     set_ini(INI, "VR", {"VrPresence": "true", "VrPresencePeer": "127.0.0.1:47801", "VrPresencePort": "47800",
-                        "VrPresenceKey": ""})
+                        "VrPresenceKey": "loopback-test"})
     env = dict(os.environ)
     env["XR_RUNTIME_JSON"] = os.path.join(DEV, "no-openxr-runtime.json")  # missing on purpose: no OpenXR runtime
     env["PCSX2_VR_TEST_INPUT"] = "1"

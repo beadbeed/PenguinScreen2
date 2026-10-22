@@ -282,6 +282,33 @@ namespace VR::Presence
 		void CloseSock(Sock s) { close(s); }
 #endif
 
+		// The local IPv4 address (host order) the system routes to peer from: a UDP connect() sends nothing, it only picks
+		// the route and the source address. 0 when there is none.
+		u32 LocalAddressFor(u32 peer, u16 port)
+		{
+			Sock t = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+			if (t == kNoSock)
+				return 0;
+			sockaddr_in to = {};
+			to.sin_family = AF_INET;
+			to.sin_port = htons(port);
+			to.sin_addr.s_addr = htonl(peer);
+			u32 out = 0;
+			if (connect(t, reinterpret_cast<const sockaddr*>(&to), sizeof(to)) == 0)
+			{
+				sockaddr_in me = {};
+#ifdef _WIN32
+				int len = sizeof(me);
+#else
+				socklen_t len = sizeof(me);
+#endif
+				if (getsockname(t, reinterpret_cast<sockaddr*>(&me), &len) == 0 && me.sin_family == AF_INET)
+					out = ntohl(me.sin_addr.s_addr);
+			}
+			CloseSock(t);
+			return out;
+		}
+
 		// The socket thread: opens the socket only while Poll says the channel is live (closed again 2 s after it is not),
 		// sends the newest local pose every kSendIntervalMs and keeps the newest accepted packet from the peer.
 		void NetThread()
@@ -379,11 +406,21 @@ namespace VR::Presence
 						Console.Error("(VR) Presence: socket() failed; nothing is sent.");
 						continue;
 					}
+					// Listen only on the interface that routes to the peer (night review m5: never 0.0.0.0, so not on every
+					// network the PC is on): loopback for a loopback peer, else the local address a UDP connect() to the
+					// peer picks.
+					const u32 local_addr = IsLoopbackIPv4(addr) ? 0x7F000001u : LocalAddressFor(addr, cfg.port);
+					if (local_addr == 0)
+					{
+						CloseSock(s);
+						refused_gen = gen;
+						Console.Error("(VR) Presence: no local interface routes to %s; nothing is sent.", Ip(addr).c_str());
+						continue;
+					}
 					sockaddr_in local = {};
 					local.sin_family = AF_INET;
 					local.sin_port = htons(cfg.local_port);
-					// A loopback peer: listen on loopback only (the offline test needs no firewall rule).
-					local.sin_addr.s_addr = htonl(IsLoopbackIPv4(addr) ? 0x7F000001u : INADDR_ANY);
+					local.sin_addr.s_addr = htonl(local_addr);
 					if (bind(s, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0)
 					{
 						CloseSock(s);
@@ -409,7 +446,7 @@ namespace VR::Presence
 					seqst = SeqState{};
 					Console.WriteLn("(VR) Presence: channel open: listening on %s:%u, sending to %s:%u (%s), about %u packets "
 									"a second of %u bytes.",
-						IsLoopbackIPv4(addr) ? "127.0.0.1" : "0.0.0.0", cfg.local_port, Ip(addr).c_str(), cfg.port,
+						Ip(local_addr).c_str(), cfg.local_port, Ip(addr).c_str(), cfg.port,
 						cfg.host.c_str(), 1000u / kSendIntervalMs, static_cast<unsigned>(kPacketSize));
 				}
 
@@ -439,7 +476,7 @@ namespace VR::Presence
 #endif
 						if (n < 0)
 							break;
-						if (from.sin_family != AF_INET || ntohl(from.sin_addr.s_addr) != peer_addr)
+						if (from.sin_family != AF_INET || ntohl(from.sin_addr.s_addr) != peer_addr || ntohs(from.sin_port) != peer_port)
 						{
 							s_foreign.fetch_add(1, std::memory_order_relaxed);
 							continue;
@@ -619,6 +656,16 @@ namespace VR::Presence
 	u32 KeyHash(std::string_view text)
 	{
 		return Fnv1a(reinterpret_cast<const u8*>(text.data()), text.size());
+	}
+
+	bool KeyUsable(std::string_view text)
+	{
+		for (char c : text)
+		{
+			if (c != ' ' && c != '	')
+				return true;
+		}
+		return false;
 	}
 
 	bool IsLoopbackIPv4(u32 a)
@@ -850,6 +897,8 @@ namespace VR::Presence
 			s_cfg_ok = false;
 			if (!ParsePeer(s_peer_text, &host, &port))
 				Console.Warning("(VR) Presence: VrPresencePeer '%s' is not host:port; VR presence stays off.", s_peer_text.c_str());
+			else if (!KeyUsable(s_key_text))
+				Console.Warning("(VR) Presence: VrPresenceKey is empty; set the same word on both consoles. VR presence stays off.");
 			else if (!port_ok)
 				Console.Warning("(VR) Presence: VrPresencePort %d is not 1024-65535; VR presence stays off.", vr.VrPresencePort);
 			else
@@ -1192,6 +1241,7 @@ namespace VR::Presence
 			Encode(s, bad, sizeof(bad));
 			check(!Decode(bad, sizeof(bad), &q), "an unknown flag: refused");
 			check(KeyHash("brothers") != KeyHash("Brothers") && KeyHash("") == 2166136261u, "the key hash tells words apart");
+			check(!KeyUsable("") && !KeyUsable("  ") && KeyUsable("brothers"), "an empty key (a fixed public hash) is refused");
 		}
 
 		// --- The private-address filter and the peer parser ---
