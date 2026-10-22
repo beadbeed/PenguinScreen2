@@ -1481,6 +1481,30 @@ struct Pcsx2Config
 		// DEV9's Internal DNS and its hosts entry sends the game's login host to a LAN, Tailscale or loopback address
 		// (see CameraDriver::LoginHostIsPrivate and ResolveNetMode).
 		bool PrivateCoopFirstPerson = false;
+		// VR presence (tools/outbreak-vr/research/2026-10-21-vr-presence.md): in private co-op, two PenguinScreen2 consoles send
+		// each other their players' VR head and hand poses (in the game's coordinates, about 30 a second) over a small UDP
+		// side channel of their own, never the game's connection, and each draws the partner's VR head and hands beside the
+		// partner's game character in the same room. Off by default; nothing is sent or drawn unless first person is armed
+		// in private co-op (or the offline loopback test, PCSX2_VR_PRESENCE_LOOPBACK=1). No game memory is written.
+		bool VrPresence = false;
+		// The other console, host:port (an IPv4 address or a name). Only a private address is accepted (a LAN 10/8,
+		// 172.16/12, 192.168/16, Tailscale 100.64/10, or this PC 127/8); anything else, the public internet or obsrv, is
+		// refused. Empty: off.
+		std::string VrPresencePeer;
+		// The UDP port this console listens on (1024-65535); the peer's own VrPresencePort is the port in its address.
+		int VrPresencePort = 47800;
+		// A shared word both consoles set alike (empty is a word too); packets carrying another word's hash are dropped.
+		std::string VrPresenceKey;
+		// VR body (tools/outbreak-vr/research/2026-10-21-vr-body.md): a VR player is shown as the game's own character model,
+		// its own skeleton posed by the player's real head and hands (the head and neck turned to the VR head, each arm
+		// reaching the VR hand with a two-bone IK, the hand turned to the controller; the legs, hips and walking stay the
+		// game's animation). The partner's, from VrPresence's poses (so only in private co-op or its offline loopback
+		// test). Off by default. Only the bone matrices the game rebuilds every frame for the draw; never a character's
+		// game state, never the game's traffic.
+		bool VrBody = false;
+		// With VrBody: the local character too, offline only, so in first person you see your own character's arms
+		// (the rest of the body stays hidden) instead of the hand models.
+		bool VrBodySelf = false;
 		// First-person near depth, in metres: how near true stereo depth reaches before it flattens onto that
 		// plane. 0 = the profile's stereo.firstPerson.nearest, below 0 = off (flatten at the convergence plane
 		// as before), above 0 = this value (clamped to 0.45-1.5 m).

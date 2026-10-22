@@ -1983,6 +1983,12 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(VignetteStrength);
 	SettingsWrapEntry(OnlineSafe);
 	SettingsWrapEntry(PrivateCoopFirstPerson);
+	SettingsWrapEntry(VrPresence);
+	SettingsWrapEntry(VrPresencePeer);
+	SettingsWrapEntry(VrPresencePort);
+	SettingsWrapEntry(VrPresenceKey);
+	SettingsWrapEntry(VrBody);
+	SettingsWrapEntry(VrBodySelf);
 	SettingsWrapEntry(NearDepthMetres);
 	SettingsWrapEntry(RollParallax);
 	SettingsWrapEntry(FirstPersonAutoStereo);

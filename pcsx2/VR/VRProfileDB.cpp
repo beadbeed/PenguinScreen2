@@ -3661,6 +3661,133 @@ static void checkPouches(const std::string_view serial, VR::ProfileDB::Profile& 
 // breakout: shaking a controller breaks free of a grab (VR::GrabBreakout). The presses are the player's own pad input and
 // run only while the grabbed checks hold, so a grabbed list with any bad entry (which would widen it) drops the whole
 // block with a warning; a bad tuning number keeps its default.
+// presence: where VR presence reads the rooms and which records are in use (reads only). A bad entry drops the block.
+static std::optional<VR::ProfileDB::PresenceParams> parsePresence(const std::string_view serial, const ryml::ConstNodeRef& node)
+{
+	warnUnknownKeys(serial, node, "presence", {"room", "recordRoom", "recordUsed", "notes"});
+	VR::ProfileDB::PresenceParams pp;
+	const auto read_hex = [&](const char* key, u32& dst) {
+		if (!node.has_child(key))
+			return false;
+		const std::optional<u32> v = parseHexU32(nodeVal(node[key]));
+		if (!v.has_value())
+			return false;
+		dst = v.value();
+		return true;
+	};
+	if (!read_hex("room", pp.room) || !read_hex("recordRoom", pp.record_room) || !read_hex("recordUsed", pp.record_used) ||
+		(pp.room % 2) != 0 || pp.room + 2 > Ps2MemSize::MainRam || (pp.record_room % 2) != 0 || (pp.record_used % 2) != 0 ||
+		pp.record_room > 0x10000 || pp.record_used > 0x10000)
+	{
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' presence needs room (a u16 in main RAM), recordRoom and recordUsed (u16 "
+						   "record offsets); ignoring it, so no partner's VR head or hands are drawn.", serial);
+		return std::nullopt;
+	}
+	return pp;
+}
+
+// body: cave V's block, tables and site, where the bones are and which ones VR body poses. A bad entry drops the block.
+static std::optional<VR::ProfileDB::BodyParams> parseBody(const std::string_view serial, const ryml::ConstNodeRef& node)
+{
+	warnUnknownKeys(serial, node, "body",
+		{"block", "tables", "hook", "hookOn", "bones", "boneTable", "boneCount", "local", "boneIndex", "boneParent", "chest",
+			"neck", "head", "arms", "eye", "notes"});
+	VR::ProfileDB::BodyParams bp;
+	bool ok = true;
+	const auto read_hex = [&](const char* key, u32& dst, bool required) {
+		if (!node.has_child(key))
+		{
+			ok &= !required;
+			return;
+		}
+		const std::optional<u32> v = parseHexU32(nodeVal(node[key]));
+		if (!v.has_value())
+			ok = false;
+		else
+			dst = v.value();
+	};
+	const auto read_int = [&](const char* key, int& dst) {
+		if (!node.has_child(key))
+			return;
+		const std::optional<u32> v = StringUtil::FromChars<u32>(nodeVal(node[key]), 10);
+		if (!v.has_value() || v.value() >= 64)
+			ok = false;
+		else
+			dst = static_cast<int>(v.value());
+	};
+	read_hex("block", bp.block, true);
+	read_hex("tables", bp.tables, true);
+	read_hex("hook", bp.hook, true);
+	read_hex("hookOn", bp.hook_on, true);
+	read_hex("bones", bp.bones, false);
+	read_hex("boneTable", bp.bone_table, false);
+	read_hex("boneCount", bp.bone_count, false);
+	read_hex("local", bp.local, false);
+	read_hex("boneIndex", bp.bone_index, false);
+	read_hex("boneParent", bp.bone_parent, false);
+	read_int("chest", bp.chest);
+	read_int("neck", bp.neck);
+	read_int("head", bp.head);
+	if (node.has_child("arms"))
+	{
+		const ryml::ConstNodeRef arms = node["arms"];
+		if (!arms.is_seq() || arms.num_children() != 2)
+			ok = false;
+		else
+		{
+			int a = 0;
+			for (const ryml::ConstNodeRef arm : arms.children())
+			{
+				if (!arm.is_seq() || arm.num_children() != 4)
+				{
+					ok = false;
+					break;
+				}
+				int k = 0;
+				for (const ryml::ConstNodeRef b : arm.children())
+				{
+					const std::optional<u32> v = StringUtil::FromChars<u32>(nodeVal(b), 10);
+					if (!v.has_value() || v.value() >= 64)
+						ok = false;
+					else
+						bp.arms[a][k] = static_cast<int>(v.value());
+					k++;
+				}
+				a++;
+			}
+		}
+	}
+	if (node.has_child("eye"))
+	{
+		const ryml::ConstNodeRef eye = node["eye"];
+		if (!eye.is_seq() || eye.num_children() != 3)
+			ok = false;
+		else
+		{
+			int k = 0;
+			for (const ryml::ConstNodeRef e : eye.children())
+			{
+				const std::optional<float> v = StringUtil::FromChars<float>(nodeVal(e));
+				if (!v.has_value() || !std::isfinite(v.value()) || std::fabs(v.value()) > 50.0f)
+					ok = false;
+				else
+					bp.eye[k] = v.value();
+				k++;
+			}
+		}
+	}
+	const auto ram_ok = [](u32 a, u32 len) { return (a % 16) == 0 && a >= 0x80000 && a + len <= 0x100000; };
+	if (!ok || !ram_ok(bp.block, 0x100) || !ram_ok(bp.tables, 2 * VR::ProfileDB::kBodyTableBytes) || (bp.hook % 4) != 0 ||
+		bp.hook + 4 > Ps2MemSize::MainRam || bp.hook_on == 0 || bp.bones > 0x10000 || bp.bone_table > 0x10000 ||
+		bp.bone_count > 0x10000 || bp.local + 64 > 0x190 || bp.bone_index > 0x190 || bp.bone_parent > 0x190)
+	{
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' body needs block, tables (16-byte aligned free RAM below 1 MB), hook "
+						   "and hookOn, and bone numbers below 64; ignoring it, so no VR body.", serial);
+		return std::nullopt;
+	}
+	return bp;
+}
+
 static std::optional<VR::ProfileDB::BreakoutParams> parseBreakout(const std::string_view serial, const ryml::ConstNodeRef& node)
 {
 	using VR::ProfileDB::BreakoutParams;
@@ -5031,6 +5158,33 @@ bool VR::ProfileDB::parseProfile(const std::string_view serial, const ryml::Node
 	else if (node.has_child("melee"))
 		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a melee that is not a map; ignoring it.", serial);
 
+	if (node.has_child("presence") && node["presence"].is_map())
+	{
+		out.presence = parsePresence(serial, node["presence"]);
+		if (out.presence.has_value() &&
+			!(out.camera.has_value() && out.camera->base.has_value() && out.camera->base->is_indexed && out.camera->look_at.has_value()))
+		{
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a presence block but no indexed camera.base and camera.lookAt; "
+							   "the partners' records are found through them, so no partner is drawn.", serial);
+			out.presence.reset();
+		}
+	}
+	else if (node.has_child("presence"))
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a presence that is not a map; ignoring it.", serial);
+
+	if (node.has_child("body") && node["body"].is_map())
+	{
+		out.body = parseBody(serial, node["body"]);
+		if (out.body.has_value() && !out.presence.has_value())
+		{
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a body block but no presence block; VR body poses the partner "
+							   "from presence, so it is off.", serial);
+			out.body.reset();
+		}
+	}
+	else if (node.has_child("body"))
+		Console.WarningFmt("(VR) ProfileDB: Serial '{}' has a body that is not a map; ignoring it.", serial);
+
 	if (node.has_child("controls"))
 	{
 		if (node["controls"].is_seq())
@@ -5670,7 +5824,8 @@ bool VR::ProfileDB::IsSilenceSettingName(std::string_view name)
 	return name == "SeamlessDoors" || name == "PhysicalMelee" || name == "PhysicalMeleeContact" || name == "MeleeHitJolt" ||
 	       name == "GunRayAim" ||
 	       name == "HandPickup" ||
-	       name == "ScriptedShotsFirstPerson" || name == "SpatialAudio" || name == "FadeDim";
+	       name == "ScriptedShotsFirstPerson" || name == "SpatialAudio" || name == "FadeDim" ||
+	       name == "VrBody" || name == "VrBodySelf";
 }
 
 bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
@@ -5698,6 +5853,11 @@ bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
 		return EmuConfig.VR.SpatialAudio;
 	if (name == "FadeDim")
 		return EmuConfig.VR.FadeDim;
+	// VR body's cave V and its draw site; the local character's site on top (VrBodySelf, offline only).
+	if (name == "VrBody")
+		return EmuConfig.VR.VrBody;
+	if (name == "VrBodySelf")
+		return EmuConfig.VR.VrBody && EmuConfig.VR.VrBodySelf;
 	return false;
 }
 
@@ -5707,6 +5867,10 @@ bool VR::ProfileDB::SilenceSettingCoopLive(std::string_view name)
 		return EmuConfig.VR.PhysicalMelee && EmuConfig.VR.PhysicalMeleeOnline && VR::PhysicalMelee::CoopOverrideLive();
 	if (name == "PhysicalMeleeContact")
 		return SilenceSettingOn(name) && EmuConfig.VR.PhysicalMeleeOnline && VR::PhysicalMelee::CoopOverrideLive();
+	// VR body poses the partner in private co-op: cave V only rewrites the bone matrices the game rebuilds every frame
+	// for its draw (after the update and the hit tests, before VU1), never a record or the game's traffic.
+	if (name == "VrBody")
+		return SilenceSettingOn(name);
 	return false;
 }
 
