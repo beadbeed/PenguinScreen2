@@ -12,6 +12,7 @@
 #include "VR/HandModel.h"
 #include "VR/MeshRaster.h"
 #include "VR/GameFeedback.h"
+#include "VR/GunRay.h"
 #include "VR/HudCards.h"
 #include "VR/MenuPanel.h"
 #include "VR/MenuPointer.h"
@@ -2695,7 +2696,8 @@ namespace VR::XRCompositor
 				const double age = (shot_now_ms > wv.shot_ms) ? static_cast<double>(shot_now_ms - wv.shot_ms) : 0.0;
 				HandModel::HandState& d = hs[HandModel::kRight];
 				d.kick = (shot && age < 300.0) ? static_cast<float>(std::exp(-age / 60.0)) : 0.0f;
-				d.flash = shot && age < 45.0;
+				// [VR] GunObjectAim: the game's own muzzle flash comes from the VR gun, so the hands draw none.
+				d.flash = shot && age < 45.0 && !GunRay::GameFlashOnVrGun();
 				d.slide = (shot && age < 120.0) ? static_cast<float>(1.0 - age / 120.0) : 0.0f;
 				d.slide_locked = wv.valid && wv.ammo == 0 && right_held == HandModel::Held::Pistol;
 			}

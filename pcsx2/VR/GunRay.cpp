@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 
@@ -103,6 +104,31 @@ namespace VR::GunRay
 			out_origin[k] = muzzle_g[k] + back * z[k];
 		}
 		out_matrix[3] = out_matrix[7] = out_matrix[11] = 0.0f;
+		out_matrix[15] = 1.0f;
+		return true;
+	}
+
+	bool ObjectFrame(const float shot_m[16], const float muzzle_g[3], const float local[3], float out_matrix[16],
+		float out_pos[3])
+	{
+		for (int k = 0; k < 16; k++)
+			if (!std::isfinite(shot_m[k]))
+				return false;
+		if (!Finite3(muzzle_g) || !Finite3(local))
+			return false;
+		// M = Rot^T x F (Rot a signed permutation): row 0 = -f2, row 1 = -f0, row 2 = f1.
+		for (int k = 0; k < 3; k++)
+		{
+			out_matrix[0 + k] = -shot_m[8 + k];
+			out_matrix[4 + k] = -shot_m[0 + k];
+			out_matrix[8 + k] = shot_m[4 + k];
+		}
+		out_matrix[3] = out_matrix[7] = out_matrix[11] = 0.0f;
+		for (int k = 0; k < 3; k++)
+		{
+			out_pos[k] = muzzle_g[k] - (local[0] * out_matrix[0 + k] + local[1] * out_matrix[4 + k] + local[2] * out_matrix[8 + k]);
+			out_matrix[12 + k] = out_pos[k];
+		}
 		out_matrix[15] = 1.0f;
 		return true;
 	}
@@ -209,6 +235,58 @@ namespace VR::GunRay
 			check(!ShotFrame(o, zero, -35.0f, m, org), "frame: a zero direction fails");
 			check(!ShotFrame(o, o, std::nanf(""), m, org), "frame: a NaN back fails");
 		}
+		{
+			// The fake weapon object: the game's own math on it (FUN_0062CF10: frame = Ry(-pi/2) then Rx(+pi/2) applied to
+			// the identity, times the object's matrix; muzzle = local x M + position) gives back the VR shot's frame and
+			// the VR muzzle.
+			const float o[3] = {0.1f, 1.2f, -0.3f};
+			const float d[3] = {0.3f, -0.2f, -1.0f};
+			float og[3], dg[3], f[16], org[3];
+			check(RayToGame(o, d, TestMapFn, &tm, og, dg) && ShotFrame(og, dg, -35.0f, f, org), "object: a shot frame");
+			const float local[3] = {-9.5f, 0.0f, 5.1f}; // the 45 Auto's muzzle in its model
+			float mo[16], pos[3];
+			check(ObjectFrame(f, og, local, mo, pos), "object: built");
+			// The game's rotation, built as its helpers do (rows; A = A x R).
+			const auto mul3 = [](const float a[9], const float b[9], float out[9]) {
+				for (int r = 0; r < 3; r++)
+					for (int c = 0; c < 3; c++)
+						out[r * 3 + c] = a[r * 3 + 0] * b[0 * 3 + c] + a[r * 3 + 1] * b[1 * 3 + c] + a[r * 3 + 2] * b[2 * 3 + c];
+			};
+			const float pi2 = 1.5707963705062866f;
+			float sy = std::sin(-pi2), cy = std::cos(-pi2), sx = std::sin(pi2), cx = std::cos(pi2);
+			const float ry[9] = {cy, 0.0f, -sy, 0.0f, 1.0f, 0.0f, sy, 0.0f, cy};
+			const float rx[9] = {1.0f, 0.0f, 0.0f, 0.0f, cx, sx, 0.0f, -sx, cx};
+			const float id[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+			float a1[9], rot[9];
+			mul3(id, ry, a1);
+			mul3(a1, rx, rot);
+			const float m3[9] = {mo[0], mo[1], mo[2], mo[4], mo[5], mo[6], mo[8], mo[9], mo[10]};
+			float g[9];
+			mul3(rot, m3, g);
+			bool same = true;
+			for (int r = 0; r < 3; r++)
+				for (int c = 0; c < 3; c++)
+					same = same && Near(g[r * 3 + c], f[r * 4 + c], 1e-5f);
+			check(same, "object: the game's frame from the fake object is the VR shot's frame");
+			float mz[3];
+			for (int k = 0; k < 3; k++)
+				mz[k] = local[0] * mo[0 + k] + local[1] * mo[4 + k] + local[2] * mo[8 + k] + pos[k];
+			check(Near(mz[0], og[0], 1e-3f) && Near(mz[1], og[1], 1e-3f) && Near(mz[2], og[2], 1e-3f),
+				"object: the game's muzzle from the fake object is the VR muzzle");
+			// The game's bullet origin: muzzle + (0, 0, back) x frame, as cave I's.
+			const float bo[3] = {mz[0] - 35.0f * g[6], mz[1] - 35.0f * g[7], mz[2] - 35.0f * g[8]};
+			check(Near(bo[0], org[0], 1e-2f) && Near(bo[1], org[1], 1e-2f) && Near(bo[2], org[2], 1e-2f),
+				"object: the game's bullet origin is cave I's");
+			check(mo[12] == pos[0] && mo[13] == pos[1] && mo[14] == pos[2] && mo[15] == 1.0f && mo[3] == 0.0f && mo[7] == 0.0f &&
+					  mo[11] == 0.0f,
+				"object: row 3 is (position, 1), the w column zero");
+			float c12[3];
+			const float r0[3] = {mo[0], mo[1], mo[2]}, r1[3] = {mo[4], mo[5], mo[6]}, r2[3] = {mo[8], mo[9], mo[10]};
+			Cross(r1, r2, c12);
+			check(Near(Dot(r0, c12), 1.0f, 1e-4f), "object: a rotation (determinant +1)");
+			const float bad[3] = {std::nanf(""), 0.0f, 0.0f};
+			check(!ObjectFrame(f, og, bad, mo, pos) && !ObjectFrame(f, bad, local, mo, pos), "object: NaN refused");
+		}
 		return fail;
 	}
 
@@ -231,6 +309,17 @@ namespace VR::GunRay
 		std::array<bool, 64> s_present{};
 		float s_shot_origin[3] = {};
 		float s_shot_dir[3] = {};
+		// Cave O's block ([VR] GunObjectAim).
+		bool s_obj_armed = false;
+		u32 s_obj_addr = 0;
+		u32 s_obj_magic = 0;
+		u32 s_obj_crc = 0;
+		bool s_obj_stale = true;
+		u32 s_obj_last_shots = 0;
+		u32 s_obj_last_flashes = 0;
+		std::atomic<bool> s_obj_live{false};
+		float s_obj_muzzle[3] = {};
+		std::string s_obj_verdict;
 
 		bool DefaultRead(u32 address, u8 width, u32* value)
 		{
@@ -259,6 +348,25 @@ namespace VR::GunRay
 			}
 			s_armed = false;
 			s_watch_s = 0.0f;
+		}
+
+		void ClearObject()
+		{
+			if (s_obj_armed && VMManager::HasValidVM() && s_obj_addr + kObjBlockBytes <= Ps2MemSize::MainRam &&
+				VMManager::GetDiscCRC() == s_obj_crc && static_cast<u32>(memRead32(s_obj_addr)) == s_obj_magic)
+			{
+				for (u32 off = 0; off < kObjBlockBytes; off += 4)
+					memWrite32(s_obj_addr + off, 0);
+			}
+			s_obj_armed = false;
+			s_obj_live.store(false, std::memory_order_relaxed);
+		}
+
+		void WriteF32(u32 address, float v)
+		{
+			u32 w;
+			std::memcpy(&w, &v, 4);
+			memWrite32(address, w);
 		}
 
 		bool MapPoint(const void* ctx, const float vr[3], float game[3])
@@ -316,6 +424,13 @@ namespace VR::GunRay
 		s_armed = s_addr != 0;
 		s_stale = true;
 		s_watch_s = 0.0f;
+		s_obj_armed = s_obj_addr != 0;
+		s_obj_stale = true;
+	}
+
+	bool GameFlashOnVrGun()
+	{
+		return s_obj_live.load(std::memory_order_relaxed);
 	}
 
 	void Poll(const VRInputSnapshot& snap, GuestReader reader, float dt)
@@ -381,6 +496,7 @@ namespace VR::GunRay
 		}
 
 		bool wrote = false;
+		bool obj_wrote = false;
 		float pos[3] = {}, quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 		if (gun && RightHand(snap, pos, quat))
 		{
@@ -457,6 +573,71 @@ namespace VR::GunRay
 				s_crc = VMManager::GetDiscCRC();
 				wrote = true;
 
+				// Cave O ([VR] GunObjectAim): the fake weapon object posed so the game's own muzzle (the weapon type's
+				// model-space muzzle through the object) is the VR muzzle and its shot frame is cave I's.
+				u32 lm[3] = {};
+				float local[3] = {};
+				float om[16], opos[3];
+				const bool obj_ok = EmuConfig.VR.GunObjectAim && mp->has_gun_object && back_ok &&
+				                    Read(reader, mp->shape_types + mp->shape_type_stride * type + mp->gun_object_muzzle, 4, &lm[0]) &&
+				                    Read(reader, mp->shape_types + mp->shape_type_stride * type + mp->gun_object_muzzle + 4, 4, &lm[1]) &&
+				                    Read(reader, mp->shape_types + mp->shape_type_stride * type + mp->gun_object_muzzle + 8, 4, &lm[2]);
+				if (obj_ok)
+					std::memcpy(local, lm, sizeof(local));
+				if (obj_ok && Finite3(local) && std::fabs(local[0]) < 200.0f && std::fabs(local[1]) < 200.0f &&
+					std::fabs(local[2]) < 200.0f && ObjectFrame(m, og, local, om, opos))
+				{
+					const u32 ob = mp->gun_object_block;
+					if (!s_obj_armed || s_obj_stale)
+					{
+						s_obj_stale = false;
+						memWrite32(ob + kObjOffShots, 0);
+						memWrite32(ob + kObjOffFlashes, 0);
+						s_obj_last_shots = 0;
+						s_obj_last_flashes = 0;
+					}
+					for (int k = 0; k < 16; k++)
+						WriteF32(ob + kObjOffMatrix + 4u * static_cast<u32>(k), om[k]);
+					for (int k = 0; k < 3; k++)
+						WriteF32(ob + kObjOffPos + 4u * static_cast<u32>(k), opos[k]);
+					memWrite32(ob + kObjOffRecord, record);
+					memWrite32(ob + kObjOffStamp, counter & 0xFFu);
+					memWrite32(ob + kObjOffMagic, mp->gun_object_magic);
+					s_obj_armed = true;
+					s_obj_addr = ob;
+					s_obj_magic = mp->gun_object_magic;
+					s_obj_crc = VMManager::GetDiscCRC();
+					s_obj_live.store(true, std::memory_order_relaxed);
+					obj_wrote = true;
+					u32 oshots = 0, flashes = 0;
+					if (Read(reader, ob + kObjOffShots, 4, &oshots) && oshots != s_obj_last_shots)
+					{
+						s_obj_last_shots = oshots;
+						std::memcpy(s_obj_muzzle, og, sizeof(og));
+						Console.WriteLn("(VR) Gun object: shot %u from the VR gun object (muzzle (%.1f, %.1f, %.1f), type %u, "
+										"model muzzle (%.1f, %.1f, %.1f)).", oshots, static_cast<double>(og[0]),
+							static_cast<double>(og[1]), static_cast<double>(og[2]), type, static_cast<double>(local[0]),
+							static_cast<double>(local[1]), static_cast<double>(local[2]));
+					}
+					if (Read(reader, ob + kObjOffFlashes, 4, &flashes) && flashes != s_obj_last_flashes)
+					{
+						s_obj_last_flashes = flashes;
+						u32 fw[3] = {};
+						float fp[3] = {};
+						if (Read(reader, ob + kObjOffFlashPos, 4, &fw[0]) && Read(reader, ob + kObjOffFlashPos + 4, 4, &fw[1]) &&
+							Read(reader, ob + kObjOffFlashPos + 8, 4, &fw[2]))
+						{
+							std::memcpy(fp, fw, sizeof(fp));
+							const float dx = fp[0] - s_obj_muzzle[0], dy = fp[1] - s_obj_muzzle[1], dz = fp[2] - s_obj_muzzle[2];
+							Console.WriteLn("(VR) Gun object: the game's muzzle flash %u spawned at (%.1f, %.1f, %.1f); the VR "
+											"muzzle at the shot (%.1f, %.1f, %.1f), %.2f units apart.", flashes,
+								static_cast<double>(fp[0]), static_cast<double>(fp[1]), static_cast<double>(fp[2]),
+								static_cast<double>(s_obj_muzzle[0]), static_cast<double>(s_obj_muzzle[1]),
+								static_cast<double>(s_obj_muzzle[2]), static_cast<double>(std::sqrt(dx * dx + dy * dy + dz * dz)));
+						}
+					}
+				}
+
 				// A shot cave I sent along the ray: logged, and the enemies' HP watched for 0.3 s.
 				u32 shots = 0;
 				if (Read(reader, b + kOffShots, 4, &shots) && shots != s_last_shots)
@@ -502,5 +683,20 @@ namespace VR::GunRay
 		}
 		if (!wrote)
 			Clear();
+		if (!obj_wrote)
+			ClearObject();
+		if (profile)
+		{
+			const std::string ov = !mp || !mp->has_gun_object ? "off (the profile has no melee.gunObject)" :
+			                       !EmuConfig.VR.GunObjectAim ? "off (the VR GunObjectAim setting)" :
+			                       !setting ? "off (needs GunRayAim)" :
+			                       !offline ? "off (online)" :
+			                                  "on (the game's own muzzle flash and shell come from the VR gun)";
+			if (ov != s_obj_verdict)
+			{
+				s_obj_verdict = ov;
+				Console.WriteLn("(VR) Gun object: %s.", ov.c_str());
+			}
+		}
 	}
 }

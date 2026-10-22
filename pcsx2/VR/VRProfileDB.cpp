@@ -3942,7 +3942,7 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 	using VR::ProfileDB::MeleeParams;
 	warnUnknownKeys(serial, node, "melee", {"attackButton", "screenFlag", "swing", "enemies", "override", "online", "tip", "speed", "rest", "endMs",
 		"travel", "straightness", "strokeMs", "pressMs", "pressMaxMs", "raiseMs", "swingMs", "contactMs", "cooldownMs", "contact",
-		"jolt", "gunRay", "fist", "notes"});
+		"jolt", "gunRay", "gunObject", "fist", "notes"});
 	MeleeParams mp;
 	if (node.has_child("attackButton"))
 	{
@@ -4501,6 +4501,32 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee gunRay needs contact, block (16-byte aligned), a non-zero magic "
 							   "and back (table, stride 4-256, class inside a weapon-type entry, character); ignoring it, so "
 							   "GunRayAim does nothing here.", serial);
+	}
+	// gunObject ([VR] GunObjectAim): cave O's block and the weapon type's muzzle offset; needs gunRay.
+	if (node.has_child("gunObject"))
+	{
+		const ryml::ConstNodeRef go = node["gunObject"];
+		MeleeParams o = mp;
+		bool ok = go.is_map() && mp.has_gun_ray;
+		if (ok)
+		{
+			warnUnknownKeys(serial, go, "melee.gunObject", {"block", "magic", "muzzle", "notes"});
+			ok = read_hex(go, "block", o.gun_object_block) && read_hex(go, "magic", o.gun_object_magic) &&
+			     read_hex(go, "muzzle", o.gun_object_muzzle);
+			ok = ok && o.gun_object_magic != 0 && (o.gun_object_block % 16) == 0 &&
+			     o.gun_object_block >= VR::GunRay::kObjFakeBias &&
+			     static_cast<u64>(o.gun_object_block) + VR::GunRay::kObjBlockBytes <= Ps2MemSize::MainRam &&
+			     o.gun_object_muzzle % 4 == 0 && o.gun_object_muzzle + 12 <= mp.shape_type_stride;
+		}
+		if (ok)
+		{
+			o.has_gun_object = true;
+			mp = o;
+		}
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee gunObject needs gunRay, block (16-byte aligned), a non-zero "
+							   "magic and muzzle (3 floats inside a weapon-type entry); ignoring it, so GunObjectAim does "
+							   "nothing here.", serial);
 	}
 	// Decimal tuning in the key's unit, stored scaled (milliseconds to seconds).
 	const auto read_float = [&](const char* key, float lo, float hi, float scale, float& dst) {
@@ -5831,7 +5857,7 @@ static int CountMultibandResolveMismatches(bool log)
 bool VR::ProfileDB::IsSilenceSettingName(std::string_view name)
 {
 	return name == "SeamlessDoors" || name == "PhysicalMelee" || name == "PhysicalMeleeContact" || name == "MeleeHitJolt" ||
-	       name == "GunRayAim" ||
+	       name == "GunRayAim" || name == "GunObjectAim" ||
 	       name == "HandPickup" ||
 	       name == "ScriptedShotsFirstPerson" || name == "SpatialAudio" || name == "FadeDim" ||
 	       name == "VrBody" || name == "VrBodySelf" || name == "VrBodyLocals";
@@ -5853,6 +5879,9 @@ bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
 	// The gun ray's cave I: strictly offline (SilenceSettingCoopLive says no for it).
 	if (name == "GunRayAim")
 		return EmuConfig.VR.GunRayAim;
+	// Cave O (the shot's weapon object, so the game's flash and shell): on top of the gun ray, strictly offline.
+	if (name == "GunObjectAim")
+		return EmuConfig.VR.GunRayAim && EmuConfig.VR.GunObjectAim;
 	// Real hand pickups' cave (the Circle search at the hand): strictly offline (SilenceSettingCoopLive says no for it).
 	if (name == "HandPickup")
 		return EmuConfig.VR.HandPickup;

@@ -47,6 +47,32 @@ namespace VR::GunRay
 	// zero or non-finite direction, a non-finite muzzle or back.
 	bool ShotFrame(const float muzzle_g[3], const float dir_g[3], float back, float out_matrix[16], float out_origin[3]);
 
+	// [VR] GunObjectAim (on top of GunRayAim; section 13 of the vr-melee note): FUN_0062CF10 also takes the muzzle flash
+	// (0x5AC8D0), the shell (0x55E400) and 0x6801A0 from the gun's weapon object (s0 at 0x62CF98: matrix +0x1C0,
+	// position +0x200). Cave O (0xFB000) hands the shot a fake object laid over the object block (fake + 0x1C0 = block
+	// + 0x40), so all of them come from the VR gun. The block (main RAM, the profile's melee.gunObject.block): +0x00 magic,
+	// +0x04 the counter stamp (u8), +0x08 the local record, +0x0C shots cave O took over (cave O counts), +0x10 the game's
+	// flashes seen for that record (cave O's flash stub counts), +0x14 the flash's origin as the game passed it, +0x40 the
+	// fake object's matrix (rows 0-2 the rotation, row 3 (position, 1)), +0x80 its position.
+	constexpr u32 kObjBlockBytes = 0x90;
+	constexpr u32 kObjOffMagic = 0x00, kObjOffStamp = 0x04, kObjOffRecord = 0x08, kObjOffShots = 0x0C, kObjOffFlashes = 0x10,
+				  kObjOffFlashPos = 0x14, kObjOffMatrix = 0x40, kObjOffPos = 0x80;
+	// The fake object's base: the block + 0x40 - 0x1C0 (only +0x1C0 and +0x200 of it are read).
+	constexpr u32 kObjFakeBias = 0x180;
+
+	// The weapon object whose shot is shot_m / muzzle_g as FUN_0062CF10 builds it. The game turns the identity by
+	// FUN_0018FB70(-pi/2) (A = A x Ry: rows (c, 0, -s), (0, 1, 0), (s, 0, c)) and FUN_0018FAD0(+pi/2) (A = A x Rx:
+	// rows (1, 0, 0), (0, c, s), (0, -s, c)), then times the object's matrix: frame = Rot x M with Rot rows (0, -1, 0),
+	// (0, 0, 1), (-1, 0, 0). So M's rows are (-f2, -f0, f1). The muzzle is local (the weapon type's +0x38) x M plus the
+	// position, so the position is muzzle_g - local x M. Row 3 is (position, 1) (the shell reads row 3 as its position).
+	// False on a non-finite input.
+	bool ObjectFrame(const float shot_m[16], const float muzzle_g[3], const float local[3], float out_matrix[16],
+		float out_pos[3]);
+
+	// True while cave O's block is armed (the game's own muzzle flash comes from the VR gun): the hands then draw no
+	// flash of their own.
+	bool GameFlashOnVrGun();
+
 	// RayToGame and ShotFrame on scripted maps and rays. Returns the failed checks.
 	std::vector<std::string> SelfTest();
 
