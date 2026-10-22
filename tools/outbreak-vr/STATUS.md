@@ -283,6 +283,13 @@ Play offline, in Single Play, with the network adapter off. Turn both Frame cont
 
 ## In progress
 
+**Punches and pistol-whips (`punch`, from `nightly`), researched and designed, not built** (`research/2026-10-14-vr-melee.md`
+section 10): bare hands are weapon type 0 (attack id 0: a sphere r 40 a metre up, damage 10, zombie class 1); the game has
+no gun-butt attack (its spawn turns a gun into a shot); downed zombies are hit targets while their `+0x32` is 0. Plan: the
+knife's attack (id 33) at a fist-sized point on the hand or the gun's grip, scaled by cave E to 11-22 HP (a light flinch),
+through a new cave H (a static attack object, no item), behind `[VR] PhysicalMeleeFists`; no ammo or durability touched.
+Not checked live (Alex was playing during the session).
+
 **Night polish (`nightpolish`, from `nightly`), checked offline headset-free on 2026-10-15** (run-npolish, local build,
 38 of 38 self-tests):
 - **Hit jolt on the hit's update** (`MeleeHitJolt`; `research/2026-10-14-vr-melee.md` section 9, "Latency, fixed"): the
