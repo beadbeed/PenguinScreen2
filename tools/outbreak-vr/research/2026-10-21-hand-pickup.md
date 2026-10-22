@@ -71,9 +71,18 @@ flat screen without `MenuPanel`), and a re-squeeze test could be met by a fidget
 |---|---|---|
 | slot 7, Handgun (id 0) on the J's Bar counter, Kevin facing it | squeeze, hold | cave took the word 19-35 ms after the press; prompt (record 3, item 0) 0.64 s later; confirmed 0.31 s after; Handgun in cell 0 |
 | slot 7, head (and with it Kevin) turned 90 deg left, hand on the Handgun | squeeze, hold | the character's own Circle would not take it ("no" in the log); same result: Handgun in cell 0 |
-| slot 8, Green Herb on the bathroom sink, Kevin at the door 1.5 m away facing +x | squeeze, hold | own Circle would not take it; the cave took the word, the herb's prompt (record 14, item 300) came 1.36 s later (the reach walk) |
+| slot 8, Green Herb on the bathroom sink, Kevin at the door 1.5 m away facing +x | squeeze, hold | own Circle would not take it; the cave took the word 34 ms after the press, the herb's prompt (record 14, item 300) 1.34 s later (the reach walk), confirmed 0.31 s after; Green Herb in cell 0 |
+| slot 7, squeeze then let go after 0.3 s | squeeze, release | the prompt came (record 3, item 0) and stayed up; logged "the grip was let go before the prompt: the prompt is the player's"; nothing pressed, nothing taken |
+| slot 9, the .45 rounds (id 262) on the sink, one free cell | squeeze, hold, twice | the cave took the word and the character reached both times, but the game opened no prompt (the rounds' record 8 is the one already in cell 2); "no take-it prompt came": nothing pressed, cells unchanged |
+| slot 7, `HandPickup = false`, head turned 90 deg (heading 33732 -> 50116, 90.0 deg), the same squeeze at the Handgun | squeeze, hold | no `Hand pickup` lines, the cave never went in, overlay stayed 0, cells unchanged |
 
-The rows below are filled in by the runs after the first two commits; see the end of this note.
+Not checked live: a full inventory (no savestate has four full cells and a floor item with a prompt; the refusal is
+self-tested), the cursor resting on a full cell (every prompt seen opened on cell 0 and it was free), a partner's
+hand-over, the left hand, the box in a headset. One of the slot 8 runs did not arm first person at all after the load
+(a startup flake of the headset-free setup; the retry ran clean).
+
+Self-tests: 44 of 44 (the 42 before, plus "Hand pickup" with 48 checks and "Hand pickup cave" interpreted; the pickup
+cue's suite grew from 120 to 141 checks with the selection).
 
 ## Risks and what is not known
 

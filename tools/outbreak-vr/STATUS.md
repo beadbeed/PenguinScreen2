@@ -72,6 +72,14 @@ calm, is 0.55 dim right, try `Dim` / `Live`).
   doorway opened it: the walk-in trigger, room 1 to 4. First person did not interfere (`research/2026-10-14-doors.md`,
   "Door by stick"). Nothing changed in code for it.
 
+**2026-10-21 branch `handpickup`** (from `nightly`; local LTO-off build, 44 of 44 self-tests; checked offline,
+headset-free only): `[VR] HandPickup` (off), real hand pickups. Put a hand on any floor item (the box shows with
+`HandTargeting = true`), squeeze and keep squeezing: the game's own Circle search runs at the hand (a cave at 0x61DB94,
+local record only), its take-it prompt comes up and is confirmed for you (Alex's approved exception), and the item is in
+your cells, whichever way the character faces. Offline: the J's Bar Handgun facing it and turned 90 deg away, the bathroom
+Green Herb from 1.5 m facing away, all taken; let go early and the prompt is yours; switch off and nothing happens.
+`research/2026-10-21-hand-pickup.md`, `pickuptest.py`.
+
 ## Where things are
 
 | | |
@@ -533,6 +541,10 @@ re-press; the VR self-tests in CI.
 - **`PCSX2_VR_DUMP_HANDS=<folder>`:** once in game, draws every weapon of the scenario as held, holstered and from afar
   into PNGs there (the game's models: keep them on the PC).
 - **`handtest.py <dev install>`:** hand targeting from slot 7 (above).
+- **`pickuptest.py <dev install> <slot> <item id>[,...] [--turn DEG] [--release-early] [--vr x,y,z]`:** `[VR] HandPickup`:
+  a scripted right hand on the item (`PCSX2_VR_PICKUP_DEBUG` lists every floor item's centre), a squeeze, the prompt flags
+  and the cells before and after. Slots 7 (Handgun, id 0) and 8 (Green Herb, id 300). Refuses while another emulator or
+  vrserver runs; kills only its own emulator.
 - **`nearcull_test.py <dev install> <before|after> <slot> <seconds> [zombie|down]`:** the near-cull patch against
   the committed profile; slot 5 faces the approaching zombie, slot 6 looks down at the body (above).
 - **`menupanel_test.py <dev install> <out dir> [items] [map] [takeit] [pause] [--xr]`:** `[VR] MenuPanel`: per
