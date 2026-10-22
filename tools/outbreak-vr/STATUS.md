@@ -14,6 +14,28 @@ Details live elsewhere:
 Updated by the Windows PC session on 2026-10-13 at night: no headset session that day; everything below dated 10-13 is
 checked offline or on SteamVR's null headset only.
 
+**Morning of 2026-10-22, for Alex:** `D:\Games\PS2\Playtest\Slot5/6/7/9.cmd` now run `nightly` = the 10-15 build +
+`truestereo` + `grabdoor` + `vraim` (local LTO build, 50 of 50 self-tests, profile check passes), in
+`D:\dev\PenguinScreen2-buildun-playtest-models` with its own settings (the previous exe is kept there as
+`pcsx2-qt.prev-13e5427.exe`). New in its `inis\PenguinScreen2.ini` `[VR]`: `TrueStereo = true` and
+`PhysicalMeleeFists = true`; `GrabFirstPerson`, `DoorVeil` and `GunRayAim` are on by default; everything else as before.
+Checked offline headset-free (slot 5: 255.5 counts/s of 0x48BF93, normal speed; all four caves in and read back: A-C,
+D-F+H, G at 0xFE900, I at 0xFEA00; grabbed in slot 5 kept first person) and on SteamVR's null headset (slot 7, scripted
+head and hands, TrueStereo off and on: no xrEndFrame or Vulkan error, 58-60 frames/s submitted in first person as
+before (the first TrueStereo launch dipped to 46-54/s while its shaders were new, the next two did not), hands drawn,
+the panel set up). Not in the headset yet. Headset checklist:
+1. **TrueStereo on/off** (slot 7): the counter and Handgun at arm's length, a zombie close (slot 5), leaning, rolling
+   your head, the HUD text, a menu (MenuPanel). Then `TrueStereo = false` for the same: which feels more solid? If
+   anything looks doubled or swims, say where.
+2. **Grab** (slot 5, `GrabFirstPerson`): the zombie grabs from behind; you should stay in first person, turn round to
+   see it, shake to break free as before.
+3. **Doors** (slot 9, the bathroom door; `DoorVeil`): open a door yourself: black through the load, no third-person flash of the room
+   camera, then first person in the next room.
+4. **Gun ray** (slot 5 or 6, `GunRayAim`): shots should hit where the laser points, also when the gun is off to the side
+   of where you face.
+5. **Fists** (`PhysicalMeleeFists`): with a gun, a fast swing of the gun hand pistol-whips; with nothing equipped, a
+   fast punch. Slow moves should do nothing; if quick aiming ever triggers a whip, set it to `false`.
+
 **2026-10-13 in short:**
 - **Direction:** Alex chose PenguinScreen2 as the foundation. The native-port option (REO) was assessed and parked:
   `research/2026-10-13-reo-assessment.md`.
