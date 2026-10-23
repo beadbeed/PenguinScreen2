@@ -87,6 +87,7 @@ namespace VR::HeadInWall
 			u8 header_b[0x20] = {};
 			u32 age = 0;
 			bool valid = false;
+			bool bad = false; // grid A refused for these headers (evening review m2): not read again until they change
 			Grid a, b;
 			bool logged_grid = false;
 		};
@@ -97,6 +98,17 @@ namespace VR::HeadInWall
 			NoHeader, // the headers did not read
 			BadGrid,  // grid A did not read as expected
 		};
+
+		// Whether the copy serves these headers (pure): Ok for a good copy, BadGrid for one refused for the same headers
+		// (evening review m2: a grid that does not read is not walked again on every call, only when a header, the room or
+		// the game changes, or after the usual 120 uses), NoHeader for "read it". Counts a use.
+		Refresh CachedVerdict(GridCache& c, u32 crc, u16 room, const u8 ha[0x20], const u8 hb[0x20])
+		{
+			if ((c.valid || c.bad) && c.crc == crc && c.room == room && std::memcmp(ha, c.header_a, 0x20) == 0 &&
+				std::memcmp(hb, c.header_b, 0x20) == 0 && ++c.age < 120)
+				return c.valid ? Refresh::Ok : Refresh::BadGrid;
+			return Refresh::NoHeader;
+		}
 
 		// CPU thread. changed: grid A's faces are new (a new room, or the first read).
 		Refresh RefreshGrid(GridCache& c, u32 crc, bool* changed)
@@ -109,11 +121,12 @@ namespace VR::HeadInWall
 			if (!ReadGuest(kGridA, 0x20, ha) || !ReadGuest(kGridB, 0x20, hb))
 			{
 				c.valid = false;
+				c.bad = false;
 				return Refresh::NoHeader;
 			}
-			if (c.valid && c.crc == crc && c.room == room && std::memcmp(ha, c.header_a, 0x20) == 0 &&
-				std::memcmp(hb, c.header_b, 0x20) == 0 && ++c.age < 120)
-				return Refresh::Ok;
+			const Refresh cached = CachedVerdict(c, crc, room, ha, hb);
+			if (cached != Refresh::NoHeader)
+				return cached;
 			c.crc = crc;
 			c.room = room;
 			std::memcpy(c.header_a, ha, 0x20);
@@ -124,9 +137,12 @@ namespace VR::HeadInWall
 			const bool ok_b = ReadGrid(read, kGridB, &b);
 			if (!ok_a)
 			{
+				// Known bad for these headers (they are kept): read again only when they, the room or the game change.
 				c.valid = false;
+				c.bad = true;
 				return Refresh::BadGrid;
 			}
+			c.bad = false;
 			if (changed)
 				*changed = !c.valid || a.face_addr != c.a.face_addr;
 			c.a = std::move(a);
@@ -529,6 +545,7 @@ namespace VR::HeadInWall
 		if (!Finite(va) || !Finite(vb) || !IsFile1(crc) || memRead32(kOverlay) != 3 || memRead8(kStatus) != 2)
 		{
 			s_lines.valid = false;
+			s_lines.bad = false;
 			return r;
 		}
 		if (RefreshGrid(s_lines, crc, nullptr) != Refresh::Ok)
@@ -860,6 +877,33 @@ namespace VR::HeadInWall
 			putf(0x220034, 900.0f);
 			check(!ChestFrom(rd, 0x200000, c), "chest: a point over 3 m from the record refused");
 			check(!ChestFrom(rd, 0, c), "chest: no record");
+		}
+		{
+			// The copy's verdicts (evening review m2): a refused grid is not read again for the same headers.
+			GridCache c;
+			u8 ha[0x20] = {1}, hb[0x20] = {2};
+			check(CachedVerdict(c, 0x1234, 5, ha, hb) == Refresh::NoHeader, "cache: an empty copy is read");
+			c.crc = 0x1234;
+			c.room = 5;
+			std::memcpy(c.header_a, ha, 0x20);
+			std::memcpy(c.header_b, hb, 0x20);
+			c.bad = true;
+			check(CachedVerdict(c, 0x1234, 5, ha, hb) == Refresh::BadGrid, "cache: a refused grid is not read again");
+			u8 ha2[0x20] = {9};
+			check(CachedVerdict(c, 0x1234, 5, ha2, hb) == Refresh::NoHeader, "cache: a new header is read again");
+			check(CachedVerdict(c, 0x1234, 6, ha, hb) == Refresh::NoHeader, "cache: a new room is read again");
+			check(CachedVerdict(c, 0x9999, 5, ha, hb) == Refresh::NoHeader, "cache: a new game is read again");
+			c.age = 0;
+			int bad_uses = 0;
+			while (CachedVerdict(c, 0x1234, 5, ha, hb) == Refresh::BadGrid && bad_uses < 1000)
+				bad_uses++;
+			check(bad_uses == 119, "cache: a refused grid is read again after the usual 120 uses");
+			c.bad = false;
+			c.valid = true;
+			c.age = 0;
+			check(CachedVerdict(c, 0x1234, 5, ha, hb) == Refresh::Ok, "cache: a good copy serves");
+			c.valid = false;
+			check(CachedVerdict(c, 0x1234, 5, ha, hb) == Refresh::NoHeader, "cache: neither good nor refused: read");
 		}
 		return fail;
 	}
