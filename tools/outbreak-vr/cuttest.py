@@ -18,6 +18,9 @@ DEV = sys.argv[1]
 OUT = sys.argv[2]
 LEAN = sys.argv[3] if len(sys.argv) > 3 else "0.05,0,0"
 SECONDS = float(sys.argv[4]) if len(sys.argv) > 4 else 150.0
+# --xr: SteamVR (its null headset: python null_driver.py on first, off after); the compositor asks for the eyes itself.
+XR = "--xr" in sys.argv
+STEAMXR = r"E:\ProgramFile\Steam\steamapps\common\SteamVR\steamxr_win64.json"
 EXE = os.path.join(DEV, "pcsx2-qt.exe")
 LOG = os.path.join(DEV, "logs", "emulog.txt")
 ISO = r"D:\Games\PS2\games\Biohazard Outbreak File 1 (SLPM-65428) EN-patched.iso"
@@ -26,6 +29,9 @@ assert os.path.exists(os.path.join(DEV, "portable.txt"))
 
 STATUS, CUTFLAG, COUNTER = 0x48BF60, 0x48BF88, 0x48BF93
 EYE, TARGET, FOV = 0x306338, 0x306344, 0x306380
+# The cutscene player (0x5BD690): state struct 0x35FFD0 (frame counter u32 +8), kind u8 0x35FFFF (1: drawn by the minimal
+# frame 0x341AF0, no 3D), camera-key flag u8 0x35FF60.
+PLAYER, KIND, CAMKEY = 0x35FFD0, 0x35FFFF, 0x35FF60
 
 
 def log_text():
@@ -39,9 +45,13 @@ def main():
     require_offline()
     os.makedirs(OUT, exist_ok=True)
     env = dict(os.environ)
-    env["XR_RUNTIME_JSON"] = os.path.join(DEV, "no-openxr-runtime.json")  # missing on purpose: no OpenXR runtime
-    env["PCSX2_VR_TEST_INPUT"] = "1"
-    env["PCSX2_VR_CUTSCENE_TEST"] = LEAN
+    if XR:
+        env["XR_RUNTIME_JSON"] = STEAMXR
+        env.pop("PCSX2_VR_CUTSCENE_TEST", None)
+    else:
+        env["XR_RUNTIME_JSON"] = os.path.join(DEV, "no-openxr-runtime.json")  # missing on purpose: no OpenXR runtime
+        env["PCSX2_VR_TEST_INPUT"] = "1"
+        env["PCSX2_VR_CUTSCENE_TEST"] = LEAN
     env["PCSX2_VR_STEREODUMP"] = OUT + ",15"
     env.pop("PCSX2_VR_FAKE_HEADPOSE", None)
     proc = subprocess.Popen([EXE, "--vr", "--", ISO], cwd=DEV, env=env)
@@ -64,7 +74,8 @@ def main():
         counts = {}  # status -> (counter ticks, seconds)
         prev_t = time.time()
         cut_start = cut_end = None
-        with FakeController(p):
+        import contextlib
+        with (contextlib.nullcontext() if XR else FakeController(p)):
             while time.time() - t0 < SECONDS:
                 now = time.time()
                 st = p.read8(STATUS)
@@ -85,24 +96,30 @@ def main():
                 if st == 4 and (not samples or now - samples[-1][0] >= 1.0):
                     eye = tuple(p.readf(EYE + 4 * i) for i in range(3))
                     tgt = tuple(p.readf(TARGET + 4 * i) for i in range(3))
-                    samples.append((now, eye, tgt, p.readf(FOV)))
+                    samples.append((now, eye, tgt, p.readf(FOV), p.read8(PLAYER), p.read32(PLAYER + 8), p.read8(KIND),
+                                    p.read8(CAMKEY)))
                 if cut_end and now - cut_end > 12.0:
                     break
                 time.sleep(0.03)
     finally:
         proc.kill()  # only the emulator this script started
-        proc.wait(timeout=30)
+        try:
+            proc.wait(timeout=90)
+        except subprocess.TimeoutExpired:
+            print("== the emulator did not exit in 90 s (pid %d)" % proc.pid)
     print("== status timeline (s since load, status, 0x48BF88):", events)
     if cut_start:
         print("== cutscene: started %.2f s after the load, %s" % (
             cut_start - t0, ("lasted %.2f s" % (cut_end - cut_start)) if cut_end else "did not end in the run"))
     for st, (ticks, secs) in sorted(counts.items()):
         print("== status %d: counter %.1f counts/s over %.1f s" % (st, ticks / secs if secs else 0, secs))
-    for (t, eye, tgt, fov) in samples:
-        print("   t+%.1f eye (%.0f, %.0f, %.0f) target (%.0f, %.0f, %.0f) fov %.2f" % ((t - cut_start,) + eye + tgt + (fov,)))
+    for (t, eye, tgt, fov, pst, pframe, kind, camkey) in samples:
+        print("   t+%.1f eye (%.0f, %.0f, %.0f) target (%.0f, %.0f, %.0f) fov %.2f player state %d frame %d kind %d camkey %d" % (
+            (t - cut_start,) + eye + tgt + (fov, pst, pframe, kind, camkey)))
     text = log_text()
     for l in text.splitlines():
-        if "CutsceneStereo" in l or "ARMED" in l or "DISARM" in l or "Stereo dump:" in l and "cut" in l:
+        if (("CutsceneStereo" in l and "draw " not in l and "mapped " not in l and "output " not in l) or "CameraDriver: ARMED" in l
+                or "CameraDriver: DISARMED" in l or "TrueStereo: first" in l or "xrEndFrame" in l or "Screen: " in l):
             print("  ", l[:260])
     cut_dumps = 0
     for f in sorted(os.listdir(OUT)):

@@ -28,6 +28,8 @@ namespace VR::CameraDriver
 	// [VR] CutsceneStereo: the game is playing a real-time cutscene (camera.cutscene) with first person handed back
 	// (any thread; lapses 250 ms after Apply last decided it).
 	bool CutsceneActive();
+	// The same whatever [VR] CutsceneStereo says (the stereo dump, test aids).
+	bool InCutscene();
 
 	// Comfort vignette: how much the view is moving without the head right now, 0-1. The larger of a smooth stick
 	// turn's rate against lookAt.smoothTurnDegPerSec and walking (the move stick's push, or the character's own

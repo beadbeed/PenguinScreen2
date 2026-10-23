@@ -2651,6 +2651,7 @@ namespace VR::CameraDriver
 		// [VR] CutsceneStereo: a real-time cutscene is playing (camera.cutscene holds, first person disarmed), and when
 		// that was last decided (CutsceneActive lapses when Apply stops deciding).
 		std::atomic_bool s_cutscene_active{false};
+		std::atomic_bool s_cutscene_game{false}; // the same with the switch off (the stereo dump's test aid)
 		std::atomic<u64> s_cutscene_stamp_ms{0};
 		std::atomic<u64> s_lookat_stamp_ms{0};
 		bool s_fov_saved = false;
@@ -4113,11 +4114,13 @@ namespace VR::CameraDriver
 		// Paused: held as it is.
 		{
 			bool cut = s_cutscene_active.load(std::memory_order_relaxed);
+			bool in_cut = s_cutscene_game.load(std::memory_order_relaxed);
 			if (vm_state == VMState::Running)
-				cut = switched_on && EmuConfig.VR.CutsceneStereo && !cam.cutscene.empty() && !armed &&
-				      GuardListPass(cam.cutscene);
+				in_cut = switched_on && !cam.cutscene.empty() && !armed && GuardListPass(cam.cutscene);
 			else if (!switched_on)
-				cut = false;
+				in_cut = false;
+			s_cutscene_game.store(in_cut, std::memory_order_release);
+			cut = in_cut && EmuConfig.VR.CutsceneStereo;
 			if (cut && cam.look_at.has_value())
 				PublishScreenIntrinsics(cam.look_at.value());
 			if (cut != s_cutscene_active.load(std::memory_order_relaxed))
@@ -4773,6 +4776,12 @@ namespace VR::CameraDriver
 	bool CutsceneActive()
 	{
 		return s_cutscene_active.load(std::memory_order_acquire) &&
+		       NowMs() - s_cutscene_stamp_ms.load(std::memory_order_acquire) < 250;
+	}
+
+	bool InCutscene()
+	{
+		return s_cutscene_game.load(std::memory_order_acquire) &&
 		       NowMs() - s_cutscene_stamp_ms.load(std::memory_order_acquire) < 250;
 	}
 

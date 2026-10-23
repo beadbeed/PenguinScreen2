@@ -11539,6 +11539,8 @@ namespace VR::XRCompositor
 			else
 			{
 				StereoState::SetCutsceneRequest(StereoState::CutsceneEyes{});
+				float drain_pos[2][3], drain_fov[2][4];
+				StereoState::TakeCutsceneUsed(drain_pos, drain_fov); // the next window starts from its own frames
 				s.cut_shown_valid = false;
 			}
 

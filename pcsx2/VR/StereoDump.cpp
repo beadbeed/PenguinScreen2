@@ -277,7 +277,7 @@ namespace VR::StereoDump
 
 		const StereoState::Params st = StereoState::Get();
 		// First person, or ([VR] CutsceneStereo) a cutscene.
-		const bool cutscene = !st.first_person && CameraDriver::CutsceneActive();
+		const bool cutscene = !st.first_person && CameraDriver::InCutscene();
 		if (!st.enabled || !(st.first_person || cutscene))
 			return;
 

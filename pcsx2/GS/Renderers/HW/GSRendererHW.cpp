@@ -394,6 +394,21 @@ GSTexture* GSRendererHW::GetOutput(int i, float& scale, int& y_offset)
 		}
 #endif
 
+		{
+			static const bool s_cut_out_log = std::getenv("PCSX2_VR_CUTSCENE_LOG") != nullptr;
+			static int s_cut_out_n = 0;
+			if (s_cut_out_log && s_cut_out_n < 12 && VR::CameraDriver::InCutscene())
+			{
+				s_cut_out_n++;
+				Console.WriteLn("(VR) CutsceneStereo output %d: unit %d dispfb 0x%x fbw %u psm 0x%x -> target 0x%x psm 0x%x fbw %u "
+								"layers %u %dx%d, fb rect %d,%d-%d,%d, both circuits %d",
+					s_cut_out_n, i, TEX0.TBP0, static_cast<u32>(TEX0.TBW), static_cast<u32>(TEX0.PSM), rt->m_TEX0.TBP0,
+					static_cast<u32>(rt->m_TEX0.PSM), static_cast<u32>(rt->m_TEX0.TBW), rt->m_texture->GetArrayLayers(),
+					rt->m_texture->GetWidth(), rt->m_texture->GetHeight(), curFramebuffer.framebufferRect.x,
+					curFramebuffer.framebufferRect.y, curFramebuffer.framebufferRect.z, curFramebuffer.framebufferRect.w,
+					(PCRTCDisplays.PCRTCDisplays[0].enabled && PCRTCDisplays.PCRTCDisplays[1].enabled) ? 1 : 0);
+			}
+		}
 		const int delta = bp_adj - rt->m_TEX0.TBP0;
 		if (delta > 0 && curFramebuffer.FBW != 0)
 		{
@@ -6485,21 +6500,43 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 	// [VR] CutsceneStereo (VR/CutsceneView.h): a real-time cutscene through the compositor's world-locked window. Each
 	// layer is the scene through the window from that eye (off-axis, not turned); the game's flat draws sit on the
 	// window's plane, where the game drew them. PCSX2_VR_CUTSCENE_TEST=<x>,<y>,<z>[,<ipd>] (metres): headset-free, the head
-	// at that offset whenever CameraDriver reports a cutscene and the compositor asks for nothing.
+	// at that offset whenever CameraDriver reports a cutscene and the compositor asks for nothing; with
+	// PCSX2_VR_CUTSCENE_FORCE=1 also in first person (the window map on the head camera's frames, to check it against the
+	// game's own renders: a cutscene that draws in 3D is not in the savestates).
+	static const bool s_cut_force = std::getenv("PCSX2_VR_CUTSCENE_FORCE") != nullptr;
 	VR::StereoState::CutsceneEyes vr_cut;
 	bool vr_cut_on = st.enabled && !st.first_person && vr_multiview_target && VR::StereoState::CutsceneRequest(&vr_cut);
-	if (!vr_cut_on && st.enabled && !st.first_person && vr_multiview_target)
+	if (!vr_cut_on && st.enabled && (!st.first_person || s_cut_force) && vr_multiview_target)
 	{
 		static const char* s_cut_test = std::getenv("PCSX2_VR_CUTSCENE_TEST");
 		float t[4] = {0.0f, 0.0f, 0.0f, 0.064f};
 		if (s_cut_test && *s_cut_test && std::sscanf(s_cut_test, "%f,%f,%f,%f", &t[0], &t[1], &t[2], &t[3]) >= 3 &&
-			VR::CameraDriver::CutsceneActive())
+			(VR::CameraDriver::CutsceneActive() || s_cut_force))
 		{
 			const float id[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 			VR::CutsceneView::EyePositions(t, id, t[3], VR::CutsceneView::kMaxOffsetM, vr_cut.pos_m);
 			vr_cut.window_m = VR::CutsceneView::kWindowM;
 			vr_cut.valid = true;
 			vr_cut_on = true;
+		}
+	}
+	// PCSX2_VR_CUTSCENE_LOG=<n>: the first n draws of a cutscene, what they are and whether they were mapped per eye.
+	{
+		static const long s_cut_log_max = []() -> long {
+			const char* e = std::getenv("PCSX2_VR_CUTSCENE_LOG");
+			return (e && *e) ? std::strtol(e, nullptr, 10) : 0;
+		}();
+		static long s_cut_logged_n = 0;
+		if (s_cut_logged_n < s_cut_log_max && VR::CameraDriver::CutsceneActive())
+		{
+			s_cut_logged_n++;
+			Console.WriteLn("(VR) CutsceneStereo draw %ld: fbp 0x%x psm 0x%x multiview %d enabled %d fp %d cut_on %d fst %d tme %d "
+							"eq_q %d eq_z %d zte %d ztst %d zfit %d zdriven %d prim %d r %d,%d-%d,%d tbp 0x%x",
+				s_cut_logged_n, m_cached_ctx.FRAME.Block(), static_cast<u32>(m_cached_ctx.FRAME.PSM), vr_multiview_target ? 1 : 0,
+				st.enabled ? 1 : 0, st.first_person ? 1 : 0, vr_cut_on ? 1 : 0, PRIM->FST ? 1 : 0, PRIM->TME ? 1 : 0,
+				m_vt.m_eq.q ? 1 : 0, m_vt.m_eq.z ? 1 : 0, static_cast<int>(m_cached_ctx.TEST.ZTE),
+				static_cast<int>(m_cached_ctx.TEST.ZTST), s_vr_zqfit.valid ? 1 : 0, st.z_driven_depth ? 1 : 0,
+				static_cast<int>(m_vt.m_primclass), m_r.x, m_r.y, m_r.z, m_r.w, PRIM->TME ? m_cached_ctx.TEX0.TBP0 : 0u);
 		}
 	}
 	if (st.enabled && vr_multiview_target && ((st.first_person && VR::StereoState::TrueStereoActive()) || vr_cut_on))
@@ -6685,6 +6722,24 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 		}
 	}
 
+	{
+		static const long s_cut_log_max2 = []() -> long {
+			const char* e = std::getenv("PCSX2_VR_CUTSCENE_LOG");
+			return (e && *e) ? std::strtol(e, nullptr, 10) : 0;
+		}();
+		static long s_cut_logged_m = 0;
+		if (vr_cut_on && s_cut_logged_m < s_cut_log_max2)
+		{
+			s_cut_logged_m++;
+			Console.WriteLn("(VR) CutsceneStereo mapped %ld: mode %u stereo %.4f fit %.3g %.3g %.1f kind %.0f eye0 cx %.2f fx %.2f m03 %.2f "
+							"eye1 cx %.2f fx %.2f m03 %.2f in %.2f %.2f %.1f %.1f",
+				s_cut_logged_m, m_conf.cb_vs.vr_map_mode, m_conf.cb_vs.vr_stereo.x, m_conf.cb_vs.vr_eye_fit.x,
+				m_conf.cb_vs.vr_eye_fit.y, m_conf.cb_vs.vr_eye_fit.z, m_conf.cb_vs.vr_eye_fit.w, m_conf.cb_vs.vr_eye[3].z,
+				m_conf.cb_vs.vr_eye[3].x, m_conf.cb_vs.vr_eye[0].w, m_conf.cb_vs.vr_eye[7].z, m_conf.cb_vs.vr_eye[7].x,
+				m_conf.cb_vs.vr_eye[4].w, m_conf.cb_vs.vr_eye_in.x, m_conf.cb_vs.vr_eye_in.y, m_conf.cb_vs.vr_eye_in.z,
+				m_conf.cb_vs.vr_eye_in.w);
+		}
+	}
 	if (vr_zq_apply && VRZQFitVerbose()) [[unlikely]]
 	{
 		const float zhi = m_vt.m_max.p.z * 0x1p-32f;
