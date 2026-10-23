@@ -589,7 +589,18 @@ namespace VR::GunRay
 				u32 lm[3] = {};
 				float local[3] = {};
 				float om[16], opos[3];
-				const bool obj_ok = EmuConfig.VR.GunObjectAim && mp->has_gun_object && back_ok &&
+				// Before the first write the object block must read zero or ours (late review m3).
+				const u32 ob0 = mp->gun_object_block;
+				const bool obj_free = s_obj_armed || !mp->has_gun_object ||
+				                      PhysicalMelee::RegionFreeOrOurs(reader, ob0, ob0 + kObjBlockBytes, ob0 + kObjOffMagic,
+										  mp->gun_object_magic);
+				if (!obj_free && EmuConfig.VR.GunObjectAim && !s_obj_refused_logged)
+				{
+					s_obj_refused_logged = true;
+					Console.Warning("(VR) Gun object: the block at 0x%X holds someone else's words; GunObjectAim stays off while it "
+									"does.", ob0);
+				}
+				const bool obj_ok = obj_free && EmuConfig.VR.GunObjectAim && mp->has_gun_object && back_ok &&
 				                    Read(reader, mp->shape_types + mp->shape_type_stride * type + mp->gun_object_muzzle, 4, &lm[0]) &&
 				                    Read(reader, mp->shape_types + mp->shape_type_stride * type + mp->gun_object_muzzle + 4, 4, &lm[1]) &&
 				                    Read(reader, mp->shape_types + mp->shape_type_stride * type + mp->gun_object_muzzle + 8, 4, &lm[2]);
