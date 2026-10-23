@@ -51,7 +51,7 @@ def main():
     # SteamVR may be in use (Alex): refuse. Another emulator on the same PINE slot would answer our calls: refuse unless
     # this install's ini gives it a slot of its own ([EmuCore] PINESlot, not the default 28011).
     _tl = subprocess.run(["tasklist"], capture_output=True, text=True).stdout.lower()
-    if "vrserver.exe" in _tl:
+    if "vrserver.exe" in _tl and not XR:  # --xr: the null headset's SteamVR, started for this test
         sys.exit("refused: vrserver.exe is running")
     if "pcsx2-qt.exe" in _tl and PINE_SLOT == 28011:
         sys.exit("refused: another pcsx2-qt.exe is running on the default PINE slot")

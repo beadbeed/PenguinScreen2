@@ -7301,6 +7301,19 @@ namespace VR::XRCompositor
 				                        BuildDepthProjection(set, eye_quad[0], eye_quad[1], turn))
 				{
 					out[proj_at] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&set.fp_proj);
+					static std::atomic_bool s_cut_proj_logged{false};
+					if (!set.fp_screen && !s_cut_proj_logged.exchange(true))
+					{
+						constexpr float kDeg = 180.0f / 3.14159265f;
+						const XrCompositionLayerProjectionView& l = set.fp_views[0];
+						const XrCompositionLayerProjectionView& r = set.fp_views[1];
+						Console.WriteLn("(VR) CutsceneStereo: first window projection layer: left eye at (%.3f, %.3f, %.3f), right at "
+										"(%.3f, %.3f, %.3f) m; fov left %.1f/%.1f/%.1f/%.1f, right %.1f/%.1f/%.1f/%.1f deg; %dx%d.",
+							l.pose.position.x, l.pose.position.y, l.pose.position.z, r.pose.position.x, r.pose.position.y,
+							r.pose.position.z, l.fov.angleLeft * kDeg, l.fov.angleRight * kDeg, l.fov.angleUp * kDeg,
+							l.fov.angleDown * kDeg, r.fov.angleLeft * kDeg, r.fov.angleRight * kDeg, r.fov.angleUp * kDeg,
+							r.fov.angleDown * kDeg, l.subImage.imageRect.extent.width, l.subImage.imageRect.extent.height);
+					}
 				}
 				else
 				{

@@ -98,9 +98,10 @@ motion. The game's fades, letterbox and subtitles stay on the window's plane. Re
 flags and the speed are untouched. Movies (kind `0x35FFFF` = 1) show flat in the same window. Checked offline: slot 7's
 cutscene (a movie, then the load) plays to its end in 28.49 s with it on and 28.50 s with it off, first person comes back
 on the vsync status returns to 2, and on forced first-person frames each eye's layer is the game's own render from that
-eye shifted by the window's off-axis centre (15 px at 3x for 3.2 cm, as predicted). Not checked: a real-time 3D
-cutscene (none starts by itself in the savestates), the null headset (SteamVR's Vulkan device call failed) and the
-headset. `research/2026-10-22-cutscene-vr.md`; headset-free test `tools/outbreak-vr/cuttest.py`.
+eye shifted by the window's off-axis centre (15 px at 3x for 3.2 cm, as predicted). On SteamVR's null headset the
+window goes up 64 ms into the cutscene and is sent as a projection layer of the eyes (60 frames/s, no XR errors), and
+comes down with the blink as first person returns. Not checked: a real-time 3D cutscene (none starts by itself in the
+savestates) and the headset. `research/2026-10-22-cutscene-vr.md`; headset-free test `tools/outbreak-vr/cuttest.py`.
 
 **2026-10-13 in short:**
 - **Direction:** Alex chose PenguinScreen2 as the foundation. The native-port option (REO) was assessed and parked:

@@ -127,15 +127,15 @@ runtime's job: the layer is world-locked). The camera's roll and pitch stay in t
 | The window map in the GS against the game's own render (slot 7, first person, `PCSX2_VR_CUTSCENE_FORCE=1`, eyes at +-3.2 cm, against a run with the head 3.2 cm right and the identity eyes: the view's translation moved 3.20 units) | the right layer is the moved camera's render shifted by the window's off-axis principal point, as it must be: per 96 px tile a uniform dx of 15 px (expected 161.107 x 3 x 0.032 / 1.0 = 15.5), 85-87% of 174-178 tiles within 1 px of it, dy 0; mean pixel difference 1.1-1.2 after the shift, 9.5 before (three frame pairs) | checked offline |
 | The two layers differ (the same forced frames) | right against left per tile dx p5 -27, median -7, p95 +8 px at 3x (the far limit is fx ipd / D = 161.1 x 3 x 0.064 = 31 px; things nearer than 1 m cross) | checked offline |
 | Movie frames | both layers identical, on the window's plane | checked offline |
-| SteamVR's null headset | not run: `xrGetVulkanGraphicsDevice2KHR` failed (`XR_ERROR_RUNTIME_FAILURE`) twice with SteamVR not already running; the build ran flat; the null driver was put back (`null_driver.py off`) | not checked |
+| SteamVR's null headset (`cuttest.py --xr`, SteamVR started first with `vrstartup.exe`; two runs before that failed in `xrGetVulkanGraphicsDevice2KHR` and one session was ended by SteamVR at once, the known flakiness) | the window goes up 64 ms after status reads 4 (`Screen: world-locked`, `the cutscene window is up`), the first window frame 20 ms later, and the projection layer is built from the eye quads: `first window projection layer: left eye at (0.032, 0, 0), right at (-0.032, 0, 0) m; fov left -27.3/24.4/20.0/-20.0, right -24.4/27.3/20.0/-20.0 deg; 1536x1344` (the null headset's head pose is rolled 180 deg, so its eyes are swapped; first person's TrueStereo line shows the same, right eye at -0.0315 m). 60 frames/s submitted at 90 Hz, 57.6-60 new GS frames/s, "no projection 0", no XR errors; status 4 for 28.46 s (both runs); on the way out first person is armed on the vsync status reads 2 and the window comes down with the blink (64 ms in one run; 0.68 s in the other, where the game's room load stalled the presents). The null driver was put back after (`null_driver.py off`; `steamvr.vrsettings` byte-identical to its backup) | checked on the null headset |
 
 ## 6. Not checked, and what to watch
 
 - **A real-time 3D cutscene (kind not 1).** None starts by itself in the File #1 savestates (all eight others are in play,
   status 2, no cutscene pending). It needs a scenario event reached by playing. Watch: `(VR) CutsceneStereo: first window
   frame` in the log, the two layers differing in a stereo dump with `"cutscene": true`, and the camera block moving.
-- **The compositor's projection layer for the window** (null headset or headset): the views' poses and fovs; that the
-  window holds still while the head turns; the blink at both ends.
+- **In the headset:** that the window holds still while the head turns and leans, and how the blink at both ends feels
+  (the null headset's head does not move).
 - **The eyes of the shown frame** are the ones the GS drew with last, so a frame whose draws spanned a present shows with
   the newer eyes (a head move of one vsync, under 1 cm at normal speeds). The first 0.1 s of a cutscene still run under
   first person's disarm grace (`disarmAfterVsyncs: 6`), as before.
