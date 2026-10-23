@@ -319,6 +319,7 @@ namespace VR::GunRay
 		u32 s_obj_last_shots = 0;
 		u32 s_obj_last_flashes = 0;
 		std::atomic<bool> s_obj_live{false};
+		bool s_load_pending = false;         // a state was loaded: zero any block of ours it holds (late review m2)
 		bool s_refused_logged = false, s_obj_refused_logged = false;
 		float s_obj_muzzle[3] = {};
 		std::string s_obj_verdict;
@@ -362,6 +363,24 @@ namespace VR::GunRay
 			}
 			s_obj_armed = false;
 			s_obj_live.store(false, std::memory_order_relaxed);
+		}
+
+		// A loaded state's own blocks: zeroed when they read our magic, whether or not this session armed them (late
+		// review m2; as HandPickup does), so a pose saved with the state is never taken for a fresh one.
+		void ClearLoadedBlocks(const ProfileDB::MeleeParams& mp)
+		{
+			const auto zero_if_ours = [](u32 addr, u32 bytes, u32 magic, const char* what) {
+				if (magic == 0 || addr == 0 || static_cast<u64>(addr) + bytes > Ps2MemSize::MainRam ||
+					static_cast<u32>(memRead32(addr)) != magic)
+					return;
+				for (u32 off = 0; off < bytes; off += 4)
+					memWrite32(addr + off, 0);
+				Console.WriteLn("(VR) Gun ray: a loaded state's %s block at 0x%X cleared.", what, addr);
+			};
+			if (mp.has_gun_ray)
+				zero_if_ours(mp.gun_block, kBlockBytes, mp.gun_magic, "gun ray");
+			if (mp.has_gun_object)
+				zero_if_ours(mp.gun_object_block, kObjBlockBytes, mp.gun_object_magic, "gun object");
 		}
 
 		void WriteF32(u32 address, float v)
@@ -428,6 +447,7 @@ namespace VR::GunRay
 		s_watch_s = 0.0f;
 		s_obj_armed = s_obj_addr != 0;
 		s_obj_stale = true;
+		s_load_pending = true;
 	}
 
 	bool GameFlashOnVrGun()
@@ -438,6 +458,15 @@ namespace VR::GunRay
 	void Poll(const VRInputSnapshot& snap, GuestReader reader, float dt)
 	{
 		dt = std::isfinite(dt) ? std::clamp(dt, 0.0f, 0.25f) : 0.0f;
+		if (s_load_pending && VMManager::HasValidVM())
+		{
+			// Before anything else, live or not: the game may shoot before the hands are back.
+			s_load_pending = false;
+			const std::string lserial = VMManager::GetDiscSerial();
+			const ProfileDB::Profile* lp = lserial.empty() ? nullptr : ProfileDB::Lookup(lserial, VMManager::GetDiscCRC());
+			if (lp && lp->melee.has_value())
+				ClearLoadedBlocks(lp->melee.value());
+		}
 		const bool live = snap.generation != 0 && snap.actions_active;
 		u32 record = 0;
 		const ProfileDB::Profile* profile = nullptr;
