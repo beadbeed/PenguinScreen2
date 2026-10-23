@@ -3,6 +3,7 @@
 
 #include "VR/CameraDriver.h"
 #include "VR/MenuPanel.h"
+#include "VR/NetGate.h"
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
 #include "VR/HeadInWall.h"
@@ -1190,7 +1191,7 @@ namespace VR::CameraDriver
 		// values (position, heading, aim), so first person plays in full and only the setting turns them off.
 		bool OnlineSafeNow()
 		{
-			return EmuConfig.VR.OnlineSafe || (EmuConfig.DEV9.EthEnable && s_net_mode != NetMode::PrivateCoop);
+			return EmuConfig.VR.OnlineSafe || (NetGate::IsOnline() && s_net_mode != NetMode::PrivateCoop);
 		}
 
 		// DEV9's Internal DNS sends the game's login host (www01.kddi-mmbb.jp) to a private address, and that DNS is the
@@ -1228,11 +1229,14 @@ namespace VR::CameraDriver
 		NetMode ResolveNetMode(const ProfileDB::CameraProfile& cam)
 		{
 			const bool game_online = cam.network_flag.has_value() && memRead8(cam.network_flag.value()) != 0;
-			if (!EmuConfig.DEV9.EthEnable && !game_online)
+			// NetGate::IsOnline: the adapter on, or (adapter off) the PCSX2_VR_TEST_NET=privatecoop test override, which
+			// stands in for the private login host only; [VR] PrivateCoopFirstPerson is still required.
+			const bool online = NetGate::IsOnline();
+			if (!online && !game_online)
 				return NetMode::Offline;
 			// The game can't be online without the adapter, so a set flag with the adapter off means the read is
 			// wrong (another game, an overlay not resident): stay restricted rather than guess.
-			if (EmuConfig.DEV9.EthEnable && EmuConfig.VR.PrivateCoopFirstPerson && LoginHostIsPrivate())
+			if (online && EmuConfig.VR.PrivateCoopFirstPerson && (NetGate::TestOverrideActive() || LoginHostIsPrivate()))
 				return NetMode::PrivateCoop;
 			return NetMode::Restricted;
 		}
@@ -1493,7 +1497,7 @@ namespace VR::CameraDriver
 				return true;
 			if (!ProfileDB::SilenceSettingOn(sil.when_setting) || EmuConfig.VR.OnlineSafe)
 				return false;
-			if (!EmuConfig.DEV9.EthEnable)
+			if (!NetGate::IsOnline())
 				return true;
 			return s_net_mode == NetMode::PrivateCoop && ProfileDB::SilenceSettingCoopLive(sil.when_setting);
 		}
@@ -4018,9 +4022,11 @@ namespace VR::CameraDriver
 		const NetMode net_mode = ResolveNetMode(cam);
 		if (net_mode != s_net_mode || !s_net_mode_logged)
 		{
-			Console.WriteLn("(VR) CameraDriver: network mode %s%s.", NetModeName(net_mode),
+			Console.WriteLn("(VR) CameraDriver: network mode %s%s%s.", NetModeName(net_mode),
 				net_mode == NetMode::Restricted ? ": first person stays off (turn on Private Co-op First Person and point "
-				                                  "the login host at the private server to use it online)" : "");
+				                                  "the login host at the private server to use it online)" : "",
+				NetGate::TestOverrideActive() ? " [PCSX2_VR_TEST_NET TEST OVERRIDE: the adapter is off, online code paths "
+				                                "selected for testing]" : "");
 			s_net_mode = net_mode;
 			s_net_mode_logged = true;
 		}

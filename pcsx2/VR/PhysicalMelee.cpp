@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/PhysicalMelee.h"
+#include "VR/NetGate.h"
 #include "VR/CameraDriver.h"
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
@@ -1193,7 +1194,7 @@ namespace VR::PhysicalMelee
 
 		bool StrictlyOffline()
 		{
-			return !EmuConfig.DEV9.EthEnable && !EmuConfig.VR.OnlineSafe;
+			return NetGate::StrictlyOffline();
 		}
 
 		// The whole block back to zero (the magic first), so the caves see nothing and the free RAM reads as it was.
@@ -3019,7 +3020,7 @@ namespace VR::PhysicalMelee
 		mi.setting = setting;
 		mi.online_setting = EmuConfig.VR.PhysicalMeleeOnline;
 		mi.strictly_offline = offline;
-		mi.private_coop = EmuConfig.DEV9.EthEnable && CameraDriver::PrivateCoop();
+		mi.private_coop = NetGate::IsOnline() && CameraDriver::PrivateCoop();
 		mi.online_safe = EmuConfig.VR.OnlineSafe;
 		mi.has_online = mp && mp->has_online && mp->has_override;
 		const bool coop_eligible = mi.setting && mi.online_setting && mi.private_coop && !mi.online_safe && mi.has_online &&

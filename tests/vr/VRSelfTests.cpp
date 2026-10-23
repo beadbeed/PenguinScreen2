@@ -32,6 +32,7 @@
 #include "VR/ItemReach.h"
 #include "VR/MenuPanel.h"
 #include "VR/MenuPointer.h"
+#include "VR/NetGate.h"
 #include "VR/MeshRaster.h"
 #include "VR/GunRay.h"
 #include "VR/PhysicalMelee.h"
@@ -1233,6 +1234,8 @@ int main(int argc, char* argv[])
 	std::printf("vr_selftests: the shipped profiles from %s\n", profiles.c_str());
 	std::fflush(stdout);
 
+	RunLogged("Network gate (NetGate: PCSX2_VR_TEST_NET selects code paths only, never with the adapter on)",
+		VR::NetGate::SelfTest, "(VR) NetGate self-test");
 	RunLogged("MenuPointer", VR::MenuPointer::SelfTest, "(VR) MenuPointer self-test");
 	RunLogged("Item names", VR::GameFeedback::ItemSelfTest, "(VR) Item names self-test");
 	RunLogged("BeltPouches", VR::BeltPouches::SelfTest, "(VR) BeltPouches self-test");

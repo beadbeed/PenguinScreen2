@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/VrPresence.h"
+#include "VR/NetGate.h"
 
 #include "VR/VRInputState.h"
 #include "VR/VRProfileDB.h"
@@ -953,7 +954,10 @@ namespace VR::Presence
 			cfg = s_cfg;
 		}
 		const bool loopback_test = s_loopback_env && cfg.numeric && IsLoopbackIPv4(cfg.addr) && CameraDriver::NetworkOffline();
-		const bool mode_ok = CameraDriver::PrivateCoop() || loopback_test;
+		// Under the PCSX2_VR_TEST_NET test override (adapter off, private co-op paths selected) only a 127/8 peer: the
+		// override never sends anything off this PC.
+		const bool test_net_ok = !NetGate::TestOverrideActive() || (cfg.numeric && IsLoopbackIPv4(cfg.addr));
+		const bool mode_ok = (CameraDriver::PrivateCoop() && test_net_ok) || loopback_test;
 
 		const ProfileDB::Profile* profile = nullptr;
 		if (mode_ok && VMManager::GetState() == VMState::Running)

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/SpatialAudio.h"
+#include "VR/NetGate.h"
 
 #include "Config.h"
 #include "Memory.h"
@@ -56,7 +57,7 @@ namespace VR::SpatialAudio
 
 	void Poll(u32 crc, bool live)
 	{
-		const bool want = live && EmuConfig.VR.SpatialAudio && IsFile1(crc) && !EmuConfig.DEV9.EthEnable && !EmuConfig.VR.OnlineSafe;
+		const bool want = live && EmuConfig.VR.SpatialAudio && IsFile1(crc) && NetGate::StrictlyOffline();
 		if (!want)
 		{
 			// Cleared only while it reads ours (never a block some other build or game left there).

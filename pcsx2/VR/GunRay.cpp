@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/GunRay.h"
+#include "VR/NetGate.h"
 #include "VR/CameraDriver.h"
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
@@ -591,7 +592,7 @@ namespace VR::GunRay
 		const ProfileDB::FeedbackParams* fb =
 			(profile && profile->feedback.has_value() && profile->feedback->has_weapon) ? &profile->feedback.value() : nullptr;
 		const bool setting = EmuConfig.VR.GunRayAim;
-		const bool offline = !EmuConfig.DEV9.EthEnable && !EmuConfig.VR.OnlineSafe;
+		const bool offline = NetGate::StrictlyOffline();
 		u32 slot = 0;
 		const bool slot_known = profile && profile->camera.has_value() && profile->camera->base.has_value() &&
 		                        profile->camera->base->is_indexed && CameraDriver::LocalSlot(&slot);
