@@ -5,6 +5,7 @@
 #include "VR/CameraDriver.h"
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
+#include "VR/HeadInWall.h"
 #include "VR/ItemData.h"
 #include "VR/PhysicalMelee.h"
 #include "VR/SplitState.h"
@@ -671,7 +672,31 @@ namespace VR::GunRay
 					Console.Warning("(VR) Gun object: the block at 0x%X holds someone else's words; GunObjectAim stays off while it "
 									"does.", ob0);
 				}
-				const bool obj_ok = obj_free && EmuConfig.VR.GunObjectAim && mp->has_gun_object && back_ok &&
+				// Late review m6: a muzzle pushed through a wall would spawn the shell and FUN_006801A0's object beyond it.
+				// Then the game's own object takes the shot: when the line from the character's chest (bone 11, where the
+				// game's own sight starts) to the VR muzzle crosses a face that stops the game's bullets (attribute 0x2;
+				// room walls, shut door walls and the moving faces, not furniture). Unknown (no chest, no grid): as before.
+				bool muzzle_walled = false;
+				if (EmuConfig.VR.GunObjectAim && mp->has_gun_object)
+				{
+					static bool s_walled_said = false;
+					float chest[3] = {};
+					HeadInWall::LineResult lr;
+					if (HeadInWall::CharacterChest(VMManager::GetDiscCRC(), record, chest))
+						lr = HeadInWall::LineBlocked(VMManager::GetDiscCRC(), chest, og, HeadInWall::kMaskShot);
+					muzzle_walled = lr.known && lr.blocked;
+					if (muzzle_walled && !s_walled_said)
+						Console.WriteLn("(VR) Gun object: the VR muzzle (%.1f, %.1f, %.1f) is beyond a wall from the character's "
+										"chest (%.1f, %.1f, %.1f) (face 0x%08X at %.0f%% of the line); the game's own gun object "
+										"until it is back.",
+							static_cast<double>(og[0]), static_cast<double>(og[1]), static_cast<double>(og[2]),
+							static_cast<double>(chest[0]), static_cast<double>(chest[1]), static_cast<double>(chest[2]), lr.flags,
+							static_cast<double>(lr.t * 100.0f));
+					else if (!muzzle_walled && s_walled_said)
+						Console.WriteLn("(VR) Gun object: the VR muzzle is back on the character's side of the wall.");
+					s_walled_said = muzzle_walled;
+				}
+				const bool obj_ok = obj_free && !muzzle_walled && EmuConfig.VR.GunObjectAim && mp->has_gun_object && back_ok &&
 				                    Read(reader, mp->shape_types + mp->shape_type_stride * type + mp->gun_object_muzzle, 4, &lm[0]) &&
 				                    Read(reader, mp->shape_types + mp->shape_type_stride * type + mp->gun_object_muzzle + 4, 4, &lm[1]) &&
 				                    Read(reader, mp->shape_types + mp->shape_type_stride * type + mp->gun_object_muzzle + 8, 4, &lm[2]);

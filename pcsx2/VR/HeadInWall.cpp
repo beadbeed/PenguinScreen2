@@ -77,7 +77,8 @@ namespace VR::HeadInWall
 			return true;
 		}
 
-		struct Live
+		// A copy of the room's grids (A walls, B floors), read again on a new room, game or header and every 120 uses.
+		struct GridCache
 		{
 			u32 crc = 0;
 			u16 room = 0xFFFF;
@@ -86,15 +87,78 @@ namespace VR::HeadInWall
 			u32 age = 0;
 			bool valid = false;
 			Grid a, b;
+			bool logged_grid = false;
+		};
+
+		enum class Refresh
+		{
+			Ok,
+			NoHeader, // the headers did not read
+			BadGrid,  // grid A did not read as expected
+		};
+
+		// CPU thread. changed: grid A's faces are new (a new room, or the first read).
+		Refresh RefreshGrid(GridCache& c, u32 crc, bool* changed)
+		{
+			if (changed)
+				*changed = false;
+			const Reader read = [](u32 a, u32 n, void* o) { return ReadGuest(a, n, o); };
+			u8 ha[0x20], hb[0x20];
+			const u16 room = static_cast<u16>(memRead16(kRoom));
+			if (!ReadGuest(kGridA, 0x20, ha) || !ReadGuest(kGridB, 0x20, hb))
+			{
+				c.valid = false;
+				return Refresh::NoHeader;
+			}
+			if (c.valid && c.crc == crc && c.room == room && std::memcmp(ha, c.header_a, 0x20) == 0 &&
+				std::memcmp(hb, c.header_b, 0x20) == 0 && ++c.age < 120)
+				return Refresh::Ok;
+			c.crc = crc;
+			c.room = room;
+			std::memcpy(c.header_a, ha, 0x20);
+			std::memcpy(c.header_b, hb, 0x20);
+			c.age = 0;
+			Grid a, b;
+			const bool ok_a = ReadGrid(read, kGridA, &a);
+			const bool ok_b = ReadGrid(read, kGridB, &b);
+			if (!ok_a)
+			{
+				c.valid = false;
+				return Refresh::BadGrid;
+			}
+			if (changed)
+				*changed = !c.valid || a.face_addr != c.a.face_addr;
+			c.a = std::move(a);
+			c.b = ok_b ? std::move(b) : Grid{};
+			c.valid = true;
+			return Refresh::Ok;
+		}
+
+		// The moving faces (0x70E750), read every use.
+		void ReadDynamic(std::vector<Face>* out)
+		{
+			const s32 dyn = static_cast<s32>(memRead32(kDynCount));
+			for (s32 i = 0; i < std::min<s32>(dyn, kMaxDyn); i++)
+			{
+				u8 b[kFaceSize];
+				Face f;
+				if (ReadGuest(kDynFaces + static_cast<u32>(i) * kFaceSize, kFaceSize, b) && DecodeFace(b, &f))
+					out->push_back(f);
+			}
+		}
+
+		struct Live
+		{
+			GridCache g;
 			u64 last_ms = 0;
 			float fade = 0.0f;
 			bool clamping = false;
 			u64 log_ms = 0;
 			u32 clamps = 0;
 			float max_pushed = 0.0f;
-			bool logged_grid = false;
 		};
 		Live s_live;
+		GridCache s_lines; // LineBlocked's own copy
 		std::atomic<float> s_fade{0.0f};
 
 		u64 NowMs()
@@ -311,13 +375,40 @@ namespace VR::HeadInWall
 
 	bool BlocksPlayer(u32 flags, u32 ignore_mask, const std::function<bool(u32 slot)>& door_open)
 	{
+		return FaceCounts(flags, kMaskPlayer, ignore_mask, door_open);
+	}
+
+	int SegmentBlockedBy(const std::vector<Face>& faces, u32 mask_a, u32 ignore_mask,
+		const std::function<bool(u32 slot)>& door_open, const Vec3& a, const Vec3& b, float* t)
+	{
+		if (!Finite(a) || !Finite(b))
+			return -1;
+		float best = 2.0f;
+		int idx = -1;
+		for (size_t i = 0; i < faces.size(); i++)
+		{
+			float tt = 0.0f;
+			if (SegmentHitsFace(faces[i], a, b, &tt) && tt < best && FaceCounts(faces[i].flags, mask_a, ignore_mask, door_open))
+			{
+				best = tt;
+				idx = static_cast<int>(i);
+			}
+		}
+		if (idx >= 0 && t)
+			*t = best;
+		return idx;
+	}
+
+	bool FaceCounts(u32 flags, u32 mask_a, u32 ignore_mask, const std::function<bool(u32 slot)>& door_open)
+	{
+		const u32 cls = flags & 0xFFu;
+		// The class: one bit per class 0-15 in the mask's low half (a class past 15 never matches).
+		if (cls >= 16 || (mask_a & (1u << cls)) == 0)
+			return false;
 		const u32 hi = flags & 0xFFFF0000u;
-		if ((hi & 0x00010000u) == 0) // the player's attribute mask 0x0001
+		if ((hi & mask_a & 0xFFFF0000u) == 0) // the attribute bits the caller asks for
 			return false;
 		if ((hi & ignore_mask) != 0)
-			return false;
-		const u32 cls = flags & 0xFFu;
-		if (cls >= 16) // the class mask 0xFFFF: classes 0-15
 			return false;
 		if (cls == 1)
 		{
@@ -356,71 +447,46 @@ namespace VR::HeadInWall
 		};
 		if (!EmuConfig.VR.HeadInWall || !IsFile1(crc) || memRead32(kOverlay) != 3 || memRead8(kStatus) != 2)
 		{
-			L.valid = false;
+			L.g.valid = false;
 			ease_to(0.0f);
 			return false;
 		}
-		const Reader read = [](u32 a, u32 n, void* o) { return ReadGuest(a, n, o); };
-		u8 ha[0x20], hb[0x20];
-		const u16 room = static_cast<u16>(memRead16(kRoom));
-		if (!ReadGuest(kGridA, 0x20, ha) || !ReadGuest(kGridB, 0x20, hb))
+		const bool was_valid = L.g.valid;
+		bool changed = false;
+		const Refresh rf = RefreshGrid(L.g, crc, &changed);
+		if (rf != Refresh::Ok)
 		{
 			// The dim eases off too (night review m9), as for any other reason the eye is left alone.
-			L.valid = false;
+			if (rf == Refresh::BadGrid && (was_valid || !L.g.logged_grid))
+			{
+				Console.Warning("(VR) HeadInWall: room %u's wall grid does not read as expected; the eye is left alone.", L.g.room);
+				L.g.logged_grid = true;
+			}
 			ease_to(0.0f);
 			return false;
 		}
-		if (!L.valid || L.crc != crc || L.room != room || std::memcmp(ha, L.header_a, 0x20) != 0 ||
-			std::memcmp(hb, L.header_b, 0x20) != 0 || ++L.age >= 120)
-		{
-			L.crc = crc;
-			L.room = room;
-			std::memcpy(L.header_a, ha, 0x20);
-			std::memcpy(L.header_b, hb, 0x20);
-			L.age = 0;
-			Grid a, b;
-			const bool ok_a = ReadGrid(read, kGridA, &a);
-			const bool ok_b = ReadGrid(read, kGridB, &b);
-			if (!ok_a)
-			{
-				if (L.valid || !L.logged_grid)
-					Console.Warning("(VR) HeadInWall: room %u's wall grid does not read as expected; the eye is left alone.", room);
-				L.logged_grid = true;
-				L.valid = false;
-				ease_to(0.0f);
-				return false;
-			}
-			const bool changed = !L.valid || a.face_addr != L.a.face_addr;
-			L.a = std::move(a);
-			L.b = ok_b ? std::move(b) : Grid{};
-			if (changed)
-				Console.WriteLn("(VR) HeadInWall: room %u, wall grid %ux%u (%d x %d cm cells), %zu wall faces, %zu floor faces.", room,
-					L.a.nx, L.a.nz, L.a.cell_x, L.a.cell_z, L.a.faces.size(), L.b.faces.size());
-			L.valid = true;
-			L.logged_grid = false;
-		}
+		L.g.logged_grid = false;
+		if (changed)
+			Console.WriteLn("(VR) HeadInWall: room %u, wall grid %ux%u (%d x %d cm cells), %zu wall faces, %zu floor faces.", L.g.room,
+				L.g.a.nx, L.g.a.nz, L.g.a.cell_x, L.g.a.cell_z, L.g.a.faces.size(), L.g.b.faces.size());
 		const u32 ignore = memRead32(kIgnoreMask);
 		const auto door_open = [](u32 slot) { return memRead8(kDoorState + slot * 0x60u) == 2; };
 		std::vector<Face> walls;
-		walls.reserve(L.a.faces.size() + 16);
-		for (const Face& f : L.a.faces)
+		walls.reserve(L.g.a.faces.size() + 16);
+		for (const Face& f : L.g.a.faces)
 			if (BlocksPlayer(f.flags, ignore, door_open))
 				walls.push_back(f);
-		const s32 dyn = static_cast<s32>(memRead32(kDynCount));
-		for (s32 i = 0; i < std::min<s32>(dyn, kMaxDyn); i++)
-		{
-			u8 b[kFaceSize];
-			Face f;
-			if (ReadGuest(kDynFaces + static_cast<u32>(i) * kFaceSize, kFaceSize, b) && DecodeFace(b, &f) &&
-				BlocksPlayer(f.flags, ignore, door_open))
+		std::vector<Face> dyn;
+		ReadDynamic(&dyn);
+		for (const Face& f : dyn)
+			if (BlocksPlayer(f.flags, ignore, door_open))
 				walls.push_back(f);
-		}
 		const Params p;
 		const Vec3 h{head[0], head[1], head[2]};
 		const Vec3 want{eye[0], eye[1], eye[2]};
 		if (!Finite(h) || !Finite(want))
 			return false;
-		const Result r = Clamp(walls, L.b.faces, h, want, p);
+		const Result r = Clamp(walls, L.g.b.faces, h, want, p);
 		if (!Finite(r.eye))
 			return false;
 		eye[0] = r.eye.x;
@@ -451,6 +517,69 @@ namespace VR::HeadInWall
 			L.clamping = false;
 			L.max_pushed = 0.0f;
 		}
+		return true;
+	}
+
+	LineResult LineBlocked(u32 crc, const float a[3], const float b[3], u32 mask_a)
+	{
+		LineResult r;
+		const Vec3 va{a[0], a[1], a[2]};
+		const Vec3 vb{b[0], b[1], b[2]};
+		if (!Finite(va) || !Finite(vb) || !IsFile1(crc) || memRead32(kOverlay) != 3 || memRead8(kStatus) != 2)
+		{
+			s_lines.valid = false;
+			return r;
+		}
+		if (RefreshGrid(s_lines, crc, nullptr) != Refresh::Ok)
+			return r;
+		const u32 ignore = memRead32(kIgnoreMask);
+		const auto door_open = [](u32 slot) { return memRead8(kDoorState + slot * 0x60u) == 2; };
+		r.known = true;
+		float t = 0.0f;
+		const int i = SegmentBlockedBy(s_lines.a.faces, mask_a, ignore, door_open, va, vb, &t);
+		if (i >= 0)
+		{
+			r.blocked = true;
+			r.flags = s_lines.a.faces[static_cast<size_t>(i)].flags;
+			r.t = t;
+		}
+		std::vector<Face> dyn;
+		ReadDynamic(&dyn);
+		float td = 0.0f;
+		const int j = SegmentBlockedBy(dyn, mask_a, ignore, door_open, va, vb, &td);
+		if (j >= 0 && (!r.blocked || td < r.t))
+		{
+			r.blocked = true;
+			r.flags = dyn[static_cast<size_t>(j)].flags;
+			r.t = td;
+		}
+		return r;
+	}
+
+	bool CharacterChest(u32 crc, u32 record, float out[3])
+	{
+		if (!IsFile1(crc) || record == 0)
+			return false;
+		const auto in_ram = [](u32 p) { return (p & 3) == 0 && (p & 0x1FFFFFFFu) >= 0x100000u && (p & 0x1FFFFFFFu) + 0x40 <= Ps2MemSize::MainRam; };
+		if (!in_ram(record))
+			return false;
+		const u32 model = memRead32(record + 0x34);
+		if (!in_ram(model))
+			return false;
+		const u32 bone = memRead32(model + 0x820 + 11 * 4);
+		if (!in_ram(bone))
+			return false;
+		u32 w[3], pw[3];
+		if (!ReadGuest(bone + 0x30, 12, w) || !ReadGuest(record + 0x38, 12, pw))
+			return false;
+		Vec3 c, pos;
+		std::memcpy(&c, w, 12);
+		std::memcpy(&pos, pw, 12);
+		if (!Finite(c) || !Finite(pos) || Len(Sub(c, pos)) > 300.0f)
+			return false;
+		out[0] = c.x;
+		out[1] = c.y;
+		out[2] = c.z;
 		return true;
 	}
 
@@ -547,6 +676,49 @@ namespace VR::HeadInWall
 		check(BlocksPlayer(0x02010001u, 0, shut) && !BlocksPlayer(0x02010001u, 0, open) && BlocksPlayer(0x02410001u, 0, open) &&
 				  BlocksPlayer(0x03010001u, 0, open),
 			"a door wall (class 1, slot (attr >> 8) & 15): open when its door reads 2 unless attr 0x40");
+
+		// The game's other masks on File #1's own attribute words: 0x2F room walls, 0x29 furniture, 0x27 moving faces.
+		check(FaceCounts(0x002F0000u, kMaskSight, 0, shut) && FaceCounts(0x002F0000u, kMaskShot, 0, shut) &&
+				  FaceCounts(0x002F0000u, kMaskPlayer, 0, shut),
+			"a room wall (0x2F) stops sight, shots and the player");
+		check(!FaceCounts(0x00290000u, kMaskSight, 0, shut) && !FaceCounts(0x00290000u, kMaskShot, 0, shut) &&
+				  FaceCounts(0x00290000u, kMaskPlayer, 0, shut),
+			"furniture (0x29) fences the player only: sight and shots pass");
+		check(FaceCounts(0x00270000u, kMaskSight, 0, shut) && FaceCounts(0x00270000u, kMaskShot, 0, shut),
+			"a moving face (0x27) stops sight and shots");
+		check(FaceCounts(0x022F0001u, kMaskSight, 0, shut) && !FaceCounts(0x022F0001u, kMaskSight, 0, open) &&
+				  !FaceCounts(0x002F0000u, kMaskSight, 0x00040000u, shut) && !FaceCounts(0x002F0000u, 0x0004FFFEu, 0, shut),
+			"sight: a shut door wall stops it, an open one not; the ignore mask and the class bits apply");
+
+		// Line of sight (night review m10): the slot 7 case, a head over a desk front (furniture, the face the player's
+		// filter stopped the Handgun on) and a room wall farther on, both facing the head.
+		{
+			std::vector<Face> scene = wall_at(67.0f);
+			for (Face& f : scene)
+				f.flags = 0x00290000u;
+			for (Face f : wall_at(200.0f))
+			{
+				f.flags = 0x002F0000u;
+				scene.push_back(f);
+			}
+			const Vec3 eye_pt{0.0f, 155.0f, 0.0f};
+			float tl = 0.0f;
+			check(SegmentBlockedBy(scene, kMaskSight, 0, shut, eye_pt, {0.0f, 140.0f, 90.0f}, &tl) < 0,
+				"line of sight: an item on the desk is seen past its front (furniture)");
+			const int by_player = SegmentBlockedBy(scene, kMaskPlayer, 0, shut, eye_pt, {0.0f, 140.0f, 90.0f}, &tl);
+			check(by_player >= 0 && scene[static_cast<size_t>(by_player)].flags == 0x00290000u,
+				"line of sight: the player's filter would have stopped it on the desk front (the reverted try)");
+			const int by_wall = SegmentBlockedBy(scene, kMaskSight, 0, shut, eye_pt, {0.0f, 140.0f, 230.0f}, &tl);
+			check(by_wall >= 0 && scene[static_cast<size_t>(by_wall)].flags == 0x002F0000u && near(tl, 200.0f / 230.0f, 1.0e-3f),
+				"line of sight: an item behind the room wall is not seen (the wall, 200 of 230 cm along)");
+			check(SegmentBlockedBy(scene, kMaskShot, 0, shut, {0.0f, 130.0f, 150.0f}, {0.0f, 130.0f, 215.0f}, &tl) >= 0 &&
+					  SegmentBlockedBy(scene, kMaskShot, 0, shut, {0.0f, 130.0f, 150.0f}, {0.0f, 130.0f, 190.0f}, &tl) < 0,
+				"shot mask: a muzzle 15 cm past the wall is beyond it, 10 cm short of it not");
+			check(SegmentBlockedBy(scene, kMaskSight, 0, shut, {0.0f, 140.0f, 230.0f}, eye_pt, &tl) < 0 &&
+					  SegmentBlockedBy(scene, kMaskSight, 0, shut, eye_pt, {std::nanf(""), 140.0f, 230.0f}, &tl) < 0 &&
+					  SegmentBlockedBy(scene, kMaskSight, 0, shut, eye_pt, {450.0f, 140.0f, 230.0f}, &tl) < 0,
+				"line of sight: one-sided (from behind no hit), NaN, and round the wall's end not blocked");
+		}
 
 		// Grid parsing on a synthetic grid A: 2 x 2 cells, faces shared between cells, the list end 0xFFFFFFFF.
 		std::vector<u8> ram(0x4000, 0);

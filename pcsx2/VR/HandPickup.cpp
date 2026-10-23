@@ -4,6 +4,7 @@
 #include "VR/HandPickup.h"
 
 #include "VR/CameraDriver.h"
+#include "VR/HeadInWall.h"
 #include "VR/ItemData.h"
 #include "VR/ItemReach.h"
 #include "VR/SpatialControls.h"
@@ -754,6 +755,42 @@ namespace VR::HandPickup
 		}
 		const ItemReach::PickupTarget tg = ItemReach::CurrentPickup();
 		in.target_highlighted = tg.valid && tg.highlighted && tg.point_ok;
+		// Night review m10: not through a wall. The line from the character's head point (its position plus the eye height
+		// of the camera mapping) to the search point must not cross a face that stops the game's own line of sight
+		// (attribute 0x4, the zombies' sight test). Furniture and counters (attribute 0x29) do not; room walls, shut door
+		// walls and the moving faces do. No check without a mapping or a readable grid: as before.
+		{
+			static u32 s_wall_said = 0xFFFFFFFFu;
+			CameraDriver::Mapping map;
+			bool walled = false;
+			HeadInWall::LineResult lr;
+			float head[3] = {};
+			if (in.target_highlighted && CameraDriver::GetMapping(&map))
+			{
+				head[0] = map.character[0];
+				head[1] = map.character[1] + map.eye_height;
+				head[2] = map.character[2];
+				lr = HeadInWall::LineBlocked(VMManager::GetDiscCRC(), head, tg.point, HeadInWall::kMaskSight);
+				walled = lr.known && lr.blocked;
+			}
+			if (walled)
+			{
+				in.target_highlighted = false;
+				if (s_wall_said != tg.node)
+					Console.WriteLn("(VR) Hand pickup: item %u (%s, node 0x%08X) is behind a wall from the character's head: "
+									"not taken by hand (face 0x%08X at %.0f%% of the line from (%.1f, %.1f, %.1f) to the search "
+									"point (%.1f, %.1f, %.1f)).",
+						static_cast<unsigned>(tg.item_id), ItemData::Name(tg.item_id), tg.node, lr.flags,
+						static_cast<double>(lr.t * 100.0f), static_cast<double>(head[0]), static_cast<double>(head[1]),
+						static_cast<double>(head[2]), static_cast<double>(tg.point[0]), static_cast<double>(tg.point[1]),
+						static_cast<double>(tg.point[2]));
+				s_wall_said = tg.node;
+			}
+			else if (tg.valid && tg.highlighted && tg.point_ok)
+			{
+				s_wall_said = 0xFFFFFFFFu;
+			}
+		}
 		in.target_hand = tg.hand;
 		in.target_node = tg.node;
 		in.target_index = tg.index;
