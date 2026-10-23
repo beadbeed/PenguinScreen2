@@ -5,7 +5,6 @@
 #include "VR/CameraDriver.h"
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
-#include "VR/HeadInWall.h"
 #include "VR/ItemData.h"
 #include "VR/PhysicalMelee.h"
 #include "VR/SplitState.h"
@@ -672,16 +671,7 @@ namespace VR::GunRay
 					Console.Warning("(VR) Gun object: the block at 0x%X holds someone else's words; GunObjectAim stays off while it "
 									"does.", ob0);
 				}
-				// Late review m6: the muzzle pushed through a wall would spawn the shell and FUN_006801A0's object beyond it,
-				// so then the game's own object is used (HeadInWall's copy of the player collision, from the character's head).
-				bool wall_known = false;
-				const bool muzzle_walled = HeadInWall::HeadToPointBlocked(VMManager::GetDiscCRC(), og, &wall_known);
-				static bool s_walled_said = false;
-				if (muzzle_walled && !s_walled_said && EmuConfig.VR.GunObjectAim)
-					Console.WriteLn("(VR) Gun object: the VR muzzle is beyond a wall from the character's head; the game's own gun "
-									"object until it is back.");
-				s_walled_said = muzzle_walled;
-				const bool obj_ok = obj_free && !muzzle_walled && EmuConfig.VR.GunObjectAim && mp->has_gun_object && back_ok &&
+				const bool obj_ok = obj_free && EmuConfig.VR.GunObjectAim && mp->has_gun_object && back_ok &&
 				                    Read(reader, mp->shape_types + mp->shape_type_stride * type + mp->gun_object_muzzle, 4, &lm[0]) &&
 				                    Read(reader, mp->shape_types + mp->shape_type_stride * type + mp->gun_object_muzzle + 4, 4, &lm[1]) &&
 				                    Read(reader, mp->shape_types + mp->shape_type_stride * type + mp->gun_object_muzzle + 8, 4, &lm[2]);
