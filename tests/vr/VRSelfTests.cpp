@@ -32,6 +32,7 @@
 #include "VR/ItemReach.h"
 #include "VR/MenuPanel.h"
 #include "VR/MenuPointer.h"
+#include "VR/NetGate.h"
 #include "VR/MeshRaster.h"
 #include "VR/GunRay.h"
 #include "VR/PhysicalMelee.h"
@@ -1233,6 +1234,37 @@ int main(int argc, char* argv[])
 	std::printf("vr_selftests: the shipped profiles from %s\n", profiles.c_str());
 	std::fflush(stdout);
 
+	RunLogged("Network gate (NetGate: PCSX2_VR_TEST_NET selects code paths only, never with the adapter on)",
+		VR::NetGate::SelfTest, "(VR) NetGate self-test");
+	// Co-op readiness (tools/outbreak-vr/research/2026-10-22-coop-ready.md): which profile switches run in private co-op.
+	RunSilent("Co-op switches (SilenceSettingCoopLive: FadeDim, SeamlessDoors, SpatialAudio)", +[]() {
+		bool ok = true;
+		const bool fade = EmuConfig.VR.FadeDim;
+		EmuConfig.VR.FadeDim = true;
+		ok &= VR::ProfileDB::SilenceSettingCoopLive("FadeDim"); // draw-only: one dim online too
+		EmuConfig.VR.FadeDim = false;
+		ok &= !VR::ProfileDB::SilenceSettingCoopLive("FadeDim");
+		EmuConfig.VR.FadeDim = fade;
+		// SeamlessDoors: the door shots co-op live with the switch, the arrival shot never.
+		const bool doors = EmuConfig.VR.SeamlessDoors;
+		EmuConfig.VR.SeamlessDoors = true;
+		ok &= VR::ProfileDB::SilenceSettingCoopLive("SeamlessDoors") && !VR::ProfileDB::SilenceSettingCoopLive("SeamlessDoorsArrival");
+		ok &= VR::ProfileDB::SilenceSettingOn("SeamlessDoorsArrival") && VR::ProfileDB::IsSilenceSettingName("SeamlessDoorsArrival");
+		EmuConfig.VR.SeamlessDoors = false;
+		ok &= !VR::ProfileDB::SilenceSettingCoopLive("SeamlessDoors") && !VR::ProfileDB::SilenceSettingOn("SeamlessDoorsArrival");
+		EmuConfig.VR.SeamlessDoors = doors;
+		// SpatialAudio: pan only, this console's own mixing.
+		const bool audio = EmuConfig.VR.SpatialAudio;
+		EmuConfig.VR.SpatialAudio = true;
+		ok &= VR::ProfileDB::SilenceSettingCoopLive("SpatialAudio");
+		EmuConfig.VR.SpatialAudio = false;
+		ok &= !VR::ProfileDB::SilenceSettingCoopLive("SpatialAudio");
+		EmuConfig.VR.SpatialAudio = audio;
+		// Still never co-op live: the gun ray's and hand pickup's caves, cave U.
+		ok &= !VR::ProfileDB::SilenceSettingCoopLive("GunRayAim") && !VR::ProfileDB::SilenceSettingCoopLive("GunObjectAim") &&
+		      !VR::ProfileDB::SilenceSettingCoopLive("HandPickup") && !VR::ProfileDB::SilenceSettingCoopLive("VrBodyLocals");
+		return ok;
+	});
 	RunLogged("MenuPointer", VR::MenuPointer::SelfTest, "(VR) MenuPointer self-test");
 	RunLogged("Item names", VR::GameFeedback::ItemSelfTest, "(VR) Item names self-test");
 	RunLogged("BeltPouches", VR::BeltPouches::SelfTest, "(VR) BeltPouches self-test");
@@ -1316,16 +1348,16 @@ int main(int argc, char* argv[])
 					return false;
 				continue;
 			}
-			if (sil.when_setting != "SeamlessDoors" || !sil.offline_only || sil.value_off != 0x0C1642D0u ||
-				sil.value_on != 0 || sil.when.empty())
+			if ((sil.when_setting != "SeamlessDoors" && sil.when_setting != "SeamlessDoorsArrival") || !sil.offline_only ||
+				sil.value_off != 0x0C1642D0u || sil.value_on != 0 || sil.when.empty())
 				return false;
 			gated++;
+			// The arrival shot (and only it) is kept through disarm and named SeamlessDoorsArrival (never co-op live).
+			const bool arrival = sil.ee_address == 0x550494u || sil.ee_address == 0x5504E0u || sil.ee_address == 0x55052Cu;
+			if (sil.keep_through_disarm != arrival || (sil.when_setting == "SeamlessDoorsArrival") != arrival)
+				return false;
 			if (sil.keep_through_disarm)
-			{
 				kept++;
-				if (sil.ee_address != 0x550494u && sil.ee_address != 0x5504E0u && sil.ee_address != 0x55052Cu)
-					return false;
-			}
 		}
 		return gated == 15 && kept == 3;
 	});

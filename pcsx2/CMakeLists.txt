@@ -1076,6 +1076,7 @@ set(pcsx2VRSources
 	VR/HandPickup.cpp
 	VR/ItemReach.cpp
 	VR/MenuPointer.cpp
+	VR/NetGate.cpp
 	VR/SpatialAudio.cpp
 	VR/SplitState.cpp
 	VR/SeatCast.cpp
@@ -1126,6 +1127,7 @@ set(pcsx2VRHeaders
 	VR/ItemReach.h
 	VR/MenuPointer.h
 	VR/SpatialAudio.h
+	VR/NetGate.h
 	VR/SplitState.h
 	VR/SeatCast.h
 	VR/SeatSession.h

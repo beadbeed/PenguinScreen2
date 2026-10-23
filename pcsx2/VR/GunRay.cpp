@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/GunRay.h"
+#include "VR/NetGate.h"
 #include "VR/CameraDriver.h"
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
@@ -25,6 +26,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <mutex>
 
 namespace VR::GunRay
 {
@@ -389,7 +391,140 @@ namespace VR::GunRay
 			const float bad[3] = {std::nanf(""), 0.0f, 0.0f};
 			check(!ObjectFrame(f, og, bad, mo, pos) && !ObjectFrame(f, bad, local, mo, pos), "object: NaN refused");
 		}
+		{
+			// Co-op aim (research/2026-10-22-coop-ready.md): the aim point, the heading solve, the elevation trim.
+			const float o[3] = {0.0f, 100.0f, 0.0f}, d[3] = {0.0f, 0.0f, 1.0f};
+			const float cs[3][3] = {{30.0f, 100.0f, 300.0f}, {10.0f, 100.0f, 200.0f}, {0.0f, 100.0f, -100.0f}};
+			const float rs[3] = {15.0f, 15.0f, 15.0f};
+			float t[3];
+			// Sphere 1 (10 cm off the ray, t 200) is the nearest within r + pad; sphere 0 (30 off) would be too; sphere 2 is
+			// behind the muzzle.
+			check(AimPoint(o, d, cs, rs, 3, 24.0f, 1000.0f, 600.0f, t) && std::fabs(t[2] - 200.0f) < 1e-3f && t[0] == 0.0f,
+				"co-op aim: the nearest enemy sphere along the ray, the point on the ray beside it");
+			const float far_c[1][3] = {{80.0f, 100.0f, 200.0f}};
+			check(!AimPoint(o, d, far_c, rs, 1, 24.0f, 1000.0f, 600.0f, t) && std::fabs(t[2] - 600.0f) < 1e-3f,
+				"co-op aim: a sphere farther off the ray than r + pad: the far point");
+			const float beyond[1][3] = {{0.0f, 100.0f, 1200.0f}};
+			check(!AimPoint(o, d, beyond, rs, 1, 24.0f, 1000.0f, 600.0f, t), "co-op aim: a sphere past the shot's reach is ignored");
+			check(!AimPoint(o, d, cs, rs, 0, 24.0f, 1000.0f, 600.0f, t) && std::fabs(t[2] - 600.0f) < 1e-3f,
+				"co-op aim: no enemies: the far point");
+			// The heading solve: a gun 20 cm right of the centre (heading 0 = +z, right = +x), barrel along the heading.
+			const float gun_rel[2] = {20.0f, 50.0f};
+			const AimPose p = PoseFrom(0.0f, 0.0f, gun_rel);
+			check(std::fabs(p.lateral - 20.0f) < 1e-3f && std::fabs(p.forward - 50.0f) < 1e-3f && std::fabs(p.delta) < 1e-6f,
+				"co-op aim: the pose's lateral and forward offsets");
+			// A target straight ahead of the centre, 300 cm away: the barrel's line (20 cm right) must turn left onto it.
+			const float target[2] = {0.0f, 300.0f};
+			float h = 0.0f, lat = 0.0f;
+			check(SolveHeading(p, target, &h, &lat) && h < 0.0f, "co-op aim: a gun right of the centre turns left onto a target ahead");
+			// Check the solved heading: the gun turned by h, its line passes through the target.
+			{
+				const float sh = std::sin(h), ch = std::cos(h);
+				const float gx = gun_rel[0] * ch + gun_rel[1] * sh, gz = -gun_rel[0] * sh + gun_rel[1] * ch; // rotated by h
+				const float ux = sh, uz = ch;
+				const float vx = target[0] - gx, vz = target[1] - gz;
+				check(std::fabs(vx * uz - vz * ux) < 0.05f, "co-op aim: the solved heading's barrel line passes through the target");
+			}
+			// The same pose read in a turn (heading 90 deg, everything turned with it) gives the same offsets.
+			const float turned[2] = {50.0f, -20.0f};
+			const AimPose q = PoseFrom(1.5707963f, 1.5707963f, turned);
+			check(std::fabs(q.lateral - 20.0f) < 1e-3f && std::fabs(q.forward - 50.0f) < 1e-3f && std::fabs(q.delta) < 1e-5f,
+				"co-op aim: the pose's offsets turn with the heading");
+			AimPose sm = p;
+			const AimPose wrapped{20.0f, 50.0f, 3.1f}, other{20.0f, 50.0f, -3.1f};
+			sm = wrapped;
+			SmoothPose(sm, other, 0.5f);
+			check(std::fabs(std::fabs(sm.delta) - 3.14159f) < 0.01f, "co-op aim: the yaw offset smooths across +-180 deg");
+			const float none[2] = {0.0f, 0.0f};
+			check(!SolveHeading(p, none, &h, &lat), "co-op aim: no heading for a target at the centre");
+			// The elevation trim: held when told to, learnt (and clamped) otherwise.
+			Steer st;
+			float cmd[2];
+			const float want[2] = {0.0f, 0.1f}, now[2] = {0.0f, 0.0f};
+			st.Step(want, now, true, 0.5f, 0.2f, cmd);
+			check(cmd[1] == 0.1f && st.trim_elev == 0.0f, "co-op aim: the first step is the wanted elevation");
+			st.Step(want, now, false, 0.5f, 0.2f, cmd);
+			check(st.trim_elev == 0.0f, "co-op aim: a held step learns nothing");
+			for (int i = 0; i < 20; i++)
+				st.Step(want, now, true, 0.5f, 0.2f, cmd);
+			check(std::fabs(st.trim_elev - 0.2f) < 1e-6f && std::fabs(cmd[1] - 0.3f) < 1e-6f, "co-op aim: the trim is clamped");
+			st.Reset();
+			check(!st.valid && st.trim_elev == 0.0f, "co-op aim: reset");
+		}
 		return fail;
+	}
+
+	// Co-op aim's pure parts.
+	bool AimPoint(const float o[3], const float d[3], const float (*centres)[3], const float* radii, int n, float pad, float reach,
+		float far_t, float out[3])
+	{
+		float best = -1.0f;
+		for (int i = 0; i < n; i++)
+		{
+			const float v[3] = {centres[i][0] - o[0], centres[i][1] - o[1], centres[i][2] - o[2]};
+			const float t = v[0] * d[0] + v[1] * d[1] + v[2] * d[2];
+			if (!std::isfinite(t) || t <= 0.0f || t > reach || !std::isfinite(radii[i]) || radii[i] <= 0.0f)
+				continue;
+			const float q[3] = {v[0] - t * d[0], v[1] - t * d[1], v[2] - t * d[2]};
+			const float miss = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+			if (miss <= radii[i] + pad && (best < 0.0f || t < best))
+				best = t;
+		}
+		const float t = best > 0.0f ? best : far_t;
+		for (int k = 0; k < 3; k++)
+			out[k] = o[k] + t * d[k];
+		return best > 0.0f;
+	}
+
+	void Steer::Step(const float desired[2], const float actual[2], bool learn, float gain, float max_trim, float out_cmd[2])
+	{
+		const auto wrap = [](float a) {
+			a = std::fmod(a + 3.14159265f, 6.28318531f);
+			if (a < 0.0f)
+				a += 6.28318531f;
+			return a - 3.14159265f;
+		};
+		if (valid && learn)
+		{
+			// The barrel's error against what is wanted now: the trim moves by gain of it (one poll late, as the game
+			// poses the gun after the heading and pitch it was given).
+			trim_yaw = std::clamp(trim_yaw + gain * wrap(desired[0] - actual[0]), -max_trim, max_trim);
+			trim_elev = std::clamp(trim_elev + gain * (desired[1] - actual[1]), -max_trim, max_trim);
+		}
+		valid = true;
+		out_cmd[0] = wrap(desired[0] + trim_yaw);
+		out_cmd[1] = desired[1] + trim_elev;
+	}
+
+	AimPose PoseFrom(float barrel_yaw, float heading, const float gun_rel[2])
+	{
+		AimPose p;
+		const float su = std::sin(barrel_yaw), cu = std::cos(barrel_yaw);
+		p.lateral = gun_rel[0] * cu - gun_rel[1] * su; // . (cos, -sin): right of the barrel
+		p.forward = gun_rel[0] * su + gun_rel[1] * cu; // . (sin, cos)
+		p.delta = std::remainder(barrel_yaw - heading, 6.28318531f);
+		return p;
+	}
+
+	void SmoothPose(AimPose& s, const AimPose& now, float k)
+	{
+		s.lateral += k * (now.lateral - s.lateral);
+		s.forward += k * (now.forward - s.forward);
+		s.delta = std::remainder(s.delta + k * std::remainder(now.delta - s.delta, 6.28318531f), 6.28318531f);
+	}
+
+	bool SolveHeading(const AimPose& p, const float target_rel[2], float* heading, float* lateral)
+	{
+		const float r = std::sqrt(target_rel[0] * target_rel[0] + target_rel[1] * target_rel[1]);
+		if (!std::isfinite(r) || !std::isfinite(p.lateral) || !std::isfinite(p.delta) || r < 1.0f)
+			return false;
+		const float alpha = std::atan2(target_rel[0], target_rel[1]);
+		// The barrel's line, lateral off the centre, passes through the target when its yaw is alpha - asin(lateral / r);
+		// a target closer than that offset (inside the gun's own reach) is faced straight on.
+		const float theta = (std::fabs(p.lateral) < r) ? alpha - std::asin(p.lateral / r) : alpha;
+		*heading = std::remainder(theta - p.delta, 6.28318531f);
+		*lateral = p.lateral;
+		return std::isfinite(*heading);
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------
@@ -397,6 +532,26 @@ namespace VR::GunRay
 	// -----------------------------------------------------------------------------------------------------------------
 	namespace
 	{
+		// Co-op aim: the command CameraDriver's aim writes while fresh, and the steering state.
+		std::mutex s_coop_mutex;
+		float s_coop_yaw = 0.0f, s_coop_elev = 0.0f;
+		u64 s_coop_ms = 0;
+		Steer s_steer;
+		AimPose s_pose;
+		bool s_pose_valid = false;
+		bool s_prev_valid = false;
+		float s_prev_heading = 0.0f, s_prev_barrel = 0.0f;
+		constexpr float kSteadyRad = 0.0105f; // 0.6 deg between polls
+		bool s_coop_said = false;
+		float s_coop_up_s = 0.0f; // how long co-op aim has steered without a break
+		constexpr float kLearnWithin = 0.21f; // rad (12 deg)
+		constexpr float kSettleS = 0.3f;
+		constexpr float kArmPivot = 55.0f; // game cm behind the weapon object along the barrel: the shoulder
+		float s_coop_log_s = 0.0f;
+		// The equipped item's weapon object pointer (File #1: item record +0x1C, as FUN_0062CF10 reads it).
+		constexpr u32 kItemObjectOffset = 0x1C;
+		constexpr u32 kObjMatrix = 0x1C0, kObjPos = 0x200;
+
 		bool s_armed = false; // the block may hold our words (written since the last clear)
 		u32 s_addr = 0;
 		u32 s_magic = 0;
@@ -541,6 +696,184 @@ namespace VR::GunRay
 		}
 	}
 
+	namespace
+	{
+		bool ReadF32(GuestReader reader, u32 address, float* out)
+		{
+			u32 w = 0;
+			if (!Read(reader, address, 4, &w))
+				return false;
+			std::memcpy(out, &w, 4);
+			return std::isfinite(*out);
+		}
+
+		// Co-op aim's poll: the game barrel's muzzle and direction from the weapon object, the aim point on the VR ray, the
+		// heading that puts the barrel's line through it (Solve), the elevation, the command published. False when anything
+		// does not read (then the controller's own aim).
+		bool SteerCoop(GuestReader reader, const ProfileDB::MeleeParams& mp, const ProfileDB::CameraLookAt& la, u32 record,
+			u32 item_rec, u32 type, bool type_ok, const float og[3], const float dg[3], float dt)
+		{
+			u32 obj = 0;
+			if (item_rec == 0 || !la.has_heading || !Read(reader, item_rec + kItemObjectOffset, 4, &obj) || obj == 0 ||
+				static_cast<u64>(obj) + kObjPos + 12 > Ps2MemSize::MainRam)
+				return false;
+			float M[16], pos[3], K[3];
+			for (u32 k = 0; k < 16; k++)
+				if (!ReadF32(reader, obj + kObjMatrix + 4 * k, &M[k]))
+					return false;
+			for (u32 k = 0; k < 3; k++)
+				if (!ReadF32(reader, obj + kObjPos + 4 * k, &pos[k]) ||
+					!ReadF32(reader, static_cast<u32>(record + la.position_offset + 4 * k), &K[k]))
+					return false;
+			u32 hb = 0;
+			if (!Read(reader, static_cast<u32>(record + la.heading_offset), 2, &hb))
+				return false;
+			const float heading = static_cast<float>(static_cast<s16>(static_cast<u16>(hb))) * (6.28318531f / 65536.0f);
+			// The barrel: FUN_0062CF10's frame is Rot x M with Rot's row 2 (-1, 0, 0), so the barrel is -(M's row 0).
+			float B[3] = {-M[0], -M[1], -M[2]};
+			const float bl = std::sqrt(B[0] * B[0] + B[1] * B[1] + B[2] * B[2]);
+			if (!std::isfinite(bl) || bl < 1e-4f)
+				return false;
+			for (float& c : B)
+				c /= bl;
+			// The game's muzzle: the weapon type's model-space muzzle through the object (row vectors), else the object.
+			float G[3] = {pos[0], pos[1], pos[2]};
+			if (type_ok && mp.has_gun_object)
+			{
+				u32 lw[3] = {};
+				float local[3] = {};
+				bool ok = true;
+				for (u32 k = 0; k < 3 && ok; k++)
+					ok = Read(reader, mp.shape_types + mp.shape_type_stride * type + mp.gun_object_muzzle + 4 * k, 4, &lw[k]);
+				std::memcpy(local, lw, sizeof(local));
+				if (ok && Finite3(local) && std::fabs(local[0]) < 200.0f && std::fabs(local[1]) < 200.0f && std::fabs(local[2]) < 200.0f)
+					for (int j = 0; j < 3; j++)
+						G[j] = pos[j] + local[0] * M[0 + j] + local[1] * M[4 + j] + local[2] * M[8 + j];
+			}
+			// The enemies' hurt spheres (present, alive; File #1's melee.contact fields).
+			float centres[64][3];
+			float radii[64];
+			int n = 0;
+			if (mp.has_contact)
+			{
+				const u32 count = std::min<u32>(mp.enemy_count, 64u);
+				for (u32 i = 0; i < count && n < 64; i++)
+				{
+					const u32 base = mp.enemy_table + i * mp.enemy_stride;
+					u32 present = 0, hp = 0, sc = 0, shapes = 0, cen = 0;
+					if (!Read(reader, base + mp.enemy_present, 1, &present) || present == 0 || !Read(reader, base + mp.enemy_hp, 2, &hp) ||
+						static_cast<s16>(static_cast<u16>(hp)) <= 0 || !Read(reader, base + mp.sphere_count, 1, &sc) ||
+						!Read(reader, base + mp.sphere_shapes, 4, &shapes) || !Read(reader, base + mp.sphere_centres, 4, &cen) ||
+						shapes == 0 || cen == 0 || shapes >= Ps2MemSize::MainRam || cen >= Ps2MemSize::MainRam)
+						continue;
+					for (u32 k = 0; k < std::min<u32>(sc, 8u) && n < 64; k++)
+					{
+						float r = 0.0f;
+						if (!ReadF32(reader, shapes + 20u * k + 0x0C, &r) || !(r > 0.0f))
+							break; // the list ends at a radius of -1
+						if (!ReadF32(reader, cen + 12u * k, &centres[n][0]) || !ReadF32(reader, cen + 12u * k + 4, &centres[n][1]) ||
+							!ReadF32(reader, cen + 12u * k + 8, &centres[n][2]))
+							break;
+						radii[n] = r;
+						n++;
+					}
+				}
+			}
+			float T[3];
+			const bool on_enemy = AimPoint(og, dg, centres, radii, n, kAimPad, kAimReach, kAimFar, T);
+
+			// The gun moves with the character: the barrel's line keeps its lateral offset c from the character's centre
+			// and its yaw offset from the heading (smoothed: the pose lags the heading a frame or two in a turn).
+			const float gun_rel[2] = {G[0] - K[0], G[2] - K[2]};
+			const AimPose ap = PoseFrom(std::atan2(B[0], B[2]), heading, gun_rel);
+			const float target_rel[2] = {T[0] - K[0], T[2] - K[2]};
+			float heading_cmd = 0.0f, lateral = 0.0f;
+			// Learnt only while the heading and the barrel both hold still between polls: in a turn the gun's pose lags
+			// the heading, and that lag is not the gun's offset. Until a first steady read: the barrel along the heading
+			// from the centre (the controller-style aim).
+			const bool steady = s_prev_valid && std::fabs(std::remainder(heading - s_prev_heading, 6.28318531f)) < kSteadyRad &&
+			                    std::fabs(std::remainder(ap.delta + heading - s_prev_barrel, 6.28318531f)) < kSteadyRad;
+			s_prev_valid = true;
+			s_prev_heading = heading;
+			s_prev_barrel = ap.delta + heading;
+			if (steady)
+			{
+				if (!s_pose_valid)
+					s_pose = ap;
+				else
+					SmoothPose(s_pose, ap, 0.3f);
+				s_pose_valid = true;
+			}
+			if (!SolveHeading(s_pose_valid ? s_pose : AimPose{}, target_rel, &heading_cmd, &lateral))
+				return false;
+			// The elevation: the aim pitch swings the arm, so the gun turns about the shoulder, kArmPivot back along the
+			// barrel from the weapon object (measured offline: 32 cm of travel for 34 deg of pitch); seen from there the
+			// muzzle's own rise and fall with the pitch drops out, so the elevation from the pivot to the aim point is the
+			// one that puts the barrel's line through it. Plus a trim learnt from the barrel (the aim pitch's blend of aim
+			// clips is not exactly 1:1), only from a steady, consistent pose: the matrix's row 3 (its position) the same as
+			// +0x200, the barrel within kLearnWithin, the gun up for kSettleS.
+			const float P[3] = {pos[0] - kArmPivot * B[0], pos[1] - kArmPivot * B[1], pos[2] - kArmPivot * B[2]};
+			const float hd = std::sqrt((T[0] - P[0]) * (T[0] - P[0]) + (T[2] - P[2]) * (T[2] - P[2]));
+			const float elev_want = std::atan2(T[1] - P[1], std::max(hd, 1.0f));
+			const float elev_now = std::asin(std::clamp(B[1], -1.0f, 1.0f));
+			const float dpos = std::fabs(M[12] - pos[0]) + std::fabs(M[13] - pos[1]) + std::fabs(M[14] - pos[2]);
+			s_coop_up_s += dt;
+			const bool learn = dpos < 2.0f && std::fabs(elev_want - elev_now) < kLearnWithin && s_coop_up_s >= kSettleS;
+			const float desired[2] = {heading_cmd, elev_want};
+			const float actual[2] = {heading_cmd, elev_now}; // the heading comes from SolveHeading, not trimmed
+			float cmd[2];
+			s_steer.Step(desired, actual, learn, 0.12f, 0.26f, cmd);
+			if (!std::isfinite(cmd[0]) || !std::isfinite(cmd[1]))
+			{
+				s_steer.Reset();
+				return false;
+			}
+			{
+				std::lock_guard<std::mutex> lock(s_coop_mutex);
+				s_coop_yaw = cmd[0];
+				s_coop_elev = cmd[1];
+				s_coop_ms = CameraDriver::SteadyNowMs();
+			}
+			if (!s_coop_said)
+			{
+				s_coop_said = true;
+				Console.WriteLn("(VR) Gun ray: co-op aim steering the local record 0x%X (the game's gun object 0x%X).", record, obj);
+			}
+			s_coop_log_s += dt;
+			if (Log() && s_coop_log_s >= 0.25f)
+			{
+				s_coop_log_s = 0.0f;
+				// How far the game barrel's line passes from the aim point now (the check: about 0 once it has turned).
+				const float v[3] = {T[0] - G[0], T[1] - G[1], T[2] - G[2]};
+				const float t = v[0] * B[0] + v[1] * B[1] + v[2] * B[2];
+				const float q[3] = {v[0] - t * B[0], v[1] - t * B[1], v[2] - t * B[2]};
+				Console.WriteLn("(VR) Gun ray co-op: aim point (%.1f, %.1f, %.1f)%s, game muzzle (%.1f, %.1f, %.1f) barrel (%.3f, %.3f, "
+								"%.3f): its line passes %.1f cm from the aim point; heading %.1f -> %.1f deg (lateral %.1f), elevation "
+								"%.1f want %.1f, trim %.2f deg%s.",
+					static_cast<double>(T[0]), static_cast<double>(T[1]), static_cast<double>(T[2]), on_enemy ? " on an enemy" : "",
+					static_cast<double>(G[0]), static_cast<double>(G[1]), static_cast<double>(G[2]), static_cast<double>(B[0]),
+					static_cast<double>(B[1]), static_cast<double>(B[2]),
+					static_cast<double>(std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2])),
+					static_cast<double>(heading * 57.2957795f), static_cast<double>(cmd[0] * 57.2957795f), static_cast<double>(lateral),
+					static_cast<double>(elev_now * 57.2957795f), static_cast<double>(elev_want * 57.2957795f),
+					static_cast<double>(s_steer.trim_elev * 57.2957795f), learn ? "" : " (held)");
+			}
+			return true;
+		}
+	} // namespace
+
+	bool CoopAim(float* yaw, float* elev)
+	{
+		std::lock_guard<std::mutex> lock(s_coop_mutex);
+		const u64 now = CameraDriver::SteadyNowMs();
+		if (s_coop_ms == 0 || now < s_coop_ms || now - s_coop_ms > 100)
+			return false;
+		*yaw = s_coop_yaw;
+		*elev = s_coop_elev;
+		return true;
+	}
+
+
 	void OnStateLoaded()
 	{
 		// A block saved armed is ours to clear (or rewrite) at the next poll; the count starts again. Armed only while the
@@ -591,7 +924,9 @@ namespace VR::GunRay
 		const ProfileDB::FeedbackParams* fb =
 			(profile && profile->feedback.has_value() && profile->feedback->has_weapon) ? &profile->feedback.value() : nullptr;
 		const bool setting = EmuConfig.VR.GunRayAim;
-		const bool offline = !EmuConfig.DEV9.EthEnable && !EmuConfig.VR.OnlineSafe;
+		const bool offline = NetGate::StrictlyOffline();
+		// Co-op aim: private co-op (behind [VR] PrivateCoopFirstPerson), never online-safe; the same GunRayAim switch.
+		const bool coop = !offline && CameraDriver::PrivateCoop() && !EmuConfig.VR.OnlineSafe;
 		u32 slot = 0;
 		const bool slot_known = profile && profile->camera.has_value() && profile->camera->base.has_value() &&
 		                        profile->camera->base->is_indexed && CameraDriver::LocalSlot(&slot);
@@ -604,6 +939,9 @@ namespace VR::GunRay
 			const std::string verdict = !mp ? "off (the profile has no melee.gunRay)" :
 			                            !fb ? "off (the profile has no feedback.weapon)" :
 			                            !setting ? "off (the VR GunRayAim setting)" :
+			                            (!offline && coop) ? "co-op aim (online the room's master decides a hit from the character's "
+			                                                 "own aim: with the gun raised, your character's heading and aim pitch "
+			                                                 "turn its own gun to where the laser points; the game's own shot)" :
 			                            !offline ? "off (online: the room's master decides a hit from the character's own aim)" :
 			                                       "on (a shot hits along the VR gun's ray, through the game's own shot)";
 			const u32 crc = VMManager::GetDiscCRC();
@@ -618,7 +956,8 @@ namespace VR::GunRay
 		// A gun in hand: the local record's equipped item record, behind the weapon reader's own checks.
 		bool gun = false;
 		u16 item_id = 0;
-		if (mp && fb && setting && offline && slot_known && record_steady)
+		u32 item_rec = 0;
+		if (mp && fb && setting && (offline || coop) && slot_known && record_steady)
 		{
 			u32 eq = 0, present = 0, index = 0, owner = 0, id = 0;
 			if (Read(reader, record + fb->weapon_equipped_offset, 1, &eq) && eq != 0)
@@ -631,6 +970,7 @@ namespace VR::GunRay
 					owner == slot + 1)
 				{
 					item_id = static_cast<u16>(id);
+					item_rec = static_cast<u32>(r);
 					gun = ItemData::IsGun(ItemData::KindOf(item_id));
 				}
 			}
@@ -638,6 +978,7 @@ namespace VR::GunRay
 
 		bool wrote = false;
 		bool obj_wrote = false;
+		bool steered = false;
 		float pos[3] = {}, quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 		if (gun && RightHand(snap, pos, quat))
 		{
@@ -692,7 +1033,7 @@ namespace VR::GunRay
 				Console.Warning("(VR) Gun ray: the block at 0x%X holds someone else's words; the gun ray stays off while it does.",
 					mp->gun_block);
 			}
-			bool mapped = blk_free && ray && CameraDriver::GetMapping(&map) && RayToGame(from, dir, MapPoint, &map, og, dg);
+			bool mapped = (coop || blk_free) && ray && CameraDriver::GetMapping(&map) && RayToGame(from, dir, MapPoint, &map, og, dg);
 			// Late review m6: a VR muzzle beyond a wall. When the line from the character's chest (bone 11, where the
 			// game's own sight starts) to the VR muzzle crosses a face that stops the game's bullets (attribute 0x2: room
 			// walls, shut door walls and the moving faces, not furniture), the shot (cave I) starts on the chest's side of
@@ -735,8 +1076,13 @@ namespace VR::GunRay
 					Console.WriteLn("(VR) Gun ray: the VR muzzle is back on the character's side of the wall.");
 				s_walled_said = muzzle_walled;
 			}
+			// Co-op aim: nothing is written but the command CameraDriver's aim turns the character by (its heading and aim
+			// pitch, the local record only). A VR muzzle beyond a wall: the controller's own aim, as before.
+			if (coop && mapped && !muzzle_walled)
+				steered = profile->camera.has_value() && profile->camera->look_at.has_value() &&
+				          SteerCoop(reader, *mp, *profile->camera->look_at, record, item_rec, type, back_ok, og, dg, dt);
 			// A wall shot's origin is WallShot's own, the back offset already in it (evening review m3).
-			if (mapped && ShotFrame(sg, sd, muzzle_walled ? 0.0f : back, m, origin) && Read(reader, mp->counter, 1, &counter))
+			if (!coop && mapped && ShotFrame(sg, sd, muzzle_walled ? 0.0f : back, m, origin) && Read(reader, mp->counter, 1, &counter))
 			{
 				const u32 b = mp->gun_block;
 				if (!s_armed || s_stale)
@@ -896,6 +1242,15 @@ namespace VR::GunRay
 			Clear();
 		if (!obj_wrote)
 			ClearObject();
+		if (!steered)
+		{
+			s_steer.Reset();
+			s_pose_valid = false;
+			s_prev_valid = false;
+			s_coop_up_s = 0.0f;
+			std::lock_guard<std::mutex> lock(s_coop_mutex);
+			s_coop_ms = 0;
+		}
 		if (profile)
 		{
 			const std::string ov = !mp || !mp->has_gun_object ? "off (the profile has no melee.gunObject)" :

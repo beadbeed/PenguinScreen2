@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/VrBody.h"
+#include "VR/NetGate.h"
 
 #include "VR/CameraDriver.h"
 #include "VR/VRInputState.h"
@@ -1045,7 +1046,7 @@ namespace VR::VrBody
 			return e && e[0] == '1';
 		}();
 		// Cave U only strictly offline (night review C1): online every slot is posed at the draw (cave V) only.
-		const bool use_locals = UseLocals(CameraDriver::NetworkOffline(), EmuConfig.DEV9.EthEnable, s_drawtime);
+		const bool use_locals = UseLocals(CameraDriver::NetworkOffline(), NetGate::IsOnline(), s_drawtime);
 		const u64 now = CameraDriver::SteadyNowMs();
 		const bool log_now = (s_log_env || s_loopback_env) && now - s_log_ms >= 2000;
 		if (log_now)

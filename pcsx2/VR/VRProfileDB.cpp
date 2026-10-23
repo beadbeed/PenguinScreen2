@@ -5858,7 +5858,7 @@ static int CountMultibandResolveMismatches(bool log)
 
 bool VR::ProfileDB::IsSilenceSettingName(std::string_view name)
 {
-	return name == "SeamlessDoors" || name == "PhysicalMelee" || name == "PhysicalMeleeContact" || name == "MeleeHitJolt" ||
+	return name == "SeamlessDoors" || name == "SeamlessDoorsArrival" || name == "PhysicalMelee" || name == "PhysicalMeleeContact" || name == "MeleeHitJolt" ||
 	       name == "GunRayAim" || name == "GunObjectAim" ||
 	       name == "HandPickup" ||
 	       name == "ScriptedShotsFirstPerson" || name == "SpatialAudio" || name == "FadeDim" ||
@@ -5867,7 +5867,8 @@ bool VR::ProfileDB::IsSilenceSettingName(std::string_view name)
 
 bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
 {
-	if (name == "SeamlessDoors")
+	// The door shots and (kept through disarm) the arrival shot: one switch; only the door shots are co-op live.
+	if (name == "SeamlessDoors" || name == "SeamlessDoorsArrival")
 		return EmuConfig.VR.SeamlessDoors;
 	if (name == "PhysicalMelee")
 		return EmuConfig.VR.PhysicalMelee;
@@ -5916,6 +5917,22 @@ bool VR::ProfileDB::SilenceSettingCoopLive(std::string_view name)
 	// the world build, the held items and the hit tests, so hurt spheres and the held weapon follow it) is never co-op live
 	// (night review C1), and online the host never sets its flag 8 for any slot (VrBody::UseLocals).
 	if (name == "VrBody")
+		return SilenceSettingOn(name);
+	// FadeDim's quad skip (0x1B9DCC, beq v1,zero -> beq zero,zero in the fade quad's draw FUN_001B9DA0) is draw-only: no
+	// record, no fade state and none of the game's traffic, so in private co-op it runs as offline and the host's view dim
+	// stands in for the quad (co-op review: before, online the quad drew AND the host dimmed, so every fade dimmed twice).
+	if (name == "FadeDim")
+		return SilenceSettingOn(name);
+	// SeamlessDoors' door shots (the 0x590B40 calls in the door callbacks FUN_00591160 / FUN_005929E0): the camera calls
+	// are made for the local player only, and the door's motion, timer, opened bits, network notify and load are untouched,
+	// so in private co-op your own door holds first person as offline. The arrival shot ("SeamlessDoorsArrival",
+	// FUN_00550220, not proven door-only) is never co-op live.
+	if (name == "SeamlessDoors")
+		return SilenceSettingOn(name);
+	// SpatialAudio's cave (0xFC000, at FUN_001B7B50's projection call): it rewrites only the projected x and w the
+	// game's pan reads for a sound this console plays, and keeps its last values in its own block; no record, game state
+	// or traffic. In private co-op it runs as offline (VR::SpatialAudio writes the host block there too).
+	if (name == "SpatialAudio")
 		return SilenceSettingOn(name);
 	return false;
 }

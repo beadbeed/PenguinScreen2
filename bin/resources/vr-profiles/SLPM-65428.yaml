@@ -305,6 +305,11 @@ SLPM-65428:
       # with the switches on, every arrival shot FUN_00550220 starts is skipped, also for a room entered while first
       # person is disarmed (a cutscene arrival, a scripted shot), and FUN_00550220 is not proven door-only, so any other
       # arrival shot it runs is skipped too (nightly review m7 / b7: documented, not tightened).
+      # Private co-op (co-op review 2026-10-22, research/2026-10-22-coop-ready.md): the DOOR shots (whenSetting:
+      # SeamlessDoors) run there too (SilenceSettingCoopLive): the two door callbacks call 0x590B40 only for the local
+      # player, so a partner's view and everything the door sends are unchanged. The ARRIVAL shot (whenSetting:
+      # SeamlessDoorsArrival, the same switch) stays strictly offline, as FUN_00550220 is not proven door-only: online
+      # the game's arrival shot still plays in the new room (DoorVeil keeps the load black, then up to 1.5 s more).
       - { address: 0x5914FC, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_00591160, local player
       - { address: 0x5916F0, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_00591160, local player
       - { address: 0x591804, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_00591160, local player
@@ -317,9 +322,9 @@ SLPM-65428:
       - { address: 0x5930E8, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_005929E0, local player
       - { address: 0x5931FC, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_005929E0, local player
       - { address: 0x5932EC, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_005929E0, local player
-      - { address: 0x550494, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors, keepThroughDisarm: true }   # arrival shot: FUN_00550220
-      - { address: 0x5504E0, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors, keepThroughDisarm: true }   # arrival shot: FUN_00550220
-      - { address: 0x55052C, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors, keepThroughDisarm: true }   # arrival shot: FUN_00550220
+      - { address: 0x550494, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoorsArrival, keepThroughDisarm: true }   # arrival shot: FUN_00550220
+      - { address: 0x5504E0, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoorsArrival, keepThroughDisarm: true }   # arrival shot: FUN_00550220
+      - { address: 0x55052C, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoorsArrival, keepThroughDisarm: true }   # arrival shot: FUN_00550220
       # Nothing vanishes up close, and your own body stays hidden (the full story is at lookAt.hold below). The
       # near-camera cull FUN_005902F0 opens with `lb v0, 0x48BF88; beq v0, zero, <the distance test>`: without the
       # beq it always takes the exit under it (`beq zero, zero, <return>; daddu v0, zero, zero`), never culled, for
@@ -347,7 +352,7 @@ SLPM-65428:
       # positioned sound by where it lands across the screen (FUN_001B7B50: through the view and the screen matrix, x 0-640
       # -> pan 0-127, a sound behind mirrored), so only sounds inside the view pan at all. The site calls a cave at 0xFC000
       # instead of FUN_00191A10: it runs that projection as before, then, while the host block at 0xFF400 reads 'SPA1'
-      # (VR::SpatialAudio, written offline while first person is armed), writes x = 322.5 + 320 sin(azimuth) of the emitter
+      # (VR::SpatialAudio, written offline or in private co-op while first person is armed; pan only, co-op review 2026-10-22), writes x = 322.5 + 320 sin(azimuth) of the emitter
       # in view space (0x3062E0, your head in first person) and w = +1: ahead and behind centred, beside you full left or
       # right. Volume stays the game's (distance). The site first, then the cave (camera.caves: all or nothing). Main-program
       # code, guarded by FUN_001B7B50's first word.
@@ -435,6 +440,11 @@ SLPM-65428:
       # second) and only in free stance, so partners saw your first-person turns late and never saw where you
       # aim. Every 3 frames (about 10 Hz; a 0x18-byte message) and also with the weapon raised (stance 1 or 2;
       # the sub-action list that follows still filters to idle/turn/walk states).
+      # Rate (co-op review 2026-10-22, verified (code), research/2026-10-22-coop-ready.md): each message goes into the
+      # game's per-slot aggregate (NETAQ 0x820A80) flushed as ONE packet per game frame, with the game's own caps (172 bytes
+      # per channel, 512 bytes a tick); 24 bytes every 3 frames is far under them, no per-type throttle exists in the
+      # client, and the type-2 heartbeat is also what carries your position while walk-and-shoot moves you with the gun
+      # raised. Kept at 3; the server side is untested (the two-player checklist watches for drops).
       - { address: 0x633548, on: 0x24030003, off: 0x2403001E, when: [{ address: 0x540004, equals: 3 }], coopOnly: true }   # heartbeat interval 30 -> 3 (addiu v1,zero,3)
       - { address: 0x633580, on: 0x2465FFFF, off: 0x24050001, when: [{ address: 0x540004, equals: 3 }], coopOnly: true }   # a1 = stance - 1
       - { address: 0x633584, on: 0x2CA50002, off: 0x10650003, when: [{ address: 0x540004, equals: 3 }], coopOnly: true }   # a1 = stance in {1, 2}
@@ -442,7 +452,12 @@ SLPM-65428:
       - { address: 0x63358C, on: 0x00000000, off: 0x10000087, when: [{ address: 0x540004, equals: 3 }], coopOnly: true }   # delay slot (was the stance != 1 exit)
       # Aim pitch (see lookAt.aim): the gun-elevation servo's easing calls and stores to +0xBC8 are NOP'd only while
       # your weapon is raised (stance 2) and never online-safe, so the pitch written from the controller holds. They
-      # are put back as soon as the weapon is lowered. The servo is shared, so partners' aim pitch holds still while you aim.
+      # are put back as soon as the weapon is lowered. Offline the servo is shared (FUN_00556800's guard, +0x03 == u8 0x48BF7D,
+      # passes for each AI partner as the offline loops set 0x48BF7D to the record being run), so AI partners' aim pitch
+      # holds still while you aim. Online (private co-op; offlineOnly passes there) 0x48BF7D is the local slot and remote
+      # players never reach the servo (FUN_006399A0 skips their input stage); their pitch comes only from their type-1
+      # message (0x64D410), and the room master's copy of their shot uses that pose. So online the NOP touches your own
+      # aim only (verified (code), co-op review 2026-10-22, research/2026-10-22-coop-ready.md).
       - { address: 0x556968, on: 0x00000000, off: 0x0C0D1AEC, when: [{ address: 0x540004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: easing call
       - { address: 0x556980, on: 0x00000000, off: 0x0C0D1AEC, when: [{ address: 0x540004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: easing call
       - { address: 0x556998, on: 0x00000000, off: 0x0C0D1AEC, when: [{ address: 0x540004, equals: 3 }], activeWhen: [{ offset: 0x08, equals: 2, width: 1 }], offlineOnly: true }   # gun-elevation servo: easing call

@@ -819,6 +819,11 @@ namespace VR::HudCards
 				colour = memRead32(0x308898u);
 				level = std::bit_cast<float>(static_cast<u32>(memRead32(0x30889Cu)));
 				target = FadeDimFor(on, level, colour);
+				// One dim, never two (co-op review): the host dims only while the game's own fade quad is skipped (the
+				// profile's FadeDim entry at 0x1B9DCC holds its patched word, beq zero,zero). Wherever that entry is not in
+				// (its gates, a non-black fade, a disarm, the code not resident) the game's quad draws and is the only dim.
+				if (memRead32(0x1B9DCCu) != 0x10000029u)
+					target = 0.0f;
 			}
 			// The game steps its fade at 30 frames a second; about 40 ms of easing keeps the steps out of a 90 Hz view.
 			const float k = std::min(1.0f, dt * 25.0f);

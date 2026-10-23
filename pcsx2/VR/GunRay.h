@@ -124,4 +124,48 @@ namespace VR::GunRay
 
 	// CPU thread: a loaded state's RAM has its own block; it is cleared or written afresh by the next poll.
 	void OnStateLoaded();
+
+	// --- Co-op aim ([VR] GunRayAim in private co-op; tools/outbreak-vr/research/2026-10-22-coop-ready.md) ---
+	// Online the room's master decides a hit from the character's own aim, so cave I (the VR ray as the shot's frame) stays
+	// strictly offline. Instead, with the gun raised, the LOCAL character's heading (+0x92) and aim pitch (+0xBC8), the two
+	// things the game's shot pose follows and its type-1 message sends (heading +0x14, pitch +0x20, read at the call, one
+	// sent as you fire), are steered so the game's own gun barrel (the equipped item's weapon object: matrix +0x1C0,
+	// barrel = -row 0, the model-space muzzle through it) points at the laser's aim point: where the VR ray passes nearest
+	// an enemy's hurt sphere it comes within kAimPad of (the closest point on the ray), else kAimFar along it. So the game's
+	// own bullet, on this console and on the master's copy, goes where the laser points.
+	constexpr float kAimPad = 24.0f;   // game cm: the pistol shot's capsule radius
+	constexpr float kAimReach = 1000.0f; // game cm: the shot's 10 m
+	constexpr float kAimFar = 600.0f;  // game cm: no enemy on the ray
+	// Pure: the aim point on the ray (o, unit d): the closest point to the nearest (smallest t > 0, t <= reach) sphere centre
+	// whose distance from the ray is within its radius + pad; else o + far * d. True when a sphere was found.
+	bool AimPoint(const float o[3], const float d[3], const float (*centres)[3], const float* radii, int n, float pad, float reach,
+		float far_t, float out[3]);
+	// Pure: one steering step. desired / actual: (yaw, elevation) radians of the wanted and the game barrel's direction
+	// (yaw = atan2(x, z), the game's heading convention; elevation = asin(y)). The command is desired + trim, the trim
+	// learning the barrel's offset from the command (gain, clamped to max_trim): cmd -> desired + offset converges.
+	struct Steer
+	{
+		float trim_yaw = 0.0f, trim_elev = 0.0f;
+		bool valid = false;
+		void Reset() { *this = Steer{}; }
+		// learn false: the trim is held (the pose read is not one to learn from), the command still follows desired.
+		void Step(const float desired[2], const float actual[2], bool learn, float gain, float max_trim, float out_cmd[2]);
+	};
+	// The gun's pose against the character, from one read (pure): the barrel line's lateral offset from the character's
+	// centre (game cm, + right of the barrel), the muzzle's forward offset along it, and the barrel's yaw less the heading.
+	// The gun turns rigidly with the heading, so these hold through a turn and the heading that aims it can be solved.
+	struct AimPose
+	{
+		float lateral = 0.0f, forward = 0.0f, delta = 0.0f;
+	};
+	// barrel_yaw, heading: radians (atan2(x, z)); gun_rel: the muzzle less the character's position (x, z).
+	AimPose PoseFrom(float barrel_yaw, float heading, const float gun_rel[2]);
+	// s moves k of the way to now (delta wrapped).
+	void SmoothPose(AimPose& s, const AimPose& now, float k);
+	// The heading (radians) that puts the barrel's line through target_rel (the target less the character's position,
+	// x, z): yaw alpha - asin(lateral / r) for the barrel, less delta. False on non-finite input or a target at the centre.
+	bool SolveHeading(const AimPose& p, const float target_rel[2], float* heading, float* lateral);
+	// CPU thread (CameraDriver's aim, with the weapon raised): the steered heading (game radians) and elevation (radians,
+	// up positive) when co-op aim published one in the last 100 ms. False otherwise: the controller's own aim.
+	bool CoopAim(float* yaw, float* elev);
 }
