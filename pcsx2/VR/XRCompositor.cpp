@@ -96,6 +96,7 @@ namespace VR::XRCompositor
 		bool s_tablet_was_active = false;
 		// [VR] CutsceneStereo: the world screen was the cutscene window at the last present (GS thread).
 		bool s_cut_window_was = false;
+		CutsceneView::WindowGate s_cut_gate; // the window as shown (evening review m8)
 		std::mutex s_screen_mutex;
 		ScreenParams s_screen_params;
 
@@ -10905,6 +10906,7 @@ namespace VR::XRCompositor
 		// [VR] CutsceneStereo: the game's real-time cutscenes through a world-locked stereo window (VR/CutsceneView.h).
 		s.cutscene_stereo = false;
 		s_cut_window_was = false;
+		s_cut_gate = CutsceneView::WindowGate{};
 		StereoState::SetCutsceneRequest(StereoState::CutsceneEyes{});
 		if (EmuConfig.VR.CutsceneStereo)
 		{
@@ -11493,8 +11495,15 @@ namespace VR::XRCompositor
 			// at its field of view, each eye's layer drawn by the GS through it from that eye (a projection layer of the
 			// eyes, built from the eye quads in BuildSubmitArray). Held while a switch back to first person waits for its
 			// blink, so the window is not swapped for a flat screen in sight.
-			const bool cut_window = s.cutscene_stereo && !fp_screen && !tablet && s.head_pose_valid && !SplitState::Active() &&
-			                        (CameraDriver::CutsceneActive() || (s_cut_window_was && s.fp_switch_due_ms != 0));
+			// Evening review m8: the window is not a screen mode, so its own edges go under a blink (CutsceneView::StepGate):
+			// the GS draws per eye while the window is wanted or still shown (cut_window), and the window is shown
+			// (present_cut) only once its frames are there and the view is black: at once under the mode switch's blink, else
+			// after a blink of its own. Paused (offline), it is held as it is: CutsceneActive lapses when Apply stops.
+			const bool cut_place = s.cutscene_stereo && !fp_screen && !tablet && s.head_pose_valid && !SplitState::Active();
+			const bool cut_paused = s_cut_gate.shown && VMManager::GetState() == VMState::Paused;
+			const bool cut_wanted = cut_place && (CameraDriver::CutsceneActive() || cut_paused ||
+			                                         ((s_cut_window_was || s_cut_gate.shown) && s.fp_switch_due_ms != 0));
+			const bool cut_window = cut_place && (cut_wanted || s_cut_gate.shown);
 			if (cut_window != s_cut_window_was)
 				Console.WriteLn("(VR) CutsceneStereo: %s.", cut_window ? "the cutscene window is up" : "the cutscene window is down");
 			s_cut_window_was = cut_window;
@@ -11509,7 +11518,20 @@ namespace VR::XRCompositor
 					std::memcpy(s.cut_shown_fov, used_fov, sizeof(used_fov));
 					s.cut_shown_valid = true;
 				}
-				if (s.cut_shown_valid)
+				float blink_now = 0.0f;
+				const bool black = HudCards::CurrentBlink(&blink_now) && blink_now >= 0.99f;
+				const bool can_blink = !s.hud_disabled && s.view_space != XR_NULL_HANDLE;
+				const bool show = cut_wanted && s.cut_shown_valid;
+				const bool was_shown = s_cut_gate.shown;
+				const CutsceneView::GateStep gs = CutsceneView::StepGate(s_cut_gate, show, black, can_blink, false,
+					CameraDriver::SteadyNowMs(), HudCards::kBlinkRiseMs);
+				if (gs == CutsceneView::GateStep::StartBlink &&
+					!HudCards::Blink(show ? "cutscene window up" : "cutscene window down"))
+					CutsceneView::Flip(s_cut_gate, show);
+				if (s_cut_gate.shown != was_shown)
+					Console.WriteLn("(VR) CutsceneStereo: the window is %s%s.", s_cut_gate.shown ? "shown" : "taken down",
+						can_blink ? " under a blink" : " (no blink: the HUD is off)");
+				if (s_cut_gate.shown && s.cut_shown_valid)
 				{
 					for (int e = 0; e < 2; e++)
 					{
@@ -11551,6 +11573,11 @@ namespace VR::XRCompositor
 			}
 			else
 			{
+				// Its screen is gone (first person, the tablet, tracking lost, split) or nothing is wanted: down at once (a
+				// mode switch blinked for it).
+				if (s_cut_gate.shown)
+					Console.WriteLn("(VR) CutsceneStereo: the window is taken down with the screen.");
+				CutsceneView::Flip(s_cut_gate, false);
 				StereoState::SetCutsceneRequest(StereoState::CutsceneEyes{});
 				float drain_pos[2][3], drain_fov[2][4];
 				StereoState::TakeCutsceneUsed(drain_pos, drain_fov); // the next window starts from its own frames
