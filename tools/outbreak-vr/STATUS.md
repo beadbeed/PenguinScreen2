@@ -88,6 +88,14 @@ their VR hands (online the partner is posed at the draw only, after the hit test
 m1-m3 and m5 are fixed (its Fixed section); m4 and m6-m12 are still open. `gamecues` and `gunobject` came after it and
 have not been reviewed.
 
+**Late evening of 2026-10-22: branch `evfix`** (from `evreview` 42f53f4, not pushed, not merged; local non-LTO build, 63
+of 63 self-tests): the evening review's minors. Fixed: m1-m5, m7, m8, m10, m11 (cave I's wall-shot origin bounded, the
+post-load free-RAM check, the chest's masked reads, a silent or costly unreadable wall grid, a walled item no longer
+glowing as takeable, the cutscene window's edges under a blink, CutsceneStereo's "on after a VR restart", no lock per
+draw). Left and documented: m6 (no evidence yet for a `0x29` height rule), m9 (a movie's window lens). Checked offline:
+slot 5 hits and the walled shot's miss, slot 7's Handgun, slot 3's wall refusal, J's Bar cutscene 3. The table is in
+`audits/2026-10-22-evening-review.md` ("Fixed on evfix").
+
 **Evening of 2026-10-22: branch `cutscenevr`** (from `nightly` 33f8a81, not pushed, not merged; local non-LTO build,
 63 of 63 self-tests): **`[VR] CutsceneStereo`** (on). The game's real-time cutscenes (scenario status 4) are no longer the
 flat world screen: the game's own cutscene camera is shown through a world-locked stereo window placed where your head

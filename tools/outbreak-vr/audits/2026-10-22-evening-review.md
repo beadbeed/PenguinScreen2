@@ -348,3 +348,27 @@ None.
 - **`ScriptedShotCameraOnly(4)`:** keyed to the one `alsoEquals` guard (0x3AEF75), so it cannot fire on another guard's
   value.
 - **The GameText DATE exclusion:** correct for the late review's m7 (the DATE setup belongs to the unmoved box).
+
+---
+
+## Fixed on evfix
+
+Branch `evfix` (from `evreview` 42f53f4), one commit per finding, not pushed. Every finding was checked against the code
+first; none was refuted. Self-tests: `vr_selftests`, 63 suites, all PASS (verified (offline)). Offline checks: `run-evfix`,
+PINE slot 28140, no OpenXR runtime, normal speed, `HandPickup = true` in that install only, savestates copied from
+`D:\Games\PS2\PenguinScreen2\sstates`. Slot 7: the Handgun taken by hand (`pickuptest.py`, cell 0 holds record 3; checked
+offline).
+
+| Id | Verdict | Commit | What changed | Evidence |
+|---|---|---|---|---|
+| m1 | fixed | 30d097a | `LineBlocked` warns once per room and game when the wall grid does not read ("(VR) Line of sight: room N's wall grid does not read ..."); GunRay warns once while the chest does not read with a gun out; `session_report.py` counts both ("line of sight not checked"). | report: synthetic log (checked offline); no false warning in J's Bar in any run below (checked offline) |
+| m2 | fixed | 55aa807 | A refused grid keeps its headers, room and CRC and is marked known bad (`CachedVerdict`): read again only when one of them changes or after 120 uses. | self-test (verified (offline)) |
+| m3 | fixed | add57c3 | `WallShot` returns the origin itself: 1 cm plus `min(back, 0)` before the wall, at least `kWallShotGap` (10 cm) off the plane along the face's normal (`LineResult::normal`), never behind the chest. `ShotFrame` gets back 0 for a wall shot. | self-test: back 0, positive back, a wall 25 cm away, 10 deg grazing (verified (offline)); slot 5: the walled pose twice no hit (600 -> 600), cave O not armed; head, offset, head hit 600 -> 150 (checked offline) |
+| m4 | fixed | 0270a86 | `OnStateLoaded` keeps the gun block, the gun object block and cave H's word armed only while the loaded RAM reads our magic (`PhysicalMelee::ArmedAfterLoad`); otherwise the next write goes through `RegionFreeOrOurs`. | self-test (verified (offline)); slot 5: five loads in one session after shots, every case written and counted, no refusal line (checked offline) |
+| m5 | fixed | 5071274 | `CharacterChest` reads through `ChestFrom` (pure; live reader `ReadGuest`, masked and bounded) and needs bone 11 below the model's bone count (`model + 0x816`). | self-test (verified (offline)); slot 5: the chest read in the walled cases (checked offline) |
+| m6 | left, documented | 80cd538 | No rule: only two rooms surveyed, no `0x29` gate or grille seen, and the suggested height rule would refuse J's Bar's `0x29` opening that the game's own sight passes. `research/2026-10-22-line-of-sight.md` section 5 says what would settle it. | unverified |
+| m7 | fixed | c4904ed | HandPickup feeds the wall verdict back (`ItemReach::SetPickupWalled`); `ApplyWalled` shows that target walled, not highlighted (no squeezable glow, no tick); it stays tested so it returns when the line clears. | self-test (verified (offline)); slot 3 behind the wall: highlighted once, then dropped ("item left") and held down for 9 s of squeeze, cells 0 0 0 0; in front: taken (cell 0 holds record 4) (checked offline) |
+| m8 | fixed | 31ca45d | The window's edges are screen changes (`CutsceneView::StepGate`): at once under a blink already black or when its screen is gone, else after a blink of its own; shown only once its frames are there; held while the VM is paused. | self-test (verified (offline)); not seen on a runtime (no headset, no null headset here) |
+| m9 | left, documented | c5b434b | A movie's lens and the per-draw intrinsics: needs a profile key and the view-matrix latch. `research/2026-10-22-cutscene-vr.md` section 6. | J's Bar cutscene 3: the first per-eye draw mapped with fx 161.1, first person's lens (checked offline) |
+| m10 | fixed | edf44a9 | The compositor publishes whether it took the window on; CameraDriver's line says "not active this session" when it did not. Config.h, Pcsx2Config.cpp and STATUS: off at once, on after a VR restart; STATUS says it runs on obsrv. | J's Bar cutscene 3 without a runtime: "a cutscene (not active this session ...)" (checked offline) |
+| m11 | fixed | 41a1758 | A draw outside the window reads one atomic; inside it the request is copied once per new request (a sequence number) and "used" is recorded only when it changed or was taken: about once per frame. | self-test: the hand-off (verified (offline)); J's Bar cutscene 3 with `PCSX2_VR_CUTSCENE_TEST`: draws mapped per eye, status 4 for 37.8 s in the log, first person ARMED as it ended (checked offline) |
