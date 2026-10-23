@@ -208,6 +208,76 @@ the game's text raised to a comfortable height) as well as `GunObjectAim = false
 your VR gun). For Kevin's own arms set `VrBody = true` alongside `VrBodySelf = true`. Fix list for next time: GameText's text test
 (M1), then the minors in the three audits.
 
+## Co-op session (private co-op, both in VR)
+
+Branch `coopready` (2026-10-22). Everything below was checked offline only, with the test override
+`PCSX2_VR_TEST_NET=privatecoop` (the online code paths with the adapter off; never between two machines yet). Details and
+evidence: `research/2026-10-22-coop-ready.md`.
+
+**The ini lines (each player, `[VR]` section).** `netmode.py private <server address>` sets the network part and
+`PrivateCoopFirstPerson`; close the emulator first. The rest are set by hand:
+
+```ini
+[VR]
+PrivateCoopFirstPerson = true
+VrPresence = true
+; the OTHER player's PC: its Tailscale or LAN address and port
+VrPresencePeer = 100.x.y.z:47800
+VrPresencePort = 47800
+; the same word on both PCs
+VrPresenceKey = <word>
+VrBody = true
+PhysicalMelee = true
+PhysicalMeleeOnline = true
+SeamlessDoors = true
+; on by default, listed so nobody turns them off: GunRayAim, SpatialAudio, FadeDim, DoorVeil
+GunRayAim = true
+SpatialAudio = true
+FadeDim = true
+DoorVeil = true
+```
+
+Never set `OnlineSafe = true` for co-op (it turns the aim, walk-and-shoot and every co-op path off). Never set
+`PCSX2_VR_TEST_NET` for a real session: with the adapter on it does nothing, but it has no business there.
+
+**What works online (private co-op) and what does not**
+
+| Feature | Online | Notes |
+|---|---|---|
+| First person, head camera, hands, HUD, menus | yes | as before (private co-op only; obsrv and unknown servers: restricted, first person off) |
+| Aim (heading, aim pitch from the controller) | yes, now **co-op aim** | with `GunRayAim`, the character's own gun is turned to where the laser points (the game's own shot, so the room master agrees); checked offline only |
+| Gun ray (cave I), gun object (cave O) | no | strictly offline: online the room master decides hits from the character's own aim; co-op aim replaces them |
+| Walk-and-shoot | yes | writes your own record's position only; the game sends it |
+| Physical melee | presses yes; VR-weapon hits only as the room's master | `PhysicalMeleeOnline`; untested online |
+| Seamless doors | **your door shot yes** (new); the arrival shot no | online the game's arrival shot still plays in the new room (DoorVeil covers the load) |
+| Fade dim | yes, **one dim** (fixed) | before, online fades dimmed twice |
+| Spatial audio | yes (new) | pan only, your own mixing |
+| VR presence + VR body | yes | partner posed at the draw only (cave V); cave U and `VrBodySelf` offline only |
+| Hand pickup, hand targeting | no | strictly offline; see the note (not yet shown to go through the game's own request path) |
+| Gun-elevation servo NOP | yes | verified (code): online it holds only your own aim |
+| Heartbeat x10 (coopOnly) | yes | kept at every 3 frames; far under the game's own send caps |
+| Pause, speed change, state load/save | never | the emulator's online locks |
+
+**Two-player checklist (Alex and his brother; needs Alex's go)**
+1. Both PCs: the build from `coopready`, the ini lines above, `netmode.py private <server>`, the Mac's Bioserver up.
+2. Log in, make a room, both join. Each log: `network mode private co-op` and the toast "Private co-op: first person
+   online". Neither log may say `TEST OVERRIDE`.
+3. Presence: each sees the other's character turn its head and reach with the hands (`(VR) Presence:` lines).
+4. Aim: raise the gun, point the laser at a zombie, fire. The partner sees your character face and aim where your laser
+   is; the zombie takes the hit on both screens. Fire with the laser clearly above a zombie's head: a miss on both.
+   Then the same with the hand held well to the side (pointing in): still a hit.
+5. Melee as master and not (the steps in `research/2026-10-14-melee-coop.md`).
+6. Doors: open a door yourself: first person holds through the door shot, black over the load, then the game's arrival
+   shot (about 2.5 s), then first person. The partner's view of your door is the game's usual.
+7. Follow the partner through a door, and the reverse: nothing odd on either screen.
+8. A fade (a door, the map): one dim, not a double one.
+9. Walk-and-shoot: with the gun raised, walk; the partner sees you move (not slide late or snap).
+10. Watch for drops: any disconnect, rubber-banding or a partner frozen in place; note the time and keep both emulogs.
+
+**Warning: the SteamVR dashboard (and anything else that stalls the emulator).** Opening the SteamVR dashboard, the
+system menu or a headset sleep can stall the game's frames. The server drops a client that goes quiet for about 30 s.
+Online, keep the dashboard short (a few seconds), never take the headset off with the game running, and never pause.
+
 ## Where things are
 
 | | |
@@ -426,7 +496,7 @@ it big enough?
 | `MenuPanel` | false | true: a game screen (the profile's `camera.lookAt.pauseWhen`, File #1's u32 `0x720AA0`: item screen, map, pause, take-it prompts) keeps first person: the camera alone follows the head (no stick turn, aim or body-follow; the sticks and buttons are the menu's as before), the room keeps rendering in stereo, and the screen's own draws go on a flat panel 1.0 m ahead (0.80 m tall, placed where you look as it comes up), where the menu pointer aims. The screens' full-frame tint is left out. While a screen is up the desktop window shows the room without it, and the depth layer sends quads. Needs `PacerCopies` off (else screens pull away as before). The emulog says `(VR) Menu panel: on`, `shown ...` / `hidden`, or why not |
 | `MenuPanelRoom` | Freeze | With `MenuPanel`, the room behind a game screen's panel. Freeze: the camera holds the view it had as the screen came up (the head no longer drives it), so the room stays put in the world as you look around; dimmed, greyed a little, black past its edges (no edge fill while it holds); the head drives the camera again as the screen goes. Dim: the camera follows the head, the room dimmed. Live: the camera follows the head, the room as in play (the 10-14 build). The panel itself stays put in the world and comes round, gliding, after a turn of more than 60 deg. The emulog says `(VR) CameraDriver: the room holds still behind the panel ...`, `... the screen is gone; the head drives the camera again (held N s ...)` and `(VR) Menu panel: the room behind it at 55% brightness ...`. No dim with the GS `ShadeBoost` setting on |
 | `MenuPanelRoomBrightness` | 0.55 | 0.2 to 1.0: how bright the room is behind the panel under Freeze and Dim (1 = no dim), corrected for the presentation lift's gamma; eased in over 0.25 s and out over 0.2 s |
-| `SeamlessDoors` | false | true: File #1, strictly offline (no network adapter, so not private co-op either): a door you open yourself plays no door shot and no arrival shot (camera mode `0x3AEF75` stays 0), so first person holds while your character opens the door, drops only for the black fade and load, and comes back as soon as you are in the next room. The door, locks, keys, door state, the load and partners are unchanged. Profile `camera.silence` entries with `whenSetting: SeamlessDoors` (the arrival ones `keepThroughDisarm`: patched whenever the switch, VR and HeadCamera are on, armed or not, so an arrival shot is skipped after a cutscene too, and `FUN_00550220` is not proven door-only; review m7 / b7); branch `doors`; `research/2026-10-14-doors.md`. A door opened with the switch on, headset-free, 2026-10-15 (`nightpolish`, below) |
+| `SeamlessDoors` | false | true: File #1, offline; in private co-op the door shot only (the arrival shot stays strictly offline; `coopready`, see "Co-op session"): a door you open yourself plays no door shot and no arrival shot (camera mode `0x3AEF75` stays 0), so first person holds while your character opens the door, drops only for the black fade and load, and comes back as soon as you are in the next room. The door, locks, keys, door state, the load and partners are unchanged. Profile `camera.silence` entries with `whenSetting: SeamlessDoors` (the arrival ones `keepThroughDisarm`: patched whenever the switch, VR and HeadCamera are on, armed or not, so an arrival shot is skipped after a cutscene too, and `FUN_00550220` is not proven door-only; review m7 / b7); branch `doors`; `research/2026-10-14-doors.md`. A door opened with the switch on, headset-free, 2026-10-15 (`nightpolish`, below) |
 | `DoorVeil` | true | false (with `SeamlessDoors`): the room change shows the game's own picture again. true: a room load (profile `camera.roomLoad`, File #1 scenario status 3) that starts while first person is armed is shown black: the view darkens over 40 ms as the load starts (first person still holds the view then, its disarm grace), stays black through the fade out, the load and the fade in, and clears (60 ms held, 80 ms fade) once first person is armed again and the frame on screen is one drawn from the head (a matched render pose) for 2 vsyncs. Gives up 1.5 s after the load if first person does not come back (a cutscene, a scripted shot), and after 30 s in all. Display only (the HUD blink's black, held): nothing in the game is changed or paused. `PCSX2_VR_DOORLOG=1` logs every vsync around a room change (guards, armed, lookAt, matched pose, veil, what the compositor would show). Branch `grabdoor`; `research/2026-10-14-doors.md`, "Door frames" |
 | `CutsceneStereo` | true | false: a cutscene (profile `camera.cutscene`, File #1 scenario status 4) shows on the world screen as before. true (needs `PacerCopies` off): the game's own cutscene camera through a world-locked stereo window at the world anchor (where the head was as first person handed over, level), the window the camera's image plane 1 m ahead at its own field of view, each eye's layer drawn per eye by the GS through it (`VR/CutsceneView.h`, TrueStereo's map, off-axis) and sent as a projection layer; the head's lean softly clamped at 15 cm; flat draws on the window's plane. Read only. Test aids `PCSX2_VR_CUTSCENE_TEST`, `_FORCE`, `_LOG`; `research/2026-10-22-cutscene-vr.md` |
 | `GrabFirstPerson` | true | false: a grab hands the camera back to the flat screen, as before. true: while the profile's `breakout.grabbed` checks hold (grabbed, still in normal play) first person stays armed and drives the camera from the head, camera only (no heading, aim, walk-and-shoot or body writes; the stick still turns the view), the eye on Kevin's position as ever; melee, the reload, the pickup cue and the wrist card stand down as before (no `LocalRecord`), the sprint latch lets go; shake to break free and the bite haptics are unchanged. Down, dead or turned still hand back. Branch `grabdoor`; `research/2026-10-21-grab-first-person.md` |
