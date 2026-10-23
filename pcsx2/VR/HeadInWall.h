@@ -114,6 +114,7 @@ namespace VR::HeadInWall
 		bool blocked = false;
 		u32 flags = 0;    // the face that blocks
 		float t = 0.0f;   // where along a -> b
+		float normal[3] = {0.0f, 0.0f, 0.0f}; // that face's normal (unit; a is on its front)
 	};
 	LineResult LineBlocked(u32 crc, const float a[3], const float b[3], u32 mask_a);
 

@@ -50,10 +50,17 @@ namespace VR::GunRay
 	// Late review m6 (cave I): the shot of a VR muzzle beyond a wall. The game's faces are one-sided (they face the room),
 	// so a shot that starts behind one is not stopped by the capsule's wall test (FUN_005AAE60 at 0x5AB154). Instead the
 	// shot starts on the chest's side of the wall, where the chest-to-muzzle line meets it (t along chest -> muzzle, then
-	// kWallShotBefore back), and goes along that line into the wall, so the game's own wall test cuts it there. False for a
-	// non-finite input, t outside (0, 1] or chest and muzzle together.
+	// kWallShotBefore back), and goes along that line into the wall, so the game's own wall test cuts it there.
+	// Evening review m3: out_origin is the shot's origin itself (ShotFrame with back 0): kWallShotBefore plus the game's
+	// back offset (min(back, 0): a positive one would put it past the wall) before the wall, but at least kWallShotGap off
+	// the wall's plane along its normal (normal_g, the face's; a grazing line starts that much further back), and never
+	// behind the chest (then at the chest, which is in front of the wall: the line leaves the chest through the face's
+	// front). The game's wall test is a segment cast from the origin (FUN_005494C0), so the gap keeps its start clearly in
+	// front of the face. False for a non-finite input, t outside (0, 1], chest and muzzle together or a zero normal.
 	constexpr float kWallShotBefore = 1.0f; // game cm
-	bool WallShot(const float chest_g[3], const float muzzle_g[3], float t, float out_point[3], float out_dir[3]);
+	constexpr float kWallShotGap = 10.0f;   // game cm, along the face's normal
+	bool WallShot(const float chest_g[3], const float muzzle_g[3], float t, const float normal_g[3], float back,
+		float out_origin[3], float out_dir[3]);
 
 	// [VR] GunObjectAim (on top of GunRayAim; section 13 of the vr-melee note): FUN_0062CF10 also takes the muzzle flash
 	// (0x5AC8D0), the shell (0x55E400) and 0x6801A0 from the gun's weapon object (s0 at 0x62CF98: matrix +0x1C0,

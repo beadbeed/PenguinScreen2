@@ -540,8 +540,12 @@ namespace VR::HeadInWall
 		if (i >= 0)
 		{
 			r.blocked = true;
-			r.flags = s_lines.a.faces[static_cast<size_t>(i)].flags;
+			const Face& f = s_lines.a.faces[static_cast<size_t>(i)];
+			r.flags = f.flags;
 			r.t = t;
+			r.normal[0] = f.n.x;
+			r.normal[1] = f.n.y;
+			r.normal[2] = f.n.z;
 		}
 		std::vector<Face> dyn;
 		ReadDynamic(&dyn);
@@ -550,8 +554,12 @@ namespace VR::HeadInWall
 		if (j >= 0 && (!r.blocked || td < r.t))
 		{
 			r.blocked = true;
-			r.flags = dyn[static_cast<size_t>(j)].flags;
+			const Face& f = dyn[static_cast<size_t>(j)];
+			r.flags = f.flags;
 			r.t = td;
+			r.normal[0] = f.n.x;
+			r.normal[1] = f.n.y;
+			r.normal[2] = f.n.z;
 		}
 		return r;
 	}
