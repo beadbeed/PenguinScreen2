@@ -756,6 +756,9 @@ namespace VR::HandPickup
 		}
 		const ItemReach::PickupTarget tg = ItemReach::CurrentPickup();
 		in.target_highlighted = tg.valid && tg.highlighted && tg.point_ok;
+		// Tested while the point is ok, highlighted or walled (evening review m7: a walled item is shown not highlighted,
+		// and is tested on so it comes back when the line clears).
+		const bool testable = tg.valid && tg.point_ok && (tg.highlighted || tg.walled);
 		// Night review m10: not through a wall. The line from the character's head point (its position plus the eye height
 		// of the camera mapping) to the search point must not cross a face that stops the game's own line of sight
 		// (attribute 0x4, the zombies' sight test). Furniture and counters (attribute 0x29) do not; room walls, shut door
@@ -766,7 +769,7 @@ namespace VR::HandPickup
 			bool walled = false;
 			HeadInWall::LineResult lr;
 			float head[3] = {};
-			if (in.target_highlighted && CameraDriver::GetMapping(&map))
+			if (testable && CameraDriver::GetMapping(&map))
 			{
 				head[0] = map.character[0];
 				head[1] = map.character[1] + map.eye_height;
@@ -785,6 +788,8 @@ namespace VR::HandPickup
 						!lr.known ? "unknown" : lr.blocked ? "blocked" : "clear");
 				}
 			}
+			// The verdict back to the cue (evening review m7): the box of a walled item does not glow as squeezable.
+			ItemReach::SetPickupWalled(walled ? tg.node : 0u);
 			if (walled)
 			{
 				in.target_highlighted = false;
@@ -798,7 +803,7 @@ namespace VR::HandPickup
 						static_cast<double>(tg.point[2]));
 				s_wall_said = tg.node;
 			}
-			else if (tg.valid && tg.highlighted && tg.point_ok)
+			else if (testable)
 			{
 				s_wall_said = 0xFFFFFFFFu;
 			}
