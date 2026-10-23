@@ -110,6 +110,23 @@ namespace VR::GunRay
 		return true;
 	}
 
+	bool WallShot(const float chest_g[3], const float muzzle_g[3], float t, float out_point[3], float out_dir[3])
+	{
+		if (!Finite3(chest_g) || !Finite3(muzzle_g) || !std::isfinite(t) || !(t > 0.0f && t <= 1.0f))
+			return false;
+		float d[3] = {muzzle_g[0] - chest_g[0], muzzle_g[1] - chest_g[1], muzzle_g[2] - chest_g[2]};
+		const float len = std::sqrt(Dot(d, d));
+		if (!(len > 1.0e-3f) || !Normalize(d))
+			return false;
+		const float along = std::max(0.0f, t * len - kWallShotBefore);
+		for (int k = 0; k < 3; k++)
+		{
+			out_point[k] = chest_g[k] + d[k] * along;
+			out_dir[k] = d[k];
+		}
+		return true;
+	}
+
 	bool ObjectFrame(const float shot_m[16], const float muzzle_g[3], const float local[3], float out_matrix[16],
 		float out_pos[3])
 	{
@@ -201,6 +218,22 @@ namespace VR::GunRay
 				"flash: a flash with no cave O shot (it fell back) is not the VR gun's");
 			e.Reset();
 			check(!e.Suppress(3001) && e.Update(3010, 0, 0) == FlashEvidence::Seen::Nothing, "flash: a re-arm starts afresh");
+		}
+		{
+			// WallShot: chest (0, 130, 0), muzzle 100 cm ahead along +Z, the wall at 60 %.
+			const float chest[3] = {0.0f, 130.0f, 0.0f};
+			const float muzzle[3] = {0.0f, 130.0f, 100.0f};
+			float wp[3], wd[3];
+			check(WallShot(chest, muzzle, 0.6f, wp, wd) && Near(wp[0], 0.0f, 1e-4f) && Near(wp[1], 130.0f, 1e-4f) &&
+					  Near(wp[2], 60.0f - kWallShotBefore, 1e-3f) && Near(wd[2], 1.0f, 1e-5f) && Near(wd[0], 0.0f, 1e-5f),
+				"wall shot: starts 1 cm before the wall on the chest's side, along chest -> muzzle");
+			float m[16], org[3];
+			check(WallShot(chest, muzzle, 0.6f, wp, wd) && ShotFrame(wp, wd, -35.0f, m, org) && Near(org[2], 24.0f, 1e-3f) &&
+					  Near(m[10], 1.0f, 1e-5f),
+				"wall shot: the frame's barrel into the wall, the game's back offset before it (the capsule crosses the wall)");
+			check(!WallShot(chest, chest, 0.5f, wp, wd) && !WallShot(chest, muzzle, 0.0f, wp, wd) &&
+					  !WallShot(chest, muzzle, 1.5f, wp, wd) && !WallShot(chest, muzzle, std::nanf(""), wp, wd),
+				"wall shot: no line, t 0, t past the muzzle and NaN refused");
 		}
 		TestMap tm;
 		{
@@ -625,8 +658,38 @@ namespace VR::GunRay
 				Console.Warning("(VR) Gun ray: the block at 0x%X holds someone else's words; the gun ray stays off while it does.",
 					mp->gun_block);
 			}
-			if (blk_free && ray && CameraDriver::GetMapping(&map) && RayToGame(from, dir, MapPoint, &map, og, dg) &&
-				ShotFrame(og, dg, back, m, origin) && Read(reader, mp->counter, 1, &counter))
+			bool mapped = blk_free && ray && CameraDriver::GetMapping(&map) && RayToGame(from, dir, MapPoint, &map, og, dg);
+			// Late review m6: a VR muzzle beyond a wall. When the line from the character's chest (bone 11, where the
+			// game's own sight starts) to the VR muzzle crosses a face that stops the game's bullets (attribute 0x2: room
+			// walls, shut door walls and the moving faces, not furniture), the shot (cave I) starts on the chest's side of
+			// that wall and goes into it (WallShot), so the game's own wall test cuts it there; and cave O is not armed, so
+			// the shell and FUN_006801A0's object come from the game's own gun object. Unknown (no chest, no grid): as before.
+			bool muzzle_walled = false;
+			float sg[3] = {og[0], og[1], og[2]}, sd[3] = {dg[0], dg[1], dg[2]};
+			if (mapped)
+			{
+				static bool s_walled_said = false;
+				float chest[3] = {};
+				HeadInWall::LineResult lr;
+				if (HeadInWall::CharacterChest(VMManager::GetDiscCRC(), record, chest))
+					lr = HeadInWall::LineBlocked(VMManager::GetDiscCRC(), chest, og, HeadInWall::kMaskShot);
+				muzzle_walled = lr.known && lr.blocked;
+				// No usable wall shot (cannot happen for a blocked line): cave I's block is not written, the game's own shot.
+				if (muzzle_walled && !WallShot(chest, og, lr.t, sg, sd))
+					mapped = false;
+				if (muzzle_walled && !s_walled_said)
+					Console.WriteLn("(VR) Gun ray: the VR muzzle (%.1f, %.1f, %.1f) is beyond a wall from the character's chest "
+									"(%.1f, %.1f, %.1f) (face 0x%08X at %.0f%% of the line); a shot starts at (%.1f, %.1f, %.1f) "
+									"into the wall, and the game's own gun object takes the effects, until it is back.",
+						static_cast<double>(og[0]), static_cast<double>(og[1]), static_cast<double>(og[2]),
+						static_cast<double>(chest[0]), static_cast<double>(chest[1]), static_cast<double>(chest[2]), lr.flags,
+						static_cast<double>(lr.t * 100.0f), static_cast<double>(sg[0]), static_cast<double>(sg[1]),
+						static_cast<double>(sg[2]));
+				else if (!muzzle_walled && s_walled_said)
+					Console.WriteLn("(VR) Gun ray: the VR muzzle is back on the character's side of the wall.");
+				s_walled_said = muzzle_walled;
+			}
+			if (mapped && ShotFrame(sg, sd, back, m, origin) && Read(reader, mp->counter, 1, &counter))
 			{
 				const u32 b = mp->gun_block;
 				if (!s_armed || s_stale)
@@ -671,30 +734,6 @@ namespace VR::GunRay
 					s_obj_refused_logged = true;
 					Console.Warning("(VR) Gun object: the block at 0x%X holds someone else's words; GunObjectAim stays off while it "
 									"does.", ob0);
-				}
-				// Late review m6: a muzzle pushed through a wall would spawn the shell and FUN_006801A0's object beyond it.
-				// Then the game's own object takes the shot: when the line from the character's chest (bone 11, where the
-				// game's own sight starts) to the VR muzzle crosses a face that stops the game's bullets (attribute 0x2;
-				// room walls, shut door walls and the moving faces, not furniture). Unknown (no chest, no grid): as before.
-				bool muzzle_walled = false;
-				if (EmuConfig.VR.GunObjectAim && mp->has_gun_object)
-				{
-					static bool s_walled_said = false;
-					float chest[3] = {};
-					HeadInWall::LineResult lr;
-					if (HeadInWall::CharacterChest(VMManager::GetDiscCRC(), record, chest))
-						lr = HeadInWall::LineBlocked(VMManager::GetDiscCRC(), chest, og, HeadInWall::kMaskShot);
-					muzzle_walled = lr.known && lr.blocked;
-					if (muzzle_walled && !s_walled_said)
-						Console.WriteLn("(VR) Gun object: the VR muzzle (%.1f, %.1f, %.1f) is beyond a wall from the character's "
-										"chest (%.1f, %.1f, %.1f) (face 0x%08X at %.0f%% of the line); the game's own gun object "
-										"until it is back.",
-							static_cast<double>(og[0]), static_cast<double>(og[1]), static_cast<double>(og[2]),
-							static_cast<double>(chest[0]), static_cast<double>(chest[1]), static_cast<double>(chest[2]), lr.flags,
-							static_cast<double>(lr.t * 100.0f));
-					else if (!muzzle_walled && s_walled_said)
-						Console.WriteLn("(VR) Gun object: the VR muzzle is back on the character's side of the wall.");
-					s_walled_said = muzzle_walled;
 				}
 				const bool obj_ok = obj_free && !muzzle_walled && EmuConfig.VR.GunObjectAim && mp->has_gun_object && back_ok &&
 				                    Read(reader, mp->shape_types + mp->shape_type_stride * type + mp->gun_object_muzzle, 4, &lm[0]) &&
@@ -768,11 +807,12 @@ namespace VR::GunRay
 				{
 					s_last_shots = shots;
 					std::memcpy(s_shot_origin, origin, sizeof(origin));
-					std::memcpy(s_shot_dir, dg, sizeof(dg));
-					Console.WriteLn("(VR) Gun ray: shot %u along the VR ray from (%.0f, %.0f, %.0f) toward (%.3f, %.3f, %.3f) "
-									"(back %.0f).", shots, static_cast<double>(origin[0]), static_cast<double>(origin[1]),
-						static_cast<double>(origin[2]), static_cast<double>(dg[0]), static_cast<double>(dg[1]),
-						static_cast<double>(dg[2]), static_cast<double>(back));
+					std::memcpy(s_shot_dir, sd, sizeof(sd));
+					Console.WriteLn("(VR) Gun ray: shot %u %s from (%.0f, %.0f, %.0f) toward (%.3f, %.3f, %.3f) "
+									"(back %.0f).", shots, muzzle_walled ? "into the wall the VR muzzle is beyond" : "along the VR ray",
+						static_cast<double>(origin[0]), static_cast<double>(origin[1]),
+						static_cast<double>(origin[2]), static_cast<double>(sd[0]), static_cast<double>(sd[1]),
+						static_cast<double>(sd[2]), static_cast<double>(back));
 					ReadHp(reader, *mp, s_hp, s_present);
 					s_watch_s = 0.3f;
 				}
