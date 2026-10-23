@@ -131,10 +131,6 @@ runtime's job: the layer is world-locked). The camera's roll and pitch stay in t
 | SteamVR's null headset (`cuttest.py --xr`, SteamVR started first with `vrstartup.exe`; two runs before that failed in `xrGetVulkanGraphicsDevice2KHR` and one session was ended by SteamVR at once, the known flakiness) | the window goes up 64 ms after status reads 4 (`Screen: world-locked`, `the cutscene window is up`), the first window frame 20 ms later, and the projection layer is built from the eye quads: `first window projection layer: left eye at (0.032, 0, 0), right at (-0.032, 0, 0) m; fov left -27.3/24.4/20.0/-20.0, right -24.4/27.3/20.0/-20.0 deg; 1536x1344` (the null headset's head pose is rolled 180 deg, so its eyes are swapped; first person's TrueStereo line shows the same, right eye at -0.0315 m). 60 frames/s submitted at 90 Hz, 57.6-60 new GS frames/s, "no projection 0", no XR errors; status 4 for 28.46 s (both runs); on the way out first person is armed on the vsync status reads 2 and the window comes down with the blink (64 ms in one run; 0.68 s in the other, where the game's room load stalled the presents). The null driver was put back after (`null_driver.py off`; `steamvr.vrsettings` byte-identical to its backup) | checked on the null headset |
 
 ## 6. Not checked, and what to watch
-
-- **A real-time 3D cutscene (kind not 1).** None starts by itself in the File #1 savestates (all eight others are in play,
-  status 2, no cutscene pending). It needs a scenario event reached by playing. Watch: `(VR) CutsceneStereo: first window
-  frame` in the log, the two layers differing in a stereo dump with `"cutscene": true`, and the camera block moving.
 - **In the headset:** that the window holds still while the head turns and leans, and how the blink at both ends feels
   (the null headset's head does not move).
 - **The eyes of the shown frame** are the ones the GS drew with last, so a frame whose draws spanned a present shows with
@@ -143,3 +139,31 @@ runtime's job: the layer is world-locked). The camera's roll and pitch stay in t
 - **Headset:** is the window size right (the camera's FOV: 40 deg tall at slot 7's start, 27 by default), is 1 m the right
   plane, is 15 cm of look-around comfortable?
 - **Co-op:** the host broadcasts the start; the window is display only, so it is the same online. Not run online.
+
+## 7. A real-time cutscene (J's Bar cutscene 3, kind 0)
+
+**Finding it (verified, code and memory).** Op 0x62's five arguments go into a 16-byte queue entry; its first becomes the kind
+`0x35FFFF` (`0x5BF6E0`; 3 is played as 1). In J's Bar's script (`0x90E1E0`-`0x911000`) 16 cutscenes have kind 0. Blocks are
+`EC flag 1 0 ... E5` (`0x65F910`: runs once when event flag n of `0x48AD90` is set, marking it in `0x48ADD0`). Cutscene 3
+(`0x90E690`: 0, 3, 1, 0, 0x39) runs on flag 0x39, which the block for flag 2 sets (`0x90E5F0`). Flag 2 is set by an area node
+(the trigger list at `*0x23BD90`, gp = 0x241C70; type 3, `0x5939C0`) over x 9089-9299, z 12557-12687 by the door, with condition
+kind 2: the character's `+0xB98` must be 1, so the AI partner (record 1) has to walk in, not Kevin. The other kind-0 cutscenes'
+flags are set by nodes in other rooms.
+
+**What was tried.** Kevin walked into that area (scripted stick, head-yaw steering, nothing pressed) from three starting
+points, waiting 20-50 s, also with right-stick flicks: no cutscene; the partner wandered off (to 8533-8915, 12425-12745).
+Walking into the flag 0x1A areas did nothing (those nodes set per-slot flags, `+0x44` = 1).
+
+**The test harness.** In the dev install only, offline, from its own savestate (slot 0, after slot 7's movie): event flag 2
+set over PINE (`0x48AD90` word 0x3 -> 0x7), the flag the partner's node would set. The game's own script then plays
+cutscene 3 (`cutwalk.py`, `CUT_FLAG=2`); slot 4 there is saved at its start.
+
+| Check | Result | Label |
+|---|---|---|
+| A real-time cutscene | kind 0; the camera block moves (110-113 distinct eyes in 35 s); the player's frames 0 -> 722 | checked offline |
+| Both eyes | the first draw is mapped per eye (fx 527.5; eyes 5 cm right: (0.016, 0, 0) and (0.080, 0, 0) m). In stereo dumps of the 3D shots (the bartender on the floor, another shot of the bar), right against left per 96 px tile: dx p5/p95 -3/+15 px and -29/+18 px; mean pixel difference 6.4 and 8.5; no doubling seen. The loading frames after the shots are identical in both eyes. | checked offline |
+| Timing unchanged | from slot 4: status 4 for 35.39 s with it on, 35.35 s off, 35.38 s on the null headset; 722 player frames each | checked offline |
+| First person comes back | ARMED on the vsync status reads 2, every run | checked offline |
+| The window on SteamVR's null headset | the window is up as status reads 4. First window frame and projection layer 8 s in, at the first 3D frame: eyes +-3.2 cm; fov right -16.1/19.4/13.5/-13.5 deg (FOV 27, the cutscene default, so a smaller window than the movie's 40). 57.8-60 frames/s, "no projection 0", no XR errors. Down 58 ms after first person is back | checked on the null headset |
+
+Not checked: the partner walking in by itself (the natural trigger), the headset.

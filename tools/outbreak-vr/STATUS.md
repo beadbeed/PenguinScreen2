@@ -100,8 +100,10 @@ cutscene (a movie, then the load) plays to its end in 28.49 s with it on and 28.
 on the vsync status returns to 2, and on forced first-person frames each eye's layer is the game's own render from that
 eye shifted by the window's off-axis centre (15 px at 3x for 3.2 cm, as predicted). On SteamVR's null headset the
 window goes up 64 ms into the cutscene and is sent as a projection layer of the eyes (60 frames/s, no XR errors), and
-comes down with the blink as first person returns. Not checked: a real-time 3D cutscene (none starts by itself in the
-savestates) and the headset. `research/2026-10-22-cutscene-vr.md`; headset-free test `tools/outbreak-vr/cuttest.py`.
+comes down with the blink as first person returns. A real-time cutscene (J's Bar cutscene 3, kind 0, normally started
+by the partner walking to the door; started here by setting its event flag 2 in the dev install, `cutwalk.py`) plays in
+stereo through the window, 35.39 s on and 35.35 s off, with first person back at its end, also on the null headset. Not
+checked: the headset. `research/2026-10-22-cutscene-vr.md`; headset-free test `tools/outbreak-vr/cuttest.py`.
 
 **2026-10-13 in short:**
 - **Direction:** Alex chose PenguinScreen2 as the foundation. The native-port option (REO) was assessed and parked:
