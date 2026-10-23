@@ -447,3 +447,16 @@ unarmed; a foreign word in A-C's range still refused the install and it came bac
 | d12 | fixed | bece554 | Verified first: the sender FUN_0064C620 writes only +0xBA0 bit 27 (0x64C72C/740/860/874/CFF8), and cave F wrote all of +0x08 and 0x23BF0C itself, so those stay restored whole. +0xBA0 now gets only bit 27 back. Interpreter: a bit set under the call stays; bit 27 set before is set again. Online-only path, not run live. |
 | d10 | fixed in part, part refuted | 79674c0 | Bone: cave G applies only below the model's own u16 count `*(enemy+0x34)+0x816` (stored at 0x1D5D88, looped on at 0x1D5DA8 and 0x5A3B18; a 23-bone model in the dumps keeps 13 stale pointers past it), and the host bounds by the same through the new `melee.jolt.bones.real`. Expiry: the host counts game frames from 0x48BF93 and frees an entry written more than 60 game frames ago, so entries for enemies whose update does not pass 0x6644D0 no longer hold a slot. v0/v1: **refuted** (the only caller goes on to `jal 0x6798F0` with a0 = s0; neither reads v0/v1). Interpreter: a bone at the model's count is skipped while its frames run out; a model of 0. |
 | m3 | left | | Still needs cave F's pending end (+0x2C) to hold the cave D site one more frame in CameraDriver's drain (with +0x2C forced to 1), or a host-side send; online only and cosmetic, and only testable online. |
+
+## Fixed on minorsC (2026-10-22)
+
+All the reload and menu minors (a1-a5, a7, a8, a9), b1-b9, c1-c4 with addendum 3's minors, d1-d10, d12 and d13 were
+checked as fixed on `nightly` (every commit named above is an ancestor of minorsC's base 33f8a81). a6 is partly kept by
+design (above). Still open:
+
+| Id | Status | Why |
+|---|---|---|
+| m3 | left | Unchanged since `caveminors`: the end of a partner's swing needs cave F's pending end (+0x2C) to hold the cave D site one more frame in CameraDriver's drain, or a host-side send. That is cave work, online only, and testable only online. |
+| d11 | left | A note, not code: caves A and B's assumptions can only be checked by tests. |
+
+Nothing was changed for this review on minorsC.
