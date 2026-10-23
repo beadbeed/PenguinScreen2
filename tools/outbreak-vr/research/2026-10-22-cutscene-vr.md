@@ -29,8 +29,9 @@ Labels: **verified** = read in the code or memory and cross-checked; **checked o
   it off), and first person comes back on the vsync status returns to 2. The window's per-eye map is checked in the GS on
   first-person frames forced through it: each eye's layer is the game's own render from that eye, shifted by the window's
   off-axis centre (15 px at 3x for 3.2 cm, as predicted). The cutscene in slot 7 is a movie (kind 1), so its frames
-  are flat in both eyes, on the window's plane, as they should be. No real-time 3D cutscene could be reached from the
-  savestates, so that case is not run (see Not checked).
+  are flat in both eyes, on the window's plane, as they should be. On SteamVR's null headset the window goes up as the
+  cutscene starts and is sent as a projection layer of the eyes, 60 frames/s, no XR errors. No real-time 3D cutscene
+  could be reached from the savestates, so that case is not run (see Not checked).
 
 ## 1. The status-4 path (verified, code; research agent's static reading of slot 7)
 
