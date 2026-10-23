@@ -86,6 +86,14 @@ namespace VR::HeadInWall
 	bool Apply(u32 crc, const float head[3], float eye[3]);
 	// The view dim it wants now (0-1, eased), for HudCards' view dim.
 	float CurrentFade();
+
+	// Pure: whether a -> b crosses any of the faces (SegmentHitsFace: from a face's front through it).
+	bool SegmentBlocked(const std::vector<Face>& walls, const Vec3& a, const Vec3& b);
+	// Live (CPU thread): whether the line from the character's head point (as the last Apply saw it) to `to` (game cm)
+	// crosses a wall that blocks the player (night review m10, late review m6: a hand or the gun's muzzle through a wall).
+	// *known false (and false returned) when there is no fresh copy: HeadInWall off, not File #1, the grid unread, another
+	// room or game, or no Apply within the last 250 ms.
+	bool HeadToPointBlocked(u32 crc, const float to[3], bool* known);
 	void Reset();
 
 	int SelfTest(); // failures

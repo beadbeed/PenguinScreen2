@@ -93,6 +93,10 @@ namespace VR::HeadInWall
 			u32 clamps = 0;
 			float max_pushed = 0.0f;
 			bool logged_grid = false;
+			// The blocking faces and the head point of the last Apply that ran, for HeadToPointBlocked.
+			std::vector<Face> walls;
+			Vec3 head;
+			u64 walls_ms = 0;
 		};
 		Live s_live;
 		std::atomic<float> s_fade{0.0f};
@@ -354,6 +358,7 @@ namespace VR::HeadInWall
 				L.fade = 0.0f;
 			s_fade.store(L.fade, std::memory_order_release);
 		};
+		L.walls_ms = 0;
 		if (!EmuConfig.VR.HeadInWall || !IsFile1(crc) || memRead32(kOverlay) != 3 || memRead8(kStatus) != 2)
 		{
 			L.valid = false;
@@ -423,6 +428,9 @@ namespace VR::HeadInWall
 		const Result r = Clamp(walls, L.b.faces, h, want, p);
 		if (!Finite(r.eye))
 			return false;
+		L.walls = std::move(walls);
+		L.head = h;
+		L.walls_ms = now;
 		eye[0] = r.eye.x;
 		eye[1] = r.eye.y;
 		eye[2] = r.eye.z;
@@ -440,7 +448,7 @@ namespace VR::HeadInWall
 					r.hit_face >= 0 ? "the head-to-eye line crossed a wall" : "kept off a wall face near it",
 					static_cast<double>(r.eye.x), static_cast<double>(r.eye.y), static_cast<double>(r.eye.z),
 					static_cast<double>(h.x), static_cast<double>(h.y), static_cast<double>(h.z), static_cast<double>(L.fade),
-					walls.size());
+					L.walls.size());
 			}
 			L.clamping = true;
 		}
@@ -452,6 +460,30 @@ namespace VR::HeadInWall
 			L.max_pushed = 0.0f;
 		}
 		return true;
+	}
+
+	bool SegmentBlocked(const std::vector<Face>& walls, const Vec3& a, const Vec3& b)
+	{
+		if (!Finite(a) || !Finite(b))
+			return false;
+		float t = 0.0f;
+		for (const Face& f : walls)
+			if (SegmentHitsFace(f, a, b, &t))
+				return true;
+		return false;
+	}
+
+	bool HeadToPointBlocked(u32 crc, const float to[3], bool* known)
+	{
+		const Live& L = s_live;
+		const u64 now = NowMs();
+		const bool fresh = EmuConfig.VR.HeadInWall && L.valid && L.walls_ms != 0 && L.crc == crc && now >= L.walls_ms &&
+		                   now - L.walls_ms <= 250 && static_cast<u16>(memRead16(kRoom)) == L.room;
+		if (known)
+			*known = fresh;
+		if (!fresh)
+			return false;
+		return SegmentBlocked(L.walls, L.head, Vec3{to[0], to[1], to[2]});
 	}
 
 	int SelfTest()
@@ -492,6 +524,11 @@ namespace VR::HeadInWall
 			"one-sided: from behind the face no hit (FUN_005491E0)");
 		check(!SegmentHitsFace(walls[0], {500.0f, 50.0f, 0.0f}, {500.0f, 50.0f, 200.0f}, &t), "outside the triangle: no hit");
 		check(!SegmentHitsFace(walls[0], {-100.0f, 50.0f, 0.0f}, {-100.0f, 50.0f, 90.0f}, &t), "short of the plane: no hit");
+		check(SegmentBlocked(walls, {0.0f, 150.0f, 40.0f}, {150.0f, 60.0f, 130.0f}) &&
+				  !SegmentBlocked(walls, {0.0f, 150.0f, 40.0f}, {150.0f, 60.0f, 95.0f}) &&
+				  !SegmentBlocked(walls, {0.0f, 150.0f, 40.0f}, {350.0f, 60.0f, 130.0f}) &&
+				  !SegmentBlocked(walls, {0.0f, 150.0f, 40.0f}, {std::nanf(""), 60.0f, 130.0f}),
+			"line of sight: through the wall blocked; short of it, round its end and NaN not");
 		const Vec3 c = ClosestPointOnFace(walls[0], {-100.0f, 50.0f, 40.0f});
 		check(near(c.x, -100.0f) && near(c.y, 50.0f) && near(c.z, 100.0f), "closest point: straight onto the face");
 		const Vec3 c2 = ClosestPointOnFace(walls[0], {-300.0f, 400.0f, 90.0f});

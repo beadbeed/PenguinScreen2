@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/HandPickup.h"
+#include "VR/HeadInWall.h"
 
 #include "VR/CameraDriver.h"
 #include "VR/ItemData.h"
@@ -754,6 +755,19 @@ namespace VR::HandPickup
 		}
 		const ItemReach::PickupTarget tg = ItemReach::CurrentPickup();
 		in.target_highlighted = tg.valid && tg.highlighted && tg.point_ok;
+		// Night review m10: not through a wall. The line from the character's head point to the search point must not
+		// cross a wall that blocks the player (HeadInWall's copy of the player collision; no check without a fresh copy).
+		{
+			static bool s_wall_said = false;
+			bool known = false;
+			const bool walled = in.target_highlighted && HeadInWall::HeadToPointBlocked(VMManager::GetDiscCRC(), tg.point, &known);
+			if (walled)
+				in.target_highlighted = false;
+			if (walled && !s_wall_said)
+				Console.WriteLn("(VR) Hand pickup: item %u is behind a wall from the character's head: not taken by hand.",
+					static_cast<unsigned>(tg.item_id));
+			s_wall_said = walled;
+		}
 		in.target_hand = tg.hand;
 		in.target_node = tg.node;
 		in.target_index = tg.index;
