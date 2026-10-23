@@ -158,6 +158,25 @@ namespace VR::GunRay
 		bool Near(float a, float b, float eps) { return std::fabs(a - b) <= eps; }
 	}
 
+	FlashEvidence::Seen FlashEvidence::Update(u64 now_ms, u32 shots_now, u32 flashes_now)
+	{
+		const bool shot = shots_now != shots;
+		if (shot)
+		{
+			shots = shots_now;
+			shot_ms = now_ms;
+		}
+		if (flashes_now == flashes)
+			return Seen::Nothing;
+		flashes = flashes_now;
+		if (shot || (shot_ms != 0 && now_ms >= shot_ms && now_ms - shot_ms <= kSameShotMs))
+		{
+			flash_ms = now_ms;
+			return Seen::VrFlash;
+		}
+		return Seen::OtherFlash;
+	}
+
 	std::vector<std::string> SelfTest()
 	{
 		std::vector<std::string> fail;
@@ -165,6 +184,23 @@ namespace VR::GunRay
 			if (!ok)
 				fail.emplace_back(name);
 		};
+		{
+			// FlashEvidence (late review m1, m4).
+			FlashEvidence e;
+			check(!e.Suppress(1000), "flash: no evidence before any shot (the hands draw their own)");
+			check(e.Update(1000, 0, 0) == FlashEvidence::Seen::Nothing && !e.Suppress(1000), "flash: nothing counted");
+			check(e.Update(1016, 1, 1) == FlashEvidence::Seen::VrFlash && e.Suppress(1016) && e.Suppress(1060),
+				"flash: cave O's shot and the flash in one poll: the game's flash is the VR gun's");
+			check(!e.Suppress(1016 + FlashEvidence::kSuppressMs + 1), "flash: the evidence runs out");
+			check(e.Update(2000, 2, 1) == FlashEvidence::Seen::Nothing && !e.Suppress(2000),
+				"flash: a shot without a flash (not aiming) leaves the hands' own");
+			check(e.Update(2033, 2, 2) == FlashEvidence::Seen::VrFlash && e.Suppress(2040),
+				"flash: a flash two polls after cave O's shot still counts");
+			check(e.Update(3000, 2, 3) == FlashEvidence::Seen::OtherFlash && !e.Suppress(3000),
+				"flash: a flash with no cave O shot (it fell back) is not the VR gun's");
+			e.Reset();
+			check(!e.Suppress(3001) && e.Update(3010, 0, 0) == FlashEvidence::Seen::Nothing, "flash: a re-arm starts afresh");
+		}
 		TestMap tm;
 		{
 			// A gun 1.2 m up, pointing -Z (ahead) and a little down, through a turned, scaled map.
@@ -316,9 +352,9 @@ namespace VR::GunRay
 		u32 s_obj_magic = 0;
 		u32 s_obj_crc = 0;
 		bool s_obj_stale = true;
-		u32 s_obj_last_shots = 0;
-		u32 s_obj_last_flashes = 0;
+		FlashEvidence s_obj_flash;
 		std::atomic<bool> s_obj_live{false};
+		std::atomic<u64> s_obj_flash_ms{0}; // s_obj_flash.flash_ms, for the hands on the GS thread
 		bool s_load_pending = false;         // a state was loaded: zero any block of ours it holds (late review m2)
 		bool s_refused_logged = false, s_obj_refused_logged = false;
 		float s_obj_muzzle[3] = {};
@@ -363,6 +399,7 @@ namespace VR::GunRay
 			}
 			s_obj_armed = false;
 			s_obj_live.store(false, std::memory_order_relaxed);
+			s_obj_flash_ms.store(0, std::memory_order_relaxed);
 		}
 
 		// A loaded state's own blocks: zeroed when they read our magic, whether or not this session armed them (late
@@ -447,12 +484,17 @@ namespace VR::GunRay
 		s_watch_s = 0.0f;
 		s_obj_armed = s_obj_addr != 0;
 		s_obj_stale = true;
+		s_obj_flash_ms.store(0, std::memory_order_relaxed);
 		s_load_pending = true;
 	}
 
 	bool GameFlashOnVrGun()
 	{
-		return s_obj_live.load(std::memory_order_relaxed);
+		if (!s_obj_live.load(std::memory_order_relaxed))
+			return false;
+		FlashEvidence e;
+		e.flash_ms = s_obj_flash_ms.load(std::memory_order_relaxed);
+		return e.Suppress(CameraDriver::SteadyNowMs());
 	}
 
 	void Poll(const VRInputSnapshot& snap, GuestReader reader, float dt)
@@ -644,8 +686,8 @@ namespace VR::GunRay
 						s_obj_stale = false;
 						memWrite32(ob + kObjOffShots, 0);
 						memWrite32(ob + kObjOffFlashes, 0);
-						s_obj_last_shots = 0;
-						s_obj_last_flashes = 0;
+						s_obj_flash.Reset();
+						s_obj_flash_ms.store(0, std::memory_order_relaxed);
 					}
 					for (int k = 0; k < 16; k++)
 						WriteF32(ob + kObjOffMatrix + 4u * static_cast<u32>(k), om[k]);
@@ -661,18 +703,24 @@ namespace VR::GunRay
 					s_obj_live.store(true, std::memory_order_relaxed);
 					obj_wrote = true;
 					u32 oshots = 0, flashes = 0;
-					if (Read(reader, ob + kObjOffShots, 4, &oshots) && oshots != s_obj_last_shots)
+					const bool counts = Read(reader, ob + kObjOffShots, 4, &oshots) && Read(reader, ob + kObjOffFlashes, 4, &flashes);
+					const u32 prev_shots = s_obj_flash.shots;
+					const FlashEvidence::Seen seen =
+						counts ? s_obj_flash.Update(CameraDriver::SteadyNowMs(), oshots, flashes) : FlashEvidence::Seen::Nothing;
+					s_obj_flash_ms.store(s_obj_flash.flash_ms, std::memory_order_relaxed);
+					if (counts && oshots != prev_shots)
 					{
-						s_obj_last_shots = oshots;
 						std::memcpy(s_obj_muzzle, og, sizeof(og));
 						Console.WriteLn("(VR) Gun object: shot %u from the VR gun object (muzzle (%.1f, %.1f, %.1f), type %u, "
 										"model muzzle (%.1f, %.1f, %.1f)).", oshots, static_cast<double>(og[0]),
 							static_cast<double>(og[1]), static_cast<double>(og[2]), type, static_cast<double>(local[0]),
 							static_cast<double>(local[1]), static_cast<double>(local[2]));
 					}
-					if (Read(reader, ob + kObjOffFlashes, 4, &flashes) && flashes != s_obj_last_flashes)
+					if (seen == FlashEvidence::Seen::OtherFlash)
+						Console.WriteLn("(VR) Gun object: the game's muzzle flash %u came without cave O's shot (the game's own "
+										"gun object); the hands draw their own flash.", flashes);
+					else if (seen == FlashEvidence::Seen::VrFlash)
 					{
-						s_obj_last_flashes = flashes;
 						u32 fw[3] = {};
 						float fp[3] = {};
 						if (Read(reader, ob + kObjOffFlashPos, 4, &fw[0]) && Read(reader, ob + kObjOffFlashPos + 4, 4, &fw[1]) &&
