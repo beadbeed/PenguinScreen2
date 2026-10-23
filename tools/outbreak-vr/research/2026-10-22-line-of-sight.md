@@ -96,10 +96,17 @@ all three masks; 10 cm short of the wall: clear.
 - **HandPickup** (`[VR] HandPickup`): the line from the character's head point (the camera mapping's position plus eye
   height) to the search point, sight mask. Blocked: the item is not highlighted for the squeeze, logged once per item
   (`(VR) Hand pickup: item N (...) is behind a wall from the character's head ...`).
-- **GunObjectAim** (`[VR] GunObjectAim`): the line from the chest to the VR muzzle, shot mask. Blocked: the object block
-  is not written, so cave O hands the game its own gun object for that shot, and our own flash stays (the flash evidence
-  needs cave O's count). Logged on entry and exit. Cave I's bullet is unchanged: a bullet whose origin is beyond a wall
-  starts behind the faces, which are one-sided, so the game's wall test does not stop it (not changed here; see open).
+- **GunRayAim / GunObjectAim** (the gun, the same test for both): the line from the chest to the VR muzzle, shot mask.
+  Blocked:
+  - cave I's shot starts on the chest's side of the wall, 1 cm before where that line meets it, and goes along the line
+    into the wall (`GunRay::WallShot`, then the usual `ShotFrame` with the game's back offset). The faces are one-sided
+    and face the room, so the game's own capsule wall test (`0x5AB154`) now meets the wall from its front and cuts the
+    shot there A shot from behind the wall would not have been cut;
+  - cave O's object block is not written, so the game's own gun object takes the flash, shell and `FUN_006801A0`; our
+    own flash stays (the flash evidence needs cave O's count);
+  - logged on entry and exit (`(VR) Gun ray: the VR muzzle ... is beyond a wall ...`).
+  Cave I's other rules are unchanged: the same block, focus and stamp checks, the same offline gates; a wall shot that
+  cannot be built leaves the block unwritten (the game's own shot).
 - No new setting: both checks live inside the existing switches. With `PCSX2_VR_PICKUP_DEBUG` HandPickup also logs the
   line's ends and verdict once a second (2ccb684).
 - Self-test (in the HeadInWall suite): the masks on 0x2F, 0x29, 0x27 and a door wall; the slot 7 desk case (seen past the
@@ -117,7 +124,8 @@ Self-tests: `vr_selftests`, 62 suites, all PASS (verified (offline)).
 | Slot 3, the same trigger moved in front of that wall (z 13615-13645) | line clear, armed, **taken (cell 0 holds record 4)**: the refusal above is the wall, not the move. |
 | Slot 5, the same move behind the wall | line **clear**: Kevin stood at x 7956 there, and the line crossed the wall at x 7951, inside a 1 m opening (x 7950-8050, y up to 225) whose faces are `0x29`. The game's own sight and bullets pass that opening too (see section 2). The take did not happen anyway: a zombie grabbed Kevin first. |
 | Slot 5, GunObjectAim, `head` and `offset` (the gunobj cases), twice | **hit, 600 -> 150** every time; cave O counted every shot; the game's flash at the VR muzzle, 0.00 apart. |
-| Slot 5, the hand 0.9 m behind and left (muzzle (7909.2, 132.8, 13689.6), 40 cm past the solid wall) | `the VR muzzle ... is beyond a wall from the character's chest (7950.1, 127.3, 13582.7) (face 0x002F0000 at 62% of the line); the game's own gun object until it is back`, then `back on the character's side` after. **Cave O did not take the shot** (the object block cleared, its count 0): the game's own object did. Cave I's bullet still hit (600 -> 150) from beyond the wall. |
+| Slot 5, the hand 0.9 m behind and left (muzzle (7909.2, 132.8, 13689.6), 40 cm past the solid wall) | `the VR muzzle ... is beyond a wall from the character's chest (7950.1, 127.3, 13582.7) (face 0x002F0000 at 62% of the line); the game's own gun object until it is back`, then `back on the character's side` after. **Cave O did not take the shot** (the object block cleared, its count 0): the game's own object did. Before the cave I change below, cave I's bullet still hit (600 -> 150) from beyond the wall. |
+| Slot 5, the same pose after the cave I change, twice | the fallback line, cave I's shot counted from (7948.7, 126.2, 13620.8) along the chest-to-muzzle line (-0.58, 0.06, 0.81): **no hit, 600 -> 600** both times. The `head` and `offset` shots in the same run: **hit, 600 -> 150** (three shots). |
 | Slot 5, the muzzle 11 cm past the wall at x 8052 (the line through the opening) | not walled, cave O took the shot (game-consistent: the opening is `0x29`). |
 
 While the hand was on the moved trigger in slot 5, the gun check also fired with the hand's pose: `the VR muzzle (7936.2,
@@ -125,8 +133,6 @@ While the hand was on the moved trigger in slot 5, the gun check also fired with
 
 ## 5. Open
 
-- Cave I's bullet origin follows the VR muzzle even beyond a wall (one-sided faces do not stop a capsule that starts
-  behind them). Moving the bullet's origin back to the wall along the chest-to-muzzle line would close it; not done.
 - The moving faces' meaning (0x27) and attribute bit 0x8 (on walls and furniture, not on the moving faces) are not known.
 - An item or muzzle seen through a `0x29` opening (J's Bar's lower wall, x 7950-8050) is allowed, as the game's own sight
   allows it. Whether that is the door to the street was not checked.
