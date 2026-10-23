@@ -305,6 +305,11 @@ SLPM-65428:
       # with the switches on, every arrival shot FUN_00550220 starts is skipped, also for a room entered while first
       # person is disarmed (a cutscene arrival, a scripted shot), and FUN_00550220 is not proven door-only, so any other
       # arrival shot it runs is skipped too (nightly review m7 / b7: documented, not tightened).
+      # Private co-op (co-op review 2026-10-22, research/2026-10-22-coop-ready.md): the DOOR shots (whenSetting:
+      # SeamlessDoors) run there too (SilenceSettingCoopLive): the two door callbacks call 0x590B40 only for the local
+      # player, so a partner's view and everything the door sends are unchanged. The ARRIVAL shot (whenSetting:
+      # SeamlessDoorsArrival, the same switch) stays strictly offline, as FUN_00550220 is not proven door-only: online
+      # the game's arrival shot still plays in the new room (DoorVeil keeps the load black, then up to 1.5 s more).
       - { address: 0x5914FC, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_00591160, local player
       - { address: 0x5916F0, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_00591160, local player
       - { address: 0x591804, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_00591160, local player
@@ -317,9 +322,9 @@ SLPM-65428:
       - { address: 0x5930E8, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_005929E0, local player
       - { address: 0x5931FC, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_005929E0, local player
       - { address: 0x5932EC, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors }   # door shot: FUN_005929E0, local player
-      - { address: 0x550494, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors, keepThroughDisarm: true }   # arrival shot: FUN_00550220
-      - { address: 0x5504E0, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors, keepThroughDisarm: true }   # arrival shot: FUN_00550220
-      - { address: 0x55052C, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoors, keepThroughDisarm: true }   # arrival shot: FUN_00550220
+      - { address: 0x550494, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoorsArrival, keepThroughDisarm: true }   # arrival shot: FUN_00550220
+      - { address: 0x5504E0, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoorsArrival, keepThroughDisarm: true }   # arrival shot: FUN_00550220
+      - { address: 0x55052C, on: 0x00000000, off: 0x0C1642D0, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: SeamlessDoorsArrival, keepThroughDisarm: true }   # arrival shot: FUN_00550220
       # Nothing vanishes up close, and your own body stays hidden (the full story is at lookAt.hold below). The
       # near-camera cull FUN_005902F0 opens with `lb v0, 0x48BF88; beq v0, zero, <the distance test>`: without the
       # beq it always takes the exit under it (`beq zero, zero, <return>; daddu v0, zero, zero`), never culled, for

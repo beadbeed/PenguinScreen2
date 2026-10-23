@@ -5858,7 +5858,7 @@ static int CountMultibandResolveMismatches(bool log)
 
 bool VR::ProfileDB::IsSilenceSettingName(std::string_view name)
 {
-	return name == "SeamlessDoors" || name == "PhysicalMelee" || name == "PhysicalMeleeContact" || name == "MeleeHitJolt" ||
+	return name == "SeamlessDoors" || name == "SeamlessDoorsArrival" || name == "PhysicalMelee" || name == "PhysicalMeleeContact" || name == "MeleeHitJolt" ||
 	       name == "GunRayAim" || name == "GunObjectAim" ||
 	       name == "HandPickup" ||
 	       name == "ScriptedShotsFirstPerson" || name == "SpatialAudio" || name == "FadeDim" ||
@@ -5867,7 +5867,8 @@ bool VR::ProfileDB::IsSilenceSettingName(std::string_view name)
 
 bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
 {
-	if (name == "SeamlessDoors")
+	// The door shots and (kept through disarm) the arrival shot: one switch; only the door shots are co-op live.
+	if (name == "SeamlessDoors" || name == "SeamlessDoorsArrival")
 		return EmuConfig.VR.SeamlessDoors;
 	if (name == "PhysicalMelee")
 		return EmuConfig.VR.PhysicalMelee;
@@ -5921,6 +5922,12 @@ bool VR::ProfileDB::SilenceSettingCoopLive(std::string_view name)
 	// record, no fade state and none of the game's traffic, so in private co-op it runs as offline and the host's view dim
 	// stands in for the quad (co-op review: before, online the quad drew AND the host dimmed, so every fade dimmed twice).
 	if (name == "FadeDim")
+		return SilenceSettingOn(name);
+	// SeamlessDoors' door shots (the 0x590B40 calls in the door callbacks FUN_00591160 / FUN_005929E0): the camera calls
+	// are made for the local player only, and the door's motion, timer, opened bits, network notify and load are untouched,
+	// so in private co-op your own door holds first person as offline. The arrival shot ("SeamlessDoorsArrival",
+	// FUN_00550220, not proven door-only) is never co-op live.
+	if (name == "SeamlessDoors")
 		return SilenceSettingOn(name);
 	return false;
 }

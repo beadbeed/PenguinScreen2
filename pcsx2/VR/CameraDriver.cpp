@@ -1489,8 +1489,9 @@ namespace VR::CameraDriver
 		// hold; otherwise the word is put back at once (e.g. the aim servo runs again when the gun is lowered).
 		// whenSetting entries ([VR] SeamlessDoors, PhysicalMelee): the switch on and never online-safe; strictly offline (no
 		// network adapter at all), or in private co-op only where the switch allows it now (ProfileDB::SilenceSettingCoopLive:
-		// PhysicalMelee's caves with [VR] PhysicalMeleeOnline while this console runs the room's enemies; SeamlessDoors
-		// never). Entries without whenSetting always pass.
+		// PhysicalMelee's caves with [VR] PhysicalMeleeOnline while this console runs the room's enemies; SeamlessDoors' door
+		// shots, FadeDim and VrBody's draw-time caves; never the SeamlessDoors arrival shot, the gun ray's, hand pickup's or cave
+		// U). Entries without whenSetting always pass.
 		bool SilenceSettingGateOpen(const ProfileDB::CameraSilence& sil)
 		{
 			if (sil.when_setting.empty())
