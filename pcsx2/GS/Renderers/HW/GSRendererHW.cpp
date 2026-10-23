@@ -6428,9 +6428,11 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 	m_vr_true_draw = false;
 	// [VR] GameText's text test (EyeProjection::IsGameTextDraw; review 2026-10-22 M1): textured UV sprites on the 2D
 	// layer (one Z, at the depth format's maximum), not sampling the buffer they draw into, not filling the scissor.
+	// Not a DATE draw (late review m7): its setup (EmulateDATEGetConfig) was built for the draw's own box, before the
+	// vertices move.
 	bool vr_game_text = false;
 	if (st.enabled && st.first_person && vr_multiview_target && PRIM->FST && EmuConfig.VR.GameText &&
-		!VR::SpatialControls::MenuMode())
+		!m_cached_ctx.TEST.DATE && !VR::SpatialControls::MenuMode())
 	{
 		VR::EyeProjection::GameTextDraw gt;
 		gt.tme = PRIM->TME;

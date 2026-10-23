@@ -59,6 +59,8 @@ namespace VR::HeadInWall
 		constexpr u32 kRoom = 0x3065ACu;       // u16 room
 		constexpr u32 kOverlay = 0x540004u;    // GAME overlay resident: 3
 		constexpr u32 kFaceSize = 0x38u;
+		// All the face-list entries of a grid together (a face can sit in several cells; the unique faces stop at 8192).
+		constexpr u32 kMaxGridEntries = 65536u;
 		constexpr u32 kMaxDyn = 64;
 
 		bool ReadGuest(u32 address, u32 size, void* out)
@@ -269,6 +271,9 @@ namespace VR::HeadInWall
 		if (g.nx < 1 || g.nx > 32 || g.nz < 1 || g.nz > 32 || g.cell_x <= 0 || g.cell_z <= 0)
 			return false;
 		std::vector<u32> addrs;
+		// Every list entry of every cell counts toward one cap (night review m9): a malformed grid stops after
+		// kMaxGridEntries guest reads, not 32 x 32 x 4096.
+		u32 total = 0;
 		for (u32 c = 0; c < g.nx * g.nz; c++)
 		{
 			u32 list = 0;
@@ -277,7 +282,7 @@ namespace VR::HeadInWall
 			u32 n = 0;
 			for (;; n++)
 			{
-				if (n >= 4096)
+				if (n >= 4096 || ++total > kMaxGridEntries)
 					return false;
 				u32 fa = 0;
 				if (!read(list + n * 4, 4, &fa))
@@ -359,7 +364,12 @@ namespace VR::HeadInWall
 		u8 ha[0x20], hb[0x20];
 		const u16 room = static_cast<u16>(memRead16(kRoom));
 		if (!ReadGuest(kGridA, 0x20, ha) || !ReadGuest(kGridB, 0x20, hb))
+		{
+			// The dim eases off too (night review m9), as for any other reason the eye is left alone.
+			L.valid = false;
+			ease_to(0.0f);
 			return false;
+		}
 		if (!L.valid || L.crc != crc || L.room != room || std::memcmp(ha, L.header_a, 0x20) != 0 ||
 			std::memcmp(hb, L.header_b, 0x20) != 0 || ++L.age >= 120)
 		{
@@ -596,6 +606,25 @@ namespace VR::HeadInWall
 		put32(l2, 0xFFFFFFFFu);
 		putf(faces + kFaceSize + 0x30, 0.5f);
 		check(!ReadGrid(rd, hdr, &g), "grid: a face without a unit normal refuses the grid");
+		{
+			// A malformed 32 x 32 grid whose every list runs 4000 entries without an end: refused after the total cap,
+			// not after 32 x 32 x 4000 reads (night review m9).
+			u64 reads = 0;
+			const Reader bad = [&reads, faces](u32 a, u32 n, void* o) {
+				reads++;
+				if (a == 0x1000 && n == 0x20)
+				{
+					const u32 h[8] = {300, 300, 32, 32, 0, 0, 0x2000, 0};
+					std::memcpy(o, h, sizeof(h));
+					return true;
+				}
+				const u32 v = (a >= 0x2000 && a < 0x3000) ? 0x10000u : faces; // a cell's list, or a face (never the end)
+				std::memcpy(o, &v, 4);
+				return n == 4;
+			};
+			Grid gb;
+			check(!ReadGrid(bad, 0x1000, &gb) && reads <= kMaxGridEntries + 64, "grid: a list without an end stops at the total cap");
+		}
 		Console.WriteLn("(VR) HeadInWall self-test: %d failure(s).", fail);
 		return fail;
 	}

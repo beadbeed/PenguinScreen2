@@ -6,6 +6,7 @@
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
 #include "VR/ItemData.h"
+#include "VR/PhysicalMelee.h"
 #include "VR/SplitState.h"
 #include "VR/VRProfileDB.h"
 
@@ -157,6 +158,25 @@ namespace VR::GunRay
 		bool Near(float a, float b, float eps) { return std::fabs(a - b) <= eps; }
 	}
 
+	FlashEvidence::Seen FlashEvidence::Update(u64 now_ms, u32 shots_now, u32 flashes_now)
+	{
+		const bool shot = shots_now != shots;
+		if (shot)
+		{
+			shots = shots_now;
+			shot_ms = now_ms;
+		}
+		if (flashes_now == flashes)
+			return Seen::Nothing;
+		flashes = flashes_now;
+		if (shot || (shot_ms != 0 && now_ms >= shot_ms && now_ms - shot_ms <= kSameShotMs))
+		{
+			flash_ms = now_ms;
+			return Seen::VrFlash;
+		}
+		return Seen::OtherFlash;
+	}
+
 	std::vector<std::string> SelfTest()
 	{
 		std::vector<std::string> fail;
@@ -164,6 +184,23 @@ namespace VR::GunRay
 			if (!ok)
 				fail.emplace_back(name);
 		};
+		{
+			// FlashEvidence (late review m1, m4).
+			FlashEvidence e;
+			check(!e.Suppress(1000), "flash: no evidence before any shot (the hands draw their own)");
+			check(e.Update(1000, 0, 0) == FlashEvidence::Seen::Nothing && !e.Suppress(1000), "flash: nothing counted");
+			check(e.Update(1016, 1, 1) == FlashEvidence::Seen::VrFlash && e.Suppress(1016) && e.Suppress(1060),
+				"flash: cave O's shot and the flash in one poll: the game's flash is the VR gun's");
+			check(!e.Suppress(1016 + FlashEvidence::kSuppressMs + 1), "flash: the evidence runs out");
+			check(e.Update(2000, 2, 1) == FlashEvidence::Seen::Nothing && !e.Suppress(2000),
+				"flash: a shot without a flash (not aiming) leaves the hands' own");
+			check(e.Update(2033, 2, 2) == FlashEvidence::Seen::VrFlash && e.Suppress(2040),
+				"flash: a flash two polls after cave O's shot still counts");
+			check(e.Update(3000, 2, 3) == FlashEvidence::Seen::OtherFlash && !e.Suppress(3000),
+				"flash: a flash with no cave O shot (it fell back) is not the VR gun's");
+			e.Reset();
+			check(!e.Suppress(3001) && e.Update(3010, 0, 0) == FlashEvidence::Seen::Nothing, "flash: a re-arm starts afresh");
+		}
 		TestMap tm;
 		{
 			// A gun 1.2 m up, pointing -Z (ahead) and a little down, through a turned, scaled map.
@@ -315,9 +352,11 @@ namespace VR::GunRay
 		u32 s_obj_magic = 0;
 		u32 s_obj_crc = 0;
 		bool s_obj_stale = true;
-		u32 s_obj_last_shots = 0;
-		u32 s_obj_last_flashes = 0;
+		FlashEvidence s_obj_flash;
 		std::atomic<bool> s_obj_live{false};
+		std::atomic<u64> s_obj_flash_ms{0}; // s_obj_flash.flash_ms, for the hands on the GS thread
+		bool s_load_pending = false;         // a state was loaded: zero any block of ours it holds (late review m2)
+		bool s_refused_logged = false, s_obj_refused_logged = false;
 		float s_obj_muzzle[3] = {};
 		std::string s_obj_verdict;
 
@@ -360,6 +399,25 @@ namespace VR::GunRay
 			}
 			s_obj_armed = false;
 			s_obj_live.store(false, std::memory_order_relaxed);
+			s_obj_flash_ms.store(0, std::memory_order_relaxed);
+		}
+
+		// A loaded state's own blocks: zeroed when they read our magic, whether or not this session armed them (late
+		// review m2; as HandPickup does), so a pose saved with the state is never taken for a fresh one.
+		void ClearLoadedBlocks(const ProfileDB::MeleeParams& mp)
+		{
+			const auto zero_if_ours = [](u32 addr, u32 bytes, u32 magic, const char* what) {
+				if (magic == 0 || addr == 0 || static_cast<u64>(addr) + bytes > Ps2MemSize::MainRam ||
+					static_cast<u32>(memRead32(addr)) != magic)
+					return;
+				for (u32 off = 0; off < bytes; off += 4)
+					memWrite32(addr + off, 0);
+				Console.WriteLn("(VR) Gun ray: a loaded state's %s block at 0x%X cleared.", what, addr);
+			};
+			if (mp.has_gun_ray)
+				zero_if_ours(mp.gun_block, kBlockBytes, mp.gun_magic, "gun ray");
+			if (mp.has_gun_object)
+				zero_if_ours(mp.gun_object_block, kObjBlockBytes, mp.gun_object_magic, "gun object");
 		}
 
 		void WriteF32(u32 address, float v)
@@ -426,16 +484,31 @@ namespace VR::GunRay
 		s_watch_s = 0.0f;
 		s_obj_armed = s_obj_addr != 0;
 		s_obj_stale = true;
+		s_obj_flash_ms.store(0, std::memory_order_relaxed);
+		s_load_pending = true;
 	}
 
 	bool GameFlashOnVrGun()
 	{
-		return s_obj_live.load(std::memory_order_relaxed);
+		if (!s_obj_live.load(std::memory_order_relaxed))
+			return false;
+		FlashEvidence e;
+		e.flash_ms = s_obj_flash_ms.load(std::memory_order_relaxed);
+		return e.Suppress(CameraDriver::SteadyNowMs());
 	}
 
 	void Poll(const VRInputSnapshot& snap, GuestReader reader, float dt)
 	{
 		dt = std::isfinite(dt) ? std::clamp(dt, 0.0f, 0.25f) : 0.0f;
+		if (s_load_pending && VMManager::HasValidVM())
+		{
+			// Before anything else, live or not: the game may shoot before the hands are back.
+			s_load_pending = false;
+			const std::string lserial = VMManager::GetDiscSerial();
+			const ProfileDB::Profile* lp = lserial.empty() ? nullptr : ProfileDB::Lookup(lserial, VMManager::GetDiscCRC());
+			if (lp && lp->melee.has_value())
+				ClearLoadedBlocks(lp->melee.value());
+		}
 		const bool live = snap.generation != 0 && snap.actions_active;
 		u32 record = 0;
 		const ProfileDB::Profile* profile = nullptr;
@@ -542,7 +615,16 @@ namespace VR::GunRay
 			}
 			u32 counter = 0;
 			float m[16], origin[3];
-			if (ray && CameraDriver::GetMapping(&map) && RayToGame(from, dir, MapPoint, &map, og, dg) &&
+			// Before the first write the block must read zero or ours (night review m4).
+			const bool blk_free = s_armed || PhysicalMelee::RegionFreeOrOurs(reader, mp->gun_block, mp->gun_block + kBlockBytes,
+											 mp->gun_block + kOffMagic, mp->gun_magic);
+			if (!blk_free && !s_refused_logged)
+			{
+				s_refused_logged = true;
+				Console.Warning("(VR) Gun ray: the block at 0x%X holds someone else's words; the gun ray stays off while it does.",
+					mp->gun_block);
+			}
+			if (blk_free && ray && CameraDriver::GetMapping(&map) && RayToGame(from, dir, MapPoint, &map, og, dg) &&
 				ShotFrame(og, dg, back, m, origin) && Read(reader, mp->counter, 1, &counter))
 			{
 				const u32 b = mp->gun_block;
@@ -578,7 +660,18 @@ namespace VR::GunRay
 				u32 lm[3] = {};
 				float local[3] = {};
 				float om[16], opos[3];
-				const bool obj_ok = EmuConfig.VR.GunObjectAim && mp->has_gun_object && back_ok &&
+				// Before the first write the object block must read zero or ours (late review m3).
+				const u32 ob0 = mp->gun_object_block;
+				const bool obj_free = s_obj_armed || !mp->has_gun_object ||
+				                      PhysicalMelee::RegionFreeOrOurs(reader, ob0, ob0 + kObjBlockBytes, ob0 + kObjOffMagic,
+										  mp->gun_object_magic);
+				if (!obj_free && EmuConfig.VR.GunObjectAim && !s_obj_refused_logged)
+				{
+					s_obj_refused_logged = true;
+					Console.Warning("(VR) Gun object: the block at 0x%X holds someone else's words; GunObjectAim stays off while it "
+									"does.", ob0);
+				}
+				const bool obj_ok = obj_free && EmuConfig.VR.GunObjectAim && mp->has_gun_object && back_ok &&
 				                    Read(reader, mp->shape_types + mp->shape_type_stride * type + mp->gun_object_muzzle, 4, &lm[0]) &&
 				                    Read(reader, mp->shape_types + mp->shape_type_stride * type + mp->gun_object_muzzle + 4, 4, &lm[1]) &&
 				                    Read(reader, mp->shape_types + mp->shape_type_stride * type + mp->gun_object_muzzle + 8, 4, &lm[2]);
@@ -593,8 +686,8 @@ namespace VR::GunRay
 						s_obj_stale = false;
 						memWrite32(ob + kObjOffShots, 0);
 						memWrite32(ob + kObjOffFlashes, 0);
-						s_obj_last_shots = 0;
-						s_obj_last_flashes = 0;
+						s_obj_flash.Reset();
+						s_obj_flash_ms.store(0, std::memory_order_relaxed);
 					}
 					for (int k = 0; k < 16; k++)
 						WriteF32(ob + kObjOffMatrix + 4u * static_cast<u32>(k), om[k]);
@@ -610,18 +703,24 @@ namespace VR::GunRay
 					s_obj_live.store(true, std::memory_order_relaxed);
 					obj_wrote = true;
 					u32 oshots = 0, flashes = 0;
-					if (Read(reader, ob + kObjOffShots, 4, &oshots) && oshots != s_obj_last_shots)
+					const bool counts = Read(reader, ob + kObjOffShots, 4, &oshots) && Read(reader, ob + kObjOffFlashes, 4, &flashes);
+					const u32 prev_shots = s_obj_flash.shots;
+					const FlashEvidence::Seen seen =
+						counts ? s_obj_flash.Update(CameraDriver::SteadyNowMs(), oshots, flashes) : FlashEvidence::Seen::Nothing;
+					s_obj_flash_ms.store(s_obj_flash.flash_ms, std::memory_order_relaxed);
+					if (counts && oshots != prev_shots)
 					{
-						s_obj_last_shots = oshots;
 						std::memcpy(s_obj_muzzle, og, sizeof(og));
 						Console.WriteLn("(VR) Gun object: shot %u from the VR gun object (muzzle (%.1f, %.1f, %.1f), type %u, "
 										"model muzzle (%.1f, %.1f, %.1f)).", oshots, static_cast<double>(og[0]),
 							static_cast<double>(og[1]), static_cast<double>(og[2]), type, static_cast<double>(local[0]),
 							static_cast<double>(local[1]), static_cast<double>(local[2]));
 					}
-					if (Read(reader, ob + kObjOffFlashes, 4, &flashes) && flashes != s_obj_last_flashes)
+					if (seen == FlashEvidence::Seen::OtherFlash)
+						Console.WriteLn("(VR) Gun object: the game's muzzle flash %u came without cave O's shot (the game's own "
+										"gun object); the hands draw their own flash.", flashes);
+					else if (seen == FlashEvidence::Seen::VrFlash)
 					{
-						s_obj_last_flashes = flashes;
 						u32 fw[3] = {};
 						float fp[3] = {};
 						if (Read(reader, ob + kObjOffFlashPos, 4, &fw[0]) && Read(reader, ob + kObjOffFlashPos + 4, 4, &fw[1]) &&

@@ -1055,6 +1055,9 @@ namespace VR::Presence
 				if (rec < 0 || rec + 0x2000 > static_cast<s64>(Ps2MemSize::MainRam))
 					continue;
 				const u32 r = static_cast<u32>(rec);
+				// Never the local record, whatever its slot byte reads (a stale or duplicate byte mid-change).
+				if (r == base)
+					continue;
 				if (cb.has_id_offset && memRead8(static_cast<u32>(r + cb.id_offset)) != in.slot)
 					continue;
 				if (!cb.has_id_offset && k != in.slot)

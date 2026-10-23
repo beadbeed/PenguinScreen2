@@ -304,3 +304,26 @@ passes for File #1 and File #2.
 - the M1 test above.
 
 Deployed to `run-playtest-models` (previous exe kept as `pcsx2-qt.prev-bb5a6c3.exe`).
+
+## Fixed on minorsC (2026-10-22)
+
+Each item was checked against the code first. Built locally (`build-minorsC`, no LTO), `vr_selftests` 62 of 62 (new
+checks in "Head in wall", "Physical melee online" and "Grab and door"). No headset. XRCompositor and the TrueStereo
+paths were not touched (another branch works on the renderer).
+
+| Id | Status | Commit | What changed |
+|---|---|---|---|
+| m4 | fixed | 8f8d438, 92885b5 | Confirmed. New `PhysicalMelee::RegionFreeOrOurs` (our magic already there, or every word zero; a zero magic never counts). GunRay's block and cave H's fist word arm only when it passes, logged once otherwise. 92885b5: the first version read the fist word's address before checking the profile has melee and crashed at boot (seen offline on run-minorsC, 0xC0000005 in `PhysicalMelee::Poll`); it now checks only when the word is about to be written. |
+| m6 | fixed | 6ea273f | Confirmed: `r != base` was not checked. The partner search now skips the local record whatever its slot byte reads. |
+| m9 | fixed | d444f00 | Confirmed (32 x 32 x 4096 reads possible; the header-fail return left the dim). One cap of 65536 list entries for the whole grid; a header that does not read drops the grid and eases the dim to 0. Self-test: a grid whose lists never end. |
+| m11 | refuted | | `FUN_001B7B50` (`ram5_a.bin`, 0x1B7B50-0x1B7D5C) reads the projection's out (sp+0xF0) only at x (+0xF0, clamped 0-640) and w (+0xFC, at 0x1B7C6C: `w < 0` mirrors x to 640 - x). y and z are never read, and the volume comes from the distance in `$f20` (/300, `FUN_00191BC0`). So `w = +1` changes only the behind mirror, as intended. |
+| m12 | fixed | 98778ee | Confirmed. While the camera guard passes on alsoEquals 4 (mode 4, a fixed cut: the game holds the input), first person drives the camera only, as GrabFirstPerson does (the stick still turns the view; no heading, aim or body follow). Mode 5 (the shake) does not hold the input and keeps the usual first person. `ScriptedShotCameraOnly` self-test. Not run live. |
+| m10 | left (tried, reverted) | 2c41f81, reverted in 54d2fdc | A head-to-search-point test against HeadInWall's copy of the player collision. Offline (slot 7, `pickuptest.py ... 7 0 --vr 0.063,-0.149,-0.78`) it refused the Handgun on the desk: a vertical player-collision face (flags 0x00290000, normal +Z) about 23 cm in front of the item, and skipping level faces did not help. The player's walls fence furniture at full height, so they are not an occluder. A usable test needs the room's visual geometry or a study of the face classes. |
+| m7 | left | | TrueStereo's per-draw eye build vs the compositor's: GSRendererHW and XRCompositor, the renderer branch's area; needs a per-frame eye snapshot handed to the compositor. |
+| m8 | left | | `tfx.glsl`'s `w` clamp and flat draws sampling the target: shader and TrueStereo work, same reason. |
+
+**Offline** (run-minorsC, no OpenXR runtime, normal speed; `HandPickup = true` in that install's own ini only):
+- the first launch crashed at boot in the fist check (fixed in 92885b5, above);
+- slot 7 with the m10 test in: the Handgun refused, as above;
+- slot 7 on the final build: armed, the cave took the word, the take-it prompt (record 3, item 0) confirmed, Handgun in
+  cell 0, as on `nightly`; no free-RAM refusal logged.

@@ -69,8 +69,32 @@ namespace VR::GunRay
 	bool ObjectFrame(const float shot_m[16], const float muzzle_g[3], const float local[3], float out_matrix[16],
 		float out_pos[3]);
 
-	// True while cave O's block is armed (the game's own muzzle flash comes from the VR gun): the hands then draw no
-	// flash of their own.
+	// The evidence that the game's own muzzle flash came from the VR gun (late review m1, m4). Cave O counts the shots it
+	// took over (+0x0C); the flash stub counts every flash for the record (+0x10), whether or not cave O swapped that
+	// shot. A flash counts as the VR gun's only when cave O's shot count went up in the same poll or within
+	// kSameShotMs before it (both run inside one FUN_0062CF10 call). After a falling-back shot, a skipped flash (not
+	// aiming) or no shot yet, there is no evidence, and the hands draw their own flash.
+	struct FlashEvidence
+	{
+		static constexpr u64 kSameShotMs = 100;
+		static constexpr u64 kSuppressMs = 150; // the hands' own flash lasts 45 ms after the shot
+		enum class Seen
+		{
+			Nothing,
+			VrFlash,    // a flash from the VR muzzle (cave O took the shot)
+			OtherFlash, // a flash counted for the record without cave O's shot (the stub alone)
+		};
+		u32 shots = 0, flashes = 0;
+		u64 shot_ms = 0, flash_ms = 0;
+		// (Re)armed: the block's counts start from zero.
+		void Reset() { *this = FlashEvidence{}; }
+		Seen Update(u64 now_ms, u32 shots_now, u32 flashes_now);
+		// The hands leave out their own flash now.
+		bool Suppress(u64 now_ms) const { return flash_ms != 0 && now_ms >= flash_ms && now_ms - flash_ms <= kSuppressMs; }
+	};
+
+	// True while cave O's block is armed and the game's own muzzle flash for the latest shot came from the VR gun
+	// (FlashEvidence): the hands then draw no flash of their own.
 	bool GameFlashOnVrGun();
 
 	// RayToGame and ShotFrame on scripted maps and rays. Returns the failed checks.

@@ -3655,6 +3655,9 @@ namespace VR::CameraDriver
 		c(LookAtReleasedFor(true, false, true), "down/dead (not grabbed): released");
 		c(!LookAtReleasedFor(true, true, true), "grabbed, switch on: kept");
 		c(LookAtReleasedFor(true, true, false), "grabbed, switch off: released as before");
+		c(ScriptedShotCameraOnly(4) && !ScriptedShotCameraOnly(5) && !ScriptedShotCameraOnly(0) &&
+			  !ScriptedShotCameraOnly(0xFFFFFFFFu),
+			"scripted shot: a fixed cut (mode 4, input held) is camera only; the shake and normal play are not");
 		// DoorVeil: a door from first person.
 		{
 			DoorVeil v;
@@ -4494,7 +4497,17 @@ namespace VR::CameraDriver
 						Console.WriteLn("(VR) CameraDriver: no longer grabbed; first person as usual (camera only for %.2f s).",
 							static_cast<double>(s_vsync_counter - s_grab_fp_vsync) / 59.94);
 					}
-					drive_camera(false);
+					// [VR] ScriptedShotsFirstPerson, a fixed cut (mode 4): the game holds the player's input and its script
+					// may move the character, so the camera alone follows the head (the stick still turns the view); the
+					// character's heading and aim are the script's (night review m12).
+					if (ScriptedShotCameraOnly(s_also_value))
+					{
+						drive_camera(true, nullptr, true);
+						s_comfort_walk = 0.0f;
+						s_comfort_sampled = true;
+					}
+					else
+						drive_camera(false);
 				}
 			}
 		}

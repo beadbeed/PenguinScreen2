@@ -251,3 +251,22 @@ checked above. A new caller of `FUN_0062CF10`'s object, or a future cave, must k
 - With cave O, the game's own frame at `sp+0x40` is already cave I's frame F. So if cave I's stamp test failed in the
   same shot, the bullet would still follow the VR ray. The two caves cannot disagree in a harmful way.
 - The toast serial logic is race-free under `s_toast_mutex`. A later toast is never cancelled.
+
+## Fixed on minorsC (2026-10-22)
+
+Each item was checked against the code first. Built locally (`build-minorsC`, no LTO), `vr_selftests` 62 of 62 (8 new
+checks in GunRay's suite). No headset. Offline (run-minorsC, slot 5, the 45, the vraim/gunobj script, two shots on the
+zombie's head): both hit (600 -> 150), cave O took each shot and the flash stub counted its flash in the same poll, so
+the flash counted as the VR gun's (0.00 units from the VR muzzle) and the hands left theirs out; no free-RAM refusal.
+
+| Id | Status | Commit | What changed |
+|---|---|---|---|
+| m1 | fixed (suppression); defaults kept | 8e2a30d | Confirmed: `GameFlashOnVrGun` was true on every armed poll. New `GunRay::FlashEvidence`: a flash counts as the VR gun's only when cave O's shot count went up in the same poll or within 100 ms before the flash stub's count; the hands then leave their flash out for 150 ms, and draw it otherwise (a fallen-back shot, no flash when not aiming, no shot yet). If GunRay's poll sees the flash a poll after the shot, the hands' flash shows for one frame first. `GunObjectAim` and `GameText` still default to true in `Config.h` (not changed without the headset check). |
+| m2 | fixed (state load) | 7d1dd12 | Confirmed. The next poll after a state load, live or not, looks up the profile and zeroes the GUN1 and GOB1 blocks when they read our magic, whether or not this session armed them. The stamp stays mod 60: a longer counter needs caves I and O reassembled. |
+| m3 | fixed | c664196 | Confirmed. Cave O's block arms only when `RegionFreeOrOurs` passes over all 0x90 bytes (logged once otherwise); the game's object is used then. |
+| m4 | fixed | 8e2a30d | Confirmed. The log compares the counts (FlashEvidence): a flash without cave O's shot is logged as the game's own and is not compared with the VR muzzle. The stub itself is unchanged (no cave work). |
+| m5 | fixed (docs) | b9b519d | Confirmed (`0x62D070-0x62D138` after the swap at `0x62CF98`). Section 13 now says the grabbed branch's `FUN_006801A0` object, flash and shell come from the VR gun's pose too. The grabbed-shot test (slot 5) is not done. |
+| m6 | left (tried, reverted) | 6a260a1, reverted in 54d2fdc; e5c33a0 | A fallback to the game's object when the head-to-muzzle line crosses HeadInWall's player collision. Taken out: in slot 7 that collision fences the desk at full height (see the night review's m10 row), so it would drop the VR flash and shell near any furniture. Noted in section 13. |
+| m7 | fixed in part | cd46a71 | Confirmed. A DATE draw is not GameText (its DATE setup was built for the unmoved box). `m_r` and the target's valid tracking still use the old box; text inside the picture lands in an already valid frame buffer, so that part is left (unverified; recomputing `m_r` means moving the block in GSRendererHW, the renderer branch's area). |
+| m8 | left (by design) | | The review's own fix is "none needed unless it is seen". |
+| m9 | docs aligned, one oddity left | b9b519d, this commit | Three RAM dumps have (-9.504, 0, 5.095) for the 45 Auto (types 2 and 7), so section 13 now gives that (5.1, as the profile comment and the self-test). But the host's own "Gun object: shot" line in the slot 5 run on run-minorsC printed model muzzle (-9.5, 0.0, 5.0), which 5.095 would not round to. Not explained; no impact (the host reads the value from RAM). |

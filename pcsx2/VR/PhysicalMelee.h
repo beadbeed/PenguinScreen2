@@ -487,6 +487,9 @@ namespace VR::PhysicalMelee
 	int RoomMasterSlot(GuestReader reader, const OnlineParams& params, u32* room_out = nullptr);
 	// The words from lo up to hi all read zero (lo and hi word aligned); *busy_addr (optional) the first that does not.
 	bool RegionZero(GuestReader reader, u32 lo, u32 hi, u32* busy_addr = nullptr);
+	// A block in free RAM is ours to write (night review m4, late review m3): its magic word at magic_addr already reads
+	// magic, or every word from lo up to hi reads zero.
+	bool RegionFreeOrOurs(GuestReader reader, u32 lo, u32 hi, u32 magic_addr, u32 magic);
 
 	// CPU thread: CameraDriver's whenSetting gate asks, in private co-op, whether the caves may be in: true only while the
 	// last input poll decided CoopFull, and that poll ran within the last 250 ms (a stale decision counts as false).
