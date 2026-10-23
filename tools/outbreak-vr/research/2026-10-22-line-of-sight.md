@@ -142,3 +142,15 @@ While the hand was on the moved trigger in slot 5, the gun check also fired with
 - An item or muzzle seen through a `0x29` opening (J's Bar's lower wall, x 7950-8050) is allowed, as the game's own sight
   allows it. Whether that is the door to the street was not checked.
 - Other rooms than J's Bar and the bathroom were not surveyed. The code reads whatever the room's grid holds.
+- **The hand through other `0x29` faces (evening review m6; left open on `evfix`, 2026-10-22).** The sight mask lets the
+  hand reach through every `0x29` face, as the zombies see through them, and the hand reaches 85 cm (`maxReach`) where the
+  game's own search reaches about 50 cm. If File #1 classes a gate, grille, window or glass case `0x29`, an item behind it
+  within 85 cm can be taken by hand. No rule was added, because none rests on evidence yet:
+  - only J's Bar and the bathroom were surveyed, and no gate or grille was found in either; every `0x29` face there is
+    furniture except the 1 m opening in J's Bar's lower wall;
+  - the rule the review suggests (refuse a `0x29` face whose top is above the search point plus a margin) would refuse that
+    opening (floor to y 225), which the game's own sight and bullets pass, and it was not measured against the desk front
+    in slot 7 (the face's top against the Handgun's search point at y 140).
+  What would settle it: log the `0x29` faces a passed line crosses (flags, the face's top y, the search point) in the
+  other File #1 rooms that have gates, grilles or counters (not identified yet; no savestate is in one), then pick the
+  margin from those numbers.
