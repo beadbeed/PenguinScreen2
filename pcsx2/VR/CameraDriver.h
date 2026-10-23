@@ -376,5 +376,14 @@ namespace VR::CameraDriver
 		return released && !(grab_first_person && grabbed);
 	}
 
+	// [VR] ScriptedShotsFirstPerson: whether a scripted shot keeps first person camera only (night review m12). also: the
+	// alsoEquals value the camera guard passed on (0xFFFFFFFF: none). Mode 4, a fixed cut, holds the player's input
+	// (0x48C019 = 1) while the game's script may move the character, so nothing of the character (heading, aim, body
+	// follow) is written then; the view still turns. Mode 5, the camera shake, leaves the input to the player.
+	constexpr bool ScriptedShotCameraOnly(u32 also)
+	{
+		return also == 4;
+	}
+
 	bool SelfTestGrabDoor();
 }
