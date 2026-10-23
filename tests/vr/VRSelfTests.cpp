@@ -1236,6 +1236,20 @@ int main(int argc, char* argv[])
 
 	RunLogged("Network gate (NetGate: PCSX2_VR_TEST_NET selects code paths only, never with the adapter on)",
 		VR::NetGate::SelfTest, "(VR) NetGate self-test");
+	// Co-op readiness (tools/outbreak-vr/research/2026-10-22-coop-ready.md): which profile switches run in private co-op.
+	RunSilent("Co-op switches (SilenceSettingCoopLive: FadeDim)", +[]() {
+		bool ok = true;
+		const bool fade = EmuConfig.VR.FadeDim;
+		EmuConfig.VR.FadeDim = true;
+		ok &= VR::ProfileDB::SilenceSettingCoopLive("FadeDim"); // draw-only: one dim online too
+		EmuConfig.VR.FadeDim = false;
+		ok &= !VR::ProfileDB::SilenceSettingCoopLive("FadeDim");
+		EmuConfig.VR.FadeDim = fade;
+		// Still never co-op live: the gun ray's and hand pickup's caves, cave U.
+		ok &= !VR::ProfileDB::SilenceSettingCoopLive("GunRayAim") && !VR::ProfileDB::SilenceSettingCoopLive("GunObjectAim") &&
+		      !VR::ProfileDB::SilenceSettingCoopLive("HandPickup") && !VR::ProfileDB::SilenceSettingCoopLive("VrBodyLocals");
+		return ok;
+	});
 	RunLogged("MenuPointer", VR::MenuPointer::SelfTest, "(VR) MenuPointer self-test");
 	RunLogged("Item names", VR::GameFeedback::ItemSelfTest, "(VR) Item names self-test");
 	RunLogged("BeltPouches", VR::BeltPouches::SelfTest, "(VR) BeltPouches self-test");

@@ -5917,6 +5917,11 @@ bool VR::ProfileDB::SilenceSettingCoopLive(std::string_view name)
 	// (night review C1), and online the host never sets its flag 8 for any slot (VrBody::UseLocals).
 	if (name == "VrBody")
 		return SilenceSettingOn(name);
+	// FadeDim's quad skip (0x1B9DCC, beq v1,zero -> beq zero,zero in the fade quad's draw FUN_001B9DA0) is draw-only: no
+	// record, no fade state and none of the game's traffic, so in private co-op it runs as offline and the host's view dim
+	// stands in for the quad (co-op review: before, online the quad drew AND the host dimmed, so every fade dimmed twice).
+	if (name == "FadeDim")
+		return SilenceSettingOn(name);
 	return false;
 }
 
