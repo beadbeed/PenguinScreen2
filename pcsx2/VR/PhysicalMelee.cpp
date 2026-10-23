@@ -2029,6 +2029,25 @@ namespace VR::PhysicalMelee
 		return RegionZero(reader, lo, hi);
 	}
 
+	bool ArmedAfterLoad(GuestReader reader, u32 magic_addr, u32 magic)
+	{
+		u32 w = 0;
+		return magic != 0 && magic_addr != 0 && Read(reader, magic_addr, 4, &w) && w == magic;
+	}
+
+	bool ReadMainRam(u32 address, u8 width, u32* value)
+	{
+		if (!VMManager::HasValidVM() || static_cast<u64>(address) + width > Ps2MemSize::MainRam)
+			return false;
+		switch (width)
+		{
+			case 1: *value = memRead8(address); break;
+			case 2: *value = memRead16(address); break;
+			default: *value = memRead32(address); break;
+		}
+		return true;
+	}
+
 	bool CoopOverrideLive()
 	{
 		if (!s_coop_live)
@@ -2138,6 +2157,17 @@ namespace VR::PhysicalMelee
 		c(!RegionFreeOrOurs(TestRead, 0x820000, 0x820010, 0x820000, 0), "free or ours: a zero magic never counts as ours");
 		s_test_mem.fill(0);
 		c(!RegionFreeOrOurs(TestRead, 0x820000, 0x820200, 0x820000, 0x474F4231), "free or ours: unreadable memory is not free");
+		// Evening review m4: armed after a state load only while the loaded RAM reads our magic.
+		s_test_mem.fill(0);
+		c(!ArmedAfterLoad(TestRead, 0x820000, 0x474F4231), "after a load: a zero block is not armed (checked at the next write)");
+		s_test_mem[0] = 0x474F4231;
+		c(ArmedAfterLoad(TestRead, 0x820000, 0x474F4231), "after a load: our magic stays armed (cleared or rewritten as ours)");
+		s_test_mem[0] = 0x12345678;
+		c(!ArmedAfterLoad(TestRead, 0x820000, 0x474F4231), "after a load: someone else's words are not armed");
+		c(!ArmedAfterLoad(TestRead, 0x820000, 0) && !ArmedAfterLoad(TestRead, 0, 0x474F4231),
+			"after a load: a zero magic or address is never armed");
+		c(!ArmedAfterLoad(TestRead, 0x820200, 0x474F4231), "after a load: unreadable memory is not armed");
+		s_test_mem.fill(0);
 		return c.failures;
 	}
 
@@ -2905,7 +2935,10 @@ namespace VR::PhysicalMelee
 		s_block_armed = s_block_addr != 0;
 		s_block_stale = true;
 		s_jolt_armed = s_jolt_addr != 0;
-		s_fist_armed = s_fist_addr != 0;
+		// Cave H's word: armed only while the loaded word reads our magic (evening review m4), so a foreign word is checked
+		// (RegionFreeOrOurs) before the next write instead of being written over.
+		s_fist_armed = s_fist_addr != 0 && VMManager::GetDiscCRC() == s_fist_crc &&
+		               ArmedAfterLoad(ReadMainRam, s_fist_addr, s_fist_magic);
 		ClearSprings();
 		ResetContact();
 	}

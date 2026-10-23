@@ -5,6 +5,8 @@
 
 #include "VR/EyeProjection.h"
 
+#include "common/Pcsx2Defs.h"
+
 // [VR] CutsceneStereo (tools/outbreak-vr/research/2026-10-22-cutscene-vr.md). The game's real-time cutscenes (File #1:
 // scenario status 0x48BF60 == 4) are drawn by the engine from its own camera (eye, target, FOV and roll keyed by the
 // cutscene player 0x5BD690 through 0x590400 / 0x5908A0, rebuilt into the view 0x3062E0 and the screen matrix 0x2771A0 by
@@ -46,6 +48,25 @@ namespace VR::CutsceneView
 	// out_pos = R(-yaw) (head - anchor), out_quat = q(yaw)^-1 q_head.
 	void HeadInAnchor(const float head_pos[3], const float head_quat[4], const float anchor_pos[3], float anchor_yaw,
 		float out_pos[3], float out_quat[4]);
+
+	// The window's edges as screen changes (evening review m8): the window is not a screen mode, so the mode switch's blink
+	// does not cover it. It goes up or down only where it is not seen: at once while the view is black already (the mode
+	// switch's blink, a door's veil) or when forced (the screen it is shown on is gone: first person, the tablet, tracking
+	// lost), or when no blink can be drawn (the HUD off); otherwise a blink of its own starts and the flip waits for its
+	// rise (rise_ms). Wanted back before that: nothing changes.
+	struct WindowGate
+	{
+		bool shown = false;
+		u64 due_ms = 0; // the flip waits for its blink until then (0: no flip waiting)
+	};
+	enum class GateStep
+	{
+		Hold,       // as it is (or still waiting for the blink)
+		Flipped,    // shown changed now
+		StartBlink, // start a blink now (due_ms set); if it cannot start, Flip at once
+	};
+	GateStep StepGate(WindowGate& g, bool want, bool black, bool can_blink, bool force, u64 now_ms, u32 rise_ms);
+	void Flip(WindowGate& g, bool want);
 
 	// Unit tests (vr_selftests): logs "(VR) Cutscene view self-test: ...".
 	bool SelfTest();

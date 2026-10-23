@@ -121,8 +121,17 @@ namespace VR::ItemReach
 		float point[3] = {};       // game cm: the search point for the cave
 		u32 serial = 0;            // counts every change of the highlighted node (an entry, a switch, a leave)
 		bool forward_agrees = false; // the character's own Circle (46 cm ahead) would take this item now (logs)
+		bool walled = false;       // squeezable but for HandPickup's wall test (SetPickupWalled): not highlighted
 	};
 	PickupTarget CurrentPickup();
+
+	// [VR] HandPickup's line of sight (evening review m7): the node whose search point is behind a wall from the character's
+	// head (0 for none). That node's target is not highlighted (walled instead): the box does not glow as squeezable and no
+	// tick plays, so an item that cannot be taken does not look takeable. HandPickup tests a target while its point is ok
+	// (highlighted or walled) and sets or clears this every poll. CPU thread.
+	void SetPickupWalled(u32 node);
+	// Pure: drops the highlight of a target whose node is walled_node (0: none).
+	void ApplyWalled(PickupTarget& t, u32 walled_node);
 
 	// Pure: which hand's item is the pickup target this evaluation. cand[h].found / distance for each hand (found false for a
 	// hand that is not tracked or found nothing); the nearest within show wins, the right hand on a tie; highlighted when

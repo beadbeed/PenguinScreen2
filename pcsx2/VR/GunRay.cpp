@@ -110,18 +110,28 @@ namespace VR::GunRay
 		return true;
 	}
 
-	bool WallShot(const float chest_g[3], const float muzzle_g[3], float t, float out_point[3], float out_dir[3])
+	bool WallShot(const float chest_g[3], const float muzzle_g[3], float t, const float normal_g[3], float back,
+		float out_origin[3], float out_dir[3])
 	{
-		if (!Finite3(chest_g) || !Finite3(muzzle_g) || !std::isfinite(t) || !(t > 0.0f && t <= 1.0f))
+		if (!Finite3(chest_g) || !Finite3(muzzle_g) || !Finite3(normal_g) || !std::isfinite(t) || !std::isfinite(back) ||
+			!(t > 0.0f && t <= 1.0f))
 			return false;
 		float d[3] = {muzzle_g[0] - chest_g[0], muzzle_g[1] - chest_g[1], muzzle_g[2] - chest_g[2]};
 		const float len = std::sqrt(Dot(d, d));
 		if (!(len > 1.0e-3f) || !Normalize(d))
 			return false;
-		const float along = std::max(0.0f, t * len - kWallShotBefore);
+		float n[3] = {normal_g[0], normal_g[1], normal_g[2]};
+		if (!Normalize(n))
+			return false;
+		const float wall = t * len; // the wall along chest -> muzzle
+		// The game's offset before the wall (never past it), and at least kWallShotGap off the plane: along the line that
+		// is the gap over the cosine to the normal (a grazing line: from much further back, at worst from the chest).
+		const float cosine = std::fabs(Dot(d, n));
+		const float gap_along = (cosine > 1.0e-3f) ? kWallShotGap / cosine : wall;
+		const float along = std::max(0.0f, std::min(wall - kWallShotBefore + std::min(back, 0.0f), wall - gap_along));
 		for (int k = 0; k < 3; k++)
 		{
-			out_point[k] = chest_g[k] + d[k] * along;
+			out_origin[k] = chest_g[k] + d[k] * along;
 			out_dir[k] = d[k];
 		}
 		return true;
@@ -220,20 +230,41 @@ namespace VR::GunRay
 			check(!e.Suppress(3001) && e.Update(3010, 0, 0) == FlashEvidence::Seen::Nothing, "flash: a re-arm starts afresh");
 		}
 		{
-			// WallShot: chest (0, 130, 0), muzzle 100 cm ahead along +Z, the wall at 60 %.
+			// WallShot: chest (0, 130, 0), muzzle 100 cm ahead along +Z, the wall at 60 % facing the chest (normal -Z).
 			const float chest[3] = {0.0f, 130.0f, 0.0f};
 			const float muzzle[3] = {0.0f, 130.0f, 100.0f};
+			const float facing[3] = {0.0f, 0.0f, -1.0f};
 			float wp[3], wd[3];
-			check(WallShot(chest, muzzle, 0.6f, wp, wd) && Near(wp[0], 0.0f, 1e-4f) && Near(wp[1], 130.0f, 1e-4f) &&
-					  Near(wp[2], 60.0f - kWallShotBefore, 1e-3f) && Near(wd[2], 1.0f, 1e-5f) && Near(wd[0], 0.0f, 1e-5f),
-				"wall shot: starts 1 cm before the wall on the chest's side, along chest -> muzzle");
+			check(WallShot(chest, muzzle, 0.6f, facing, -35.0f, wp, wd) && Near(wp[0], 0.0f, 1e-4f) && Near(wp[1], 130.0f, 1e-4f) &&
+					  Near(wp[2], 60.0f - kWallShotBefore - 35.0f, 1e-3f) && Near(wd[2], 1.0f, 1e-5f) && Near(wd[0], 0.0f, 1e-5f),
+				"wall shot: the game's back offset before a point 1 cm before the wall, along chest -> muzzle");
 			float m[16], org[3];
-			check(WallShot(chest, muzzle, 0.6f, wp, wd) && ShotFrame(wp, wd, -35.0f, m, org) && Near(org[2], 24.0f, 1e-3f) &&
-					  Near(m[10], 1.0f, 1e-5f),
-				"wall shot: the frame's barrel into the wall, the game's back offset before it (the capsule crosses the wall)");
-			check(!WallShot(chest, chest, 0.5f, wp, wd) && !WallShot(chest, muzzle, 0.0f, wp, wd) &&
-					  !WallShot(chest, muzzle, 1.5f, wp, wd) && !WallShot(chest, muzzle, std::nanf(""), wp, wd),
-				"wall shot: no line, t 0, t past the muzzle and NaN refused");
+			check(WallShot(chest, muzzle, 0.6f, facing, -35.0f, wp, wd) && ShotFrame(wp, wd, 0.0f, m, org) &&
+					  Near(org[2], 24.0f, 1e-3f) && Near(m[10], 1.0f, 1e-5f),
+				"wall shot: the frame's barrel into the wall, its origin the wall shot's (back 0)");
+			// Evening review m3: bounds on the origin.
+			check(WallShot(chest, muzzle, 0.6f, facing, 0.0f, wp, wd) && Near(wp[2], 60.0f - kWallShotGap, 1e-3f),
+				"wall shot: back 0 (unread) still starts kWallShotGap off the wall, not 1 cm");
+			check(WallShot(chest, muzzle, 0.6f, facing, 30.0f, wp, wd) && Near(wp[2], 60.0f - kWallShotGap, 1e-3f),
+				"wall shot: a positive back is not taken (it would start past the wall)");
+			check(WallShot(chest, muzzle, 0.25f, facing, -35.0f, wp, wd) && Near(wp[2], 0.0f, 1e-4f),
+				"wall shot: a wall 25 cm from the chest starts at the chest, not behind it");
+			{
+				// The line 10 deg off the wall's plane (z = 60 sin 10 deg at 60 %), the gap along the normal.
+				const float s10 = std::sin(10.0f * 3.14159265f / 180.0f), c10 = std::cos(10.0f * 3.14159265f / 180.0f);
+				const float graze[3] = {0.0f, 130.0f + 100.0f * c10, 100.0f * s10};
+				check(WallShot(chest, graze, 0.6f, facing, 0.0f, wp, wd) && Near(60.0f * s10 - wp[2], kWallShotGap, 1e-2f),
+					"wall shot: at a grazing 10 deg the start is still kWallShotGap off the plane, not 1.7 mm");
+				check(WallShot(chest, graze, 0.3f, facing, 0.0f, wp, wd) && Near(wp[2], 0.0f, 1e-4f) && Near(wp[1], 130.0f, 1e-4f),
+					"wall shot: grazing, with the chest nearer the plane than the gap: from the chest");
+			}
+			const float zero[3] = {0.0f, 0.0f, 0.0f};
+			check(!WallShot(chest, chest, 0.5f, facing, 0.0f, wp, wd) && !WallShot(chest, muzzle, 0.0f, facing, 0.0f, wp, wd) &&
+					  !WallShot(chest, muzzle, 1.5f, facing, 0.0f, wp, wd) &&
+					  !WallShot(chest, muzzle, std::nanf(""), facing, 0.0f, wp, wd) &&
+					  !WallShot(chest, muzzle, 0.6f, zero, 0.0f, wp, wd) &&
+					  !WallShot(chest, muzzle, 0.6f, facing, std::nanf(""), wp, wd),
+				"wall shot: no line, t 0, t past the muzzle, NaN, a zero normal and a NaN back refused");
 		}
 		TestMap tm;
 		{
@@ -512,11 +543,14 @@ namespace VR::GunRay
 
 	void OnStateLoaded()
 	{
-		// A block saved armed is ours to clear (or rewrite) at the next poll; the count starts again.
-		s_armed = s_addr != 0;
+		// A block saved armed is ours to clear (or rewrite) at the next poll; the count starts again. Armed only while the
+		// loaded block reads our magic (evening review m4): a block holding someone else's words is checked
+		// (RegionFreeOrOurs) before the next write instead of being written over.
+		s_armed = s_addr != 0 && VMManager::GetDiscCRC() == s_crc && PhysicalMelee::ArmedAfterLoad(PhysicalMelee::ReadMainRam, s_addr, s_magic);
 		s_stale = true;
 		s_watch_s = 0.0f;
-		s_obj_armed = s_obj_addr != 0;
+		s_obj_armed = s_obj_addr != 0 && VMManager::GetDiscCRC() == s_obj_crc &&
+		              PhysicalMelee::ArmedAfterLoad(PhysicalMelee::ReadMainRam, s_obj_addr, s_obj_magic);
 		s_obj_stale = true;
 		s_obj_flash_ms.store(0, std::memory_order_relaxed);
 		s_load_pending = true;
@@ -671,11 +705,23 @@ namespace VR::GunRay
 				static bool s_walled_said = false;
 				float chest[3] = {};
 				HeadInWall::LineResult lr;
+				static bool s_chest_said = false;
 				if (HeadInWall::CharacterChest(VMManager::GetDiscCRC(), record, chest))
+				{
 					lr = HeadInWall::LineBlocked(VMManager::GetDiscCRC(), chest, og, HeadInWall::kMaskShot);
+					s_chest_said = false;
+				}
+				else if (!s_chest_said)
+				{
+					// Unknown, so the shot goes as before the wall test: said once until the chest reads again (evening
+					// review m1).
+					s_chest_said = true;
+					Console.Warning("(VR) Line of sight: the character's chest (bone 11) does not read; the gun is not checked "
+									"against walls.");
+				}
 				muzzle_walled = lr.known && lr.blocked;
 				// No usable wall shot (cannot happen for a blocked line): cave I's block is not written, the game's own shot.
-				if (muzzle_walled && !WallShot(chest, og, lr.t, sg, sd))
+				if (muzzle_walled && !WallShot(chest, og, lr.t, lr.normal, back, sg, sd))
 					mapped = false;
 				if (muzzle_walled && !s_walled_said)
 					Console.WriteLn("(VR) Gun ray: the VR muzzle (%.1f, %.1f, %.1f) is beyond a wall from the character's chest "
@@ -689,7 +735,8 @@ namespace VR::GunRay
 					Console.WriteLn("(VR) Gun ray: the VR muzzle is back on the character's side of the wall.");
 				s_walled_said = muzzle_walled;
 			}
-			if (mapped && ShotFrame(sg, sd, back, m, origin) && Read(reader, mp->counter, 1, &counter))
+			// A wall shot's origin is WallShot's own, the back offset already in it (evening review m3).
+			if (mapped && ShotFrame(sg, sd, muzzle_walled ? 0.0f : back, m, origin) && Read(reader, mp->counter, 1, &counter))
 			{
 				const u32 b = mp->gun_block;
 				if (!s_armed || s_stale)

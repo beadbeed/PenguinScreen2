@@ -114,6 +114,7 @@ namespace VR::HeadInWall
 		bool blocked = false;
 		u32 flags = 0;    // the face that blocks
 		float t = 0.0f;   // where along a -> b
+		float normal[3] = {0.0f, 0.0f, 0.0f}; // that face's normal (unit; a is on its front)
 	};
 	LineResult LineBlocked(u32 crc, const float a[3], const float b[3], u32 mask_a);
 
@@ -121,6 +122,10 @@ namespace VR::HeadInWall
 	// from +0x820, the position at the matrix's +0x30): the point the game's own sight starts from. False if it does not
 	// read as a finite point within 3 m of the record's position.
 	bool CharacterChest(u32 crc, u32 record, float out[3]);
+	// Pure, through a reader (evening review m5): CharacterChest's reads. Every read goes through read (masked and bounded
+	// in the live one); the record, model and bone pointers word aligned in main RAM (masked, above 1 MB); bone 11 below
+	// the model's real bone count (u16 at model + 0x816, as cave U and VrBody check).
+	bool ChestFrom(const Reader& read, u32 record, float out[3]);
 
 	// Live (CPU thread, from CameraDriver::ApplyLookAt while first person writes the eye): File #1 only, the switch on.
 	// head: the character's head (its position + the eye height); eye in, the stopped eye out. Returns true when it ran.

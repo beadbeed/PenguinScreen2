@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/CutsceneView.h"
+#include "VR/StereoState.h"
 
 #include "common/Console.h"
 
@@ -108,6 +109,37 @@ namespace VR::CutsceneView
 		out_quat[1] = inv[3] * h[1] - inv[0] * h[2] + inv[1] * h[3] + inv[2] * h[0];
 		out_quat[2] = inv[3] * h[2] + inv[0] * h[1] - inv[1] * h[0] + inv[2] * h[3];
 		out_quat[3] = inv[3] * h[3] - inv[0] * h[0] - inv[1] * h[1] - inv[2] * h[2];
+	}
+
+	GateStep StepGate(WindowGate& g, bool want, bool black, bool can_blink, bool force, u64 now_ms, u32 rise_ms)
+	{
+		if (want == g.shown)
+		{
+			g.due_ms = 0;
+			return GateStep::Hold;
+		}
+		if (force || black || !can_blink)
+		{
+			Flip(g, want);
+			return GateStep::Flipped;
+		}
+		if (g.due_ms == 0)
+		{
+			g.due_ms = std::max<u64>(1, now_ms + rise_ms);
+			return GateStep::StartBlink;
+		}
+		if (now_ms >= g.due_ms)
+		{
+			Flip(g, want);
+			return GateStep::Flipped;
+		}
+		return GateStep::Hold;
+	}
+
+	void Flip(WindowGate& g, bool want)
+	{
+		g.shown = want;
+		g.due_ms = 0;
 	}
 
 	bool SelfTest()
@@ -220,6 +252,57 @@ namespace VR::CutsceneView
 			EyeProjection::GameCamera none;
 			const float pl[2][3] = {{-0.032f, 0.0f, 0.0f}, {0.032f, 0.0f, 0.0f}};
 			check(!BuildEyes(none, pl, kWindowM, e), "no camera: refused");
+		}
+
+		// 7. The window's edges under a blink (evening review m8).
+		{
+			WindowGate g;
+			check(StepGate(g, false, false, true, false, 1000, 40) == GateStep::Hold && !g.shown, "gate: nothing wanted");
+			check(StepGate(g, true, false, true, false, 1000, 40) == GateStep::StartBlink && !g.shown && g.due_ms == 1040,
+				"gate: up: a blink first, the world screen until it has risen");
+			check(StepGate(g, true, false, true, false, 1020, 40) == GateStep::Hold && !g.shown, "gate: up: still rising");
+			check(StepGate(g, true, false, true, false, 1040, 40) == GateStep::Flipped && g.shown && g.due_ms == 0,
+				"gate: up once the blink is black");
+			check(StepGate(g, true, false, true, false, 1100, 40) == GateStep::Hold && g.shown, "gate: held up");
+			check(StepGate(g, false, false, true, false, 2000, 40) == GateStep::StartBlink && g.shown, "gate: down: a blink first");
+			check(StepGate(g, true, false, true, false, 2010, 40) == GateStep::Hold && g.shown && g.due_ms == 0,
+				"gate: wanted back before the flip: nothing changes");
+			check(StepGate(g, false, true, true, false, 2100, 40) == GateStep::Flipped && !g.shown,
+				"gate: the view already black (the mode switch's blink): at once");
+			check(StepGate(g, true, false, false, false, 2200, 40) == GateStep::Flipped && g.shown, "gate: no blink can be drawn: at once");
+			check(StepGate(g, false, false, true, true, 2300, 40) == GateStep::Flipped && !g.shown, "gate: forced (first person): at once");
+			Flip(g, true);
+			check(g.shown && g.due_ms == 0, "gate: a blink that could not start flips at once");
+		}
+
+		// 8. The request/used hand-off without a lock per draw (evening review m11): what a draw gets is still the newest.
+		{
+			StereoState::CutsceneEyes req, got;
+			StereoState::SetCutsceneRequest(req);
+			check(!StereoState::CutsceneRequest(&got), "hand-off: no request");
+			req.valid = true;
+			req.pos_m[0][0] = -0.03f;
+			StereoState::SetCutsceneRequest(req);
+			check(StereoState::CutsceneRequest(&got) && got.pos_m[0][0] == -0.03f, "hand-off: the request");
+			check(StereoState::CutsceneRequest(&got) && got.pos_m[0][0] == -0.03f, "hand-off: the same request, again");
+			req.pos_m[0][0] = -0.05f;
+			StereoState::SetCutsceneRequest(req);
+			check(StereoState::CutsceneRequest(&got) && got.pos_m[0][0] == -0.05f, "hand-off: a new request is seen at once");
+			StereoState::SetCutsceneRequest(StereoState::CutsceneEyes{});
+			check(!StereoState::CutsceneRequest(&got), "hand-off: cleared");
+			float p[2][3] = {{-0.03f, 0.0f, 0.0f}, {0.03f, 0.0f, 0.0f}}, f[2][4] = {{-0.5f, 0.5f, 0.4f, -0.4f}, {-0.5f, 0.5f, 0.4f, -0.4f}};
+			float tp[2][3], tf[2][4];
+			StereoState::TakeCutsceneUsed(tp, tf);
+			StereoState::SetCutsceneUsed(p, f);
+			StereoState::SetCutsceneUsed(p, f);
+			check(StereoState::TakeCutsceneUsed(tp, tf) && tp[1][0] == 0.03f && tf[0][2] == 0.4f, "hand-off: used, taken");
+			check(!StereoState::TakeCutsceneUsed(tp, tf), "hand-off: taken once");
+			StereoState::SetCutsceneUsed(p, f);
+			check(StereoState::TakeCutsceneUsed(tp, tf), "hand-off: the same eyes after a take are recorded again (the next frame)");
+			StereoState::SetCutsceneUsed(p, f);
+			f[1][1] = 0.6f;
+			StereoState::SetCutsceneUsed(p, f);
+			check(StereoState::TakeCutsceneUsed(tp, tf) && tf[1][1] == 0.6f, "hand-off: changed eyes before a take: the newest");
 		}
 
 		if (fails.empty())

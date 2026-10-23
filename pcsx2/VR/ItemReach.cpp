@@ -917,6 +917,7 @@ namespace VR::ItemReach
 		bool s_pickup_active = false;
 		const char* s_pickup_wait = nullptr;
 		u32 s_pickup_said_node = 0; // the highlighted node last said in the log (0 none)
+		std::atomic<u32> s_pickup_walled{0}; // HandPickup's walled node (evening review m7)
 
 		void PickupWait(const char* why)
 		{
@@ -937,6 +938,7 @@ namespace VR::ItemReach
 			s_pickup = PickupTarget{};
 			s_pickup.serial = serial;
 			s_pickup_said_node = 0;
+			s_pickup_walled.store(0, std::memory_order_relaxed);
 			if (s_hand.published)
 				PublishMark(nullptr);
 		}
@@ -1069,8 +1071,9 @@ namespace VR::ItemReach
 					for (int k = 0; k < 3; k++)
 						next.point[k] = static_cast<float>(pt[k]);
 				}
-				// Squeezable only where the game's own search would pick this very item.
+				// Squeezable only where the game's own search would pick this very item, and not behind a wall (HandPickup).
 				next.highlighted = next.point_ok;
+				ApplyWalled(next, s_pickup_walled.load(std::memory_order_relaxed));
 			}
 
 			// The box: dim within show, brighter within 20 cm, brightest while highlighted.
@@ -1125,6 +1128,18 @@ namespace VR::ItemReach
 	PickupTarget CurrentPickup()
 	{
 		return s_pickup;
+	}
+
+	void SetPickupWalled(u32 node)
+	{
+		s_pickup_walled.store(node, std::memory_order_relaxed);
+	}
+
+	void ApplyWalled(PickupTarget& t, u32 walled_node)
+	{
+		t.walled = t.highlighted && walled_node != 0 && t.node == walled_node;
+		if (t.walled)
+			t.highlighted = false;
 	}
 
 	void PollHandTarget(const ProfileDB::Profile* profile, const Live& live, u64 now_ms, float haptic_strength)
@@ -2045,6 +2060,24 @@ namespace VR::ItemReach
 			c[1].horizontal_cm = 0.0;
 			c[1].vertical_cm = 5.0;
 			check(ChoosePickupHand(c, 6.0, 45.0, &hl) == 1 && hl, "hand: 5 cm above the volume is within near");
+
+			// Evening review m7: a walled target does not look squeezable.
+			{
+				PickupTarget t;
+				t.valid = t.highlighted = t.point_ok = true;
+				t.node = 0x00ABC000;
+				ApplyWalled(t, 0);
+				check(t.highlighted && !t.walled, "walled: none, the item stays highlighted");
+				ApplyWalled(t, 0x00ABD000);
+				check(t.highlighted && !t.walled, "walled: another node, this one stays highlighted");
+				ApplyWalled(t, 0x00ABC000);
+				check(!t.highlighted && t.walled && t.point_ok, "walled: this node, not highlighted (the box not brightest)");
+				PickupTarget far;
+				far.valid = true;
+				far.node = 0x00ABC000;
+				ApplyWalled(far, 0x00ABC000);
+				check(!far.highlighted && !far.walled, "walled: a target that was not highlighted is not called walled");
+			}
 
 			// Arm's reach (85 cm on the floor plane from the character's position; the height does not count).
 			const double near_hand[3] = {8493.5, 140.0, 12950.0};

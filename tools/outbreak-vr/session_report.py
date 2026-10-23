@@ -517,6 +517,9 @@ def parse_emulog(path: str) -> Log:
                     add("actions", on=False)
                 elif m.startswith("Controller actions active"):
                     add("actions", on=True)
+                elif m.startswith("Line of sight:"):
+                    # the hand's and the gun's wall test could not run (evening review m1)
+                    add("los_unknown", what="chest" if "chest" in m else "grid")
                 elif re.search(r"(?i)\bpick(ed)? ?up\b|\bobtained\b|take it\b", m) and "Pouches:" not in m:
                     add("pickup")
                 elif re.search(r"(?i)reload", m) and not m.startswith(("Spatial controls", "Feedback")):
@@ -1443,6 +1446,7 @@ def analyze_play(log: Log, rec: Rec | None) -> dict:
     out["pouch_nothing"] = len([e for e in log.of("pouch") if e.d.get("nothing")])
     out["recenters"] = len(log.of("recenter"))
     out["pickup_lines"] = log.of("pickup")
+    out["los_unknown"] = log.of("los_unknown")
     out["reload_other"] = log.of("reload_other")
     out["wrist_start"] = log.of("wrist")[0] if log.of("wrist") else None
     # ---- the recorder's view
@@ -2046,6 +2050,12 @@ def tbl_play(R_: R, clock: Clock):
         if not P["pickup_lines"]:
             bits.append("this build logs no pickup line")
         rows.append(["pickups / take-it reaches", str(len(prompts) or pk), "; ".join(bits)])
+    if P.get("los_unknown"):
+        grids = [e for e in P["los_unknown"] if e.d["what"] == "grid"]
+        chests = [e for e in P["los_unknown"] if e.d["what"] == "chest"]
+        rows.append(["line of sight not checked", str(len(P["los_unknown"])),
+                     f"{len(grids)} room(s) whose wall grid does not read, {len(chests)} time(s) the chest did not read; "
+                     f"e.g. '{clip(P['los_unknown'][0].msg, 70)}' (the hand and the gun then go unchecked)"])
     if P["rumble_on"]:
         rows.append(["game rumble", str(P["rumble_on"]), "forwarded to the controllers"])
     if P["pouch"]:

@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <map>
 
 namespace VR::HeadInWall
 {
@@ -86,6 +87,7 @@ namespace VR::HeadInWall
 			u8 header_b[0x20] = {};
 			u32 age = 0;
 			bool valid = false;
+			bool bad = false; // grid A refused for these headers (evening review m2): not read again until they change
 			Grid a, b;
 			bool logged_grid = false;
 		};
@@ -96,6 +98,17 @@ namespace VR::HeadInWall
 			NoHeader, // the headers did not read
 			BadGrid,  // grid A did not read as expected
 		};
+
+		// Whether the copy serves these headers (pure): Ok for a good copy, BadGrid for one refused for the same headers
+		// (evening review m2: a grid that does not read is not walked again on every call, only when a header, the room or
+		// the game changes, or after the usual 120 uses), NoHeader for "read it". Counts a use.
+		Refresh CachedVerdict(GridCache& c, u32 crc, u16 room, const u8 ha[0x20], const u8 hb[0x20])
+		{
+			if ((c.valid || c.bad) && c.crc == crc && c.room == room && std::memcmp(ha, c.header_a, 0x20) == 0 &&
+				std::memcmp(hb, c.header_b, 0x20) == 0 && ++c.age < 120)
+				return c.valid ? Refresh::Ok : Refresh::BadGrid;
+			return Refresh::NoHeader;
+		}
 
 		// CPU thread. changed: grid A's faces are new (a new room, or the first read).
 		Refresh RefreshGrid(GridCache& c, u32 crc, bool* changed)
@@ -108,11 +121,12 @@ namespace VR::HeadInWall
 			if (!ReadGuest(kGridA, 0x20, ha) || !ReadGuest(kGridB, 0x20, hb))
 			{
 				c.valid = false;
+				c.bad = false;
 				return Refresh::NoHeader;
 			}
-			if (c.valid && c.crc == crc && c.room == room && std::memcmp(ha, c.header_a, 0x20) == 0 &&
-				std::memcmp(hb, c.header_b, 0x20) == 0 && ++c.age < 120)
-				return Refresh::Ok;
+			const Refresh cached = CachedVerdict(c, crc, room, ha, hb);
+			if (cached != Refresh::NoHeader)
+				return cached;
 			c.crc = crc;
 			c.room = room;
 			std::memcpy(c.header_a, ha, 0x20);
@@ -123,9 +137,12 @@ namespace VR::HeadInWall
 			const bool ok_b = ReadGrid(read, kGridB, &b);
 			if (!ok_a)
 			{
+				// Known bad for these headers (they are kept): read again only when they, the room or the game change.
 				c.valid = false;
+				c.bad = true;
 				return Refresh::BadGrid;
 			}
+			c.bad = false;
 			if (changed)
 				*changed = !c.valid || a.face_addr != c.a.face_addr;
 			c.a = std::move(a);
@@ -528,10 +545,26 @@ namespace VR::HeadInWall
 		if (!Finite(va) || !Finite(vb) || !IsFile1(crc) || memRead32(kOverlay) != 3 || memRead8(kStatus) != 2)
 		{
 			s_lines.valid = false;
+			s_lines.bad = false;
 			return r;
 		}
-		if (RefreshGrid(s_lines, crc, nullptr) != Refresh::Ok)
+		const Refresh rf = RefreshGrid(s_lines, crc, nullptr);
+		if (rf != Refresh::Ok)
+		{
+			// Unknown, so the callers carry on unchecked: said once per room and game (evening review m1).
+			static u32 s_said_crc = 0;
+			static u32 s_said_room = 0xFFFFFFFFu;
+			const u32 room = memRead16(kRoom);
+			if (crc != s_said_crc || room != s_said_room)
+			{
+				s_said_crc = crc;
+				s_said_room = room;
+				Console.Warning("(VR) Line of sight: room %u's wall grid does not read (%s); the hand and the gun are not "
+								"checked against its walls here.",
+					room, rf == Refresh::NoHeader ? "its headers" : "grid A refused");
+			}
 			return r;
+		}
 		const u32 ignore = memRead32(kIgnoreMask);
 		const auto door_open = [](u32 slot) { return memRead8(kDoorState + slot * 0x60u) == 2; };
 		r.known = true;
@@ -540,8 +573,12 @@ namespace VR::HeadInWall
 		if (i >= 0)
 		{
 			r.blocked = true;
-			r.flags = s_lines.a.faces[static_cast<size_t>(i)].flags;
+			const Face& f = s_lines.a.faces[static_cast<size_t>(i)];
+			r.flags = f.flags;
 			r.t = t;
+			r.normal[0] = f.n.x;
+			r.normal[1] = f.n.y;
+			r.normal[2] = f.n.z;
 		}
 		std::vector<Face> dyn;
 		ReadDynamic(&dyn);
@@ -550,27 +587,30 @@ namespace VR::HeadInWall
 		if (j >= 0 && (!r.blocked || td < r.t))
 		{
 			r.blocked = true;
-			r.flags = dyn[static_cast<size_t>(j)].flags;
+			const Face& f = dyn[static_cast<size_t>(j)];
+			r.flags = f.flags;
 			r.t = td;
+			r.normal[0] = f.n.x;
+			r.normal[1] = f.n.y;
+			r.normal[2] = f.n.z;
 		}
 		return r;
 	}
 
-	bool CharacterChest(u32 crc, u32 record, float out[3])
+	bool ChestFrom(const Reader& read, u32 record, float out[3])
 	{
-		if (!IsFile1(crc) || record == 0)
+		if (record == 0)
 			return false;
 		const auto in_ram = [](u32 p) { return (p & 3) == 0 && (p & 0x1FFFFFFFu) >= 0x100000u && (p & 0x1FFFFFFFu) + 0x40 <= Ps2MemSize::MainRam; };
+		constexpr u32 kChestBone = 11;
 		if (!in_ram(record))
 			return false;
-		const u32 model = memRead32(record + 0x34);
-		if (!in_ram(model))
-			return false;
-		const u32 bone = memRead32(model + 0x820 + 11 * 4);
-		if (!in_ram(bone))
+		u32 model = 0, count_word = 0, bone = 0;
+		if (!read(record + 0x34, 4, &model) || !in_ram(model) || !read(model + 0x814, 4, &count_word) ||
+			kChestBone >= (count_word >> 16) || !read(model + 0x820 + kChestBone * 4, 4, &bone) || !in_ram(bone))
 			return false;
 		u32 w[3], pw[3];
-		if (!ReadGuest(bone + 0x30, 12, w) || !ReadGuest(record + 0x38, 12, pw))
+		if (!read(bone + 0x30, 12, w) || !read(record + 0x38, 12, pw))
 			return false;
 		Vec3 c, pos;
 		std::memcpy(&c, w, 12);
@@ -581,6 +621,16 @@ namespace VR::HeadInWall
 		out[1] = c.y;
 		out[2] = c.z;
 		return true;
+	}
+
+	bool CharacterChest(u32 crc, u32 record, float out[3])
+	{
+		// Every read masked and bounded (ReadGuest; evening review m5): a garbage pointer (the record mid-change) is refused
+		// instead of reaching the EE's TLB.
+		if (!IsFile1(crc))
+			return false;
+		const Reader read = [](u32 a, u32 n, void* o) { return ReadGuest(a, n, o); };
+		return ChestFrom(read, record, out);
 	}
 
 	int SelfTest()
@@ -798,6 +848,78 @@ namespace VR::HeadInWall
 			check(!ReadGrid(bad, 0x1000, &gb) && reads <= kMaxGridEntries + 64, "grid: a list without an end stops at the total cap");
 		}
 		Console.WriteLn("(VR) HeadInWall self-test: %d failure(s).", fail);
+		{
+			// ChestFrom (evening review m5): the record at 0x200000, its model at 0x210000, bone 11's matrix at 0x220000.
+			std::map<u32, u32> ram;
+			const auto putw = [&ram](u32 a, u32 v) { ram[a] = v; };
+			const auto putf = [&ram](u32 a, float f) {
+				u32 v;
+				std::memcpy(&v, &f, 4);
+				ram[a] = v;
+			};
+			const Reader rd = [&ram](u32 a, u32 n, void* o) {
+				for (u32 i = 0; i < n; i += 4)
+				{
+					const auto it = ram.find(a + i);
+					if (it == ram.end())
+						return false;
+					std::memcpy(static_cast<u8*>(o) + i, &it->second, 4);
+				}
+				return true;
+			};
+			putw(0x200034, 0x210000);
+			putf(0x200038, 100.0f);
+			putf(0x20003C, 0.0f);
+			putf(0x200040, 200.0f);
+			putw(0x210814, 36u << 16);
+			putw(0x210820 + 11 * 4, 0x220000);
+			putf(0x220030, 101.0f);
+			putf(0x220034, 128.0f);
+			putf(0x220038, 205.0f);
+			float c[3] = {};
+			check(ChestFrom(rd, 0x200000, c) && near(c[1], 128.0f) && near(c[2], 205.0f), "chest: bone 11 read");
+			putw(0x210814, 11u << 16);
+			check(!ChestFrom(rd, 0x200000, c), "chest: bone 11 past the model's bone count refused");
+			putw(0x210814, 36u << 16);
+			putw(0x200034, 0x40210000); // a garbage pointer: the read through the reader fails, nothing raw
+			check(!ChestFrom(rd, 0x200000, c), "chest: a model pointer that does not read refused");
+			putw(0x200034, 0x210002);
+			check(!ChestFrom(rd, 0x200000, c), "chest: an unaligned model pointer refused");
+			putw(0x200034, 0x210000);
+			putw(0x210820 + 11 * 4, 0x01FFFFF0);
+			check(!ChestFrom(rd, 0x200000, c), "chest: a bone pointer in the last bytes of RAM refused");
+			putw(0x210820 + 11 * 4, 0x220000);
+			putf(0x220034, 900.0f);
+			check(!ChestFrom(rd, 0x200000, c), "chest: a point over 3 m from the record refused");
+			check(!ChestFrom(rd, 0, c), "chest: no record");
+		}
+		{
+			// The copy's verdicts (evening review m2): a refused grid is not read again for the same headers.
+			GridCache c;
+			u8 ha[0x20] = {1}, hb[0x20] = {2};
+			check(CachedVerdict(c, 0x1234, 5, ha, hb) == Refresh::NoHeader, "cache: an empty copy is read");
+			c.crc = 0x1234;
+			c.room = 5;
+			std::memcpy(c.header_a, ha, 0x20);
+			std::memcpy(c.header_b, hb, 0x20);
+			c.bad = true;
+			check(CachedVerdict(c, 0x1234, 5, ha, hb) == Refresh::BadGrid, "cache: a refused grid is not read again");
+			u8 ha2[0x20] = {9};
+			check(CachedVerdict(c, 0x1234, 5, ha2, hb) == Refresh::NoHeader, "cache: a new header is read again");
+			check(CachedVerdict(c, 0x1234, 6, ha, hb) == Refresh::NoHeader, "cache: a new room is read again");
+			check(CachedVerdict(c, 0x9999, 5, ha, hb) == Refresh::NoHeader, "cache: a new game is read again");
+			c.age = 0;
+			int bad_uses = 0;
+			while (CachedVerdict(c, 0x1234, 5, ha, hb) == Refresh::BadGrid && bad_uses < 1000)
+				bad_uses++;
+			check(bad_uses == 119, "cache: a refused grid is read again after the usual 120 uses");
+			c.bad = false;
+			c.valid = true;
+			c.age = 0;
+			check(CachedVerdict(c, 0x1234, 5, ha, hb) == Refresh::Ok, "cache: a good copy serves");
+			c.valid = false;
+			check(CachedVerdict(c, 0x1234, 5, ha, hb) == Refresh::NoHeader, "cache: neither good nor refused: read");
+		}
 		return fail;
 	}
 } // namespace VR::HeadInWall

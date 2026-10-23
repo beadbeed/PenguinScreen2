@@ -4126,9 +4126,14 @@ namespace VR::CameraDriver
 			cut = in_cut && EmuConfig.VR.CutsceneStereo;
 			if (cut && cam.look_at.has_value())
 				PublishScreenIntrinsics(cam.look_at.value());
+			// The setting is read here every vsync (off takes effect at once), but the compositor takes it on only when VR
+			// starts (evening review m10): say so rather than claim a window this session does not show.
 			if (cut != s_cutscene_active.load(std::memory_order_relaxed))
-				Console.WriteLn("(VR) CutsceneStereo: %s.", cut ? "a cutscene: the game's camera in a stereo window" :
-				                                                   "the cutscene is over");
+				Console.WriteLn("(VR) CutsceneStereo: %s.",
+					!cut                                  ? "the cutscene is over" :
+					StereoState::CutsceneStereoActive() ? "a cutscene: the game's camera in a stereo window" :
+					                                        "a cutscene (not active this session: the stereo window is taken on only when "
+					                                        "VR starts, with PacerCopies off)");
 			s_cutscene_active.store(cut, std::memory_order_release);
 			s_cutscene_stamp_ms.store(NowMs(), std::memory_order_release);
 		}
