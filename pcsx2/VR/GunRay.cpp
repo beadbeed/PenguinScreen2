@@ -6,6 +6,7 @@
 #include "VR/GameFeedback.h"
 #include "VR/HandModel.h"
 #include "VR/ItemData.h"
+#include "VR/PhysicalMelee.h"
 #include "VR/SplitState.h"
 #include "VR/VRProfileDB.h"
 
@@ -318,6 +319,7 @@ namespace VR::GunRay
 		u32 s_obj_last_shots = 0;
 		u32 s_obj_last_flashes = 0;
 		std::atomic<bool> s_obj_live{false};
+		bool s_refused_logged = false, s_obj_refused_logged = false;
 		float s_obj_muzzle[3] = {};
 		std::string s_obj_verdict;
 
@@ -542,7 +544,16 @@ namespace VR::GunRay
 			}
 			u32 counter = 0;
 			float m[16], origin[3];
-			if (ray && CameraDriver::GetMapping(&map) && RayToGame(from, dir, MapPoint, &map, og, dg) &&
+			// Before the first write the block must read zero or ours (night review m4).
+			const bool blk_free = s_armed || PhysicalMelee::RegionFreeOrOurs(reader, mp->gun_block, mp->gun_block + kBlockBytes,
+											 mp->gun_block + kOffMagic, mp->gun_magic);
+			if (!blk_free && !s_refused_logged)
+			{
+				s_refused_logged = true;
+				Console.Warning("(VR) Gun ray: the block at 0x%X holds someone else's words; the gun ray stays off while it does.",
+					mp->gun_block);
+			}
+			if (blk_free && ray && CameraDriver::GetMapping(&map) && RayToGame(from, dir, MapPoint, &map, og, dg) &&
 				ShotFrame(og, dg, back, m, origin) && Read(reader, mp->counter, 1, &counter))
 			{
 				const u32 b = mp->gun_block;

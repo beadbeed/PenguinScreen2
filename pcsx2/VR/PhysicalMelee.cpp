@@ -2021,6 +2021,14 @@ namespace VR::PhysicalMelee
 		return true;
 	}
 
+	bool RegionFreeOrOurs(GuestReader reader, u32 lo, u32 hi, u32 magic_addr, u32 magic)
+	{
+		u32 w = 0;
+		if (magic != 0 && Read(reader, magic_addr, 4, &w) && w == magic)
+			return true;
+		return RegionZero(reader, lo, hi);
+	}
+
 	bool CoopOverrideLive()
 	{
 		if (!s_coop_live)
@@ -2117,6 +2125,19 @@ namespace VR::PhysicalMelee
 		c(!RegionZero(TestRead, 0x820000, 0x820100, &busy) && busy == 0x820080, "free RAM: a word in use is found");
 		c(RegionZero(TestRead, 0x820000, 0x820080), "free RAM: the range ends before it");
 		c(!RegionZero(TestRead, 0x820000, 0x820200), "free RAM: unreadable memory is not clear");
+		s_test_mem.fill(0);
+		c(RegionFreeOrOurs(TestRead, 0x820000, 0x820010, 0x820000, 0x474F4231), "free or ours: all zero");
+		s_test_mem[2] = 7;
+		c(!RegionFreeOrOurs(TestRead, 0x820000, 0x820010, 0x820000, 0x474F4231), "free or ours: someone else's word refuses");
+		s_test_mem[0] = 0x474F4231;
+		c(RegionFreeOrOurs(TestRead, 0x820000, 0x820010, 0x820000, 0x474F4231), "free or ours: our magic (a block we wrote)");
+		s_test_mem[0] = 0x474F4232;
+		c(!RegionFreeOrOurs(TestRead, 0x820000, 0x820010, 0x820000, 0x474F4231), "free or ours: another magic is not ours");
+		s_test_mem.fill(0);
+		s_test_mem[2] = 7;
+		c(!RegionFreeOrOurs(TestRead, 0x820000, 0x820010, 0x820000, 0), "free or ours: a zero magic never counts as ours");
+		s_test_mem.fill(0);
+		c(!RegionFreeOrOurs(TestRead, 0x820000, 0x820200, 0x820000, 0x474F4231), "free or ours: unreadable memory is not free");
 		return c.failures;
 	}
 
@@ -3289,7 +3310,16 @@ namespace VR::PhysicalMelee
 		if (!wrote)
 			ClearBlock();
 		// Cave H's word: the attack while a fist or the gun hand may strike, else back to zero.
-		if (wrote && fist_usable)
+		// Before the first write, the two words must read zero or ours (night review m4).
+		static bool s_fist_refused_logged = false;
+		const bool fist_free = s_fist_armed || RegionFreeOrOurs(reader, mp->fist_word, mp->fist_word + 8, mp->fist_word, mp->fist_magic);
+		if (wrote && fist_usable && !fist_free && !s_fist_refused_logged)
+		{
+			s_fist_refused_logged = true;
+			Console.Warning("(VR) PhysicalMelee: cave H's word at 0x%X holds someone else's words; the fists stay off while it does.",
+				mp->fist_word);
+		}
+		if (wrote && fist_usable && fist_free)
 		{
 			memWrite32(mp->fist_word + 4, mp->fist_attack + 1);
 			memWrite32(mp->fist_word, mp->fist_magic);
