@@ -25,6 +25,12 @@ namespace VR::CameraDriver
 	// True while camera.lookAt is driving the game camera (any thread).
 	bool LookAtActive();
 
+	// [VR] CutsceneStereo: the game is playing a real-time cutscene (camera.cutscene) with first person handed back
+	// (any thread; lapses 250 ms after Apply last decided it).
+	bool CutsceneActive();
+	// The same whatever [VR] CutsceneStereo says (the stereo dump, test aids).
+	bool InCutscene();
+
 	// Comfort vignette: how much the view is moving without the head right now, 0-1. The larger of a smooth stick
 	// turn's rate against lookAt.smoothTurnDegPerSec and walking (the move stick's push, or the character's own
 	// speed against a brisk walk), eased in over about 0.15 s and out over 0.3 s. Snap turns count nothing (the

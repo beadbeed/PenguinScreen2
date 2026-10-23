@@ -274,6 +274,13 @@ SLPM-65428:
     # (research/2026-10-14-doors.md). With VR SeamlessDoors and DoorVeil (on), one that starts while first person is armed
     # is shown black until first person's own frames are back on screen, so none of the room camera's frames show.
     roomLoad: [{ address: 0x48BF60, equals: 3, width: 1 }]
+    # A real-time cutscene: scenario status 4 (handler 0x5CE2F0; entered from 2 when script op 0x62 sets u8 0x48BF88, the host
+    # broadcasting the start in co-op). The cutscene player 0x5BD690 keys the camera (eye 0x306338, target 0x306344, FOV
+    # 0x306380, roll 0x30638C) through 0x590400 / 0x5908A0, and the frame draw 0x341B80 rebuilds the view 0x3062E0 and the
+    # screen matrix 0x2771A0 from them with 0x345740 each frame (u8 0x35FFFF == 1 is the other kind, drawn by the minimal
+    # frame 0x341AF0: no 3D). With VR CutsceneStereo (on) it is shown in stereo through a world-locked window, the game's own
+    # camera as the director placed it; nothing in the game is written (research/2026-10-22-cutscene-vr.md).
+    cutscene: [{ address: 0x48BF60, equals: 4, width: 1 }]
     silence:
       - { address: 0x58EAEC, on: 0x00000000, off: 0x0C163B1C, when: [{ address: 0x540004, equals: 3 }] }   # fixed-cut handler
       - { address: 0x58EAFC, on: 0x00000000, off: 0x0C163C8C, when: [{ address: 0x540004, equals: 3 }] }   # spline cut handler

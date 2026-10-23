@@ -463,6 +463,9 @@ namespace VR::ProfileDB
 		// roomLoad: guards that all hold while the game changes rooms (File #1: scenario status 0x48BF60 == 3, the fade
 		// out, the load and the fade in). [VR] DoorVeil shows that black when it starts from first person. Empty: none.
 		std::vector<CameraGuard> room_load;
+		// cutscene: guards that all hold while the game plays a real-time cutscene from its own camera (File #1: scenario
+		// status 0x48BF60 == 4). [VR] CutsceneStereo shows it in stereo through a world-locked window. Empty: none.
+		std::vector<CameraGuard> cutscene;
 		// u8 the game sets to 1 while it is in network play (Outbreak File #1 0x3065C2). Read every vsync to
 		// tell online from offline even when the network adapter setting can't (the setting is per emulator).
 		std::optional<u32> network_flag;

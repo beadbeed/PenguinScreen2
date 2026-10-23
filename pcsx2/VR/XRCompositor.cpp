@@ -6,6 +6,7 @@
 #include "VR/DepthExport.h"
 #include "VR/DepthWarp.h"
 #include "VR/EyeProjection.h"
+#include "VR/CutsceneView.h"
 #include "VR/StereoState.h"
 #include "VR/SplitState.h"
 #include "VR/ControlQuads.h"
@@ -93,6 +94,8 @@ namespace VR::XRCompositor
 		bool s_fp_screen_was_active = false;
 		// The menu tablet is the screen in use (GS thread, like s_fp_screen_was_active; never both).
 		bool s_tablet_was_active = false;
+		// [VR] CutsceneStereo: the world screen was the cutscene window at the last present (GS thread).
+		bool s_cut_window_was = false;
 		std::mutex s_screen_mutex;
 		ScreenParams s_screen_params;
 
@@ -589,6 +592,14 @@ namespace VR::XRCompositor
 			// [VR] TrueStereo (Initialize): on for this session (not PacerCopies); this present's eyes (GS thread).
 			bool true_stereo = false;
 			FpTrue present_true;
+			// [VR] CutsceneStereo (Initialize): on for this session (the setting, not PacerCopies); whether this present's
+			// world screen is the cutscene window with present_true holding the eyes its frame was drawn for (relative to
+			// the cutscene camera: the world anchor, facing its yaw), and the eyes the shown frame was drawn for (GS thread).
+			bool cutscene_stereo = false;
+			bool present_cut = false;
+			bool cut_shown_valid = false;
+			float cut_shown_pos[2][3] = {};
+			float cut_shown_fov[2][4] = {};
 			// [VR] DepthWarp: this present's frame in the warp's ring (WarpCopyFrame), for the publish (GS thread).
 			FpWarp present_warp;
 
@@ -6826,7 +6837,7 @@ namespace VR::XRCompositor
 			}
 			next.serial = prev.serial + 1;
 			next.fp_depth = fp_screen ? s.present_depth : FpDepth{};
-			next.fp_true = fp_screen ? s.present_true : FpTrue{};
+			next.fp_true = (fp_screen || s.present_cut) ? s.present_true : FpTrue{};
 			next.fp_warp = s.present_warp;
 			if (!fp_screen)
 				next.fp_warp.eyes_placed = false;
@@ -7239,7 +7250,9 @@ namespace VR::XRCompositor
 			// [VR] DepthLayer: the first-person screen's quads go as one projection layer, in the first one's position.
 			// m8: only with one Screen quad per eye (or one for both). A split-screen first person has several viewports
 			// per eye, and one projection view per eye would drop all but the first: those go as quads, without depth.
-			bool depth_proj = set.fp_screen && (set.fp_depth.valid || set.fp_true.valid);
+			// [VR] CutsceneStereo: the world screen's eye quads as the cutscene window's projection layer (fp_true holds its
+			// eyes, fp_head the cutscene camera's place).
+			bool depth_proj = (set.fp_screen && (set.fp_depth.valid || set.fp_true.valid)) || (!set.fp_screen && set.fp_true.valid);
 			if (depth_proj)
 			{
 				u32 per_eye[2] = {0, 0};
@@ -7288,6 +7301,19 @@ namespace VR::XRCompositor
 				                        BuildDepthProjection(set, eye_quad[0], eye_quad[1], turn))
 				{
 					out[proj_at] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&set.fp_proj);
+					static std::atomic_bool s_cut_proj_logged{false};
+					if (!set.fp_screen && !s_cut_proj_logged.exchange(true))
+					{
+						constexpr float kDeg = 180.0f / 3.14159265f;
+						const XrCompositionLayerProjectionView& l = set.fp_views[0];
+						const XrCompositionLayerProjectionView& r = set.fp_views[1];
+						Console.WriteLn("(VR) CutsceneStereo: first window projection layer: left eye at (%.3f, %.3f, %.3f), right at "
+										"(%.3f, %.3f, %.3f) m; fov left %.1f/%.1f/%.1f/%.1f, right %.1f/%.1f/%.1f/%.1f deg; %dx%d.",
+							l.pose.position.x, l.pose.position.y, l.pose.position.z, r.pose.position.x, r.pose.position.y,
+							r.pose.position.z, l.fov.angleLeft * kDeg, l.fov.angleRight * kDeg, l.fov.angleUp * kDeg,
+							l.fov.angleDown * kDeg, r.fov.angleLeft * kDeg, r.fov.angleRight * kDeg, r.fov.angleUp * kDeg,
+							r.fov.angleDown * kDeg, l.subImage.imageRect.extent.width, l.subImage.imageRect.extent.height);
+					}
 				}
 				else
 				{
@@ -10876,6 +10902,23 @@ namespace VR::XRCompositor
 			}
 		}
 		StereoState::SetTrueStereoActive(s.true_stereo);
+		// [VR] CutsceneStereo: the game's real-time cutscenes through a world-locked stereo window (VR/CutsceneView.h).
+		s.cutscene_stereo = false;
+		s_cut_window_was = false;
+		StereoState::SetCutsceneRequest(StereoState::CutsceneEyes{});
+		if (EmuConfig.VR.CutsceneStereo)
+		{
+			if (pc.on)
+				Console.Warning("(VR) CutsceneStereo: off: it needs [VR] PacerCopies off.");
+			else
+			{
+				s.cutscene_stereo = true;
+				Console.WriteLn("(VR) CutsceneStereo: on: cutscenes from the game's own camera through a world-locked stereo "
+								"window, %.1f m ahead at the camera's field of view, each eye's view through it (look-around "
+								"clamped softly at %.0f cm).",
+					CutsceneView::kWindowM, 100.0f * CutsceneView::kMaxOffsetM);
+			}
+		}
 		if (EmuConfig.VR.DepthWarp && s.true_stereo)
 		{
 			Console.Warning("(VR) Depth warp: off: [VR] TrueStereo is on (the warp redraws a screen image; the eyes' own "
@@ -11445,6 +11488,74 @@ namespace VR::XRCompositor
 			const bool fp_screen = s_fp_screen_was_active;
 			const bool tablet = !fp_screen && s_tablet_was_active;
 			pub_fp_screen = fp_screen;
+			// [VR] CutsceneStereo: a real-time cutscene on the world screen is the cutscene window: the game's camera at the
+			// world anchor (the head as the screen took over, level), the window its image plane CutsceneView::kWindowM ahead
+			// at its field of view, each eye's layer drawn by the GS through it from that eye (a projection layer of the
+			// eyes, built from the eye quads in BuildSubmitArray). Held while a switch back to first person waits for its
+			// blink, so the window is not swapped for a flat screen in sight.
+			const bool cut_window = s.cutscene_stereo && !fp_screen && !tablet && s.head_pose_valid && !SplitState::Active() &&
+			                        (CameraDriver::CutsceneActive() || (s_cut_window_was && s.fp_switch_due_ms != 0));
+			if (cut_window != s_cut_window_was)
+				Console.WriteLn("(VR) CutsceneStereo: %s.", cut_window ? "the cutscene window is up" : "the cutscene window is down");
+			s_cut_window_was = cut_window;
+			s.present_cut = false;
+			if (cut_window)
+			{
+				// The frame on screen: drawn with the eyes the GS last used (taken each present they changed).
+				float used_pos[2][3], used_fov[2][4];
+				if (StereoState::TakeCutsceneUsed(used_pos, used_fov))
+				{
+					std::memcpy(s.cut_shown_pos, used_pos, sizeof(used_pos));
+					std::memcpy(s.cut_shown_fov, used_fov, sizeof(used_fov));
+					s.cut_shown_valid = true;
+				}
+				if (s.cut_shown_valid)
+				{
+					for (int e = 0; e < 2; e++)
+					{
+						s.present_true.eye[e].position = {s.cut_shown_pos[e][0], s.cut_shown_pos[e][1], s.cut_shown_pos[e][2]};
+						s.present_true.eye[e].orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+						s.present_true.fov[e] = {s.cut_shown_fov[e][0], s.cut_shown_fov[e][1], s.cut_shown_fov[e][2],
+							s.cut_shown_fov[e][3]};
+					}
+					s.present_true.valid = true;
+					s.present_cut = true;
+					pub_fp_head = {s.world_anchor_x, s.world_anchor_y, s.world_anchor_z};
+				}
+				// The frames to come: the eyes from the head now, in the anchor's frame, the lean softly clamped.
+				const XrPosef& hp = s.head_pose;
+				const float head_pos[3] = {hp.position.x, hp.position.y, hp.position.z};
+				const float head_quat[4] = {hp.orientation.x, hp.orientation.y, hp.orientation.z, hp.orientation.w};
+				const float anchor[3] = {s.world_anchor_x, s.world_anchor_y, s.world_anchor_z};
+				float rel_pos[3], rel_quat[4];
+				CutsceneView::HeadInAnchor(s.head_position_valid ? head_pos : anchor, head_quat, anchor, s.world_anchor_yaw,
+					rel_pos, rel_quat);
+				const EyeInfo ei = GetEyeInfo();
+				StereoState::CutsceneEyes req;
+				CutsceneView::EyePositions(rel_pos, rel_quat, (ei.valid && ei.ipd_m > 0.04f && ei.ipd_m < 0.09f) ? ei.ipd_m : 0.064f,
+					CutsceneView::kMaxOffsetM, req.pos_m);
+				req.window_m = CutsceneView::kWindowM;
+				req.valid = true;
+				StereoState::SetCutsceneRequest(req);
+				static bool s_cut_logged = false;
+				if (s.present_cut && !s_cut_logged)
+				{
+					s_cut_logged = true;
+					constexpr float kDeg = 180.0f / 3.14159265f;
+					Console.WriteLn("(VR) CutsceneStereo: first window frame: eyes (%.3f, %.3f, %.3f) / (%.3f, %.3f, %.3f) m from "
+									"the camera, right eye fov %.1f/%.1f/%.1f/%.1f deg.",
+						s.cut_shown_pos[0][0], s.cut_shown_pos[0][1], s.cut_shown_pos[0][2], s.cut_shown_pos[1][0],
+						s.cut_shown_pos[1][1], s.cut_shown_pos[1][2], s.cut_shown_fov[1][0] * kDeg, s.cut_shown_fov[1][1] * kDeg,
+						s.cut_shown_fov[1][2] * kDeg, s.cut_shown_fov[1][3] * kDeg);
+				}
+			}
+			else
+			{
+				StereoState::SetCutsceneRequest(StereoState::CutsceneEyes{});
+				float drain_pos[2][3], drain_fov[2][4];
+				StereoState::TakeCutsceneUsed(drain_pos, drain_fov); // the next window starts from its own frames
+				s.cut_shown_valid = false;
+			}
 
 			// First-person screen: placed in the room (base space) in front of the head pose the shown
 			// frame was rendered from (matched through the game's view matrix when the profile names it,
@@ -11563,7 +11674,7 @@ namespace VR::XRCompositor
 			const float arc_deg = fp_screen ? sp.fp_arc_deg : (tablet ? 0.0f : sp.arc_deg);
 			const float voffset = (fp_screen || tablet) ? 0.0f : sp.voffset;
 			const float aspect = ComputeAspect();
-			const bool curved = (arc_deg >= 5.0f) && XRSession::HasCylinderLayer();
+			const bool curved = !cut_window && (arc_deg >= 5.0f) && XRSession::HasCylinderLayer();
 			if (fp_screen && !curved && distance > 0.0f)
 			{
 				fill_geo = true;
@@ -11586,7 +11697,7 @@ namespace VR::XRCompositor
 			const XrVector3f tablet_pos = {s.world_anchor_x - sp.menu_distance * ayaw_sin, s.world_anchor_y - sp.menu_drop,
 				s.world_anchor_z - sp.menu_distance * ayaw_cos};
 
-			const bool follow = !fp_screen && !tablet && sp.follow_head && (s.view_space != XR_NULL_HANDLE);
+			const bool follow = !fp_screen && !tablet && !cut_window && sp.follow_head && (s.view_space != XR_NULL_HANDLE);
 			const XrSpace layer_space = follow ? s.view_space : XRSession::GetSpace();
 			const XrQuaternionf follow_quat = {0.0f, 0.0f, 0.0f, 1.0f};
 
@@ -12044,7 +12155,7 @@ namespace VR::XRCompositor
 		FillPublishedSet(&set, layers, layer_count, sources);
 		ParkFreeSlots(&set);
 		set.fp_depth = pub_fp_screen ? s.present_depth : FpDepth{};
-		set.fp_true = pub_fp_screen ? s.present_true : FpTrue{};
+		set.fp_true = (pub_fp_screen || s.present_cut) ? s.present_true : FpTrue{};
 		set.fp_screen = pub_fp_screen;
 		set.fp_head = pub_fp_head;
 		set.fp_image = pub_fp_image;

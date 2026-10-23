@@ -2648,6 +2648,11 @@ namespace VR::CameraDriver
 		}
 
 		std::atomic_bool s_lookat_active{false};
+		// [VR] CutsceneStereo: a real-time cutscene is playing (camera.cutscene holds, first person disarmed), and when
+		// that was last decided (CutsceneActive lapses when Apply stops deciding).
+		std::atomic_bool s_cutscene_active{false};
+		std::atomic_bool s_cutscene_game{false}; // the same with the switch off (the stereo dump's test aid)
+		std::atomic<u64> s_cutscene_stamp_ms{0};
 		std::atomic<u64> s_lookat_stamp_ms{0};
 		bool s_fov_saved = false;
 		u32 s_fov_saved_raw = 0;
@@ -2798,19 +2803,24 @@ namespace VR::CameraDriver
 
 		// Before this vsync's write: if the view matrix changed since the last vsync, the game built a frame
 		// from one of the earlier writes. Match it and queue that write's head pose for the frame.
+		// [VR] TrueStereo and CutsceneStereo: the game's screen intrinsics, for the GS's per-eye vertex map
+		// (VR/EyeProjection.h). Read only.
+		void PublishScreenIntrinsics(const ProfileDB::CameraLookAt& la)
+		{
+			if (la.screen_matrix_address == 0)
+				return;
+			const auto rd = [&la](u32 i) {
+				return std::bit_cast<float>(static_cast<u32>(memRead32(la.screen_matrix_address + i * 4)));
+			};
+			const float fx = rd(0), fy = rd(5), cx = -rd(8), cy = -rd(9);
+			if (std::isfinite(fx) && std::isfinite(fy) && std::isfinite(cx) && std::isfinite(cy) && std::abs(fx) > 1.0f &&
+				std::abs(fy) > 1.0f)
+				StereoState::PublishGameCamera(fx, fy, cx, cy);
+		}
+
 		void TrackRenderPose(const ProfileDB::CameraLookAt& la)
 		{
-			// [VR] TrueStereo: the game's screen intrinsics, for the GS's per-eye vertex map (VR/EyeProjection.h).
-			if (la.screen_matrix_address != 0)
-			{
-				const auto rd = [&la](u32 i) {
-					return std::bit_cast<float>(static_cast<u32>(memRead32(la.screen_matrix_address + i * 4)));
-				};
-				const float fx = rd(0), fy = rd(5), cx = -rd(8), cy = -rd(9);
-				if (std::isfinite(fx) && std::isfinite(fy) && std::isfinite(cx) && std::isfinite(cy) && std::abs(fx) > 1.0f &&
-					std::abs(fy) > 1.0f)
-					StereoState::PublishGameCamera(fx, fy, cx, cy);
-			}
+			PublishScreenIntrinsics(la);
 			if (la.view_matrix_address == 0)
 				return;
 			float m[16];
@@ -4101,6 +4111,28 @@ namespace VR::CameraDriver
 			}
 		}
 
+		// [VR] CutsceneStereo: a real-time cutscene (camera.cutscene, File #1 status 4) with first person handed back. The
+		// game's own camera draws it; the compositor shows it through a world-locked stereo window and the GS maps each
+		// eye's vertices (VR/CutsceneView.h). Read only: the screen matrix for the eyes' intrinsics, nothing written.
+		// Paused: held as it is.
+		{
+			bool cut = s_cutscene_active.load(std::memory_order_relaxed);
+			bool in_cut = s_cutscene_game.load(std::memory_order_relaxed);
+			if (vm_state == VMState::Running)
+				in_cut = switched_on && !cam.cutscene.empty() && !armed && GuardListPass(cam.cutscene);
+			else if (!switched_on)
+				in_cut = false;
+			s_cutscene_game.store(in_cut, std::memory_order_release);
+			cut = in_cut && EmuConfig.VR.CutsceneStereo;
+			if (cut && cam.look_at.has_value())
+				PublishScreenIntrinsics(cam.look_at.value());
+			if (cut != s_cutscene_active.load(std::memory_order_relaxed))
+				Console.WriteLn("(VR) CutsceneStereo: %s.", cut ? "a cutscene: the game's camera in a stereo window" :
+				                                                   "the cutscene is over");
+			s_cutscene_active.store(cut, std::memory_order_release);
+			s_cutscene_stamp_ms.store(NowMs(), std::memory_order_release);
+		}
+
 		if (armed != s_armed_logged)
 		{
 			// Each time first person takes over (after a door, cutscene or menu) the camera faces the
@@ -4752,6 +4784,18 @@ namespace VR::CameraDriver
 			return false;
 		*out = best->pose;
 		return true;
+	}
+
+	bool CutsceneActive()
+	{
+		return s_cutscene_active.load(std::memory_order_acquire) &&
+		       NowMs() - s_cutscene_stamp_ms.load(std::memory_order_acquire) < 250;
+	}
+
+	bool InCutscene()
+	{
+		return s_cutscene_game.load(std::memory_order_acquire) &&
+		       NowMs() - s_cutscene_stamp_ms.load(std::memory_order_acquire) < 250;
 	}
 
 	bool LookAtActive()
