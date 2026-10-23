@@ -47,6 +47,14 @@ namespace VR::GunRay
 	// zero or non-finite direction, a non-finite muzzle or back.
 	bool ShotFrame(const float muzzle_g[3], const float dir_g[3], float back, float out_matrix[16], float out_origin[3]);
 
+	// Late review m6 (cave I): the shot of a VR muzzle beyond a wall. The game's faces are one-sided (they face the room),
+	// so a shot that starts behind one is not stopped by the capsule's wall test (FUN_005AAE60 at 0x5AB154). Instead the
+	// shot starts on the chest's side of the wall, where the chest-to-muzzle line meets it (t along chest -> muzzle, then
+	// kWallShotBefore back), and goes along that line into the wall, so the game's own wall test cuts it there. False for a
+	// non-finite input, t outside (0, 1] or chest and muzzle together.
+	constexpr float kWallShotBefore = 1.0f; // game cm
+	bool WallShot(const float chest_g[3], const float muzzle_g[3], float t, float out_point[3], float out_dir[3]);
+
 	// [VR] GunObjectAim (on top of GunRayAim; section 13 of the vr-melee note): FUN_0062CF10 also takes the muzzle flash
 	// (0x5AC8D0), the shell (0x55E400) and 0x6801A0 from the gun's weapon object (s0 at 0x62CF98: matrix +0x1C0,
 	// position +0x200). Cave O (0xFB000) hands the shot a fake object laid over the object block (fake + 0x1C0 = block

@@ -78,8 +78,49 @@ namespace VR::HeadInWall
 	};
 	bool ReadGrid(const Reader& read, u32 base, Grid* out);
 
-	// The player's filter (FUN_005E6050 with mask 0x0001FFFF): door_open(slot) says whether that door reads open.
+	// The masks the game's own callers pass the face filter FUN_005E6050 (its maskA: the class bits low, one bit per class
+	// 0-15; the attribute bits high, compared with the face's flags >> 16; maskB 0 in all three). Verified statically on
+	// ram_now.bin (tools/outbreak-vr/research/2026-10-22-line-of-sight.md):
+	// - the player's movement: attribute 0x1 (rec+0x190 = 0x0001FFFF);
+	// - the attack capsule's wall test (FUN_005AAE60 at 0x5AB154, when the attack params' +0x0C has bit 0x10, which every
+	//   gun and melee attack in File #1's table 0x6E7C90 has): attribute 0x2. A hit shortens the capsule to the wall before
+	//   the enemy test, so bullets stop there;
+	// - the zombies' sight (the perception cache FUN_006A3B60 at 0x6A3F04, any-hit FUN_00549860 from the character's chest,
+	//   bone 11, to the enemy's sight bone): attribute 0x4.
+	// File #1's faces carry attribute 0x2F (room walls: every bit), 0x29 (furniture and counters: the player and enemies
+	// only, so sight and shots pass), 0x27 (the moving faces) and the door walls 0x12F / 0x22F.
+	constexpr u32 kMaskPlayer = 0x0001FFFFu;
+	constexpr u32 kMaskShot = 0x0002FFFFu;
+	constexpr u32 kMaskSight = 0x0004FFFFu;
+
+	// FUN_005E6050 with maskB 0 (pure): whether a face with these flags counts for mask_a. door_open(slot) says whether that
+	// door reads open (a class-1 face then passes unless its attribute has 0x40).
+	bool FaceCounts(u32 flags, u32 mask_a, u32 ignore_mask, const std::function<bool(u32 slot)>& door_open);
+	// The player's filter (FUN_005E6050 with mask 0x0001FFFF).
 	bool BlocksPlayer(u32 flags, u32 ignore_mask, const std::function<bool(u32 slot)>& door_open);
+
+	// Pure: the nearest face of `faces` that counts for mask_a and that a -> b crosses (SegmentHitsFace, one-sided as the
+	// game's ray), or -1; *t where along a -> b. -1 for a non-finite a or b.
+	int SegmentBlockedBy(const std::vector<Face>& faces, u32 mask_a, u32 ignore_mask,
+		const std::function<bool(u32 slot)>& door_open, const Vec3& a, const Vec3& b, float* t);
+
+	// Live (CPU thread): whether the line a -> b (game cm) crosses a face of the room's wall grid or the moving faces that
+	// counts for mask_a (kMaskSight: what the zombies cannot see through; kMaskShot: what stops a bullet). Its own copy of
+	// the grid, kept per room (not HeadInWall's switch). known false (blocked false) when it cannot tell: not File #1, not
+	// in game, the grid unreadable, a point not finite.
+	struct LineResult
+	{
+		bool known = false;
+		bool blocked = false;
+		u32 flags = 0;    // the face that blocks
+		float t = 0.0f;   // where along a -> b
+	};
+	LineResult LineBlocked(u32 crc, const float a[3], const float b[3], u32 mask_a);
+
+	// Live (CPU thread): File #1's character record's chest (bone 11, the model at record +0x34, its bone matrix pointers
+	// from +0x820, the position at the matrix's +0x30): the point the game's own sight starts from. False if it does not
+	// read as a finite point within 3 m of the record's position.
+	bool CharacterChest(u32 crc, u32 record, float out[3]);
 
 	// Live (CPU thread, from CameraDriver::ApplyLookAt while first person writes the eye): File #1 only, the switch on.
 	// head: the character's head (its position + the eye height); eye in, the stopped eye out. Returns true when it ran.
