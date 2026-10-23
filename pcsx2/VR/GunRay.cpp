@@ -705,8 +705,20 @@ namespace VR::GunRay
 				static bool s_walled_said = false;
 				float chest[3] = {};
 				HeadInWall::LineResult lr;
+				static bool s_chest_said = false;
 				if (HeadInWall::CharacterChest(VMManager::GetDiscCRC(), record, chest))
+				{
 					lr = HeadInWall::LineBlocked(VMManager::GetDiscCRC(), chest, og, HeadInWall::kMaskShot);
+					s_chest_said = false;
+				}
+				else if (!s_chest_said)
+				{
+					// Unknown, so the shot goes as before the wall test: said once until the chest reads again (evening
+					// review m1).
+					s_chest_said = true;
+					Console.Warning("(VR) Line of sight: the character's chest (bone 11) does not read; the gun is not checked "
+									"against walls.");
+				}
 				muzzle_walled = lr.known && lr.blocked;
 				// No usable wall shot (cannot happen for a blocked line): cave I's block is not written, the game's own shot.
 				if (muzzle_walled && !WallShot(chest, og, lr.t, lr.normal, back, sg, sd))

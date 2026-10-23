@@ -548,8 +548,23 @@ namespace VR::HeadInWall
 			s_lines.bad = false;
 			return r;
 		}
-		if (RefreshGrid(s_lines, crc, nullptr) != Refresh::Ok)
+		const Refresh rf = RefreshGrid(s_lines, crc, nullptr);
+		if (rf != Refresh::Ok)
+		{
+			// Unknown, so the callers carry on unchecked: said once per room and game (evening review m1).
+			static u32 s_said_crc = 0;
+			static u32 s_said_room = 0xFFFFFFFFu;
+			const u32 room = memRead16(kRoom);
+			if (crc != s_said_crc || room != s_said_room)
+			{
+				s_said_crc = crc;
+				s_said_room = room;
+				Console.Warning("(VR) Line of sight: room %u's wall grid does not read (%s); the hand and the gun are not "
+								"checked against its walls here.",
+					room, rf == Refresh::NoHeader ? "its headers" : "grid A refused");
+			}
 			return r;
+		}
 		const u32 ignore = memRead32(kIgnoreMask);
 		const auto door_open = [](u32 slot) { return memRead8(kDoorState + slot * 0x60u) == 2; };
 		r.known = true;
