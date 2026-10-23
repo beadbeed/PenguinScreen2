@@ -5,6 +5,7 @@
 #include "VR/MenuPanel.h"
 #include "VR/NetGate.h"
 #include "VR/GameFeedback.h"
+#include "VR/GunRay.h"
 #include "VR/HandModel.h"
 #include "VR/HeadInWall.h"
 #include "VR/HudCards.h"
@@ -2431,14 +2432,23 @@ namespace VR::CameraDriver
 					{
 						const EulerAngles h = QuaternionToEulerYXZ(aim.orientation_xyzw[0], aim.orientation_xyzw[1],
 							aim.orientation_xyzw[2], aim.orientation_xyzw[3]);
-						memWrite16(heading_addr, ToBinaryAngle(base_yaw + la.yaw_sign * WrapPi(h.yaw - s_ref_yaw)));
+						// Co-op aim (private co-op, GunRayAim): the heading and pitch GunRay steers the game's own gun barrel
+						// with, so the game's shot (and the room master's copy of it, from the heading and pitch the game
+						// sends) goes where the laser points. The local record only, as the controller's aim; stale or off:
+						// the controller's own.
+						float coop_yaw = 0.0f, coop_elev = 0.0f;
+						const bool coop_aim = s_net_mode == NetMode::PrivateCoop && GunRay::CoopAim(&coop_yaw, &coop_elev);
+						if (coop_aim)
+							memWrite16(heading_addr, ToBinaryAngle(coop_yaw));
+						else
+							memWrite16(heading_addr, ToBinaryAngle(base_yaw + la.yaw_sign * WrapPi(h.yaw - s_ref_yaw)));
 						// Online-safe: no pitch write. The servo is not silenced then and would fight it every frame.
 						if (la.has_aim_pitch && !OnlineSafeNow())
 						{
 							const s64 pa2 = static_cast<s64>(base.value()) + la.aim_pitch_offset;
 							if (pa2 >= 0 && pa2 + 2 <= static_cast<s64>(Ps2MemSize::MainRam))
 							{
-								const float raw = std::clamp(la.aim_pitch_sign * h.pitch * (65536.0f / (2.0f * PI_F)),
+								const float raw = std::clamp(la.aim_pitch_sign * (coop_aim ? coop_elev : h.pitch) * (65536.0f / (2.0f * PI_F)),
 									-la.aim_pitch_clamp, la.aim_pitch_clamp);
 								memWrite16(static_cast<u32>(pa2), static_cast<u16>(static_cast<s16>(std::lround(raw))));
 							}
