@@ -3312,7 +3312,8 @@ namespace VR::PhysicalMelee
 		// Cave H's word: the attack while a fist or the gun hand may strike, else back to zero.
 		// Before the first write, the two words must read zero or ours (night review m4).
 		static bool s_fist_refused_logged = false;
-		const bool fist_free = s_fist_armed || RegionFreeOrOurs(reader, mp->fist_word, mp->fist_word + 8, mp->fist_word, mp->fist_magic);
+		const bool fist_free = wrote && fist_usable && mp &&
+		                       (s_fist_armed || RegionFreeOrOurs(reader, mp->fist_word, mp->fist_word + 8, mp->fist_word, mp->fist_magic));
 		if (wrote && fist_usable && !fist_free && !s_fist_refused_logged)
 		{
 			s_fist_refused_logged = true;
