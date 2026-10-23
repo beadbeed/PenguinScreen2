@@ -1083,6 +1083,7 @@ set(pcsx2VRSources
 	VR/SpatialControls.cpp
 	VR/DepthExport.cpp
 	VR/DepthWarp.cpp
+	VR/CutsceneView.cpp
 	VR/EyeProjection.cpp
 	VR/MenuPanel.cpp
 	VR/DepthHistogram.cpp
@@ -1131,6 +1132,7 @@ set(pcsx2VRHeaders
 	VR/SpatialControls.h
 	VR/DepthExport.h
 	VR/DepthWarp.h
+	VR/CutsceneView.h
 	VR/EyeProjection.h
 	VR/MenuPanel.h
 	VR/DepthHistogram.h
