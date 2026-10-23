@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <map>
 
 namespace VR::HeadInWall
 {
@@ -564,21 +565,20 @@ namespace VR::HeadInWall
 		return r;
 	}
 
-	bool CharacterChest(u32 crc, u32 record, float out[3])
+	bool ChestFrom(const Reader& read, u32 record, float out[3])
 	{
-		if (!IsFile1(crc) || record == 0)
+		if (record == 0)
 			return false;
 		const auto in_ram = [](u32 p) { return (p & 3) == 0 && (p & 0x1FFFFFFFu) >= 0x100000u && (p & 0x1FFFFFFFu) + 0x40 <= Ps2MemSize::MainRam; };
+		constexpr u32 kChestBone = 11;
 		if (!in_ram(record))
 			return false;
-		const u32 model = memRead32(record + 0x34);
-		if (!in_ram(model))
-			return false;
-		const u32 bone = memRead32(model + 0x820 + 11 * 4);
-		if (!in_ram(bone))
+		u32 model = 0, count_word = 0, bone = 0;
+		if (!read(record + 0x34, 4, &model) || !in_ram(model) || !read(model + 0x814, 4, &count_word) ||
+			kChestBone >= (count_word >> 16) || !read(model + 0x820 + kChestBone * 4, 4, &bone) || !in_ram(bone))
 			return false;
 		u32 w[3], pw[3];
-		if (!ReadGuest(bone + 0x30, 12, w) || !ReadGuest(record + 0x38, 12, pw))
+		if (!read(bone + 0x30, 12, w) || !read(record + 0x38, 12, pw))
 			return false;
 		Vec3 c, pos;
 		std::memcpy(&c, w, 12);
@@ -589,6 +589,16 @@ namespace VR::HeadInWall
 		out[1] = c.y;
 		out[2] = c.z;
 		return true;
+	}
+
+	bool CharacterChest(u32 crc, u32 record, float out[3])
+	{
+		// Every read masked and bounded (ReadGuest; evening review m5): a garbage pointer (the record mid-change) is refused
+		// instead of reaching the EE's TLB.
+		if (!IsFile1(crc))
+			return false;
+		const Reader read = [](u32 a, u32 n, void* o) { return ReadGuest(a, n, o); };
+		return ChestFrom(read, record, out);
 	}
 
 	int SelfTest()
@@ -806,6 +816,51 @@ namespace VR::HeadInWall
 			check(!ReadGrid(bad, 0x1000, &gb) && reads <= kMaxGridEntries + 64, "grid: a list without an end stops at the total cap");
 		}
 		Console.WriteLn("(VR) HeadInWall self-test: %d failure(s).", fail);
+		{
+			// ChestFrom (evening review m5): the record at 0x200000, its model at 0x210000, bone 11's matrix at 0x220000.
+			std::map<u32, u32> ram;
+			const auto putw = [&ram](u32 a, u32 v) { ram[a] = v; };
+			const auto putf = [&ram](u32 a, float f) {
+				u32 v;
+				std::memcpy(&v, &f, 4);
+				ram[a] = v;
+			};
+			const Reader rd = [&ram](u32 a, u32 n, void* o) {
+				for (u32 i = 0; i < n; i += 4)
+				{
+					const auto it = ram.find(a + i);
+					if (it == ram.end())
+						return false;
+					std::memcpy(static_cast<u8*>(o) + i, &it->second, 4);
+				}
+				return true;
+			};
+			putw(0x200034, 0x210000);
+			putf(0x200038, 100.0f);
+			putf(0x20003C, 0.0f);
+			putf(0x200040, 200.0f);
+			putw(0x210814, 36u << 16);
+			putw(0x210820 + 11 * 4, 0x220000);
+			putf(0x220030, 101.0f);
+			putf(0x220034, 128.0f);
+			putf(0x220038, 205.0f);
+			float c[3] = {};
+			check(ChestFrom(rd, 0x200000, c) && near(c[1], 128.0f) && near(c[2], 205.0f), "chest: bone 11 read");
+			putw(0x210814, 11u << 16);
+			check(!ChestFrom(rd, 0x200000, c), "chest: bone 11 past the model's bone count refused");
+			putw(0x210814, 36u << 16);
+			putw(0x200034, 0x40210000); // a garbage pointer: the read through the reader fails, nothing raw
+			check(!ChestFrom(rd, 0x200000, c), "chest: a model pointer that does not read refused");
+			putw(0x200034, 0x210002);
+			check(!ChestFrom(rd, 0x200000, c), "chest: an unaligned model pointer refused");
+			putw(0x200034, 0x210000);
+			putw(0x210820 + 11 * 4, 0x01FFFFF0);
+			check(!ChestFrom(rd, 0x200000, c), "chest: a bone pointer in the last bytes of RAM refused");
+			putw(0x210820 + 11 * 4, 0x220000);
+			putf(0x220034, 900.0f);
+			check(!ChestFrom(rd, 0x200000, c), "chest: a point over 3 m from the record refused");
+			check(!ChestFrom(rd, 0, c), "chest: no record");
+		}
 		return fail;
 	}
 } // namespace VR::HeadInWall
