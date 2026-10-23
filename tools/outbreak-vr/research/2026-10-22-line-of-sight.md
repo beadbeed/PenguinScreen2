@@ -101,7 +101,7 @@ all three masks; 10 cm short of the wall: clear.
   - cave I's shot starts on the chest's side of the wall, 1 cm before where that line meets it, and goes along the line
     into the wall (`GunRay::WallShot`, then the usual `ShotFrame` with the game's back offset). The faces are one-sided
     and face the room, so the game's own capsule wall test (`0x5AB154`) now meets the wall from its front and cuts the
-    shot there A shot from behind the wall would not have been cut;
+    shot there. A shot from behind the wall would not have been cut;
   - cave O's object block is not written, so the game's own gun object takes the flash, shell and `FUN_006801A0`; our
     own flash stays (the flash evidence needs cave O's count);
   - logged on entry and exit (`(VR) Gun ray: the VR muzzle ... is beyond a wall ...`).
@@ -116,6 +116,11 @@ all three masks; 10 cm short of the wall: clear.
 ## 4. Checked offline (run-losfix, headset-free, no OpenXR runtime, normal speed, `HandPickup = true` in that install only)
 
 Self-tests: `vr_selftests`, 62 suites, all PASS (verified (offline)).
+
+The four checks below (slot 7, slot 3 behind and in front of the wall, the slot 5 gun cases) were run again at about
+21:25 on the final build (21b0de1's code) with run-losfix on its own PINE slot 28123, after another agent's script may have
+reached the shared default slot 28011 around 21:04. Each run's log shows one PINE client and only its own state loads;
+the results are the same as listed.
 
 | Case | Result |
 |---|---|
