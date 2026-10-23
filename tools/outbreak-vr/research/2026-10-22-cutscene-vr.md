@@ -139,6 +139,17 @@ runtime's job: the layer is world-locked). The camera's roll and pitch stay in t
 - **Headset:** is the window size right (the camera's FOV: 40 deg tall at slot 7's start, 27 by default), is 1 m the right
   plane, is 15 cm of look-around comfortable?
 - **Co-op:** the host broadcasts the start; the window is display only, so it is the same online. Not run online.
+- **The window's field of view can be stale or a frame off (evening review m9; left open on `evfix`, 2026-10-22).** The
+  window's tangents come from the screen matrix `0x2771A0`, read at the vsync. A movie (kind `0x35FFFF` == 1, the minimal
+  frame `0x341AF0`) does not rebuild it, so a movie's window is whatever the last 3D frame left (first person's lens going
+  in, "FOV 100 -> 40" in slot 7). On `evfix` (offline, J's Bar cutscene 3 from slot 3 with `CUT_FLAG=2` and
+  `PCSX2_VR_CUTSCENE_TEST`) the first per-eye draw was mapped with fx 161.1 (first person's wide lens) before the
+  cutscene's own camera rebuilt the matrix: the same class. Each draw also builds its eyes from the newest intrinsics, so
+  on a lens change one frame's draws can be mapped with the next frame's fx (the night review's m7 class: eyes per draw,
+  not per frame). Not fixed: a movie window needs a fixed lens per game (a profile key beside `camera.cutscene`, for
+  example `cutsceneMovie` with its guard `0x35FFFF == 1` and a fixed FOV), and latching the intrinsics with their frame
+  needs the view-matrix match `TrackRenderPose` uses; both are display only and wait for a headset look at the window's
+  size.
 
 ## 7. A real-time cutscene (J's Bar cutscene 3, kind 0)
 
