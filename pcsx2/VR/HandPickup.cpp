@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 namespace VR::HandPickup
@@ -772,6 +773,17 @@ namespace VR::HandPickup
 				head[2] = map.character[2];
 				lr = HeadInWall::LineBlocked(VMManager::GetDiscCRC(), head, tg.point, HeadInWall::kMaskSight);
 				walled = lr.known && lr.blocked;
+				// PCSX2_VR_PICKUP_DEBUG (test scripts): the line test's inputs and verdict, at most once a second.
+				static const bool debug = std::getenv("PCSX2_VR_PICKUP_DEBUG") != nullptr;
+				static u64 s_debug_ms = 0;
+				if (debug && now >= s_debug_ms)
+				{
+					s_debug_ms = now + 1000;
+					Console.WriteLn("(VR) Hand pickup debug: line of sight from (%.1f, %.1f, %.1f) to (%.1f, %.1f, %.1f): %s.",
+						static_cast<double>(head[0]), static_cast<double>(head[1]), static_cast<double>(head[2]),
+						static_cast<double>(tg.point[0]), static_cast<double>(tg.point[1]), static_cast<double>(tg.point[2]),
+						!lr.known ? "unknown" : lr.blocked ? "blocked" : "clear");
+				}
 			}
 			if (walled)
 			{
