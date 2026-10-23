@@ -22,6 +22,10 @@ SECONDS = float(sys.argv[4]) if len(sys.argv) > 4 else 150.0
 XR = "--xr" in sys.argv
 STEAMXR = r"E:\ProgramFile\Steam\steamapps\common\SteamVR\steamxr_win64.json"
 EXE = os.path.join(DEV, "pcsx2-qt.exe")
+PINE_SLOT = 28011
+for _l in open(os.path.join(DEV, "inis", "PenguinScreen2.ini"), encoding="utf-8", errors="replace"):
+    if _l.strip().startswith("PINESlot"):
+        PINE_SLOT = int(_l.split("=")[1])
 LOG = os.path.join(DEV, "logs", "emulog.txt")
 ISO = r"D:\Games\PS2\games\Biohazard Outbreak File 1 (SLPM-65428) EN-patched.iso"
 assert os.path.normcase(os.path.abspath(DEV)) != os.path.normcase(r"D:\Games\PS2\PenguinScreen2")
@@ -44,10 +48,13 @@ def log_text():
 def main():
     require_offline()
     os.makedirs(OUT, exist_ok=True)
-    # Another emulator (another session, or Alex) would answer our PINE calls, and SteamVR may be in use: refuse.
+    # SteamVR may be in use (Alex): refuse. Another emulator on the same PINE slot would answer our calls: refuse unless
+    # this install's ini gives it a slot of its own ([EmuCore] PINESlot, not the default 28011).
     _tl = subprocess.run(["tasklist"], capture_output=True, text=True).stdout.lower()
-    if "pcsx2-qt.exe" in _tl or "vrserver.exe" in _tl:
-        sys.exit("refused: pcsx2-qt.exe or vrserver.exe is running")
+    if "vrserver.exe" in _tl:
+        sys.exit("refused: vrserver.exe is running")
+    if "pcsx2-qt.exe" in _tl and PINE_SLOT == 28011:
+        sys.exit("refused: another pcsx2-qt.exe is running on the default PINE slot")
     env = dict(os.environ)
     if XR:
         env["XR_RUNTIME_JSON"] = STEAMXR
@@ -60,7 +67,7 @@ def main():
     env.pop("PCSX2_VR_FAKE_HEADPOSE", None)
     proc = subprocess.Popen([EXE, "--vr", "--", ISO], cwd=DEV, env=env)
     try:
-        p = wait_for_pine(seconds=120)
+        p = wait_for_pine(slot=PINE_SLOT, seconds=120)
         for _ in range(120):
             try:
                 if p.game_id() and p.status() == "running":
