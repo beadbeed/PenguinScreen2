@@ -5929,6 +5929,11 @@ bool VR::ProfileDB::SilenceSettingCoopLive(std::string_view name)
 	// FUN_00550220, not proven door-only) is never co-op live.
 	if (name == "SeamlessDoors")
 		return SilenceSettingOn(name);
+	// SpatialAudio's cave (0xFC000, at FUN_001B7B50's projection call): it rewrites only the projected x and w the
+	// game's pan reads for a sound this console plays, and keeps its last values in its own block; no record, game state
+	// or traffic. In private co-op it runs as offline (VR::SpatialAudio writes the host block there too).
+	if (name == "SpatialAudio")
+		return SilenceSettingOn(name);
 	return false;
 }
 

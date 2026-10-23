@@ -1237,7 +1237,7 @@ int main(int argc, char* argv[])
 	RunLogged("Network gate (NetGate: PCSX2_VR_TEST_NET selects code paths only, never with the adapter on)",
 		VR::NetGate::SelfTest, "(VR) NetGate self-test");
 	// Co-op readiness (tools/outbreak-vr/research/2026-10-22-coop-ready.md): which profile switches run in private co-op.
-	RunSilent("Co-op switches (SilenceSettingCoopLive: FadeDim, SeamlessDoors)", +[]() {
+	RunSilent("Co-op switches (SilenceSettingCoopLive: FadeDim, SeamlessDoors, SpatialAudio)", +[]() {
 		bool ok = true;
 		const bool fade = EmuConfig.VR.FadeDim;
 		EmuConfig.VR.FadeDim = true;
@@ -1253,6 +1253,13 @@ int main(int argc, char* argv[])
 		EmuConfig.VR.SeamlessDoors = false;
 		ok &= !VR::ProfileDB::SilenceSettingCoopLive("SeamlessDoors") && !VR::ProfileDB::SilenceSettingOn("SeamlessDoorsArrival");
 		EmuConfig.VR.SeamlessDoors = doors;
+		// SpatialAudio: pan only, this console's own mixing.
+		const bool audio = EmuConfig.VR.SpatialAudio;
+		EmuConfig.VR.SpatialAudio = true;
+		ok &= VR::ProfileDB::SilenceSettingCoopLive("SpatialAudio");
+		EmuConfig.VR.SpatialAudio = false;
+		ok &= !VR::ProfileDB::SilenceSettingCoopLive("SpatialAudio");
+		EmuConfig.VR.SpatialAudio = audio;
 		// Still never co-op live: the gun ray's and hand pickup's caves, cave U.
 		ok &= !VR::ProfileDB::SilenceSettingCoopLive("GunRayAim") && !VR::ProfileDB::SilenceSettingCoopLive("GunObjectAim") &&
 		      !VR::ProfileDB::SilenceSettingCoopLive("HandPickup") && !VR::ProfileDB::SilenceSettingCoopLive("VrBodyLocals");

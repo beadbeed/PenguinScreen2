@@ -352,7 +352,7 @@ SLPM-65428:
       # positioned sound by where it lands across the screen (FUN_001B7B50: through the view and the screen matrix, x 0-640
       # -> pan 0-127, a sound behind mirrored), so only sounds inside the view pan at all. The site calls a cave at 0xFC000
       # instead of FUN_00191A10: it runs that projection as before, then, while the host block at 0xFF400 reads 'SPA1'
-      # (VR::SpatialAudio, written offline while first person is armed), writes x = 322.5 + 320 sin(azimuth) of the emitter
+      # (VR::SpatialAudio, written offline or in private co-op while first person is armed; pan only, co-op review 2026-10-22), writes x = 322.5 + 320 sin(azimuth) of the emitter
       # in view space (0x3062E0, your head in first person) and w = +1: ahead and behind centred, beside you full left or
       # right. Volume stays the game's (distance). The site first, then the cave (camera.caves: all or nothing). Main-program
       # code, guarded by FUN_001B7B50's first word.

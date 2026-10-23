@@ -3,6 +3,7 @@
 
 #include "VR/SpatialAudio.h"
 #include "VR/NetGate.h"
+#include "VR/CameraDriver.h"
 
 #include "Config.h"
 #include "Memory.h"
@@ -57,7 +58,11 @@ namespace VR::SpatialAudio
 
 	void Poll(u32 crc, bool live)
 	{
-		const bool want = live && EmuConfig.VR.SpatialAudio && IsFile1(crc) && NetGate::StrictlyOffline();
+		// Offline, or in private co-op (co-op review 2026-10-22): the pan is this console's own mixing of a sound (the cave
+		// writes only the projection's x and w handed to FUN_001B7B50's pan, and this block in free RAM), nothing any
+		// record, the game state or its traffic holds. Never online-safe, never restricted.
+		const bool where_ok = NetGate::StrictlyOffline() || (CameraDriver::PrivateCoop() && !EmuConfig.VR.OnlineSafe);
+		const bool want = live && EmuConfig.VR.SpatialAudio && IsFile1(crc) && where_ok;
 		if (!want)
 		{
 			// Cleared only while it reads ours (never a block some other build or game left there).
