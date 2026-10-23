@@ -1385,6 +1385,8 @@ static std::optional<VR::ProfileDB::CameraProfile> parseCamera(const std::string
 		parseGuardList(serial, cnode["guards"], "camera guard", cam.guards);
 	if (cnode.has_child("roomLoad") && cnode["roomLoad"].is_seq())
 		parseGuardList(serial, cnode["roomLoad"], "camera roomLoad guard", cam.room_load);
+	if (cnode.has_child("cutscene") && cnode["cutscene"].is_seq())
+		parseGuardList(serial, cnode["cutscene"], "camera cutscene guard", cam.cutscene);
 
 	if (cnode.has_child("disarmAfterVsyncs"))
 	{

@@ -103,6 +103,21 @@ namespace VR::StereoState
 	bool TrueStereoActive();
 	bool HeadRoll(float* roll_rad);
 
+	// [VR] CutsceneStereo (VR/CutsceneView.h): the eyes a cutscene's frames are drawn for, in the cutscene camera's frame
+	// (metres), and the window's distance. The compositor asks for them each present while it shows the cutscene window
+	// (GS thread); the GS draws with the newest request under 250 ms old (CutsceneRequest) and records the eyes it drew
+	// with, which the compositor shows the frame with (TakeCutsceneUsed: the eyes since the last take, false if none).
+	struct CutsceneEyes
+	{
+		bool valid = false;
+		float pos_m[2][3] = {};
+		float window_m = 1.0f;
+	};
+	void SetCutsceneRequest(const CutsceneEyes& eyes);
+	bool CutsceneRequest(CutsceneEyes* out);
+	void SetCutsceneUsed(const float pos_m[2][3], const float fov_rad[2][4]);
+	bool TakeCutsceneUsed(float pos_m[2][3], float fov_rad[2][4]);
+
 	// Rotate first-person parallax with head roll (VR.RollParallax).
 	void SetRollParallaxEnabled(bool enabled);
 	bool RollParallaxEnabled();

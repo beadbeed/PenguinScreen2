@@ -19,6 +19,8 @@
 #include "VR/StereoState.h"
 #include "MemoryTypes.h"
 #include "VR/EyeProjection.h"
+#include "VR/CutsceneView.h"
+#include "VR/CameraDriver.h"
 #include "VR/XRCompositor.h"
 #include <cstdio>
 #include <cstring>
@@ -6480,7 +6482,27 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 			}
 		}
 	}
-	if (st.enabled && st.first_person && vr_multiview_target && VR::StereoState::TrueStereoActive())
+	// [VR] CutsceneStereo (VR/CutsceneView.h): a real-time cutscene through the compositor's world-locked window. Each
+	// layer is the scene through the window from that eye (off-axis, not turned); the game's flat draws sit on the
+	// window's plane, where the game drew them. PCSX2_VR_CUTSCENE_TEST=<x>,<y>,<z>[,<ipd>] (metres): headset-free, the head
+	// at that offset whenever CameraDriver reports a cutscene and the compositor asks for nothing.
+	VR::StereoState::CutsceneEyes vr_cut;
+	bool vr_cut_on = st.enabled && !st.first_person && vr_multiview_target && VR::StereoState::CutsceneRequest(&vr_cut);
+	if (!vr_cut_on && st.enabled && !st.first_person && vr_multiview_target)
+	{
+		static const char* s_cut_test = std::getenv("PCSX2_VR_CUTSCENE_TEST");
+		float t[4] = {0.0f, 0.0f, 0.0f, 0.064f};
+		if (s_cut_test && *s_cut_test && std::sscanf(s_cut_test, "%f,%f,%f,%f", &t[0], &t[1], &t[2], &t[3]) >= 3 &&
+			VR::CameraDriver::CutsceneActive())
+		{
+			const float id[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+			VR::CutsceneView::EyePositions(t, id, t[3], VR::CutsceneView::kMaxOffsetM, vr_cut.pos_m);
+			vr_cut.window_m = VR::CutsceneView::kWindowM;
+			vr_cut.valid = true;
+			vr_cut_on = true;
+		}
+	}
+	if (st.enabled && vr_multiview_target && ((st.first_person && VR::StereoState::TrueStereoActive()) || vr_cut_on))
 	{
 		VR::EyeProjection::GameCamera cam;
 		const GSVector2i res = PCRTCDisplays.GetResolution();
@@ -6492,7 +6514,19 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 		float test_pose[4] = {};
 		bool has_test_pose = false;
 		float eye_tan[2][4] = {};
-		if (ok)
+		if (ok && vr_cut_on)
+		{
+			ok = VR::CutsceneView::BuildEyes(cam, vr_cut.pos_m, vr_cut.window_m, eyes);
+			if (ok)
+			{
+				float fov[2][4];
+				for (int e = 0; e < 2; e++)
+					for (int k = 0; k < 4; k++)
+						fov[e][k] = eyes[e].fov_rad[k];
+				VR::StereoState::SetCutsceneUsed(vr_cut.pos_m, fov);
+			}
+		}
+		else if (ok)
 		{
 			VR::EyeProjection::EyeSpec spec;
 			const VR::XRCompositor::EyeInfo ei = VR::XRCompositor::GetEyeInfo();
@@ -6556,7 +6590,7 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 							   cover.width() * 100 >= full.width() * 95 && cover.height() * 100 >= full.height() * 95;
 			// A game screen split onto the menu panel ([VR] MenuPanel): its flat draws stay where the game put them, so
 			// the panel shows them as it does without TrueStereo; the room under them is still drawn per eye.
-			const bool panel_flat = kind == 0.0f && EmuConfig.VR.MenuPanel && VR::MenuPanel::SplitOn();
+			const bool panel_flat = !vr_cut_on && kind == 0.0f && EmuConfig.VR.MenuPanel && VR::MenuPanel::SplitOn();
 			if (fills || panel_flat)
 			{
 				m_conf.cb_vs.vr_map_mode = 0;
@@ -6574,7 +6608,9 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 				// times EyeProjection::kGameTextScale, so the game's own text near the bottom of its screen sits where
 				// it is read without looking far down.
 				float flat_fx = cam.fx, flat_fy = cam.fy;
-				if (kind == 0.0f)
+				// The cutscene window: the flat draws (letterbox, subtitles) on the window's plane at the game's own scale.
+				const float flat_d = vr_cut_on ? vr_cut.window_m : 1.5f;
+				if (kind == 0.0f && !vr_cut_on)
 				{
 					const float fraction = 0.9f * (vr_game_text ? VR::EyeProjection::kGameTextScale : 1.0f);
 					float th = 10.0f, tv = 10.0f;
@@ -6590,7 +6626,7 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 					}
 				}
 				m_conf.cb_vs.vr_eye_in = GSVector4(flat_fx, flat_fy, cam.cx, cam.cy);
-				m_conf.cb_vs.vr_eye_fit = GSVector4(s_vr_zqfit.a0, s_vr_zqfit.beta, 1.5f * cam.units_per_m, kind);
+				m_conf.cb_vs.vr_eye_fit = GSVector4(s_vr_zqfit.a0, s_vr_zqfit.beta, flat_d * cam.units_per_m, kind);
 				for (int e = 0; e < 2; e++)
 				{
 					for (int r = 0; r < 3; r++)
@@ -6599,8 +6635,20 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale, 
 					m_conf.cb_vs.vr_eye[e * 4 + 3] = GSVector4(eyes[e].fx, eyes[e].fy, eyes[e].cx, eyes[e].cy);
 				}
 			}
+			static bool s_cut_logged = false;
+			if (vr_cut_on && !s_cut_logged)
+			{
+				s_cut_logged = true;
+				Console.WriteLn("(VR) CutsceneStereo: first cutscene draw per eye; game fx %.3f fy %.3f centre %.1f,%.1f, target "
+								"%.0fx%.0f; eyes at (%.3f, %.3f, %.3f) and (%.3f, %.3f, %.3f) m, window %.2f m, right eye fov "
+								"%.1f/%.1f/%.1f/%.1f deg.",
+					cam.fx, cam.fy, cam.cx, cam.cy, 2.0f * cam.half_w, 2.0f * cam.half_h, vr_cut.pos_m[0][0],
+					vr_cut.pos_m[0][1], vr_cut.pos_m[0][2], vr_cut.pos_m[1][0], vr_cut.pos_m[1][1], vr_cut.pos_m[1][2],
+					vr_cut.window_m, eyes[1].fov_rad[0] * 57.29578f, eyes[1].fov_rad[1] * 57.29578f,
+					eyes[1].fov_rad[2] * 57.29578f, eyes[1].fov_rad[3] * 57.29578f);
+			}
 			static bool s_ts_logged = false;
-			if (!s_ts_logged)
+			if (!s_ts_logged && !vr_cut_on)
 			{
 				s_ts_logged = true;
 				Console.WriteLn("(VR) TrueStereo: first draw; game fx %.3f fy %.3f centre %.1f,%.1f, target %.0fx%.0f; "

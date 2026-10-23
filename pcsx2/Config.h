@@ -1603,6 +1603,14 @@ struct Pcsx2Config
 		// stay flat on a plane 1.5 m ahead. Needs PacerCopies off; DepthWarp is not used with it (DepthLayer adds depth).
 		// Read when VR starts. Render-only: nothing in the game changes.
 		bool TrueStereo = false;
+		// The game's real-time cutscenes (File #1: scenario status 4, the profile's camera.cutscene) in stereo through a
+		// world-locked window (VR/CutsceneView.h, tools/outbreak-vr/research/2026-10-22-cutscene-vr.md): the game's own
+		// cutscene camera is placed where your head was as the cutscene began, the window is its image plane 1 m ahead at its
+		// own field of view (the scene at its real size), and each eye sees the scene through it from where that eye is, per
+		// eye as TrueStereo draws first person (leaning looks around a little, softly clamped at 15 cm). The camera moves only
+		// inside the window. The game's fades, letterbox and subtitles stay on the window's plane. Needs PacerCopies off.
+		// Read when VR starts. Render-only: the cutscene, its timing, its flags and the speed are untouched.
+		bool CutsceneStereo = true;
 
 		VROptions();
 		void LoadSave(SettingsWrapper& wrap);

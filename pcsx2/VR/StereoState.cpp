@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 
 namespace VR::StereoState
@@ -133,6 +134,52 @@ namespace VR::StereoState
 		*fy = s_cam[1];
 		*cx = s_cam[2];
 		*cy = s_cam[3];
+		return true;
+	}
+
+	namespace
+	{
+		std::mutex s_cut_mutex;
+		CutsceneEyes s_cut_req;
+		s64 s_cut_req_ms = 0;
+		bool s_cut_used = false;
+		float s_cut_used_pos[2][3] = {};
+		float s_cut_used_fov[2][4] = {};
+	}
+
+	void SetCutsceneRequest(const CutsceneEyes& eyes)
+	{
+		std::lock_guard<std::mutex> lock(s_cut_mutex);
+		s_cut_req = eyes;
+		s_cut_req_ms = NowMs();
+	}
+
+	bool CutsceneRequest(CutsceneEyes* out)
+	{
+		std::lock_guard<std::mutex> lock(s_cut_mutex);
+		const s64 age = NowMs() - s_cut_req_ms;
+		if (!s_cut_req.valid || s_cut_req_ms == 0 || age < 0 || age > 250)
+			return false;
+		*out = s_cut_req;
+		return true;
+	}
+
+	void SetCutsceneUsed(const float pos_m[2][3], const float fov_rad[2][4])
+	{
+		std::lock_guard<std::mutex> lock(s_cut_mutex);
+		std::memcpy(s_cut_used_pos, pos_m, sizeof(s_cut_used_pos));
+		std::memcpy(s_cut_used_fov, fov_rad, sizeof(s_cut_used_fov));
+		s_cut_used = true;
+	}
+
+	bool TakeCutsceneUsed(float pos_m[2][3], float fov_rad[2][4])
+	{
+		std::lock_guard<std::mutex> lock(s_cut_mutex);
+		if (!s_cut_used)
+			return false;
+		std::memcpy(pos_m, s_cut_used_pos, sizeof(s_cut_used_pos));
+		std::memcpy(fov_rad, s_cut_used_fov, sizeof(s_cut_used_fov));
+		s_cut_used = false;
 		return true;
 	}
 
