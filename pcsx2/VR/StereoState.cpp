@@ -142,9 +142,25 @@ namespace VR::StereoState
 		std::mutex s_cut_mutex;
 		CutsceneEyes s_cut_req;
 		s64 s_cut_req_ms = 0;
-		bool s_cut_used = false;
 		float s_cut_used_pos[2][3] = {};
 		float s_cut_used_fov[2][4] = {};
+		// Evening review m11: no lock per draw. The request changes only at a present (a new sequence number each time)
+		// and is valid only while the window is up, so a draw reads two atomics and its thread's own copy; the lock is
+		// taken once per new request. "Used" is recorded only when it differs from what this thread last recorded or the
+		// compositor has taken it since: about once per frame.
+		std::atomic<bool> s_cut_req_valid{false};
+		std::atomic<u64> s_cut_req_seq{0};
+		std::atomic<bool> s_cut_used{false};
+		struct CutCopy
+		{
+			u64 seq = ~0ull;
+			CutsceneEyes req;
+			s64 ms = 0;
+			bool used_known = false;
+			float used_pos[2][3] = {};
+			float used_fov[2][4] = {};
+		};
+		thread_local CutCopy t_cut;
 	}
 
 	void SetCutsceneRequest(const CutsceneEyes& eyes)
@@ -152,34 +168,51 @@ namespace VR::StereoState
 		std::lock_guard<std::mutex> lock(s_cut_mutex);
 		s_cut_req = eyes;
 		s_cut_req_ms = NowMs();
+		s_cut_req_valid.store(eyes.valid, std::memory_order_release);
+		s_cut_req_seq.fetch_add(1, std::memory_order_acq_rel);
 	}
 
 	bool CutsceneRequest(CutsceneEyes* out)
 	{
-		std::lock_guard<std::mutex> lock(s_cut_mutex);
-		const s64 age = NowMs() - s_cut_req_ms;
-		if (!s_cut_req.valid || s_cut_req_ms == 0 || age < 0 || age > 250)
+		if (!s_cut_req_valid.load(std::memory_order_acquire))
 			return false;
-		*out = s_cut_req;
+		if (s_cut_req_seq.load(std::memory_order_acquire) != t_cut.seq)
+		{
+			std::lock_guard<std::mutex> lock(s_cut_mutex);
+			t_cut.req = s_cut_req;
+			t_cut.ms = s_cut_req_ms;
+			t_cut.seq = s_cut_req_seq.load(std::memory_order_relaxed);
+		}
+		const s64 age = NowMs() - t_cut.ms;
+		if (!t_cut.req.valid || t_cut.ms == 0 || age < 0 || age > 250)
+			return false;
+		*out = t_cut.req;
 		return true;
 	}
 
 	void SetCutsceneUsed(const float pos_m[2][3], const float fov_rad[2][4])
 	{
+		if (t_cut.used_known && s_cut_used.load(std::memory_order_acquire) &&
+			std::memcmp(t_cut.used_pos, pos_m, sizeof(t_cut.used_pos)) == 0 &&
+			std::memcmp(t_cut.used_fov, fov_rad, sizeof(t_cut.used_fov)) == 0)
+			return; // recorded already and not taken since
 		std::lock_guard<std::mutex> lock(s_cut_mutex);
 		std::memcpy(s_cut_used_pos, pos_m, sizeof(s_cut_used_pos));
 		std::memcpy(s_cut_used_fov, fov_rad, sizeof(s_cut_used_fov));
-		s_cut_used = true;
+		s_cut_used.store(true, std::memory_order_release);
+		std::memcpy(t_cut.used_pos, pos_m, sizeof(t_cut.used_pos));
+		std::memcpy(t_cut.used_fov, fov_rad, sizeof(t_cut.used_fov));
+		t_cut.used_known = true;
 	}
 
 	bool TakeCutsceneUsed(float pos_m[2][3], float fov_rad[2][4])
 	{
 		std::lock_guard<std::mutex> lock(s_cut_mutex);
-		if (!s_cut_used)
+		if (!s_cut_used.load(std::memory_order_relaxed))
 			return false;
 		std::memcpy(pos_m, s_cut_used_pos, sizeof(s_cut_used_pos));
 		std::memcpy(fov_rad, s_cut_used_fov, sizeof(s_cut_used_fov));
-		s_cut_used = false;
+		s_cut_used.store(false, std::memory_order_release);
 		return true;
 	}
 

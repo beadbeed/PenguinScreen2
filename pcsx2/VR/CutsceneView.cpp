@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/CutsceneView.h"
+#include "VR/StereoState.h"
 
 #include "common/Console.h"
 
@@ -272,6 +273,36 @@ namespace VR::CutsceneView
 			check(StepGate(g, false, false, true, true, 2300, 40) == GateStep::Flipped && !g.shown, "gate: forced (first person): at once");
 			Flip(g, true);
 			check(g.shown && g.due_ms == 0, "gate: a blink that could not start flips at once");
+		}
+
+		// 8. The request/used hand-off without a lock per draw (evening review m11): what a draw gets is still the newest.
+		{
+			StereoState::CutsceneEyes req, got;
+			StereoState::SetCutsceneRequest(req);
+			check(!StereoState::CutsceneRequest(&got), "hand-off: no request");
+			req.valid = true;
+			req.pos_m[0][0] = -0.03f;
+			StereoState::SetCutsceneRequest(req);
+			check(StereoState::CutsceneRequest(&got) && got.pos_m[0][0] == -0.03f, "hand-off: the request");
+			check(StereoState::CutsceneRequest(&got) && got.pos_m[0][0] == -0.03f, "hand-off: the same request, again");
+			req.pos_m[0][0] = -0.05f;
+			StereoState::SetCutsceneRequest(req);
+			check(StereoState::CutsceneRequest(&got) && got.pos_m[0][0] == -0.05f, "hand-off: a new request is seen at once");
+			StereoState::SetCutsceneRequest(StereoState::CutsceneEyes{});
+			check(!StereoState::CutsceneRequest(&got), "hand-off: cleared");
+			float p[2][3] = {{-0.03f, 0.0f, 0.0f}, {0.03f, 0.0f, 0.0f}}, f[2][4] = {{-0.5f, 0.5f, 0.4f, -0.4f}, {-0.5f, 0.5f, 0.4f, -0.4f}};
+			float tp[2][3], tf[2][4];
+			StereoState::TakeCutsceneUsed(tp, tf);
+			StereoState::SetCutsceneUsed(p, f);
+			StereoState::SetCutsceneUsed(p, f);
+			check(StereoState::TakeCutsceneUsed(tp, tf) && tp[1][0] == 0.03f && tf[0][2] == 0.4f, "hand-off: used, taken");
+			check(!StereoState::TakeCutsceneUsed(tp, tf), "hand-off: taken once");
+			StereoState::SetCutsceneUsed(p, f);
+			check(StereoState::TakeCutsceneUsed(tp, tf), "hand-off: the same eyes after a take are recorded again (the next frame)");
+			StereoState::SetCutsceneUsed(p, f);
+			f[1][1] = 0.6f;
+			StereoState::SetCutsceneUsed(p, f);
+			check(StereoState::TakeCutsceneUsed(tp, tf) && tf[1][1] == 0.6f, "hand-off: changed eyes before a take: the newest");
 		}
 
 		if (fails.empty())
