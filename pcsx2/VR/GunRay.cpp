@@ -543,11 +543,14 @@ namespace VR::GunRay
 
 	void OnStateLoaded()
 	{
-		// A block saved armed is ours to clear (or rewrite) at the next poll; the count starts again.
-		s_armed = s_addr != 0;
+		// A block saved armed is ours to clear (or rewrite) at the next poll; the count starts again. Armed only while the
+		// loaded block reads our magic (evening review m4): a block holding someone else's words is checked
+		// (RegionFreeOrOurs) before the next write instead of being written over.
+		s_armed = s_addr != 0 && VMManager::GetDiscCRC() == s_crc && PhysicalMelee::ArmedAfterLoad(PhysicalMelee::ReadMainRam, s_addr, s_magic);
 		s_stale = true;
 		s_watch_s = 0.0f;
-		s_obj_armed = s_obj_addr != 0;
+		s_obj_armed = s_obj_addr != 0 && VMManager::GetDiscCRC() == s_obj_crc &&
+		              PhysicalMelee::ArmedAfterLoad(PhysicalMelee::ReadMainRam, s_obj_addr, s_obj_magic);
 		s_obj_stale = true;
 		s_obj_flash_ms.store(0, std::memory_order_relaxed);
 		s_load_pending = true;

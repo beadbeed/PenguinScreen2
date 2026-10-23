@@ -490,6 +490,13 @@ namespace VR::PhysicalMelee
 	// A block in free RAM is ours to write (night review m4, late review m3): its magic word at magic_addr already reads
 	// magic, or every word from lo up to hi reads zero.
 	bool RegionFreeOrOurs(GuestReader reader, u32 lo, u32 hi, u32 magic_addr, u32 magic);
+	// After a state load (evening review m4): whether a block this session armed may still count as armed, so its next
+	// write skips RegionFreeOrOurs: only when the loaded RAM reads our magic at it (a state saved while it was armed).
+	// Anything else (zero, or someone else's words) is not armed, and the next write checks the region first. False for a
+	// zero address or magic.
+	bool ArmedAfterLoad(GuestReader reader, u32 magic_addr, u32 magic);
+	// A GuestReader over main RAM (CPU thread; false without a VM or past main RAM).
+	bool ReadMainRam(u32 address, u8 width, u32* value);
 
 	// CPU thread: CameraDriver's whenSetting gate asks, in private co-op, whether the caves may be in: true only while the
 	// last input poll decided CoopFull, and that poll ran within the last 250 ms (a stale decision counts as false).
