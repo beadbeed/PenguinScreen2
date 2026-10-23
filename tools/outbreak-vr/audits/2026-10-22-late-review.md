@@ -255,7 +255,9 @@ checked above. A new caller of `FUN_0062CF10`'s object, or a future cave, must k
 ## Fixed on minorsC (2026-10-22)
 
 Each item was checked against the code first. Built locally (`build-minorsC`, no LTO), `vr_selftests` 62 of 62 (8 new
-checks in GunRay's suite). No headset; GunObjectAim not run live on this branch.
+checks in GunRay's suite). No headset. Offline (run-minorsC, slot 5, the 45, the vraim/gunobj script, two shots on the
+zombie's head): both hit (600 -> 150), cave O took each shot and the flash stub counted its flash in the same poll, so
+the flash counted as the VR gun's (0.00 units from the VR muzzle) and the hands left theirs out; no free-RAM refusal.
 
 | Id | Status | Commit | What changed |
 |---|---|---|---|
@@ -267,4 +269,4 @@ checks in GunRay's suite). No headset; GunObjectAim not run live on this branch.
 | m6 | left (tried, reverted) | 6a260a1, reverted in 54d2fdc; e5c33a0 | A fallback to the game's object when the head-to-muzzle line crosses HeadInWall's player collision. Taken out: in slot 7 that collision fences the desk at full height (see the night review's m10 row), so it would drop the VR flash and shell near any furniture. Noted in section 13. |
 | m7 | fixed in part | cd46a71 | Confirmed. A DATE draw is not GameText (its DATE setup was built for the unmoved box). `m_r` and the target's valid tracking still use the old box; text inside the picture lands in an already valid frame buffer, so that part is left (unverified; recomputing `m_r` means moving the block in GSRendererHW, the renderer branch's area). |
 | m8 | left (by design) | | The review's own fix is "none needed unless it is seen". |
-| m9 | fixed (docs) | b9b519d | `ram5_a.bin` has (-9.504, 0, 5.095) for the 45 Auto (types 2 and 7), so 5.1 is right; section 13 said 5.0 and now matches. |
+| m9 | docs aligned, one oddity left | b9b519d, this commit | Three RAM dumps have (-9.504, 0, 5.095) for the 45 Auto (types 2 and 7), so section 13 now gives that (5.1, as the profile comment and the self-test). But the host's own "Gun object: shot" line in the slot 5 run on run-minorsC printed model muzzle (-9.5, 0.0, 5.0), which 5.095 would not round to. Not explained; no impact (the host reads the value from RAM). |
