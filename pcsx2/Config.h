@@ -1609,7 +1609,8 @@ struct Pcsx2Config
 		// own field of view (the scene at its real size), and each eye sees the scene through it from where that eye is, per
 		// eye as TrueStereo draws first person (leaning looks around a little, softly clamped at 15 cm). The camera moves only
 		// inside the window. The game's fades, letterbox and subtitles stay on the window's plane. Needs PacerCopies off.
-		// Read when VR starts. Render-only: the cutscene, its timing, its flags and the speed are untouched.
+		// Turned off, it takes effect at once; turned on, only after a VR restart (the compositor takes it on when VR
+		// starts). Render-only: the cutscene, its timing, its flags and the speed are untouched.
 		bool CutsceneStereo = true;
 
 		VROptions();

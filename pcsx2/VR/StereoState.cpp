@@ -183,6 +183,21 @@ namespace VR::StereoState
 		return true;
 	}
 
+	namespace
+	{
+		std::atomic<bool> s_cut_stereo_active{false};
+	}
+
+	void SetCutsceneStereoActive(bool active)
+	{
+		s_cut_stereo_active.store(active, std::memory_order_relaxed);
+	}
+
+	bool CutsceneStereoActive()
+	{
+		return s_cut_stereo_active.load(std::memory_order_relaxed);
+	}
+
 	void SetTrueStereoActive(bool active)
 	{
 		s_true_stereo.store(active, std::memory_order_relaxed);

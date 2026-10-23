@@ -98,7 +98,10 @@ motion. The game's fades, letterbox and subtitles stay on the window's plane. Re
 flags and the speed are untouched. Movies (kind `0x35FFFF` = 1) show flat in the same window. Checked offline: slot 7's
 cutscene (a movie, then the load) plays to its end in 28.49 s with it on and 28.50 s with it off, first person comes back
 on the vsync status returns to 2, and on forced first-person frames each eye's layer is the game's own render from that
-eye shifted by the window's off-axis centre (15 px at 3x for 3.2 cm, as predicted). On SteamVR's null headset the
+eye shifted by the window's off-axis centre (15 px at 3x for 3.2 cm, as predicted). The setting turned off takes effect at
+once; turned on, only after a VR restart (the session log then says "not active this session"). It runs the same online
+and on obsrv: it changes nothing in the game and is not first person, so "on obsrv first person stays off" does not cover
+it. On SteamVR's null headset the
 window goes up 64 ms into the cutscene and is sent as a projection layer of the eyes (60 frames/s, no XR errors), and
 comes down with the blink as first person returns. A real-time cutscene (J's Bar cutscene 3, kind 0, normally started
 by the partner walking to the door; started here by setting its event flag 2 in the dev install, `cutwalk.py`) plays in

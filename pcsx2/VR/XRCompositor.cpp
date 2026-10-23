@@ -10921,6 +10921,7 @@ namespace VR::XRCompositor
 					CutsceneView::kWindowM, 100.0f * CutsceneView::kMaxOffsetM);
 			}
 		}
+		StereoState::SetCutsceneStereoActive(s.cutscene_stereo);
 		if (EmuConfig.VR.DepthWarp && s.true_stereo)
 		{
 			Console.Warning("(VR) Depth warp: off: [VR] TrueStereo is on (the warp redraws a screen image; the eyes' own "

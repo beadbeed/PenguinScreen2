@@ -113,6 +113,10 @@ namespace VR::StereoState
 		float pos_m[2][3] = {};
 		float window_m = 1.0f;
 	};
+	// The compositor took CutsceneStereo on when VR started (evening review m10: the setting is read live by CameraDriver,
+	// so off takes effect at once, but on only after a VR restart). Set by the compositor, read for CameraDriver's log.
+	void SetCutsceneStereoActive(bool active);
+	bool CutsceneStereoActive();
 	void SetCutsceneRequest(const CutsceneEyes& eyes);
 	bool CutsceneRequest(CutsceneEyes* out);
 	void SetCutsceneUsed(const float pos_m[2][3], const float fov_rad[2][4]);
