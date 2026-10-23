@@ -44,6 +44,10 @@ def log_text():
 def main():
     require_offline()
     os.makedirs(OUT, exist_ok=True)
+    # Another emulator (another session, or Alex) would answer our PINE calls, and SteamVR may be in use: refuse.
+    _tl = subprocess.run(["tasklist"], capture_output=True, text=True).stdout.lower()
+    if "pcsx2-qt.exe" in _tl or "vrserver.exe" in _tl:
+        sys.exit("refused: pcsx2-qt.exe or vrserver.exe is running")
     env = dict(os.environ)
     if XR:
         env["XR_RUNTIME_JSON"] = STEAMXR
