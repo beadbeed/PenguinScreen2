@@ -2025,6 +2025,9 @@ namespace VR::PhysicalMelee
 			if (can && fist != FistKind::None && s_shape_weapon != fist_key)
 			{
 				s_shape_weapon = fist_key;
+				// Another hit point now: its speed, path and sweep start again (an equip change is not a swing).
+				s_tip_have = s_prev_valid = s_vel_have = false;
+				s_tip_speed = s_stroke_m = 0.0f;
 				s_shape = HitShape{};
 				s_shape.valid = true;
 				s_shape.p[0] = -10.0f;
@@ -2036,6 +2039,8 @@ namespace VR::PhysicalMelee
 			if (can && fist == FistKind::None && wt != s_shape_weapon)
 			{
 				s_shape_weapon = wt;
+				s_tip_have = s_prev_valid = s_vel_have = false;
+				s_tip_speed = s_stroke_m = 0.0f;
 				std::string why;
 				if (ReadShape(reader, mp, wt, &s_shape, &why))
 				{
