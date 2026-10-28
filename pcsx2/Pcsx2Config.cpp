@@ -1976,6 +1976,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(GunRayAim);
 	SettingsWrapEntry(GunObjectAim);
 	SettingsWrapEntry(PhysicalMeleeFists);
+	SettingsWrapEntry(MeleePower);
 	SettingsWrapEntry(ScriptedShotsFirstPerson);
 	SettingsWrapEntry(HeadInWall);
 	SettingsWrapEntry(SpatialAudio);
@@ -2052,7 +2053,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 
 bool Pcsx2Config::VROptions::operator==(const VROptions& right) const
 {
-	// SnapTurn, ComfortBlink, LaserSight, ZoneMarkers, MenuPointer, MenuTablet, MenuPanel, MenuPanelRoom, MenuPanelRoomBrightness, SeamlessDoors, DoorVeil, GrabFirstPerson, GrabFacePull, VrGrab, PhysicalMelee, PhysicalMeleeOnline, PhysicalMeleeMode, MeleeHitJolt, GunRayAim, GunObjectAim, PhysicalMeleeFists, PickupCue, BeltPouches, HandTargeting, HandPickup, GameText, GameWeaponModels, WeaponSceneLighting, ComfortVignette,
+	// SnapTurn, ComfortBlink, LaserSight, ZoneMarkers, MenuPointer, MenuTablet, MenuPanel, MenuPanelRoom, MenuPanelRoomBrightness, SeamlessDoors, DoorVeil, GrabFirstPerson, GrabFacePull, VrGrab, PhysicalMelee, PhysicalMeleeOnline, PhysicalMeleeMode, MeleeHitJolt, GunRayAim, GunObjectAim, PhysicalMeleeFists, MeleePower, PickupCue, BeltPouches, HandTargeting, HandPickup, GameText, GameWeaponModels, WeaponSceneLighting, ComfortVignette,
 	// VignetteStrength, OnlineSafe, FirstPersonAutoStereo, FirstPersonStereoStrength, FirstPersonFov,
 	// FirstPersonFovMarginDeg, Brightness, GameRumble and HapticStrength are read from EmuConfig every vsync (ReloadGesture every input poll; EdgeFill,
 	// HeadsetRateSubmit, OpaqueBackground, HandsDisplayRate, PacerCopies, DepthLayer, DepthWarp, TrueStereo and CutsceneStereo when VR starts (CutsceneStereo off also at once), DedicatedXrQueue when the GS

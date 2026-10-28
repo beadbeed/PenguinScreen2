@@ -1417,6 +1417,13 @@ struct Pcsx2Config
 		// hand as a pistol-whip, strikes through the contact path with the knife's attack at a fist-sized sphere, scaled to
 		// a light hit (cave H); no ammo or durability spent. Ini only, off by default.
 		bool PhysicalMeleeFists = false;
+		// With PhysicalMelee in contact mode (tools/outbreak-vr/research/2026-10-27-melee-power.md): a contact strike's power
+		// (the tip's speed, the committed stroke, a second hand on the weapon) sets the game's own damage (0.2-1.35 x a
+		// weapon's; fists up to 41 and whips 52 of the knife's 55) and raises the game's own reaction class: a hard hit
+		// staggers, the hardest knocks down (cave P on FUN_00578300); the VR hand's picture holds still 2-4 frames at the
+		// contact, and the buzz follows the power. Online only where contact strikes apply (the room's master with
+		// PhysicalMeleeOnline). Ini only, on by default.
+		bool MeleePower = true;
 		// First person, File #1 (the native-feel switches, tools/outbreak-vr/research/2026-10-22-native-feel.md). Ini only.
 		// ScriptedShotsFirstPerson: the game's scripted camera shots (room camera mode 4, a fixed cut for a while, and 5,
 		// the camera shake) keep first person: scripts run as before (their waits see the mode the game sets) and the VR eye

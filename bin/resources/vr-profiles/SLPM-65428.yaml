@@ -1065,6 +1065,92 @@ SLPM-65428:
       - { address: 0x0FE9CC, on: 0x8FBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
       - { address: 0x0FE9D0, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
       - { address: 0x0FE9D4, on: 0x27BD0020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleeHitJolt }
+      # Swing power (VR setting MeleePower, on by default; with PhysicalMelee in contact mode; research/
+      # 2026-10-27-melee-power.md): cave P (0xFA000) is called instead of the hit's damage FUN_00578300 from its four
+      # callers in the hit testers (the capsule's FUN_00549EA0 at 0x54A2D8 / 0x54A64C, the sphere's FUN_0054AB30 at
+      # 0x54AE14 / 0x54B224; in all four s4 is the attack node, a1 the attacker, a3 the hit's class byte). For the live
+      # contact strike only (the power block 0xFF600 reads "PWR1", the melee block "MEL1", the node's object +0x08 is the
+      # block's live object +0x14 and the attacker its record +0x08) it runs the game's damage at multiplier 1 (no
+      # critical, no class promotion), scales the damage by the block's f32 +0x08 (at least 1, at most 32767) and raises
+      # the hit's class to the block's +0x04 (0-2) when the game's is lower, never lowers it; it notes the game's damage
+      # and class (+0x18, +0x1C), what it made (+0x10, +0x14) and counts (+0x0C). Every other hit runs the game's own,
+      # unchanged. The class is the zombie's own reaction (FUN_00678750: 0 a flinch, 1 a stagger, 2 a knockdown). The
+      # sites first (each checks cave P's first and last words), then the cave. Online only where the contact caves are
+      # (the room's master with PhysicalMeleeOnline: the class and damage then leave as the game's own enemy messages).
+      - { address: 0x54A2D8, on: 0x0C03E800, off: 0x0C15E0C0, when: [{ address: 0x540004, equals: 3 }, { address: 0xFA000, equals: 0x27BDFFE0 }, { address: 0xFA114, equals: 0x27BD0020 }], offlineOnly: true, whenSetting: MeleePower }   # FUN_00549EA0 (capsule): jal 0xFA000 (cave P) over jal FUN_00578300
+      - { address: 0x54A64C, on: 0x0C03E800, off: 0x0C15E0C0, when: [{ address: 0x540004, equals: 3 }, { address: 0xFA000, equals: 0x27BDFFE0 }, { address: 0xFA114, equals: 0x27BD0020 }], offlineOnly: true, whenSetting: MeleePower }   # FUN_00549EA0 (capsule): jal 0xFA000 (cave P) over jal FUN_00578300
+      - { address: 0x54AE14, on: 0x0C03E800, off: 0x0C15E0C0, when: [{ address: 0x540004, equals: 3 }, { address: 0xFA000, equals: 0x27BDFFE0 }, { address: 0xFA114, equals: 0x27BD0020 }], offlineOnly: true, whenSetting: MeleePower }   # FUN_0054AB30 (sphere): jal 0xFA000 (cave P) over jal FUN_00578300
+      - { address: 0x54B224, on: 0x0C03E800, off: 0x0C15E0C0, when: [{ address: 0x540004, equals: 3 }, { address: 0xFA000, equals: 0x27BDFFE0 }, { address: 0xFA114, equals: 0x27BD0020 }], offlineOnly: true, whenSetting: MeleePower }   # FUN_0054AB30 (sphere): jal 0xFA000 (cave P) over jal FUN_00578300
+      - { address: 0x0FA000, on: 0x27BDFFE0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # addiu sp, sp, -32 (cave P: FUN_00578300's four callers in the hit testers jal here)
+      - { address: 0x0FA004, on: 0xFFBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # sd    ra, 0(sp)
+      - { address: 0x0FA008, on: 0xFFA70008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # sd    a3, 8(sp) (the hit's class byte (the caller's sp+287))
+      - { address: 0x0FA00C, on: 0x3C080010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # lui   t0, 0x0010
+      - { address: 0x0FA010, on: 0x8D09F600, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # lw    t1, -0x0A00(t0) (0xFF600 +0: the power block's magic)
+      - { address: 0x0FA014, on: 0x3C0A5057, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # lui   t2, 0x5057
+      - { address: 0x0FA018, on: 0x354A5231, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # ori   t2, t2, 0x5231 ('PWR1')
+      - { address: 0x0FA01C, on: 0x152A0039, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # bne   t1, t2, GAME
+      - { address: 0x0FA020, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # nop
+      - { address: 0x0FA024, on: 0x8D09F000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # lw    t1, -0x1000(t0) (0xFF000: the melee block's magic)
+      - { address: 0x0FA028, on: 0x3C0A4D45, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # lui   t2, 0x4D45
+      - { address: 0x0FA02C, on: 0x354A4C31, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # ori   t2, t2, 0x4C31 ('MEL1')
+      - { address: 0x0FA030, on: 0x152A0034, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # bne   t1, t2, GAME
+      - { address: 0x0FA034, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # nop
+      - { address: 0x0FA038, on: 0x8D09F014, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # lw    t1, -0x0FEC(t0) (0xFF014: the live strike's attack object (cave D))
+      - { address: 0x0FA03C, on: 0x11200031, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # beq   t1, zero, GAME
+      - { address: 0x0FA040, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # nop
+      - { address: 0x0FA044, on: 0x8E8A0008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # lw    t2, 8(s4) (the node's object (s4 is the node in all four callers))
+      - { address: 0x0FA048, on: 0x152A002E, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # bne   t1, t2, GAME
+      - { address: 0x0FA04C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # nop
+      - { address: 0x0FA050, on: 0x8D09F008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # lw    t1, -0x0FF8(t0) (0xFF008: the block's record)
+      - { address: 0x0FA054, on: 0x1525002B, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # bne   t1, a1, GAME (a1: the attacker)
+      - { address: 0x0FA058, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # nop
+      - { address: 0x0FA05C, on: 0x3C093F80, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # lui   t1, 0x3F80
+      - { address: 0x0FA060, on: 0x44896000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # mtc1  t1, f12 (the game's damage and class at multiplier 1 (no critical, no promotion))
+      - { address: 0x0FA064, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # nop
+      - { address: 0x0FA068, on: 0x0C15E0C0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # jal   0x578300
+      - { address: 0x0FA06C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # nop
+      - { address: 0x0FA070, on: 0x3C080010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # lui   t0, 0x0010
+      - { address: 0x0FA074, on: 0xDFA70008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # ld    a3, 8(sp)
+      - { address: 0x0FA078, on: 0x90EB0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # lbu   t3, 0(a3) (the game's class)
+      - { address: 0x0FA07C, on: 0xAD02F618, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # sw    v0, -0x09E8(t0) (+0x18 the game's damage)
+      - { address: 0x0FA080, on: 0xAD0BF61C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # sw    t3, -0x09E4(t0) (+0x1C the game's class)
+      - { address: 0x0FA084, on: 0x18400010, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # blez  v0, CLS (no damage: nothing to scale)
+      - { address: 0x0FA088, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # nop
+      - { address: 0x0FA08C, on: 0xC500F608, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # lwc1  f0, -0x09F8(t0) (+0x08 the power's damage multiplier)
+      - { address: 0x0FA090, on: 0x44820800, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # mtc1  v0, f1
+      - { address: 0x0FA094, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # nop
+      - { address: 0x0FA098, on: 0x46800860, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # cvt.s.w f1, f1
+      - { address: 0x0FA09C, on: 0x46000842, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # mul.s f1, f1, f0
+      - { address: 0x0FA0A0, on: 0x46000864, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # cvt.w.s f1, f1
+      - { address: 0x0FA0A4, on: 0x44020800, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # mfc1  v0, f1
+      - { address: 0x0FA0A8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # nop
+      - { address: 0x0FA0AC, on: 0x1C400002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # bgtz  v0, HI
+      - { address: 0x0FA0B0, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # nop
+      - { address: 0x0FA0B4, on: 0x24020001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # addiu v0, zero, 1 (a hit that did damage still does 1)
+      - { address: 0x0FA0B8, on: 0x28497FFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # slti  t1, v0, 0x7FFF
+      - { address: 0x0FA0BC, on: 0x15200002, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # bne   t1, zero, CLS
+      - { address: 0x0FA0C0, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # nop
+      - { address: 0x0FA0C4, on: 0x24027FFF, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # addiu v0, zero, 0x7FFF (at most 32767, as the game clamps)
+      - { address: 0x0FA0C8, on: 0x8D09F604, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # lw    t1, -0x09FC(t0) (+0x04 the least class (0-2; anything else: none))
+      - { address: 0x0FA0CC, on: 0x2D2A0003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # sltiu t2, t1, 3
+      - { address: 0x0FA0D0, on: 0x11400006, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # beq   t2, zero, DONE
+      - { address: 0x0FA0D4, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # nop
+      - { address: 0x0FA0D8, on: 0x0169502A, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # slt   t2, t3, t1
+      - { address: 0x0FA0DC, on: 0x11400003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # beq   t2, zero, DONE (the game's own class is as strong already: kept)
+      - { address: 0x0FA0E0, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # nop
+      - { address: 0x0FA0E4, on: 0xA0E90000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # sb    t1, 0(a3)
+      - { address: 0x0FA0E8, on: 0x0120582D, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # daddu t3, t1, zero
+      - { address: 0x0FA0EC, on: 0xAD02F610, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # sw    v0, -0x09F0(t0) (+0x10 the damage now)
+      - { address: 0x0FA0F0, on: 0xAD0BF614, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # sw    t3, -0x09EC(t0) (+0x14 the class now)
+      - { address: 0x0FA0F4, on: 0x8D09F60C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # lw    t1, -0x09F4(t0) (+0x0C hits shaped)
+      - { address: 0x0FA0F8, on: 0x25290001, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # addiu t1, t1, 1
+      - { address: 0x0FA0FC, on: 0x10000003, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # beq   zero, zero, OUT
+      - { address: 0x0FA100, on: 0xAD09F60C, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # sw    t1, -0x09F4(t0)
+      - { address: 0x0FA104, on: 0x0C15E0C0, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # jal   0x578300 (anyone else's hit: the game's own, f12 as the caller set it)
+      - { address: 0x0FA108, on: 0x00000000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # nop
+      - { address: 0x0FA10C, on: 0xDFBF0000, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # ld    ra, 0(sp)
+      - { address: 0x0FA110, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # jr    ra
+      - { address: 0x0FA114, on: 0x27BD0020, off: 0x00000000, when: [{ address: 0x540004, equals: 3 }], offlineOnly: true, whenSetting: MeleePower }   # addiu sp, sp, 32
       # [VR] GunRayAim (tools/outbreak-vr/research/2026-10-14-vr-melee.md section 11): a shot hits along the VR gun's ray. The
       # game's shot FUN_0062CF10 builds the bullet's frame from the gun's weapon object (its muzzle, moved back along the
       # barrel by 0x6E6D30's per class and character offset, and the barrel's turn) and calls the attack spawn FUN_005521B0,
@@ -1477,6 +1563,7 @@ SLPM-65428:
       - { from: 0xFE900, to: 0xFE9D8, words: 54, counter: 0x48BF93 }    # G (MeleeHitJolt; at 0xFE800 before cave H)
       - { from: 0xFEA00, to: 0xFEA7C, words: 31, counter: 0x48BF93 }    # I (GunRayAim)
       - { from: 0xFB000, to: 0xFB0C0, words: 48, counter: 0x48BF93 }    # O (GunObjectAim: the shot's weapon object, the flash stub)
+      - { from: 0xFA000, to: 0xFA118, words: 70, counter: 0x48BF93 }    # P (MeleePower: the strike's damage and reaction class)
       - { from: 0xFEC00, to: 0xFEC94, words: 37, counter: 0x48BF93 }   # HandPickup (the Circle search at the hand)
       - { from: 0xFC000, to: 0xFC12C, words: 75, counter: 0x48BF93 }    # spatial audio (SpatialAudio)
       - { from: 0xFD000, to: 0xFD374, words: 221, counter: 0x48BF93 }    # V (VrBody)
@@ -1719,6 +1806,25 @@ SLPM-65428:
     # every contact strike.
     fist: { word: 0xFEBF0, magic: 0x46535431, attack: 33, wait: 0x32, point: [0.0, 0.0, -0.04], whip: [0.0, -0.07, 0.03],
             radius: 8, speed: 2.5, rearm: 1.0, firm: 6.0, light: 0.5, scale: 0.4 }
+    # Swing power (VR MeleePower, on; with contact; research/2026-10-27-melee-power.md): BetterVR's model on the game's own
+    # hit. A strike's power is its speed power (0 at the strike's own speed, 1 at fullSpeed m/s of the far hit point)
+    # times the committed stroke (strokeMin of it for a flick of strokeShort metres of the tip's path or less, all of it
+    # from strokeFull) times twoHand with the other hand on a weapon (its grip squeezed past twoHand.grip within
+    # twoHand.reach metres of the right hand's grip, moving at twoHand.speed m/s or faster), kept to minPower..1. Cave
+    # P (block: magic, the least class, the damage multiplier) makes the hit's damage the game's own at multiplier 1
+    # times (floor + gain * smoothstep(power)) * damage, and raises the hit's class (never lowers it) to 1 from stagger
+    # (the zombie's stagger) and 2 from knockdown (its knockdown), at most maxClass. hook: one of cave P's sites while it
+    # is in. The VR hand's picture holds still hitStopMin-hitStopMax display frames at the contact (by the power).
+    # Defaults per kind are PhysicalMelee::DefaultPower; the keys here override them.
+    power:
+      block: 0xFF600
+      magic: 0x50575231
+      hook: { address: 0x54A2D8, on: 0x0C03E800 }
+      twoHand: { reach: 0.30, grip: 0.5, speed: 1.0 }
+      weapon: { fullSpeed: 6.5, stagger: 0.45, knockdown: 0.85, maxClass: 2 }   # pipes, poles, the brush, the spear
+      knife: { fullSpeed: 4.5, stagger: 0.45, maxClass: 1 }                      # a blade staggers at most (the game's own knife critical)
+      fist: { fullSpeed: 4.5, damage: 0.55, stagger: 0.45, maxClass: 1 }        # 6-41 HP of the knife's 55; a stagger at most
+      whip: { fullSpeed: 4.5, damage: 0.70, stagger: 0.45, maxClass: 1 }        # 7-52 HP of the knife's 55; a stagger at most
     # Gun ray (VR GunRayAim, strictly offline; research/2026-10-14-vr-melee.md section 11): cave I's block (magic, the
     # stamp, the local record, the shot count cave I keeps, the 4 x 4 matrix at +0x10, the origin at +0x50) and the game's
     # own back offset for a shot's origin: f32 at table + stride * the weapon type's class byte (types + typeStride * type +

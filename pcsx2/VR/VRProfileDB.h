@@ -989,6 +989,23 @@ namespace VR::ProfileDB
 		float fist_radius = 8.0f;
 		float fist_scale = 0.4f;
 		PhysicalMelee::ContactParams fist;
+		// power ([VR] MeleePower; needs contact): cave P's block (magic at +0, the least class at +4, the damage multiplier
+		// f32 at +8; cave P's count at +0x0C, the shaped damage +0x10 and class +0x14, the game's base damage +0x18 and
+		// class +0x1C), the site word that reads power_hook_on while cave P is in, and per kind the power tuning (the
+		// defaults of PhysicalMelee::DefaultPower, overridden by the profile's keys); the other hand counts as on the weapon
+		// within two_hand_reach metres of the right hand's grip, squeezing its grip past two_hand_grip and moving at least
+		// two_hand_speed m/s.
+		bool has_power = false;
+		u32 power_block = 0;
+		u32 power_magic = 0;
+		u32 power_hook = 0;
+		u32 power_hook_on = 0;
+		PhysicalMelee::PowerParams power[4] = {PhysicalMelee::DefaultPower(PhysicalMelee::PowerKind::Weapon),
+			PhysicalMelee::DefaultPower(PhysicalMelee::PowerKind::Knife), PhysicalMelee::DefaultPower(PhysicalMelee::PowerKind::Fist),
+			PhysicalMelee::DefaultPower(PhysicalMelee::PowerKind::Whip)};
+		float two_hand_reach = 0.30f;
+		float two_hand_grip = 0.5f;
+		float two_hand_speed = 1.0f;
 		// gunRay ([VR] GunRayAim; needs contact for the weapon-type table and the record's weapon type): cave I's block
 		// (magic at +0, the counter stamp at +4, the local record at +8, cave I's shot count at +0x0C, the 4 x 4 matrix at
 		// +0x10, the origin at +0x50) and the game's own back offset for a shot's origin (f32 at gun_back_table +
