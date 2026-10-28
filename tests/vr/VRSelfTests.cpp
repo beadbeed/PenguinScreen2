@@ -39,6 +39,7 @@
 #include "VR/ReloadGesture.h"
 #include "VR/SpatialAudio.h"
 #include "VR/SpatialControls.h"
+#include "VR/VrGrab.h"
 #include "VR/StereoAuto.h"
 #include "VR/VRProfileDB.h"
 #include "VR/ZoneMarkers.h"
@@ -2468,6 +2469,7 @@ int main(int argc, char* argv[])
 		return stance && status && fp.has_value() && fp->table == 0x3FFCA0u && fp->stride == 0xD90u && fp->count == 64u &&
 		       fp->position == 0x38u && fp->within == 120.0f;
 	});
+	RunSilent("VrGrab (the lunge cue, shove / strike / shot detector, the escape meter)", VR::VrGrab::SelfTest);
 	RunSilent("ProfileDB::SelfTestMultibandResolve", VR::ProfileDB::SelfTestMultibandResolve);
 	RunAutoStereo();
 	RunCameraDriverLogged();

@@ -1366,6 +1366,12 @@ struct Pcsx2Config
 		// With GrabFirstPerson: the view eases round toward the zombie holding you (yaw only, at most 20 deg/s, the comfort
 		// vignette on while it turns). Off by default: an artificial turn the head did not make.
 		bool GrabFacePull = false;
+		// File #1 (VR::VrGrab): zombie grabs through the game's own systems. A short buzz on both hands when a zombie starts
+		// its grab lunge at you (read only). While grabbed: a hard shove of a hand into the grabbing zombie's head or chest,
+		// or the trigger with the laser on its head at point-blank range, runs the breakout's own pad presses for a moment
+		// (the game's escape inputs on your own pad, so private co-op too) and, offline only, takes points off the game's own
+		// escape meter in your own record (+0xCDD); a hard one empties it, so the game runs its own shove-off escape.
+		bool VrGrab = true;
 		// First person, File #1 offline only (profiles with a melee block and camera.silence entries marked whenSetting:
 		// PhysicalMelee): with a melee weapon equipped, a deliberate swing of the right controller presses the game's own
 		// attack (Circle; R1 too if the weapon is down), and while the game's swing is live its hit test is run on the VR

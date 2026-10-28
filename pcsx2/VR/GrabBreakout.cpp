@@ -4,6 +4,8 @@
 #include "VR/GrabBreakout.h"
 #include "VR/SpatialControls.h"
 
+#include "Config.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -132,7 +134,9 @@ namespace VR::GrabBreakout
 			out.shaking[i] = st.hand[i].since_shake_s <= p.hold_s + kEdgeEps;
 		}
 
-		out.active = live && grabbed && (out.shaking[0] || out.shaking[1]);
+		const bool burst = grabbed && st.burst_s > 0.0f;
+		st.burst_s = grabbed ? std::max(0.0f, st.burst_s - dt) : 0.0f;
+		out.active = live && grabbed && (out.shaking[0] || out.shaking[1] || burst);
 		if (!out.active)
 		{
 			// The next grab (or shake) starts the schedule over: the stick right and a Circle press first.
@@ -225,8 +229,19 @@ namespace VR::SpatialControls
 	{
 		st.buzz = {};
 		st.buzz_s = 0.0f;
+		// [VR] VrGrab: a shove, a strike or a point-blank shot at the grabbing zombie runs the presses below for a moment
+		// (the game's own escape inputs; offline the camera driver's VrGrab::Vsync also takes points off the game's meter).
+		VrGrab::Event vr_ev;
+		if (EmuConfig.VR.VrGrab)
+			vr_ev = VrGrab::InputPoll(snapshot, grabbed && !menu_mode, dt, st.vr, &st.burst_s);
 		// Never into a menu: Circle confirms there.
 		const GrabBreakout::Output out = GrabBreakout::Step(snapshot, p, grabbed && !menu_mode, dt, st);
+		if (vr_ev.kind != VrGrab::Kind::None && vr_ev.hand >= 0 && vr_ev.hand < 2)
+		{
+			// A thump in the hand that did it (the presses' own buzz may follow on the next polls).
+			st.buzz[vr_ev.hand] = VrGrab::Decisive(vr_ev.kind) ? 0.9f : 0.6f;
+			st.buzz_s = 0.06f;
+		}
 		if (!out.active)
 			return;
 
@@ -250,7 +265,7 @@ namespace VR::SpatialControls
 			v[static_cast<u32>(ControlId::ButtonB)] = 1.0f;
 			pressed = true;
 		}
-		if (pressed && out.press_began && p.buzz > 0.0f)
+		if (pressed && out.press_began && p.buzz > 0.0f && vr_ev.kind == VrGrab::Kind::None)
 		{
 			const float amplitude = std::clamp(p.buzz, 0.0f, 1.0f);
 			for (int h = 0; h < 2; ++h)
