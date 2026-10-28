@@ -14,6 +14,7 @@
 #include "VR/MeshRaster.h"
 #include "VR/GameFeedback.h"
 #include "VR/GunRay.h"
+#include "VR/PhysicalMelee.h"
 #include "VR/HudCards.h"
 #include "VR/MenuPanel.h"
 #include "VR/MenuPointer.h"
@@ -2693,6 +2694,9 @@ namespace VR::XRCompositor
 						d.held = held_weapon.held;
 						d.item_id = held_weapon.item_id;
 					}
+					// [VR] MeleePower's hit-stop: the right hand's picture held at a strike's contact for a few frames.
+					if (i == HandModel::kRight)
+						PhysicalMelee::ApplyHitStop(d.pos, d.quat);
 				}
 			}
 			// Shot feedback on a pistol or a long gun (fake hands too, for headset-free captures): recoil, a muzzle
@@ -8337,6 +8341,9 @@ namespace VR::XRCompositor
 					d.pos[k] = src.grip_pose.position_xyz[k];
 				for (int k = 0; k < 4; k++)
 					d.quat[k] = orient.orientation_xyzw[k];
+				// [VR] MeleePower's hit-stop, as BuildHandLayers holds it (the pacer must not move the image on).
+				if (i == HandModel::kRight)
+					PhysicalMelee::ApplyHitStop(d.pos, d.quat);
 				d.time = (snap.display_time != 0) ? snap.display_time : t;
 				d.valid = true;
 			}

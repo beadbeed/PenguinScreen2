@@ -263,6 +263,10 @@ namespace
 						r[rd] = r[rs] ^ r[rt];
 					else if (fn == 0x2B)
 						r[rd] = r[rs] < r[rt] ? 1u : 0u;
+					else if (fn == 0x2A)
+						r[rd] = static_cast<s32>(r[rs]) < static_cast<s32>(r[rt]) ? 1u : 0u; // slt
+					else if (fn == 0x2D)
+						r[rd] = r[rs] + r[rt]; // daddu: these values are 32-bit
 					else if (fn == 0x08)
 					{
 						*branch = *taken = true;
@@ -290,7 +294,9 @@ namespace
 				case 0x06: *branch = true; *taken = static_cast<s32>(r[rs]) <= 0; *target = bt; break;
 				case 0x07: *branch = true; *taken = static_cast<s32>(r[rs]) > 0; *target = bt; break;
 				case 0x09: r[rt] = r[rs] + simm; break;
+				case 0x0A: r[rt] = static_cast<s32>(r[rs]) < static_cast<s32>(simm) ? 1u : 0u; break; // slti
 				case 0x0B: r[rt] = r[rs] < simm ? 1u : 0u; break;
+				case 0x37: r[rt] = Load32(r[rs] + simm); break; // ld: these values are 32-bit (sd stored the low word)
 				case 0x0C: r[rt] = r[rs] & imm; break;
 				case 0x0D: r[rt] = r[rs] | imm; break;
 				case 0x0F: r[rt] = imm << 16; break;
@@ -307,6 +313,23 @@ namespace
 					if (((i >> 21) & 31u) == 0x04 && (i & 0x7FFu) == 0)
 					{
 						f[rd] = r[rt];
+						break;
+					}
+					// mfc1 rt, fs; cvt.s.w fd, fs; cvt.w.s fd, fs (truncating, as the EE)
+					if (((i >> 21) & 31u) == 0x00 && (i & 0x7FFu) == 0)
+					{
+						r[rt] = f[rd];
+						break;
+					}
+					if (((i >> 21) & 31u) == 0x14 && fn == 0x20)
+					{
+						f[(i >> 6) & 31u] = Bits(static_cast<float>(static_cast<s32>(f[rd])));
+						break;
+					}
+					if (((i >> 21) & 31u) == 0x10 && fn == 0x24)
+					{
+						const float x = F(f[rd]);
+						f[(i >> 6) & 31u] = static_cast<u32>(std::isfinite(x) ? static_cast<s32>(std::clamp(x, -2147483520.0f, 2147483520.0f)) : 0);
 						break;
 					}
 					if (((i >> 21) & 31u) != 0x10 || fn != 0x02)
@@ -1049,6 +1072,164 @@ namespace
 		return ok;
 	}
 
+	// Cave P ([VR] MeleePower): in place of FUN_00578300 at its four callers (s4 the node, a1 the attacker, a3 the hit's
+	// class byte, f12 the multiplier). A stub stands for FUN_00578300: base damage and class (the iron pipe on a zombie,
+	// 60 and 1), times f12, the class one up when f12 > 1, as the game.
+	struct CaveP
+	{
+		bool power_magic = true, melee_magic = true;
+		u32 live = kObject, node_obj = kObject, attacker = kLocalRecord, least = 2;
+		float mult = 1.35f, f12 = 2.0f;
+		s32 base = 60;
+		u8 base_class = 1;
+	};
+	struct CavePOut
+	{
+		bool ok = false;
+		u32 v0 = 0, count = 0, game_dmg = 0, game_cls = 0, now_dmg = 0, now_cls = 0;
+		u8 cls = 0;
+		float f12_seen = 0.0f;
+		bool called = false;
+	};
+	CavePOut s_cave_p_last;
+	CaveP s_cave_p_case;
+	CavePOut RunCaveP(const CaveP& c)
+	{
+		CavePOut out;
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		if (!p || !p->camera.has_value())
+			return out;
+		MiniEE ee;
+		int words = 0;
+		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
+		{
+			if (sil.when_setting == "MeleePower" && sil.ee_address >= 0xFA000u && sil.ee_address < 0xFB000u)
+			{
+				ee.Store32(sil.ee_address, sil.value_on);
+				words++;
+			}
+		}
+		if (words != 70)
+			return out;
+		s_cave_p_case = c;
+		s_cave_p_last = {};
+		ee.stub = +[](MiniEE& e, u32 pc, u32* next) {
+			if (pc != 0x578300)
+				return false;
+			const float m = MiniEE::F(e.f[12]);
+			s_cave_p_last.called = true;
+			s_cave_p_last.f12_seen = m;
+			u8 cls = s_cave_p_case.base_class;
+			if (m > 1.0f && cls < 2)
+				cls++;
+			e.Store8(e.r[7], cls);
+			e.r[2] = static_cast<u32>(static_cast<s32>(static_cast<float>(s_cave_p_case.base) * m));
+			for (int k : {1, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13})
+				e.r[k] = 0xDEAD0000u + static_cast<u32>(k);
+			e.f[0] = e.f[1] = MiniEE::Bits(-7.0f);
+			*next = e.r[31];
+			return true;
+		};
+		constexpr u32 kPower = 0xFF600, kClassByte = 0x01F0011F;
+		ee.r[29] = 0x01F00000;
+		ee.Store32(kPower, c.power_magic ? 0x50575231u : 0u);
+		ee.Store32(kPower + 0x04, c.least);
+		ee.Store32(kPower + 0x08, MiniEE::Bits(c.mult));
+		ee.Store32(kPower + 0x0C, 5);
+		ee.Store32(kBlock, c.melee_magic ? 0x4D454C31u : 0u);
+		ee.Store32(kBlock + 0x08, kLocalRecord);
+		ee.Store32(kBlock + 0x14, c.live);
+		ee.Store32(kNode + 0x08, c.node_obj);
+		ee.Store8(kClassByte, 0x77);
+		ee.r[4] = 0x429530;      // a0: the zombie
+		ee.r[5] = c.attacker;    // a1
+		ee.r[6] = 0x6E8100;      // a2: the params
+		ee.r[7] = kClassByte;    // a3
+		ee.r[20] = kNode;        // s4: the node
+		ee.r[16] = 0x11111111;
+		ee.f[12] = MiniEE::Bits(c.f12);
+		ee.r[31] = 0x54A2E0;
+		const u32 sp = ee.r[29];
+		const u32 where = ee.Run(0xFA000, 0xFA000, 0xFA118);
+		out = s_cave_p_last;
+		out.ok = where == 0x54A2E0 && ee.r[29] == sp && ee.r[16] == 0x11111111 && ee.r[20] == kNode && out.called;
+		out.v0 = ee.r[2];
+		out.cls = static_cast<u8>(ee.Load32(kClassByte) >> 24);
+		out.count = ee.Load32(kPower + 0x0C);
+		out.now_dmg = ee.Load32(kPower + 0x10);
+		out.now_cls = ee.Load32(kPower + 0x14);
+		out.game_dmg = ee.Load32(kPower + 0x18);
+		out.game_cls = ee.Load32(kPower + 0x1C);
+		return out;
+	}
+
+	bool MeleeCaveP()
+	{
+		bool ok = true;
+		const auto check = [&](bool c) { ok = ok && c; };
+		{
+			// Ours, hard: the game's damage at multiplier 1 (not the caller's 2.0), x1.35 = 81, the class raised to 2.
+			const CavePOut o = RunCaveP(CaveP{});
+			check(o.ok && o.f12_seen == 1.0f && o.v0 == 81 && o.cls == 2 && o.count == 6 && o.game_dmg == 60 && o.game_cls == 1 &&
+				  o.now_dmg == 81 && o.now_cls == 2);
+		}
+		{
+			// Ours, light: x0.3 = 18 (truncated), the least class 0 keeps the game's 1 (never lowered).
+			CaveP c;
+			c.mult = 0.3f;
+			c.least = 0;
+			const CavePOut o = RunCaveP(c);
+			check(o.ok && o.f12_seen == 1.0f && o.v0 == 18 && o.cls == 1 && o.count == 6 && o.now_cls == 1);
+		}
+		{
+			// No least class (0xFF): the game's; a tiny multiplier still does 1; the cap at 32767; no damage stays none.
+			CaveP c;
+			c.least = 0xFF;
+			c.mult = 0.001f;
+			const CavePOut o = RunCaveP(c);
+			check(o.ok && o.v0 == 1 && o.cls == 1);
+			c.mult = 2.0f;
+			c.base = 30000;
+			const CavePOut big = RunCaveP(c);
+			check(big.ok && big.v0 == 32767);
+			c.base = 0;
+			const CavePOut zero = RunCaveP(c);
+			check(zero.ok && zero.v0 == 0 && zero.count == 6);
+		}
+		{
+			// A knife's class 0 raised to a stagger.
+			CaveP c;
+			c.base = 55;
+			c.base_class = 0;
+			c.least = 1;
+			c.mult = 0.5f;
+			const CavePOut o = RunCaveP(c);
+			check(o.ok && o.v0 == 27 && o.cls == 1);
+		}
+		// Anyone else's hit: the game's own, the caller's multiplier (2.0: 120 HP, the class promoted), nothing counted.
+		const auto game = [&](const CaveP& c) {
+			const CavePOut o = RunCaveP(c);
+			return o.ok && o.f12_seen == 2.0f && o.v0 == 120 && o.cls == 2 && o.count == 5 && o.game_dmg == 0;
+		};
+		CaveP other;
+		other.node_obj = kObject + 0x200;
+		check(game(other));
+		CaveP none;
+		none.live = 0;
+		none.node_obj = 0;
+		check(game(none));
+		CaveP partner;
+		partner.attacker = kPartnerRecord;
+		check(game(partner));
+		CaveP nomagic;
+		nomagic.power_magic = false;
+		check(game(nomagic));
+		CaveP nomelee;
+		nomelee.melee_magic = false;
+		check(game(nomelee));
+		return ok;
+	}
+
 	bool MeleeContactCaves()
 	{
 		bool ok = true;
@@ -1338,7 +1519,8 @@ int main(int argc, char* argv[])
 		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
 		{
 			if (sil.when_setting.empty() || sil.when_setting == "PhysicalMelee" || sil.when_setting == "PhysicalMeleeContact" ||
-				sil.when_setting == "MeleeHitJolt" || sil.when_setting == "GunRayAim" || sil.when_setting == "GunObjectAim" ||
+				sil.when_setting == "MeleeHitJolt" || sil.when_setting == "MeleePower" || sil.when_setting == "GunRayAim" ||
+				sil.when_setting == "GunObjectAim" ||
 				sil.when_setting == "HandPickup" ||
 				sil.when_setting == "ScriptedShotsFirstPerson" ||
 				sil.when_setting == "SpatialAudio" || sil.when_setting == "FadeDim" ||
@@ -1548,6 +1730,60 @@ int main(int argc, char* argv[])
 		       std::fabs(VR::PhysicalMelee::FistStrength(9.0f, m.fist, m.fist_scale) - 0.4f) < 1e-4f &&
 		       std::fabs(m.fist_point[2] + 0.04f) < 1e-6f && std::fabs(m.whip_point[1] + 0.07f) < 1e-6f;
 	});
+	// [VR] MeleePower (tools/outbreak-vr/research/2026-10-27-melee-power.md): the power curve and the thresholds, File #1's
+	// melee.power and its MeleePower entries (four sites guarded by cave P's first and last words, before the cave), and
+	// cave P itself on the profile's words.
+	{
+		Begin("Physical melee power (PhysicalMelee::SelfTestPower)");
+		const std::vector<std::string> failed = VR::PhysicalMelee::SelfTestPower();
+		std::string all;
+		for (const std::string& f : failed)
+			all += (all.empty() ? "" : "; ") + f;
+		Record("Physical melee power", failed.empty(),
+			failed.empty() ? std::string("passed (it names the failed checks only, no check count)") :
+							 "FAIL: " + std::to_string(failed.size()) + " check(s): " + all);
+	}
+	RunSilent("Physical melee power (File #1 profile, melee.power and cave P's entries)", +[]() {
+		const VR::ProfileDB::Profile* p = VR::ProfileDB::Lookup("SLPM-65428", 0x32088394u);
+		if (!p || !p->melee.has_value() || !p->camera.has_value() || !VR::ProfileDB::IsSilenceSettingName("MeleePower"))
+			return false;
+		const VR::ProfileDB::MeleeParams& m = p->melee.value();
+		using VR::PhysicalMelee::PowerKind;
+		const auto& w = m.power[static_cast<int>(PowerKind::Weapon)];
+		const auto& k = m.power[static_cast<int>(PowerKind::Knife)];
+		const auto& f = m.power[static_cast<int>(PowerKind::Fist)];
+		const auto& wh = m.power[static_cast<int>(PowerKind::Whip)];
+		// The block inside 0xFF600-0xFF6FF; the hook one of the four sites.
+		if (!m.has_power || m.power_block != 0xFF600 || m.power_magic != 0x50575231 || m.power_hook != 0x54A2D8 ||
+			m.power_hook_on != 0x0C03E800 || w.max_class != 2 || k.max_class != 1 || f.max_class != 1 || wh.max_class != 1 ||
+			f.damage_scale != 0.55f || wh.damage_scale != 0.70f || w.full_speed != 6.5f || f.full_speed != 4.5f)
+			return false;
+		int sites = 0, words = 0;
+		bool order = true;
+		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
+		{
+			if (sil.when_setting != "MeleePower")
+				continue;
+			if (!sil.offline_only || sil.keep_through_disarm)
+				return false;
+			if (sil.ee_address >= 0xFA000 && sil.ee_address < 0xFA118)
+			{
+				words++;
+				continue;
+			}
+			if (sil.value_on != 0x0C03E800 || sil.value_off != 0x0C15E0C0 || sil.when.size() != 3 ||
+				sil.when[1].ee_address != 0xFA000 || sil.when[1].equals != 0x27BDFFE0 || sil.when[2].ee_address != 0xFA114 ||
+				sil.when[2].equals != 0x27BD0020)
+				return false;
+			order = order && words == 0;
+			sites++;
+		}
+		bool range = false;
+		for (const VR::ProfileDB::CameraCave& cv : p->camera->caves)
+			range = range || (cv.from == 0xFA000 && cv.to == 0xFA118);
+		return sites == 4 && words == 70 && order && range;
+	});
+	RunSilent("Physical melee power cave P (File #1 profile words, interpreted)", MeleeCaveP);
 	// [VR] MeleeHitJolt (a prototype; tools/outbreak-vr/research/2026-10-14-vr-melee.md sections 8 and 9): the pure parts
 	// (the magnitude from the swing's speed, the chain for the struck sphere's bone, each bone's turn in its parent's
 	// frame, the entries as the cave reads them), File #1's melee.jolt and its MeleeHitJolt entries (the zombie's update

@@ -278,6 +278,7 @@ namespace VR::PhysicalMelee
 	{
 		int enemy = -1;             // strike this enemy now (-1: none)
 		float strength = 0.0f;
+		float speed = 0.0f;         // the tip speed the strength is for (the fastest it went while held)
 	};
 
 	// One poll: re-arms enemies (slow tip or off them), then strikes the first armed touched enemy if the tip is fast
@@ -310,6 +311,73 @@ namespace VR::PhysicalMelee
 	float FistStrength(float speed, const ContactParams& p, float scale);
 	// ChooseFist, FistFrame and FistStrength on scripted cases. Returns the failed checks.
 	std::vector<std::string> SelfTestFists();
+
+	// --- Swing power ([VR] MeleePower, on; research/2026-10-27-melee-power.md). Pure. ---
+	//
+	// BetterVR's model (Crementif/BotW-BetterVR, MIT, src/hooking/weapon.cpp) on the game's own hit: a swing's power from
+	// the tip's speed, the committed stroke behind it and a second hand on the weapon, kept to min_power..1; the damage
+	// multiplier floor + gain * smoothstep(power) on the game's own damage (cave P: FUN_00578300 at multiplier 1, then
+	// scaled); and the game's own reaction class raised by the power (never lowered): from stagger the zombie's stagger
+	// (class 1), from knockdown its knockdown (class 2), capped at max_class. Below stagger the hit's class is the game's
+	// own (a knife's flinch, a pipe's stagger), as before.
+	enum class PowerKind : u8
+	{
+		Weapon, // a pipe, pole, brush or spear (the weapon's own class)
+		Knife,  // a blade (weapon types 32, 33): up to a stagger, as the game's own knife critical
+		Fist,   // bare hands
+		Whip,   // a gun's butt
+	};
+	struct PowerParams
+	{
+		float full_speed = 6.5f;   // m/s at the far hit point: speed power 1 here (0 at the strike's own speed)
+		float min_power = 0.15f;   // every strike has at least this
+		float floor = 0.20f;       // damage multiplier at power 0 ...
+		float gain = 1.15f;        // ... plus this times smoothstep(power)
+		float damage_scale = 1.0f; // times the multiplier (the fists' and whips' share of the knife's damage)
+		float stroke_short = 0.10f; // m of the tip's path in this stroke: at or below, stroke_min of the speed power ...
+		float stroke_full = 0.35f;  // ... rising to all of it here (a flick of the wrist is not a committed swing)
+		float stroke_min = 0.6f;
+		float two_hand = 1.25f;    // the power times this with the other hand on the weapon (weapons and knives only)
+		float stagger = 0.45f;     // power from which the class is at least 1 (the zombie's stagger)
+		float knockdown = 0.85f;   // power from which it is 2 (its knockdown), when max_class allows
+		int max_class = 2;
+		int hit_stop_min = 2;      // the VR weapon's picture held still at the contact: display frames at power 0 ...
+		int hit_stop_max = 4;      // ... and at power 1 (never the game)
+	};
+	PowerParams SanitizedPower(const PowerParams& in);
+	// The per-kind defaults (the profile's melee.power overrides them).
+	PowerParams DefaultPower(PowerKind kind);
+	// The weapon types a blade has (Kevin's knife 32, the butcher knife 33).
+	PowerKind PowerKindFor(bool fist, bool whip, u32 weapon_type);
+	float Smoothstep01(float x);
+
+	struct PowerIn
+	{
+		float speed = 0.0f;        // m/s at the far hit point, at the strike
+		float strike_speed = 0.0f; // the contact threshold for this weapon (speed power 0 there)
+		float stroke_m = 0.0f;     // the far hit point's path in this stroke, metres
+		bool two_hand = false;     // the other hand on the weapon, moving with it
+	};
+	struct PowerOut
+	{
+		float power = 0.0f;        // min_power..1
+		float damage = 1.0f;       // the multiplier on the game's damage (damage_scale included)
+		int cls = 0;               // the least reaction class (0: the game's own)
+		int hit_stop_frames = 0;
+		float haptic_amp = 0.0f;   // a sharp buzz: amplitude 0-1 and seconds
+		float haptic_s = 0.0f;
+	};
+	PowerOut SwingPower(const PowerIn& in, const PowerParams& p);
+	// The curve, the stroke and two-hand terms, the thresholds and the caps on scripted swings. Returns the failed checks.
+	std::vector<std::string> SelfTestPower();
+
+	// The hit-stop: the right hand's drawn pose (the hand image and what rides on it) held still for a moment at a
+	// strike's contact, the game and the game's hit test untouched. Any thread: the input poll starts it, the
+	// compositor's two hand paths apply it.
+	void StartHitStop(const float pos[3], const float quat[4], float seconds);
+	// While a hit-stop runs (now, steady ms): pos and quat (the right hand's grip position and pointing frame, as the
+	// hands take them) become the pose it froze. False, nothing written, otherwise.
+	bool ApplyHitStop(float pos[3], float quat[4]);
 
 	// --- Hit jolt ([VR] MeleeHitJolt, a prototype; research/2026-10-14-vr-melee.md sections 8 and 9). Pure. ---
 	//

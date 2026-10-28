@@ -3944,7 +3944,7 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 	using VR::ProfileDB::MeleeParams;
 	warnUnknownKeys(serial, node, "melee", {"attackButton", "screenFlag", "swing", "enemies", "override", "online", "tip", "speed", "rest", "endMs",
 		"travel", "straightness", "strokeMs", "pressMs", "pressMaxMs", "raiseMs", "swingMs", "contactMs", "cooldownMs", "contact",
-		"jolt", "gunRay", "gunObject", "fist", "notes"});
+		"jolt", "gunRay", "gunObject", "fist", "power", "notes"});
 	MeleeParams mp;
 	if (node.has_child("attackButton"))
 	{
@@ -4473,6 +4473,79 @@ static std::optional<VR::ProfileDB::MeleeParams> parseMelee(const std::string_vi
 							   "(0-254), and in range: wait inside an enemy's record, point and whip (3 numbers, metres, under "
 							   "0.3), radius 2-30, rearm < speed <= firm, light 0.1-1, scale 0.05-1; ignoring it, so "
 							   "PhysicalMeleeFists does nothing here.", serial);
+	}
+	// power ([VR] MeleePower): cave P's block, its site's word while it is in, and the power tuning per kind (weapons,
+	// knives, fists, whips: each a map of the VR::PhysicalMelee::PowerParams keys, over DefaultPower); needs contact.
+	if (node.has_child("power"))
+	{
+		const ryml::ConstNodeRef pw = node["power"];
+		MeleeParams o = mp;
+		bool ok = pw.is_map() && mp.has_contact && pw.has_child("hook") && pw["hook"].is_map();
+		const auto num = [&](const ryml::ConstNodeRef& n, const char* key, float lo, float hi, float& dst) {
+			if (!n.has_child(key))
+				return true;
+			const std::optional<float> x = StringUtil::FromChars<float>(nodeVal(n[key]));
+			if (!x.has_value() || !std::isfinite(x.value()) || x.value() < lo || x.value() > hi)
+				return false;
+			dst = x.value();
+			return true;
+		};
+		const auto integer = [&](const ryml::ConstNodeRef& n, const char* key, int lo, int hi, int& dst) {
+			if (!n.has_child(key))
+				return true;
+			const std::optional<s64> x = parseDecOrHex(nodeVal(n[key]));
+			if (!x.has_value() || x.value() < lo || x.value() > hi)
+				return false;
+			dst = static_cast<int>(x.value());
+			return true;
+		};
+		if (ok)
+		{
+			warnUnknownKeys(serial, pw, "melee.power", {"block", "magic", "hook", "twoHand", "weapon", "knife", "fist", "whip", "notes"});
+			const ryml::ConstNodeRef hk = pw["hook"];
+			warnUnknownKeys(serial, hk, "melee.power.hook", {"address", "on", "notes"});
+			ok = read_hex(pw, "block", o.power_block) && read_hex(pw, "magic", o.power_magic) && read_hex(hk, "address", o.power_hook) &&
+			     read_hex(hk, "on", o.power_hook_on);
+			if (ok && pw.has_child("twoHand"))
+			{
+				const ryml::ConstNodeRef th = pw["twoHand"];
+				warnUnknownKeys(serial, th, "melee.power.twoHand", {"reach", "grip", "speed", "notes"});
+				ok = th.is_map() && num(th, "reach", 0.05f, 1.0f, o.two_hand_reach) && num(th, "grip", 0.0f, 1.0f, o.two_hand_grip) &&
+				     num(th, "speed", 0.0f, 10.0f, o.two_hand_speed);
+			}
+			const char* kinds[4] = {"weapon", "knife", "fist", "whip"};
+			for (int k = 0; k < 4 && ok; k++)
+			{
+				if (!pw.has_child(kinds[k]))
+					continue;
+				const ryml::ConstNodeRef kn = pw[kinds[k]];
+				warnUnknownKeys(serial, kn, kinds[k], {"fullSpeed", "minPower", "floor", "gain", "damage", "strokeShort", "strokeFull",
+					"strokeMin", "twoHand", "stagger", "knockdown", "maxClass", "hitStopMin", "hitStopMax", "notes"});
+				VR::PhysicalMelee::PowerParams pp = o.power[k];
+				ok = kn.is_map() && num(kn, "fullSpeed", 1.0f, 20.0f, pp.full_speed) && num(kn, "minPower", 0.0f, 1.0f, pp.min_power) &&
+				     num(kn, "floor", 0.0f, 3.0f, pp.floor) && num(kn, "gain", 0.0f, 3.0f, pp.gain) &&
+				     num(kn, "damage", 0.0f, 2.0f, pp.damage_scale) && num(kn, "strokeShort", 0.0f, 2.0f, pp.stroke_short) &&
+				     num(kn, "strokeFull", 0.01f, 3.0f, pp.stroke_full) && num(kn, "strokeMin", 0.0f, 1.0f, pp.stroke_min) &&
+				     num(kn, "twoHand", 1.0f, 2.0f, pp.two_hand) && num(kn, "stagger", 0.0f, 1.01f, pp.stagger) &&
+				     num(kn, "knockdown", 0.0f, 1.01f, pp.knockdown) && integer(kn, "maxClass", 0, 2, pp.max_class) &&
+				     integer(kn, "hitStopMin", 0, 8, pp.hit_stop_min) && integer(kn, "hitStopMax", 0, 8, pp.hit_stop_max) &&
+				     pp.stroke_full > pp.stroke_short && pp.knockdown >= pp.stagger && pp.hit_stop_max >= pp.hit_stop_min;
+				o.power[k] = VR::PhysicalMelee::SanitizedPower(pp);
+			}
+			ok = ok && o.power_magic != 0 && (o.power_block % 16) == 0 && o.power_block + 0x20 <= Ps2MemSize::MainRam &&
+			     (o.power_hook % 4) == 0 && o.power_hook != 0 && o.power_hook_on != 0;
+		}
+		if (ok)
+		{
+			o.has_power = true;
+			mp = o;
+		}
+		else
+			Console.WarningFmt("(VR) ProfileDB: Serial '{}' melee power needs contact, block (16-byte aligned), a non-zero magic, "
+							   "hook (address, on) and in range: twoHand reach 0.05-1, grip 0-1, speed 0-10; per kind fullSpeed "
+							   "1-20, minPower, strokeMin 0-1, floor, gain 0-3, damage 0-2, strokeShort < strokeFull, twoHand 1-2, "
+							   "stagger <= knockdown 0-1.01, maxClass 0-2, hitStopMin <= hitStopMax 0-8; ignoring it, so MeleePower "
+							   "does nothing here.", serial);
 	}
 	// gunRay ([VR] GunRayAim): cave I's block and the game's back offset for a shot's origin; needs contact (the
 	// weapon-type table and the record's weapon type).
@@ -5859,6 +5932,7 @@ static int CountMultibandResolveMismatches(bool log)
 bool VR::ProfileDB::IsSilenceSettingName(std::string_view name)
 {
 	return name == "SeamlessDoors" || name == "SeamlessDoorsArrival" || name == "PhysicalMelee" || name == "PhysicalMeleeContact" || name == "MeleeHitJolt" ||
+	       name == "MeleePower" ||
 	       name == "GunRayAim" || name == "GunObjectAim" ||
 	       name == "HandPickup" ||
 	       name == "ScriptedShotsFirstPerson" || name == "SpatialAudio" || name == "FadeDim" ||
@@ -5876,6 +5950,9 @@ bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
 	if (name == "PhysicalMeleeContact")
 		return EmuConfig.VR.PhysicalMelee &&
 		       EmuConfig.VR.PhysicalMeleeMode == Pcsx2Config::VROptions::PhysicalMeleeModeType::Contact;
+	// Cave P (the swing's power on the game's damage and reaction class): on top of contact mode.
+	if (name == "MeleePower")
+		return EmuConfig.VR.MeleePower && SilenceSettingOn("PhysicalMeleeContact");
 	// The hit jolt's cave G: on top of contact mode, strictly offline (SilenceSettingCoopLive says no for it).
 	if (name == "MeleeHitJolt")
 		return EmuConfig.VR.MeleeHitJolt && SilenceSettingOn("PhysicalMeleeContact");
@@ -5911,6 +5988,10 @@ bool VR::ProfileDB::SilenceSettingCoopLive(std::string_view name)
 		return EmuConfig.VR.PhysicalMelee && EmuConfig.VR.PhysicalMeleeOnline && VR::PhysicalMelee::CoopOverrideLive();
 	if (name == "PhysicalMeleeContact")
 		return SilenceSettingOn(name) && EmuConfig.VR.PhysicalMeleeOnline && VR::PhysicalMelee::CoopOverrideLive();
+	// Cave P acts only for the local player's live contact strike (the melee block's object), so it is live where the
+	// contact caves are: this console runs the room's enemies, with PhysicalMeleeOnline.
+	if (name == "MeleePower")
+		return SilenceSettingOn(name) && SilenceSettingCoopLive("PhysicalMeleeContact");
 	// VR body poses the partner in private co-op at the draw only: "VrBody" gates cave V and its draw site, which rewrite
 	// only the world matrices the game rebuilds every tick, after the update and the hit tests and before VU1 (render
 	// only), never a record or the game's traffic. Cave U's site ("VrBodyLocals": the bones' locals in the update, BEFORE

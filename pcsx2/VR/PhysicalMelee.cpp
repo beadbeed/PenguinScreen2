@@ -26,7 +26,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <limits>
+#include <mutex>
 
 namespace VR::PhysicalMelee
 {
@@ -475,6 +477,7 @@ namespace VR::PhysicalMelee
 			st.pending = -1;
 			out.enemy = id;
 			out.strength = std::max(Strength(at_speed, p), Strength(p.speed, p));
+			out.speed = std::max(at_speed, p.speed);
 		};
 		if (st.pending >= 0)
 		{
@@ -601,6 +604,237 @@ namespace VR::PhysicalMelee
 			check(FistStrength(std::nanf(""), p, 0.4f) == 0.0f, "strength: NaN is nothing");
 		}
 		return fail;
+	}
+
+	// -----------------------------------------------------------------------------------------------------------------
+	// Swing power ([VR] MeleePower).
+	// -----------------------------------------------------------------------------------------------------------------
+
+	PowerParams SanitizedPower(const PowerParams& in)
+	{
+		const PowerParams d{};
+		PowerParams p;
+		p.full_speed = std::clamp(FiniteOr(in.full_speed, d.full_speed), 1.0f, 20.0f);
+		p.min_power = std::clamp(FiniteOr(in.min_power, d.min_power), 0.0f, 1.0f);
+		p.floor = std::clamp(FiniteOr(in.floor, d.floor), 0.0f, 3.0f);
+		p.gain = std::clamp(FiniteOr(in.gain, d.gain), 0.0f, 3.0f);
+		p.damage_scale = std::clamp(FiniteOr(in.damage_scale, d.damage_scale), 0.0f, 2.0f);
+		p.stroke_short = std::clamp(FiniteOr(in.stroke_short, d.stroke_short), 0.0f, 2.0f);
+		p.stroke_full = std::clamp(FiniteOr(in.stroke_full, d.stroke_full), p.stroke_short + 0.01f, 3.0f);
+		p.stroke_min = std::clamp(FiniteOr(in.stroke_min, d.stroke_min), 0.0f, 1.0f);
+		p.two_hand = std::clamp(FiniteOr(in.two_hand, d.two_hand), 1.0f, 2.0f);
+		p.stagger = std::clamp(FiniteOr(in.stagger, d.stagger), 0.0f, 1.01f);
+		p.knockdown = std::clamp(FiniteOr(in.knockdown, d.knockdown), p.stagger, 1.01f);
+		p.max_class = std::clamp(in.max_class, 0, 2);
+		p.hit_stop_min = std::clamp(in.hit_stop_min, 0, 8);
+		p.hit_stop_max = std::clamp(in.hit_stop_max, p.hit_stop_min, 8);
+		return p;
+	}
+
+	PowerParams DefaultPower(PowerKind kind)
+	{
+		PowerParams p;
+		switch (kind)
+		{
+			case PowerKind::Knife:
+				// A short blade's tip moves slower (strikes from 1.5 m/s); the game's strongest knife hit (its critical)
+				// staggers, so a knife never knocks down.
+				p.full_speed = 4.5f;
+				p.max_class = 1;
+				break;
+			case PowerKind::Fist:
+				// Bare hands: strikes from 2.5 m/s, full power by 4.5; at most 0.55 x 1.35 = 0.74 of the knife's 55 (41 HP,
+				// the least a hit adds to the zombie's down meter), a stagger at most.
+				p.full_speed = 4.5f;
+				p.damage_scale = 0.55f;
+				p.max_class = 1;
+				break;
+			case PowerKind::Whip:
+				// A gun's butt: as the fist, harder: at most 0.7 x 1.35 = 0.95 of the knife's 55 (52 HP).
+				p.full_speed = 4.5f;
+				p.damage_scale = 0.70f;
+				p.max_class = 1;
+				break;
+			default: break;
+		}
+		return p;
+	}
+
+	PowerKind PowerKindFor(bool fist, bool whip, u32 weapon_type)
+	{
+		if (whip)
+			return PowerKind::Whip;
+		if (fist)
+			return PowerKind::Fist;
+		return (weapon_type == 32 || weapon_type == 33) ? PowerKind::Knife : PowerKind::Weapon;
+	}
+
+	float Smoothstep01(float x)
+	{
+		const float t = std::clamp(FiniteOr(x, 0.0f), 0.0f, 1.0f);
+		return t * t * (3.0f - 2.0f * t);
+	}
+
+	PowerOut SwingPower(const PowerIn& in, const PowerParams& params)
+	{
+		const PowerParams p = SanitizedPower(params);
+		PowerOut out;
+		const float speed = FiniteOr(in.speed, 0.0f);
+		const float lo = std::clamp(FiniteOr(in.strike_speed, 0.0f), 0.0f, p.full_speed - 0.1f);
+		const float speed_power = std::clamp((speed - lo) / (p.full_speed - lo), 0.0f, 1.0f);
+		const float u = std::clamp((FiniteOr(in.stroke_m, 0.0f) - p.stroke_short) / (p.stroke_full - p.stroke_short), 0.0f, 1.0f);
+		const float stroke = p.stroke_min + (1.0f - p.stroke_min) * u;
+		float power = speed_power * stroke * (in.two_hand ? p.two_hand : 1.0f);
+		power = std::clamp(power, p.min_power, 1.0f);
+		out.power = power;
+		out.damage = (p.floor + p.gain * Smoothstep01(power)) * p.damage_scale;
+		int cls = 0;
+		if (power >= p.knockdown)
+			cls = 2;
+		else if (power >= p.stagger)
+			cls = 1;
+		out.cls = std::min(cls, p.max_class);
+		out.hit_stop_frames = p.hit_stop_min + static_cast<int>(std::lround(static_cast<float>(p.hit_stop_max - p.hit_stop_min) * power));
+		// Sharp: short and hard, both growing with the power (times the Haptic Strength setting where it plays).
+		out.haptic_amp = 0.45f + 0.55f * power;
+		out.haptic_s = 0.025f + 0.045f * power;
+		return out;
+	}
+
+	std::vector<std::string> SelfTestPower()
+	{
+		std::vector<std::string> fail;
+		const auto check = [&](bool ok, const char* name) {
+			if (!ok)
+				fail.emplace_back(name);
+		};
+		const PowerParams w = DefaultPower(PowerKind::Weapon);
+		const auto run = [](float speed, float strike, float stroke, bool two, const PowerParams& p) {
+			PowerIn in;
+			in.speed = speed;
+			in.strike_speed = strike;
+			in.stroke_m = stroke;
+			in.two_hand = two;
+			return SwingPower(in, p);
+		};
+		// The curve: BetterVR's 0.20 + 1.15 * smoothstep(power), power kept to 0.15..1.
+		check(std::fabs(Smoothstep01(0.5f) - 0.5f) < 1e-6f && Smoothstep01(-1.0f) == 0.0f && Smoothstep01(2.0f) == 1.0f &&
+				  Smoothstep01(std::nanf("")) == 0.0f,
+			"curve: smoothstep 0, 0.5, 1 and NaN");
+		{
+			const PowerOut lo = run(1.8f, 1.8f, 0.5f, false, w);
+			check(std::fabs(lo.power - 0.15f) < 1e-5f, "power: a strike at the threshold has the least power (0.15)");
+			check(std::fabs(lo.damage - (0.20f + 1.15f * Smoothstep01(0.15f))) < 1e-5f, "damage: the curve at the least power");
+			check(lo.cls == 0, "class: the least power keeps the game's own class");
+			const PowerOut hi = run(9.0f, 1.8f, 0.5f, false, w);
+			check(std::fabs(hi.power - 1.0f) < 1e-6f && std::fabs(hi.damage - 1.35f) < 1e-5f && hi.cls == 2,
+				"power: past full speed 1, damage 1.35x, a knockdown");
+			check(hi.hit_stop_frames == 4 && lo.hit_stop_frames == 2, "hit-stop: 2 frames at the least power, 4 at full");
+			check(hi.haptic_amp > lo.haptic_amp && hi.haptic_s > lo.haptic_s && hi.haptic_amp <= 1.0f, "haptic: harder and longer with power");
+		}
+		{
+			// Monotonic in speed; the thresholds at stagger and knockdown.
+			float last = -1.0f;
+			bool mono = true;
+			for (float v = 1.8f; v <= 8.0f; v += 0.1f)
+			{
+				const PowerOut o = run(v, 1.8f, 0.5f, false, w);
+				mono = mono && o.damage >= last;
+				last = o.damage;
+			}
+			check(mono, "damage: never falls as the tip goes faster");
+			const float v_stagger = 1.8f + w.stagger * (w.full_speed - 1.8f);
+			const float v_knock = 1.8f + w.knockdown * (w.full_speed - 1.8f);
+			check(run(v_stagger - 0.05f, 1.8f, 0.5f, false, w).cls == 0 && run(v_stagger + 0.05f, 1.8f, 0.5f, false, w).cls == 1,
+				"class: a stagger from the stagger power");
+			check(run(v_knock - 0.05f, 1.8f, 0.5f, false, w).cls == 1 && run(v_knock + 0.05f, 1.8f, 0.5f, false, w).cls == 2,
+				"class: a knockdown from the knockdown power");
+		}
+		{
+			// The committed stroke: a flick (5 cm of path) at full speed has stroke_min of the power; a full stroke all.
+			const PowerOut flick = run(9.0f, 1.8f, 0.05f, false, w);
+			const PowerOut full = run(9.0f, 1.8f, 0.40f, false, w);
+			check(std::fabs(flick.power - 0.6f) < 1e-5f && std::fabs(full.power - 1.0f) < 1e-5f, "stroke: a flick 0.6, a full stroke 1");
+			check(flick.cls == 1, "stroke: a fast flick staggers, never knocks down");
+			// Two hands: 1.25 x, still at most 1.
+			const PowerOut one = run(4.0f, 1.8f, 0.40f, false, w);
+			const PowerOut two = run(4.0f, 1.8f, 0.40f, true, w);
+			check(std::fabs(two.power - one.power * 1.25f) < 1e-5f && two.damage > one.damage, "two hands: 1.25 x the power");
+			check(run(9.0f, 1.8f, 0.4f, true, w).power <= 1.0f, "two hands: never past 1");
+		}
+		{
+			// The kinds: a knife and the fists stop at a stagger; the fists' and whips' caps on the knife's damage.
+			const PowerParams k = DefaultPower(PowerKind::Knife), f = DefaultPower(PowerKind::Fist), wh = DefaultPower(PowerKind::Whip);
+			check(run(9.0f, 1.5f, 0.5f, false, k).cls == 1, "knife: a stagger at most");
+			const PowerOut ff = run(9.0f, 2.5f, 0.5f, false, f), fw = run(9.0f, 2.5f, 0.5f, false, wh);
+			check(ff.cls == 1 && fw.cls == 1, "fist and whip: a stagger at most");
+			check(std::fabs(ff.damage * 55.0f - 40.8f) < 0.2f && std::fabs(fw.damage * 55.0f - 52.0f) < 0.2f,
+				"fist and whip: at most 41 and 52 HP of the knife's 55");
+			const PowerOut fl = run(2.5f, 2.5f, 0.5f, false, wh);
+			check(fl.cls == 0 && fl.damage * 55.0f < 15.0f, "whip: at the threshold a flinch, under 15 HP");
+			// Alex's whips (2026-10-26: 2.0-3.6 m/s): a committed 3.6 m/s whip staggers, a 3.6 m/s flick does not.
+			check(run(3.6f, 2.5f, 0.40f, false, wh).cls == 1 && run(3.6f, 2.5f, 0.05f, false, wh).cls == 0,
+				"whip: a committed 3.6 m/s swing staggers, a flick of it does not");
+			check(PowerKindFor(false, false, 33) == PowerKind::Knife && PowerKindFor(false, false, 34) == PowerKind::Weapon &&
+					  PowerKindFor(true, false, 0) == PowerKind::Fist && PowerKindFor(false, true, 0) == PowerKind::Whip,
+				"kind: knives, weapons, fists, whips");
+		}
+		{
+			// Junk params and inputs are survived.
+			PowerParams junk;
+			junk.full_speed = std::nanf("");
+			junk.stagger = 5.0f;
+			junk.knockdown = -1.0f;
+			junk.max_class = 9;
+			junk.hit_stop_max = -3;
+			const PowerOut o = run(std::nanf(""), std::nanf(""), std::nanf(""), false, junk);
+			check(std::isfinite(o.power) && std::isfinite(o.damage) && o.cls >= 0 && o.cls <= 2 && o.hit_stop_frames >= 0,
+				"junk: finite, class 0-2");
+		}
+		{
+			// The hit-stop holds the pose it froze, then lets go.
+			const float pos[3] = {0.1f, 1.2f, -0.3f}, quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+			StartHitStop(pos, quat, 0.5f);
+			float p2[3] = {9.0f, 9.0f, 9.0f}, q2[4] = {0.5f, 0.5f, 0.5f, 0.5f};
+			check(ApplyHitStop(p2, q2) && p2[0] == pos[0] && q2[3] == 1.0f, "hit-stop: the frozen pose while it runs");
+			StartHitStop(pos, quat, 0.0f);
+			float p3[3] = {9.0f, 9.0f, 9.0f}, q3[4] = {0.5f, 0.5f, 0.5f, 0.5f};
+			check(!ApplyHitStop(p3, q3) && p3[0] == 9.0f, "hit-stop: none after it ends");
+		}
+		return fail;
+	}
+
+	namespace
+	{
+		std::mutex s_hit_stop_mutex;
+		float s_hit_stop_pos[3] = {};
+		float s_hit_stop_quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+		std::chrono::steady_clock::time_point s_hit_stop_until{};
+	}
+
+	void StartHitStop(const float pos[3], const float quat[4], float seconds)
+	{
+		const std::lock_guard<std::mutex> lock(s_hit_stop_mutex);
+		const float s = std::clamp(FiniteOr(seconds, 0.0f), 0.0f, 0.2f);
+		if (!Finite3(pos) || !std::isfinite(quat[0]) || !std::isfinite(quat[1]) || !std::isfinite(quat[2]) || !std::isfinite(quat[3]))
+		{
+			s_hit_stop_until = {};
+			return;
+		}
+		std::memcpy(s_hit_stop_pos, pos, sizeof(s_hit_stop_pos));
+		std::memcpy(s_hit_stop_quat, quat, sizeof(s_hit_stop_quat));
+		s_hit_stop_until = std::chrono::steady_clock::now() +
+		                   std::chrono::microseconds(static_cast<long long>(s * 1.0e6f));
+	}
+
+	bool ApplyHitStop(float pos[3], float quat[4])
+	{
+		const std::lock_guard<std::mutex> lock(s_hit_stop_mutex);
+		if (std::chrono::steady_clock::now() >= s_hit_stop_until)
+			return false;
+		std::memcpy(pos, s_hit_stop_pos, sizeof(s_hit_stop_pos));
+		std::memcpy(quat, s_hit_stop_quat, sizeof(s_hit_stop_quat));
+		return true;
 	}
 
 	// -----------------------------------------------------------------------------------------------------------------
@@ -1274,6 +1508,44 @@ namespace VR::PhysicalMelee
 			s_fist_armed = false;
 		}
 
+		// --- Swing power ([VR] MeleePower): cave P's block (magic, the least class, the damage multiplier; cave P's
+		// counts after), ours while armed; the stroke behind the far hit point and the other hand. ---
+		constexpr u32 kPowerBlockBytes = 0x20;
+		bool s_power_armed = false;
+		u32 s_power_addr = 0, s_power_magic = 0, s_power_crc = 0;
+		void ClearPower()
+		{
+			if (s_power_armed && VMManager::HasValidVM() && s_power_addr + kPowerBlockBytes <= Ps2MemSize::MainRam &&
+				VMManager::GetDiscCRC() == s_power_crc && static_cast<u32>(memRead32(s_power_addr)) == s_power_magic)
+			{
+				memWrite32(s_power_addr, 0);
+				for (u32 off = 4; off < kPowerBlockBytes; off += 4)
+					memWrite32(s_power_addr + off, 0);
+			}
+			s_power_armed = false;
+		}
+		float s_stroke_m = 0.0f;       // the far hit point's path since the tip went fast (metres, the headset's space)
+		float s_stroke_quiet_s = 0.0f; // how long the tip has been slow (the stroke ends after kStrokeQuietS)
+		constexpr float kStrokeQuietS = 0.12f;
+		// The hands for the power: the right hand's pose (the hit-stop freezes it), the left's grip, squeeze and speed.
+		struct PowerHands
+		{
+			bool right = false;
+			float right_pos[3] = {};
+			float right_quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+			bool left = false;
+			float left_pos[3] = {};
+			float left_grip = 0.0f;
+			float left_speed = 0.0f;
+		};
+		float s_left_prev[3] = {};
+		bool s_left_have = false;
+		float s_left_speed = 0.0f;
+		// The last power strike, for the hit's log line: cave P's count before it, and the power's numbers.
+		u32 s_power_count_before = 0;
+		bool s_pend_power = false;
+		PowerOut s_pend_po;
+
 		// --- Contact mode's state (CPU thread). ---
 		bool s_contact_mode = false;
 		StrikeState s_contact;
@@ -1741,7 +2013,8 @@ namespace VR::PhysicalMelee
 		// Contact mode, every input poll with the block written this poll (can): the weapon's shape against the enemies'
 		// hurt spheres, a strike asked of cave D on first contact at speed, the cue, and the result logged.
 		void PollContact(GuestReader reader, const ProfileDB::MeleeParams& mp, u32 record, bool can, const float m[16],
-			const float origin[3], const float axes[3][3], u32 counter, float dt, bool jolt, FistKind fist)
+			const float origin[3], const float axes[3][3], u32 counter, float dt, bool jolt, FistKind fist, bool power,
+			const PowerHands& hands)
 		{
 			u32 wt = 0;
 			if (!Read(reader, record + mp.weapon_type_offset, 2, &wt))
@@ -1818,6 +2091,19 @@ namespace VR::PhysicalMelee
 						s_tip_speed += (v - s_tip_speed) * (1.0f - std::exp(-dt / 0.02f));
 					else
 						s_tip_speed = 0.0f;
+					// The stroke behind a strike ([VR] MeleePower): the far hit point's path while it moves at half the
+					// strike speed or more; it starts again once the tip has been slower than that kStrokeQuietS.
+					if (s_tip_speed >= 0.5f * cp.speed && v * dt < 1.0f)
+					{
+						s_stroke_m = std::min(s_stroke_m + v * dt, 5.0f);
+						s_stroke_quiet_s = 0.0f;
+					}
+					else
+					{
+						s_stroke_quiet_s += dt;
+						if (s_stroke_quiet_s >= kStrokeQuietS)
+							s_stroke_m = 0.0f;
+					}
 				}
 				std::memcpy(s_tip_prev, tip, sizeof(tip));
 				s_tip_have = true;
@@ -1866,15 +2152,64 @@ namespace VR::PhysicalMelee
 				u32 w;
 				memWrite32(blk + 0x18, static_cast<u32>(cp.window_frames));
 				// A punch: the knife's damage scaled to a light hit (never above 1, so the knife's class 0 stays).
-				const float strength = fist != FistKind::None ? std::min(so.strength, 1.0f) * mp.fist_scale : so.strength;
+				float strength = fist != FistKind::None ? std::min(so.strength, 1.0f) * mp.fist_scale : so.strength;
+				// [VR] MeleePower: the swing's power sets the damage and the least class through cave P (which runs the
+				// game's damage at multiplier 1 for this strike, so cave E's strength is left at 1).
+				s_pend_power = false;
+				PowerOut po;
+				bool two_hand = false;
+				const PowerKind kind = PowerKindFor(fist == FistKind::Fist, fist == FistKind::Whip, wt);
+				if (power)
+				{
+					if ((kind == PowerKind::Weapon || kind == PowerKind::Knife) && hands.right && hands.left)
+					{
+						const float d = Len3(hands.left_pos[0] - hands.right_pos[0], hands.left_pos[1] - hands.right_pos[1],
+							hands.left_pos[2] - hands.right_pos[2]);
+						two_hand = d <= mp.two_hand_reach && hands.left_grip >= mp.two_hand_grip && hands.left_speed >= mp.two_hand_speed;
+					}
+					PowerIn pin;
+					pin.speed = so.speed;
+					pin.strike_speed = cp.speed;
+					pin.stroke_m = s_stroke_m;
+					pin.two_hand = two_hand;
+					po = SwingPower(pin, mp.power[static_cast<int>(kind)]);
+					u32 pw;
+					std::memcpy(&pw, &po.damage, 4);
+					memWrite32(mp.power_block + 0x04, static_cast<u32>(po.cls));
+					memWrite32(mp.power_block + 0x08, pw);
+					u32 before = 0;
+					Read(reader, mp.power_block + 0x0C, 4, &before);
+					s_power_count_before = before;
+					s_pend_power = true;
+					s_pend_po = po;
+					strength = 1.0f;
+				}
 				std::memcpy(&w, &strength, 4);
 				memWrite32(blk + 0x1C, w);
 				memWrite32(blk + 0x28, counter & 0xFFu);
 				s_strike_seq++;
 				memWrite32(blk + 0x0C, s_strike_seq);
-				// The weight of it: a firm buzz now, harder for a harder swing (times the Haptic Strength setting).
-				const float k = std::clamp((so.strength - cp.light) / std::max(cp.strong - cp.light, 0.01f), 0.0f, 1.0f);
-				Pulse(SpatialControls::HapticCue{0.65f + 0.35f * k, 0.05f + 0.06f * k});
+				if (power)
+				{
+					// A sharp buzz by the power (both hands on a two-handed swing), and the VR hand's picture held still
+					// at the contact for a few display frames (90 a second); never the game.
+					const float setting = EmuConfig.VR.HapticStrength;
+					const float hs = std::isfinite(setting) ? std::clamp(setting, 0.0f, 1.0f) : 1.0f;
+					if (po.haptic_amp * hs > 0.0f)
+					{
+						XRInput::QueuePulse(VRInputSnapshot::RIGHT, po.haptic_amp * hs, po.haptic_s);
+						if (two_hand)
+							XRInput::QueuePulse(VRInputSnapshot::LEFT, 0.8f * po.haptic_amp * hs, po.haptic_s);
+					}
+					if (hands.right && po.hit_stop_frames > 0)
+						StartHitStop(hands.right_pos, hands.right_quat, static_cast<float>(po.hit_stop_frames) / 90.0f);
+				}
+				else
+				{
+					// The weight of it: a firm buzz now, harder for a harder swing (times the Haptic Strength setting).
+					const float k = std::clamp((so.strength - cp.light) / std::max(cp.strong - cp.light, 0.01f), 0.0f, 1.0f);
+					Pulse(SpatialControls::HapticCue{0.65f + 0.35f * k, 0.05f + 0.06f * k});
+				}
 				if (s_pend_enemy >= 0)
 					Console.WriteLn("(VR) Melee: strike on enemy %d made no hit before the next strike.", s_pend_enemy);
 				s16 hp = 0;
@@ -1899,9 +2234,16 @@ namespace VR::PhysicalMelee
 					s_pend_vel[q] = s_vel_b[q];
 				}
 				s_strikes++;
-				Console.WriteLn("(VR) Melee: %s, enemy %d (sphere %d) at %.1f m/s, strength %.2f.",
-					fist == FistKind::Fist ? "punch" : fist == FistKind::Whip ? "pistol-whip" : "strike", so.enemy, sph,
-					static_cast<double>(s_tip_speed), static_cast<double>(strength));
+				if (power)
+					Console.WriteLn("(VR) Melee: %s, enemy %d (sphere %d) at %.1f m/s, stroke %.2f m%s: power %.2f, damage x%.2f, "
+									"least class %d, hit-stop %d frames.",
+						fist == FistKind::Fist ? "punch" : fist == FistKind::Whip ? "pistol-whip" : "strike", so.enemy, sph,
+						static_cast<double>(so.speed), static_cast<double>(s_stroke_m), two_hand ? ", two hands" : "",
+						static_cast<double>(po.power), static_cast<double>(po.damage), po.cls, po.hit_stop_frames);
+				else
+					Console.WriteLn("(VR) Melee: %s, enemy %d (sphere %d) at %.1f m/s, strength %.2f.",
+						fist == FistKind::Fist ? "punch" : fist == FistKind::Whip ? "pistol-whip" : "strike", so.enemy, sph,
+						static_cast<double>(s_tip_speed), static_cast<double>(strength));
 				// Armed now, on the sphere touched: cave G starts it on the update the hit lands in.
 				s_jolt_wait_zone = -1;
 				if (s_pend_jolt && sph >= 0 && WriteJolt(reader, mp, so.enemy, sph, true))
@@ -1931,6 +2273,20 @@ namespace VR::PhysicalMelee
 									"after the strike (%u of %u strikes landed).",
 						s_pend_enemy, s_pend_hp, hp, cls, ZombieReaction(cls), zone, static_cast<double>(s_pend_s * 1000.0f),
 						s_strike_hits, s_strikes);
+					if (s_pend_power)
+					{
+						u32 n = 0, dmg = 0, ccls = 0, base_dmg = 0, base_cls = 0;
+						if (Read(reader, mp.power_block + 0x0C, 4, &n) && n != s_power_count_before &&
+							Read(reader, mp.power_block + 0x10, 4, &dmg) && Read(reader, mp.power_block + 0x14, 4, &ccls) &&
+							Read(reader, mp.power_block + 0x18, 4, &base_dmg) && Read(reader, mp.power_block + 0x1C, 4, &base_cls))
+							Console.WriteLn("(VR) Melee: power %.2f shaped the game's hit (cave P, %u): damage %d -> %d, class %u -> %u.",
+								static_cast<double>(s_pend_po.power), n - s_power_count_before, static_cast<int>(base_dmg),
+								static_cast<int>(dmg), base_cls, ccls);
+						else
+							Console.WriteLn("(VR) Melee: power %.2f: the hit did not pass cave P (its count did not move).",
+								static_cast<double>(s_pend_po.power));
+						s_pend_power = false;
+					}
 					if (jolt && s_pend_jolt)
 					{
 						// Armed on the sphere the game hit: cave G has started it on the hit's update. Otherwise (another
@@ -2940,6 +3296,12 @@ namespace VR::PhysicalMelee
 		// (RegionFreeOrOurs) before the next write instead of being written over.
 		s_fist_armed = s_fist_addr != 0 && VMManager::GetDiscCRC() == s_fist_crc &&
 		               ArmedAfterLoad(ReadMainRam, s_fist_addr, s_fist_magic);
+		// Cave P's block likewise (a state saved while it was armed reads our magic; it is cleared or written afresh).
+		s_power_armed = s_power_addr != 0 && VMManager::GetDiscCRC() == s_power_crc &&
+		                ArmedAfterLoad(ReadMainRam, s_power_addr, s_power_magic);
+		s_pend_power = false;
+		s_stroke_m = 0.0f;
+		s_left_have = false;
 		ClearSprings();
 		ResetContact();
 	}
@@ -3382,9 +3744,69 @@ namespace VR::PhysicalMelee
 			if (mp->jolt.spring_on && s_jolt_armed)
 				PumpSprings(reader, *mp);
 		}
+		// [VR] MeleePower: cave P's block armed while contact may strike and cave P is in (its site's word); before the
+		// first write the block must read zero or ours. Then the power, the haptic and the hit-stop at each strike.
+		PowerHands hands;
+		{
+			const VRHandState& lh = snap.hands[VRInputSnapshot::LEFT];
+			const bool left_ok = env && lh.grip_pose.valid && Finite3(lh.grip_pose.position_xyz.data());
+			if (left_ok && s_left_have && dt > 0.0f)
+			{
+				const float v = Len3(lh.grip_pose.position_xyz[0] - s_left_prev[0], lh.grip_pose.position_xyz[1] - s_left_prev[1],
+					                 lh.grip_pose.position_xyz[2] - s_left_prev[2]) / dt;
+				s_left_speed = (v * dt < 1.0f) ? s_left_speed + (v - s_left_speed) * (1.0f - std::exp(-dt / 0.02f)) : 0.0f;
+			}
+			else
+				s_left_speed = 0.0f;
+			s_left_have = left_ok;
+			if (left_ok)
+			{
+				for (int k = 0; k < 3; k++)
+					s_left_prev[k] = hands.left_pos[k] = lh.grip_pose.position_xyz[k];
+				hands.left = true;
+				hands.left_grip = lh.grip;
+				hands.left_speed = s_left_speed;
+			}
+			hands.right = hand;
+			for (int k = 0; k < 3; k++)
+				hands.right_pos[k] = pos[k];
+			for (int k = 0; k < 4; k++)
+				hands.right_quat[k] = quat[k];
+		}
+		u32 power_hook = 0;
+		const bool power_want = contact && wrote && EmuConfig.VR.MeleePower && mp->has_power &&
+		                        Read(reader, mp->power_hook, 4, &power_hook) && power_hook == mp->power_hook_on;
+		static bool s_power_refused_logged = false;
+		const bool power_free = power_want &&
+		                        (s_power_armed || RegionFreeOrOurs(reader, mp->power_block, mp->power_block + kPowerBlockBytes,
+		                                              mp->power_block, mp->power_magic));
+		if (power_want && !power_free && !s_power_refused_logged)
+		{
+			s_power_refused_logged = true;
+			Console.Warning("(VR) PhysicalMelee: cave P's block at 0x%X holds someone else's words; the swing power stays off while it does.",
+				mp->power_block);
+		}
+		if (power_want && power_free)
+		{
+			if (!s_power_armed)
+			{
+				for (u32 off = 4; off < kPowerBlockBytes; off += 4)
+					memWrite32(mp->power_block + off, 0);
+				memWrite32(mp->power_block + 0x04, 0xFFu); // no least class until a strike
+				memWrite32(mp->power_block, mp->power_magic);
+				s_power_armed = true;
+				s_power_addr = mp->power_block;
+				s_power_magic = mp->power_magic;
+				s_power_crc = VMManager::GetDiscCRC();
+				Console.WriteLn("(VR) Melee: swing power on (cave P in): a strike's speed, stroke and two hands set the game's damage "
+								"and raise its reaction class.");
+			}
+		}
+		else if (s_power_armed)
+			ClearPower();
 		if (contact)
 			PollContact(reader, *mp, record, wrote && !screen && !swinging, m, origin, axes, counter, dt, jolt,
-				fist_usable ? fist : FistKind::None);
+				fist_usable ? fist : FistKind::None, power_want && power_free, hands);
 		else
 			s_contact.Reset();
 
