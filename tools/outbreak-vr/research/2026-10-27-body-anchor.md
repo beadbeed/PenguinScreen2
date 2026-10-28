@@ -93,8 +93,12 @@ reaching far forward, right raised and left low, out to the sides, aim forward l
   nod, which turns about the eye: section 5), the nearest drawn bone 25-30 cm from the eye.
 - **Slot 5** (the zombie that grabs at 5-7 s; `Forearms`, 1.2 m): the wrists 0.0 cm in both samples. Other characters are
   untouched by construction (cave V's SELF only draws the slot naming the focus record; the near-cull entries are as
-  before), but **not checked on screen**: the emulator window captured black in VR mode without a runtime, so no screen
-  measurement was possible.
+  before). The window captured black in VR mode without a runtime, so instead: PINE sampled every enemy in the table
+  (`0x3FFCA0`, 0xD90 a slot) every 40 ms for 10 s after the load, with `VrBodySelf` on (Forearms) and off. The grabbing
+  zombie (slot 49, 36 bones, its feet 158 cm from the eye) had its drawn-this-frame byte `+0x198` set in 160 of 160
+  samples both ways and no bone ever collapsed; every other enemy read the same on as off. Kevin's own bones were
+  collapsed in 144 of 160 samples on, 0 off. Enemies are drawn by their own passes (`0x345170`, `0x688010`), not the
+  characters' pass that holds cave V.
 - Normal speed throughout (the OSD read 100%); one emulator, its own PINE slot, killed by its own handle.
 
 ## 4. Self-tests (`VR body`, 59 checks; 65 of 65 suites)
