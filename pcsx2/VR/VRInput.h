@@ -90,6 +90,7 @@ namespace VR
 		std::array<XrSpace, HAND_COUNT> m_aim_spaces{};
 		std::array<XrSpace, HAND_COUNT> m_grip_spaces{};
 		XrSpace m_view_space = XR_NULL_HANDLE;
+		XrSpace m_stage_space = XR_NULL_HANDLE; // the floor, for the head's height over it (VR body's calibration); may be none
 
 		int m_last_actions_active = -1;
 		bool m_locate_warned = false;
