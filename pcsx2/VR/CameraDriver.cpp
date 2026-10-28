@@ -4070,7 +4070,7 @@ namespace VR::CameraDriver
 		// [VR] VrGrab (File #1 only, its addresses): the lunge cue (reads only), the grabbing zombie's spheres for the
 		// shove / strike / shot detector, and offline the game's own escape meter in the local record (VR/VrGrab.h).
 		{
-			const bool vrgrab_on = EmuConfig.VR.VrGrab && profile->serial == "SLPM-65428" && crc == 0x32088394u && net_ok &&
+			const bool vrgrab_on = EmuConfig.VR.VrGrab && (profile->serial == "slpm-65428" || profile->serial == "SLPM-65428") && crc == 0x32088394u && net_ok &&
 			                       vm_state == VMState::Running && EffectiveVREnabled(EmuConfig.VR.Enable) &&
 			                       !SplitState::Active() && s_local_any_valid;
 			VrGrab::Vsync(vrgrab_on, net_mode == NetMode::Offline, vrgrab_on ? s_local_any_base : 0u, s_grab_now);

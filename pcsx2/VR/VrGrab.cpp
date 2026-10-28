@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0
 
 #include "VR/VrGrab.h"
+#include "VR/GrabBreakout.h"
 #include "VR/CameraDriver.h"
 #include "VR/VRInput.h"
 
@@ -117,6 +118,7 @@ namespace VR::VrGrab
 		int s_actions = 0;
 		int s_meter_writes = 0;
 		bool s_logged_on = false;
+		bool s_located_logged = false;
 
 		u64 NowMs()
 		{
@@ -354,6 +356,16 @@ namespace VR::VrGrab
 			s_target = t;
 			s_target_ms = NowMs();
 		}
+		if (held && t.valid && !s_located_logged)
+		{
+			s_located_logged = true;
+			for (int s = 0; s < t.count; ++s)
+				Console.WriteLn("(VR) VrGrab: the grabbing zombie's %s at VR (%.3f, %.3f, %.3f) m, r %.2f m.", t.head[s] ? "head" : "body",
+					static_cast<double>(t.c[s][0]), static_cast<double>(t.c[s][1]), static_cast<double>(t.c[s][2]),
+					static_cast<double>(t.r[s]));
+		}
+		if (!held)
+			s_located_logged = false;
 
 		if (held && !s_was_grabbed)
 		{
@@ -594,6 +606,26 @@ namespace VR::VrGrab
 		}
 		check(Decisive(Kind::HardShove) && Decisive(Kind::HeadShot) && !Decisive(Kind::Shove) && !Decisive(Kind::Shot),
 			"hard shoves and headshots are decisive");
+		{
+			// The breakout runs its presses for a counted action's burst without a shake, only while grabbed.
+			VRInputSnapshot s;
+			s.generation = 1;
+			s.actions_active = true;
+			s.hands[VRInputSnapshot::RIGHT].grip_pose.valid = true;
+			GrabBreakout::State bs;
+			const GrabBreakout::Params bp{};
+			GrabBreakout::Output o = GrabBreakout::Step(s, bp, true, dt, bs);
+			check(!o.active, "still hands, no burst: no presses");
+			bs.burst_s = p.burst_s;
+			o = GrabBreakout::Step(s, bp, true, dt, bs);
+			check(o.active && o.circle, "a burst runs the presses (Circle first)");
+			int active = 0;
+			for (int k = 0; k < 90; ++k)
+				active += GrabBreakout::Step(s, bp, true, dt, bs).active ? 1 : 0;
+			check(active >= 40 && active <= 46 && bs.burst_s == 0.0f, "for burst_s, then stops");
+			bs.burst_s = p.burst_s;
+			check(!GrabBreakout::Step(s, bp, false, dt, bs).active && bs.burst_s == 0.0f, "not grabbed: the burst is dropped");
+		}
 		return ok;
 	}
 }
