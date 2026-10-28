@@ -666,6 +666,11 @@ draw). Logs `(VR) Body: ...`; `PCSX2_VR_BODY_LOG=1` (always on in the loopback t
 target, the solve and the wrist bone the game built, and the head bone's forward against the VR head's;
 `PCSX2_VR_BODY_DRAWTIME=1` is the fallback (every bone at the draw). `body_test.py <dev install> [slot] [--self]
 [--shots <dir>]` is the loopback check. `vr_selftests` runs `VR body (...)` and the caves interpreted.
+`[VR] VrBodySelfStyle` (`Forearms` by default, `Arms`, `GameShoulders`): your own arms anchored to the headset
+(`research/2026-10-27-body-anchor.md`); with `PCSX2_VR_BODY_LOG=1` the self line carries `[anchor ...]` (the shoulders,
+elbows and wrists against the eye, the wrist cave V drew). `bodyanchor_test.py <dev install> [slot] [--style S]
+[--heights 1.1,1.2,1.3] [--quick] [--shots <dir>]` measures it offline (its install's own PINE slot; refuses while
+vrserver.exe runs).
 
 Rules when testing: never change emulation speed; never pause, savestate or dump RAM while online
 (obsrv drops clients after ~30 s without packets and bans speed changes); do not run the virtual pad
