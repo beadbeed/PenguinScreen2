@@ -6,6 +6,7 @@
 #include "common/Pcsx2Defs.h"
 
 #include "VR/VRInputState.h"
+#include "VR/VrGrab.h"
 
 #include <array>
 
@@ -68,6 +69,10 @@ namespace VR::GrabBreakout
 		// this poll on each hand (0: none) and its length.
 		std::array<float, 2> buzz{};
 		float buzz_s = 0.0f;
+		// [VR] VrGrab: the presses keep running this long without a shake (a shove, a strike or a point-blank shot was
+		// counted), while grabbed; and its detector's state (SpatialControls::ApplyGrabBreakout).
+		float burst_s = 0.0f;
+		VrGrab::State vr{};
 		void Reset() { *this = State{}; }
 	};
 
