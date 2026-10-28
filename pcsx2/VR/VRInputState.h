@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <limits>
 #include <cstdint>
 
 namespace VR
@@ -63,6 +64,9 @@ struct VRInputSnapshot
   std::array<VRHandState, 2> hands;
   VRScreenHit screen_hit;
   VRPose head_pose;
+  // The head's height over the floor (metres; the runtime's STAGE space), NaN when the runtime has none. With scripted test
+  // input (PCSX2_VR_TEST_INPUT) the scripted head's own y stands for it. VR body's seated calibration (VrBodySelfStyle).
+  float head_floor_y = std::numeric_limits<float>::quiet_NaN();
   bool actions_active = false;
   std::uint64_t generation = 0;
   // Monotonic time (ms) of the publish; GetInputSnapshot() treats an old one as neutral.

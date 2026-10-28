@@ -191,6 +191,103 @@ namespace VR::VrBody
 		}
 
 		double Clamp(double v, double lo, double hi) { return std::min(std::max(v, lo), hi); }
+
+		// One arm's chain toward a wrist target (one frame throughout): the two-bone IK from the shoulder s (c1 the forearm's
+		// offset in the upper arm, c2 the wrist's in the forearm, sigma the model's X side), the upper arm's crease toward the
+		// bend, the forearm on the same hinge, the hand from the controller (hf its forward, hu its up) with the wrist's twist
+		// shared with the forearm and the rest and the swing clamped. SolveBody's arm, and SolveAnchored's.
+		struct ArmChain
+		{
+			double r_up[3][3] = {}, r_fore[3][3] = {}, r_hand[3][3] = {};
+			V elbow, wrist;
+			bool clamped = false;
+		};
+		bool SolveArmChain(const V& s, const V& c1, const V& c2, double sigma, const V& tw, const V& pole, const V& hf,
+			const V& hu, const Tuning& tu, ArmChain* out)
+		{
+			const double l1 = Len(c1), l2 = Len(c2);
+			double sv[3], tv[3], pv[3];
+			St(s, sv);
+			St(tw, tv);
+			St(pole, pv);
+			IkResult ik;
+			if (!SolveTwoBone(sv, l1, l2, tv, pv, tu.max_elbow_bend_deg, &ik))
+				return false;
+			const V e = Ld(ik.elbow), wr = Ld(ik.wrist);
+			out->elbow = e;
+			out->wrist = wr;
+			out->clamped = ik.clamped;
+			const V u = Norm(e - s), f = Norm(wr - e, u);
+			// The crease (each arm bone's +Z, perpendicularised) toward where the forearm bends; a straight arm: away
+			// from the elbow's pole.
+			V crease = f - u * Dot(f, u);
+			if (Len(crease) < 1e-3)
+			{
+				crease = pole - u * Dot(pole, u);
+				crease = Norm(crease, AnyPerp(u)) * -1.0;
+			}
+			double(&r_up)[3][3] = out->r_up;
+			double(&r_fore)[3][3] = out->r_fore;
+			double(&r_hand)[3][3] = out->r_hand;
+			FrameFromPairs(c1, {0.0, 0.0, 1.0}, u, crease, r_up);
+			// The forearm on the same hinge (the upper arm's second axis), its child along f.
+			{
+				const V hinge = Row(r_up, 1);
+				const V e1 = Norm(c2, {sigma, 0.0, 0.0});
+				V e3 = V{0.0, 0.0, 1.0} - e1 * e1.z;
+				e3 = Norm(e3, AnyPerp(e1));
+				const V e2 = Cross(e3, e1);
+				// Rows e1, e2, e3 to f, hinge, f x hinge.
+				const V g1 = f, g2 = Norm(hinge - f * Dot(hinge, f), AnyPerp(f)), g3 = Cross(g1, g2);
+				double E[3][3], G[3][3], Et[3][3];
+				SetRow(E, 0, e1);
+				SetRow(E, 1, e2);
+				SetRow(E, 2, e3);
+				SetRow(G, 0, g1);
+				SetRow(G, 1, g2);
+				SetRow(G, 2, g3);
+				Transpose(E, Et);
+				MulRR(Et, G, r_fore);
+			}
+			// The hand from the controller: the fingers (the bone's +-X, the arm's side) along its forward, the thumb (+Z)
+			// along its up.
+			FrameFromPairs({sigma, 0.0, 0.0}, {0.0, 0.0, 1.0}, hf, hu, r_hand);
+			// The wrist: the hand relative to the forearm (forearm local), split into a twist about the forearm's own axis
+			// and a swing. The forearm takes a share of the twist; then the rest and the swing are clamped.
+			{
+				const V axis = Norm(c2, {sigma, 0.0, 0.0});
+				const auto split = [&](const double fore[3][3], Q* swing, double* twist_ang) {
+					double rel[3][3], fore_t[3][3];
+					Transpose(fore, fore_t);
+					MulRR(r_hand, fore_t, rel); // hand = rel * fore (rows)
+					const Q q = QFromRows(rel);
+					const double proj = q.x * axis.x + q.y * axis.y + q.z * axis.z;
+					const Q twist = (std::fabs(q.w) + std::fabs(proj) > 1e-12) ? QNorm({q.w, axis.x * proj, axis.y * proj, axis.z * proj}) : Q{};
+					*swing = QMul(q, QConj(twist));
+					const double t = 2.0 * std::atan2(proj, q.w);
+					*twist_ang = std::atan2(std::sin(t), std::cos(t));
+				};
+				Q swing;
+				double tw_ang = 0.0;
+				split(r_fore, &swing, &tw_ang);
+				// The forearm turned about its own axis (in its local frame): rows = turn(local) * rows.
+				double rf_local[3][3], r_fore2[3][3];
+				RowsFromQ(QAxis(axis, tw_ang * tu.forearm_twist_share), rf_local);
+				MulRR(rf_local, r_fore, r_fore2);
+				std::memcpy(r_fore, r_fore2, sizeof(r_fore2));
+				split(r_fore, &swing, &tw_ang);
+				const double rest = Clamp(tw_ang, -tu.wrist_twist_deg * kDeg, tu.wrist_twist_deg * kDeg);
+				V sw_axis{swing.x, swing.y, swing.z};
+				if (swing.w < 0.0)
+					sw_axis = sw_axis * -1.0;
+				const double sw_ang = std::min(QAngle(swing), tu.wrist_swing_deg * kDeg);
+				const Q rel2 = (Len(sw_axis) > 1e-9) ? QMul(QAxis(sw_axis, sw_ang), QAxis(axis, rest)) : QAxis(axis, rest);
+				double rel2r[3][3];
+				RowsFromQ(rel2, rel2r);
+				MulRR(rel2r, r_fore, r_hand);
+			}
+			return true;
+		}
 	} // namespace
 
 	Frame Compose(const Frame& c, const Frame& p)
@@ -470,90 +567,21 @@ namespace VR::VrBody
 			const double sigma = (locals[am.upper].t[0] >= 0.0) ? 1.0 : -1.0; // the side the arm sits on, in the model's X
 			const V s = Ld(anim[am.upper].t);
 			const V c1 = Ld(locals[am.fore].t), c2 = Ld(locals[am.wrist].t);
-			const double l1 = Len(c1), l2 = Len(c2);
 			const V hf = Norm(Ld(tg.hand_fwd[a]), {0.0, 0.0, 1.0});
 			V tw = Ld(tg.hand_pos[a]) - hf * tu.wrist_back_cm;
 			// Not into the torso (a box round the chest, chest frame): pushed out in front.
 			if (std::fabs(tw.x) < 14.0 && tw.y > -45.0 && tw.y < 24.0 && tw.z > -12.0 && tw.z < 14.0)
 				tw.z = 14.0;
 			const V pole = V{0.0, -1.0, 0.0} + V{sigma, 0.0, 0.0} * 0.6 + V{0.0, 0.0, -1.0} * 0.4;
-			double sv[3], tv[3], pv[3];
-			St(s, sv);
-			St(tw, tv);
-			St(pole, pv);
-			IkResult ik;
-			if (!SolveTwoBone(sv, l1, l2, tv, pv, tu.max_elbow_bend_deg, &ik))
+			ArmChain ac;
+			if (!SolveArmChain(s, c1, c2, sigma, tw, pole, hf, Ld(tg.hand_up[a]), tu, &ac))
 				continue;
-			const V e = Ld(ik.elbow), wr = Ld(ik.wrist);
-			out->wrist_err[a] = Len(wr - Ld(tg.hand_pos[a]) + hf * tu.wrist_back_cm);
-			out->reach_clamped[a] = ik.clamped;
-			const V u = Norm(e - s), f = Norm(wr - e, u);
-			// The crease (each arm bone's +Z, perpendicularised) toward where the forearm bends; a straight arm: away
-			// from the elbow's pole.
-			V crease = f - u * Dot(f, u);
-			if (Len(crease) < 1e-3)
-			{
-				crease = pole - u * Dot(pole, u);
-				crease = Norm(crease, AnyPerp(u)) * -1.0;
-			}
+			out->wrist_err[a] = Len(ac.wrist - Ld(tg.hand_pos[a]) + hf * tu.wrist_back_cm);
+			out->reach_clamped[a] = ac.clamped;
 			double r_up[3][3], r_fore[3][3], r_hand[3][3];
-			FrameFromPairs(c1, {0.0, 0.0, 1.0}, u, crease, r_up);
-			// The forearm on the same hinge (the upper arm's second axis), its child along f.
-			{
-				const V hinge = Row(r_up, 1);
-				const V e1 = Norm(c2, {sigma, 0.0, 0.0});
-				V e3 = V{0.0, 0.0, 1.0} - e1 * e1.z;
-				e3 = Norm(e3, AnyPerp(e1));
-				const V e2 = Cross(e3, e1);
-				// Rows e1, e2, e3 to f, hinge, f x hinge.
-				const V g1 = f, g2 = Norm(hinge - f * Dot(hinge, f), AnyPerp(f)), g3 = Cross(g1, g2);
-				double E[3][3], G[3][3], Et[3][3];
-				SetRow(E, 0, e1);
-				SetRow(E, 1, e2);
-				SetRow(E, 2, e3);
-				SetRow(G, 0, g1);
-				SetRow(G, 1, g2);
-				SetRow(G, 2, g3);
-				Transpose(E, Et);
-				MulRR(Et, G, r_fore);
-			}
-			// The hand from the controller: the fingers (the bone's +-X, the arm's side) along its forward, the thumb (+Z)
-			// along its up.
-			FrameFromPairs({sigma, 0.0, 0.0}, {0.0, 0.0, 1.0}, hf, Ld(tg.hand_up[a]), r_hand);
-			// The wrist: the hand relative to the forearm (forearm local), split into a twist about the forearm's own axis
-			// and a swing. The forearm takes a share of the twist; then the rest and the swing are clamped.
-			{
-				const V axis = Norm(c2, {sigma, 0.0, 0.0});
-				const auto split = [&](const double fore[3][3], Q* swing, double* twist_ang) {
-					double rel[3][3], fore_t[3][3];
-					Transpose(fore, fore_t);
-					MulRR(r_hand, fore_t, rel); // hand = rel * fore (rows)
-					const Q q = QFromRows(rel);
-					const double proj = q.x * axis.x + q.y * axis.y + q.z * axis.z;
-					const Q twist = (std::fabs(q.w) + std::fabs(proj) > 1e-12) ? QNorm({q.w, axis.x * proj, axis.y * proj, axis.z * proj}) : Q{};
-					*swing = QMul(q, QConj(twist));
-					const double t = 2.0 * std::atan2(proj, q.w);
-					*twist_ang = std::atan2(std::sin(t), std::cos(t));
-				};
-				Q swing;
-				double tw_ang = 0.0;
-				split(r_fore, &swing, &tw_ang);
-				// The forearm turned about its own axis (in its local frame): rows = turn(local) * rows.
-				double rf_local[3][3], r_fore2[3][3];
-				RowsFromQ(QAxis(axis, tw_ang * tu.forearm_twist_share), rf_local);
-				MulRR(rf_local, r_fore, r_fore2);
-				std::memcpy(r_fore, r_fore2, sizeof(r_fore2));
-				split(r_fore, &swing, &tw_ang);
-				const double rest = Clamp(tw_ang, -tu.wrist_twist_deg * kDeg, tu.wrist_twist_deg * kDeg);
-				V sw_axis{swing.x, swing.y, swing.z};
-				if (swing.w < 0.0)
-					sw_axis = sw_axis * -1.0;
-				const double sw_ang = std::min(QAngle(swing), tu.wrist_swing_deg * kDeg);
-				const Q rel2 = (Len(sw_axis) > 1e-9) ? QMul(QAxis(sw_axis, sw_ang), QAxis(axis, rest)) : QAxis(axis, rest);
-				double rel2r[3][3];
-				RowsFromQ(rel2, rel2r);
-				MulRR(rel2r, r_fore, r_hand);
-			}
+			std::memcpy(r_up, ac.r_up, sizeof(r_up));
+			std::memcpy(r_fore, ac.r_fore, sizeof(r_fore));
+			std::memcpy(r_hand, ac.r_hand, sizeof(r_hand));
 			// Blended with the animation, then placed down the chain from the (animated) shoulder.
 			const double wa = std::min(w.arm[a], 1.0);
 			BlendRot(anim[am.upper].r, r_up, wa, now[am.upper].r);
@@ -603,6 +631,212 @@ namespace VR::VrBody
 			}
 		return true;
 	}
+	double CalibrateScale(double eye_over_floor_m, const AnchorTuning& tu)
+	{
+		if (!std::isfinite(eye_over_floor_m) || eye_over_floor_m < 0.9 || eye_over_floor_m > 1.5 || !(tu.seated_eye_m > tu.seat_m + 0.1))
+			return 1.0;
+		return Clamp((eye_over_floor_m - tu.seat_m) / (tu.seated_eye_m - tu.seat_m), tu.scale_min, tu.scale_max);
+	}
+
+	bool AnchorShoulders(const double head_pos[3], const double head_fwd[3], const double head_up[3], const bool hand[2],
+		const double hand_pos[2][3], double scale, double half_width_m, double dt, const AnchorTuning& tu, double* yaw_state,
+		AnchorBody* out)
+	{
+		const V hp = Ld(head_pos);
+		const V f = Norm(Ld(head_fwd), {0.0, 0.0, -1.0}), u0 = Ld(head_up);
+		const V u = Norm(u0 - f * Dot(u0, f), AnyPerp(f));
+		if (!Finite(hp) || !Finite(f) || !Finite(u) || !std::isfinite(scale) || !(scale > 0.0) || !std::isfinite(half_width_m))
+			return false;
+		const double k = scale;
+		// The head's yaw: its forward on the floor; looking far up or down, its up tells where the face points.
+		V fh{f.x, 0.0, f.z};
+		if (Len(fh) < 0.3)
+			fh = fh + V{u.x, 0.0, u.z} * (f.y < 0.0 ? 1.0 : -1.0);
+		fh = Norm(fh, {0.0, 0.0, -1.0});
+		const double head_yaw = std::atan2(-fh.x, -fh.z);
+		// The neck's pivot under and behind the eye, in the head's frame: it stays put as the head turns and nods.
+		const V pivot = hp - u * (tu.pivot_down_m * k) - f * (tu.pivot_back_m * k);
+		// The body's yaw: the head's, turned toward the tracked hands' midpoint when that is ahead of the pivot.
+		double target = head_yaw;
+		bool used = false;
+		{
+			V mid{};
+			int nh = 0;
+			for (int h = 0; h < 2; h++)
+				if (hand[h] && Finite(Ld(hand_pos[h])))
+				{
+					mid = mid + Ld(hand_pos[h]);
+					nh++;
+				}
+			if (nh > 0)
+			{
+				const V d = mid * (1.0 / nh) - pivot;
+				const V dh{d.x, 0.0, d.z};
+				if (Len(dh) > 0.15 && Dot(Norm(dh), fh) > -0.3)
+				{
+					const double hy = std::atan2(-dh.x, -dh.z);
+					target = head_yaw + tu.hands_share * std::remainder(hy - head_yaw, 2.0 * kPi);
+					used = true;
+				}
+			}
+		}
+		const double lim = tu.max_body_yaw_deg * kDeg;
+		double yaw = target;
+		if (yaw_state && std::isfinite(*yaw_state))
+		{
+			const double a = 1.0 - std::exp(-std::max(0.0, tu.yaw_rate_per_s) * Clamp(dt, 0.0, 0.5));
+			yaw = *yaw_state + a * std::remainder(target - *yaw_state, 2.0 * kPi);
+		}
+		// Never further from the head than the neck allows.
+		yaw = std::remainder(head_yaw + Clamp(std::remainder(yaw - head_yaw, 2.0 * kPi), -lim, lim), 2.0 * kPi);
+		if (yaw_state)
+			*yaw_state = yaw;
+		const V bf{-std::sin(yaw), 0.0, -std::cos(yaw)}, br{std::cos(yaw), 0.0, -std::sin(yaw)};
+		// The shoulders: their midpoint under the pivot (the body upright), a little behind it, the model's own half width
+		// each side.
+		const V mid = pivot + V{0.0, -tu.shoulder_down_m * k, 0.0} - bf * (tu.shoulder_back_m * k);
+		St(pivot, out->pivot);
+		St(bf, out->fwd);
+		St(br, out->right);
+		St(mid - br * half_width_m, out->shoulder[0]);
+		St(mid + br * half_width_m, out->shoulder[1]);
+		out->yaw = yaw;
+		out->hands_used = used;
+		return true;
+	}
+
+	bool SelfHidePlan(const BoneMap& m, const int* parents, int n, SelfStyle style, HidePlan* out)
+	{
+		*out = HidePlan{};
+		if (style == SelfStyle::GameShoulders || !CheckMap(m, parents, n, nullptr))
+			return false;
+		const auto add = [out](int b, HideKind k, int arm) {
+			if (out->count >= kMaxOut)
+				return;
+			for (int i = 0; i < out->count; i++)
+				if (out->bone[i] == b)
+					return;
+			out->bone[out->count] = b;
+			out->kind[out->count] = k;
+			out->arm[out->count] = arm;
+			out->count++;
+		};
+		// The drawn bones first: per arm the upper arm (Arms) or the forearm (Forearms) and everything under it.
+		for (int a = 0; a < 2; a++)
+		{
+			int sub[kMaxBones];
+			const int top = (style == SelfStyle::Arms) ? m.arm[a].upper : m.arm[a].fore;
+			const int k = Subtree(parents, n, top, sub, kMaxBones);
+			for (int i = 0; i < k; i++)
+				add(sub[i], HideKind::Drawn, a);
+		}
+		// Then the hidden ones next to them: the upper arms (Forearms), the clavicles, the head's subtree.
+		if (style == SelfStyle::Forearms)
+			for (int a = 0; a < 2; a++)
+				add(m.arm[a].upper, HideKind::AtElbow, a);
+		for (int a = 0; a < 2; a++)
+			add(m.arm[a].clavicle, style == SelfStyle::Arms ? HideKind::AtShoulder : HideKind::AtChest, a);
+		add(m.chest, HideKind::AtChest, -1);
+		int sub[kMaxBones];
+		const int k = Subtree(parents, n, m.neck, sub, kMaxBones);
+		for (int i = 0; i < k; i++)
+			add(sub[i], HideKind::AtChest, -1);
+		return out->count > 0;
+	}
+
+	bool SolveAnchored(const BoneMap& m, const Frame* locals, const int* parents, int n, const AnchorTargets& at,
+		const Tuning& tu, SelfStyle style, double protract, Pose* out)
+	{
+		*out = Pose{};
+		HidePlan plan;
+		if (!SelfHidePlan(m, parents, n, style, &plan))
+			return false;
+		const V up = Norm(Ld(at.body_up), {0.0, 1.0, 0.0});
+		const V fwd = Norm(Ld(at.body_fwd) - up * Dot(Ld(at.body_fwd), up), AnyPerp(up));
+		const V left = Cross(up, fwd); // the model's +X side (up x forward)
+		Frame now[kMaxBones];
+		V elbow[2], shoulder[2];
+		for (int a = 0; a < 2; a++)
+		{
+			if (!at.tg.hand[a])
+				continue;
+			const ArmMap& am = m.arm[a];
+			const double sigma = (locals[am.upper].t[0] >= 0.0) ? 1.0 : -1.0;
+			const V c1 = Ld(locals[am.fore].t), c2 = Ld(locals[am.wrist].t);
+			const V hf = Norm(Ld(at.tg.hand_fwd[a]), {0.0, 0.0, 1.0});
+			const V tw = Ld(at.tg.hand_pos[a]) - hf * tu.wrist_back_cm;
+			V s = Ld(at.shoulder[a]);
+			if (!Finite(s) || !Finite(tw))
+				continue;
+			// Out of reach: the shoulder slides toward the hand (a real one reaches forward too), then the arm stops short.
+			const double reach = 0.999 * (Len(c1) + Len(c2)), d = Len(tw - s);
+			if (d > reach && std::isfinite(protract) && protract > 0.0)
+				s = s + Norm(tw - s) * std::min(d - reach, protract);
+			const V pole = up * -1.0 + left * (sigma * 0.6) - fwd * 0.4;
+			ArmChain ac;
+			if (!SolveArmChain(s, c1, c2, sigma, tw, pole, hf, Ld(at.tg.hand_up[a]), tu, &ac))
+				continue;
+			std::memcpy(now[am.upper].r, ac.r_up, sizeof(ac.r_up));
+			St(s, now[am.upper].t);
+			std::memcpy(now[am.fore].r, ac.r_fore, sizeof(ac.r_fore));
+			St(MulRow(c1, now[am.upper].r) + s, now[am.fore].t);
+			std::memcpy(now[am.wrist].r, ac.r_hand, sizeof(ac.r_hand));
+			St(MulRow(c2, now[am.fore].r) + Ld(now[am.fore].t), now[am.wrist].t);
+			int sub[kMaxBones];
+			const int k = Subtree(parents, n, am.wrist, sub, kMaxBones);
+			for (int i = 1; i < k; i++)
+				now[sub[i]] = Compose(locals[sub[i]], now[parents[sub[i]]]);
+			out->drawn[a] = true;
+			elbow[a] = Ld(now[am.fore].t);
+			shoulder[a] = s;
+			St(elbow[a], out->elbow[a]);
+			St(s, out->shoulder[a]);
+			St(Ld(now[am.wrist].t), out->wrist[a]);
+			out->wrist_err[a] = Len(Ld(now[am.wrist].t) - tw);
+			out->reach_clamped[a] = ac.clamped;
+		}
+		if (!out->drawn[0] && !out->drawn[1])
+			return false;
+		const auto hidden_at = [](const V& p) {
+			Frame f;
+			std::memset(f.r, 0, sizeof(f.r));
+			St(p, f.t);
+			return f;
+		};
+		for (int i = 0; i < plan.count; i++)
+		{
+			const int b = plan.bone[i], a = plan.arm[i];
+			const bool arm_drawn = a >= 0 && out->drawn[a];
+			Frame f = hidden_at(Ld(at.chest)); // the chest's own joint
+			bool keep = false;
+			switch (plan.kind[i])
+			{
+				case HideKind::Drawn:
+					if (arm_drawn)
+					{
+						f = now[b];
+						keep = true;
+					}
+					break;
+				case HideKind::AtElbow:
+					if (arm_drawn)
+						f = hidden_at(elbow[a]);
+					break;
+				case HideKind::AtShoulder:
+					if (arm_drawn)
+						f = hidden_at(shoulder[a]);
+					break;
+				case HideKind::AtChest:
+					break;
+			}
+			out->bone[out->count] = b;
+			out->rel[out->count] = f;
+			out->keep[out->count] = keep;
+			out->count++;
+		}
+		return true;
+	}
+
 	bool FromGameScaled(const float m[16], Frame* out, double* scale)
 	{
 		for (int i = 0; i < 16; i++)
@@ -697,6 +931,7 @@ namespace VR::VrBody
 			bool seen[kMaxBones] = {};
 			float seen_m[kMaxBones][16] = {};
 			u32 record = 0;
+			double anchor_yaw = std::numeric_limits<double>::quiet_NaN(); // the anchored body's yaw (VrBodySelfStyle)
 		};
 		SlotState s_slot[kSlots];
 		bool s_written = false;
@@ -752,6 +987,9 @@ namespace VR::VrBody
 			Frame chest;        // the chest's world frame (unit axes)
 			double scale = 1.0; // the character's
 			float chest_m[16] = {};
+			int root = -1;      // the chain's root bone and its world frame (the anchored arms' reference)
+			Frame root_w;
+			double root_scale = 1.0;
 		};
 
 		bool ReadSkeleton(const ProfileDB::BodyParams& bp, const BoneMap& map, u32 rec, SlotState* st, Skeleton* sk,
@@ -811,6 +1049,12 @@ namespace VR::VrBody
 				float l[16];
 				ReadF16(sk->ptr[chain[i]] + bp.local, l);
 				Mul44(l, w, w);
+				if (i == len - 1)
+				{
+					sk->root = chain[i];
+					if (!FromGameScaled(w, &sk->root_w, &sk->root_scale))
+						sk->root = -1;
+				}
 			}
 			std::memcpy(sk->chest_m, w, sizeof(w));
 			if (!FromGameScaled(w, &sk->chest, &sk->scale))
@@ -914,6 +1158,192 @@ namespace VR::VrBody
 		{
 			return std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
 		}
+
+		// Your own anchored arms (VrBodySelfStyle Forearms / Arms): the seated calibration, latched at VR start and on every
+		// recentre (the camera mapping's reference changing): the eye's height over the floor then gives the body's scale.
+		struct Calibration
+		{
+			bool have = false;
+			float ref[3] = {};
+			float ref_yaw = 0.0f;
+			double eye_floor = std::numeric_limits<double>::quiet_NaN();
+			double scale = 1.0;
+		};
+		Calibration s_cal;
+
+		// What the log prints of the anchored solve (game coordinates).
+		struct AnchorLog
+		{
+			double eye[3] = {};
+			double view_fwd[3] = {0.0, 0.0, 1.0}; // level
+			double body_off_deg = 0.0;            // the body's yaw off the head's
+			bool hands_used = false;
+		};
+
+		// The VR point p as the eye sees it, in the game: GameFromVr, then eye_forward along the view's yaw (the game's eye is
+		// that far ahead of GameFromVr(head), so everything the eye sees is drawn that much further on; CameraDriver.h).
+		bool SeenFromVr(const CameraDriver::Mapping& m, const double shift[3], const double p[3], double g[3])
+		{
+			const float pf[3] = {static_cast<float>(p[0]), static_cast<float>(p[1]), static_cast<float>(p[2])};
+			float gf[3];
+			if (!CameraDriver::GameFromVr(m, pf, gf))
+				return false;
+			for (int k = 0; k < 3; k++)
+				g[k] = gf[k] + shift[k];
+			return true;
+		}
+
+		bool MakeAnchorTargets(const CameraDriver::Mapping& m, const Skeleton& sk, const BoneMap& map, const VRInputSnapshot& snap,
+			int left_arm, double dt, double* yaw_state, AnchorTargets* at, AnchorLog* lg)
+		{
+			if (!snap.head_pose.valid || !(std::fabs(m.units_per_meter) > 1e-3f))
+				return false;
+			// The calibration, at VR start and on each recentre.
+			const bool moved = !s_cal.have || std::fabs(s_cal.ref[0] - m.ref_pos[0]) > 1e-3f || std::fabs(s_cal.ref[1] - m.ref_pos[1]) > 1e-3f ||
+							   std::fabs(s_cal.ref[2] - m.ref_pos[2]) > 1e-3f || std::fabs(s_cal.ref_yaw - m.ref_yaw) > 1e-3f;
+			const AnchorTuning atu;
+			if (moved)
+			{
+				s_cal.have = true;
+				std::memcpy(s_cal.ref, m.ref_pos, sizeof(s_cal.ref));
+				s_cal.ref_yaw = m.ref_yaw;
+				s_cal.eye_floor = snap.head_floor_y;
+				s_cal.scale = CalibrateScale(s_cal.eye_floor, atu);
+				*yaw_state = std::numeric_limits<double>::quiet_NaN();
+				if (std::isfinite(s_cal.eye_floor))
+					Console.WriteLn("(VR) Body: self calibrated at the recentre: eye %.2f m over the floor, body scale %.2f%s.", s_cal.eye_floor,
+						s_cal.scale, s_cal.scale == 1.0 && (s_cal.eye_floor < 0.9 || s_cal.eye_floor > 1.5) ? " (not a seated eye height)" : "");
+				else
+					Console.WriteLn("(VR) Body: self calibrated at the recentre: the floor is unknown, body scale 1.00.");
+			}
+			const auto& hq = snap.head_pose.orientation_xyzw;
+			const double qx = hq[0], qy = hq[1], qz = hq[2], qw = hq[3];
+			const auto rot = [&](double vx, double vy, double vz, double o[3]) {
+				// v + 2 q x (q x v + w v)
+				const double tx = qy * vz - qz * vy + qw * vx, ty = qz * vx - qx * vz + qw * vy, tz = qx * vy - qy * vx + qw * vz;
+				o[0] = vx + 2.0 * (qy * tz - qz * ty);
+				o[1] = vy + 2.0 * (qz * tx - qx * tz);
+				o[2] = vz + 2.0 * (qx * ty - qy * tx);
+			};
+			double hp[3], hf[3], hu[3];
+			for (int k = 0; k < 3; k++)
+				hp[k] = snap.head_pose.position_xyz[k];
+			rot(0.0, 0.0, -1.0, hf);
+			rot(0.0, 1.0, 0.0, hu);
+			bool hand[2] = {};
+			double hand_vr[2][3] = {};
+			for (int h = 0; h < 2; h++)
+			{
+				const VRHandState& hs = snap.hands[h];
+				hand[h] = hs.grip_pose.valid;
+				for (int k = 0; k < 3; k++)
+					hand_vr[h][k] = hs.grip_pose.position_xyz[k];
+			}
+			// The shoulders' half width: the model's own (clavicle and shoulder joint offsets), in metres.
+			const double half_units = 0.5 * (std::fabs(sk.locals[map.arm[0].clavicle].t[0] + sk.locals[map.arm[0].upper].t[0]) +
+												std::fabs(sk.locals[map.arm[1].clavicle].t[0] + sk.locals[map.arm[1].upper].t[0]));
+			const double half_m = half_units * sk.scale / std::fabs(m.units_per_meter);
+			AnchorBody body;
+			if (!AnchorShoulders(hp, hf, hu, hand, hand_vr, s_cal.scale, half_m, dt, atu, yaw_state, &body))
+				return false;
+			// The eye's shift (eye_forward along the view's level forward, in the game).
+			double shift[3] = {};
+			double g0[3], g1[3];
+			{
+				double fl[3] = {hf[0], 0.0, hf[2]};
+				const double l = std::sqrt(fl[0] * fl[0] + fl[2] * fl[2]);
+				if (l < 1e-3)
+				{
+					fl[0] = body.fwd[0];
+					fl[2] = body.fwd[2];
+				}
+				else
+				{
+					fl[0] /= l;
+					fl[2] /= l;
+				}
+				const double p1[3] = {hp[0] + fl[0], hp[1], hp[2] + fl[2]};
+				if (!SeenFromVr(m, shift, hp, g0) || !SeenFromVr(m, shift, p1, g1))
+					return false;
+				double d[3] = {g1[0] - g0[0], 0.0, g1[2] - g0[2]};
+				const double dl = std::sqrt(d[0] * d[0] + d[2] * d[2]);
+				if (!(dl > 1e-6))
+					return false;
+				for (int k = 0; k < 3; k++)
+				{
+					lg->view_fwd[k] = d[k] / dl;
+					shift[k] = lg->view_fwd[k] * m.eye_forward;
+					lg->eye[k] = g0[k] + shift[k];
+				}
+			}
+			lg->hands_used = body.hands_used;
+			{
+				double hy = std::atan2(-hf[0], -hf[2]);
+				lg->body_off_deg = std::remainder(body.yaw - hy, 2.0 * kPi) / kDeg;
+			}
+			// Everything into the chest's frame.
+			for (int side = 0; side < 2; side++)
+			{
+				const int a = (side == 0) ? left_arm : 1 - left_arm;
+				double g[3];
+				if (!SeenFromVr(m, shift, body.shoulder[side], g))
+					return false;
+				const float gf[3] = {static_cast<float>(g[0]), static_cast<float>(g[1]), static_cast<float>(g[2])};
+				PointToChest(sk, gf, at->shoulder[a]);
+				if (!hand[side])
+					continue;
+				const VRHandState& hs = snap.hands[side];
+				const VRPose& orient = hs.aim_pose.valid ? hs.aim_pose : hs.grip_pose;
+				Presence::GamePose gp;
+				if (!Presence::PoseToGame(m, hs.grip_pose.position_xyz.data(), orient.orientation_xyzw.data(), &gp))
+					continue;
+				for (int k = 0; k < 3; k++)
+					gp.pos[k] = static_cast<float>(gp.pos[k] + shift[k]);
+				at->tg.hand[a] = true;
+				PointToChest(sk, gp.pos, at->tg.hand_pos[a]);
+				DirToChest(sk, gp.fwd, at->tg.hand_fwd[a]);
+				DirToChest(sk, gp.up, at->tg.hand_up[a]);
+			}
+			{
+				const double p1[3] = {body.pivot[0] + body.fwd[0], body.pivot[1], body.pivot[2] + body.fwd[2]};
+				double a0[3], a1[3];
+				if (!SeenFromVr(m, shift, body.pivot, a0) || !SeenFromVr(m, shift, p1, a1))
+					return false;
+				const float bf[3] = {static_cast<float>(a1[0] - a0[0]), static_cast<float>(a1[1] - a0[1]), static_cast<float>(a1[2] - a0[2])};
+				const float bu[3] = {0.0f, 1.0f, 0.0f};
+				DirToChest(sk, bf, at->body_fwd);
+				DirToChest(sk, bu, at->body_up);
+			}
+			return at->tg.hand[0] || at->tg.hand[1];
+		}
+
+		// A game point against the eye, in the view's level frame: cm up, forward, right.
+		void FromEye(const AnchorLog& lg, const double w[3], double o[3])
+		{
+			const double d[3] = {w[0] - lg.eye[0], w[1] - lg.eye[1], w[2] - lg.eye[2]};
+			const double* f = lg.view_fwd;
+			const double right[3] = {-f[2], 0.0, f[0]}; // up x forward is the model's left
+			o[0] = d[1];
+			o[1] = d[0] * f[0] + d[2] * f[2];
+			o[2] = d[0] * right[0] + d[2] * right[2];
+		}
+
+		// The distance from p to the segment a-b.
+		double SegDist(const double p[3], const double a[3], const double b[3])
+		{
+			double ab[3], ap[3];
+			for (int k = 0; k < 3; k++)
+			{
+				ab[k] = b[k] - a[k];
+				ap[k] = p[k] - a[k];
+			}
+			const double l2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+			const double t = l2 > 1e-12 ? std::clamp((ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / l2, 0.0, 1.0) : 0.0;
+			double q[3];
+			for (int k = 0; k < 3; k++)
+				q[k] = a[k] + ab[k] * t - p[k];
+			return std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+		}
 	} // namespace
 
 	void Shutdown()
@@ -925,6 +1355,7 @@ namespace VR::VrBody
 		s_state_loaded = false;
 		for (SlotState& st : s_slot)
 			st = SlotState{};
+		s_cal = Calibration{};
 	}
 
 	void OnStateLoaded()
@@ -1047,6 +1478,10 @@ namespace VR::VrBody
 		}();
 		// Cave U only strictly offline (night review C1): online every slot is posed at the draw (cave V) only.
 		const bool use_locals = UseLocals(CameraDriver::NetworkOffline(), NetGate::IsOnline(), s_drawtime);
+		// Your own arms (VrBodySelfStyle): anchored to the headset and drawn at the draw only (Forearms, Arms), or from the
+		// game's shoulders as the first version (GameShoulders).
+		const SelfStyle style = static_cast<SelfStyle>(static_cast<int>(vr.VrBodySelfStyle));
+		const bool anchored = style == SelfStyle::Forearms || style == SelfStyle::Arms;
 		const u64 now = CameraDriver::SteadyNowMs();
 		const bool log_now = (s_log_env || s_loopback_env) && now - s_log_ms >= 2000;
 		if (log_now)
@@ -1063,6 +1498,7 @@ namespace VR::VrBody
 			Input in;
 			u32 rec = 0;
 			int state = 0;
+			VRInputSnapshot self_snap;
 			if (si == 0)
 			{
 				Presence::PartnerGame pg;
@@ -1085,12 +1521,15 @@ namespace VR::VrBody
 			{
 				u32 base = 0;
 				const VRInputSnapshot snap = GetInputSnapshot();
+				self_snap = snap;
 				if (!vr.VrBodySelf)
 					state = 1;
 				else if (!CameraDriver::NetworkOffline() || !have_mapping || !CameraDriver::LocalRecord(&base))
 					state = 2;
 				else if (snap.generation == 0 || !snap.actions_active)
 					state = 3;
+				else if (anchored && !snap.head_pose.valid)
+					state = 6;
 				else
 				{
 					rec = base;
@@ -1111,6 +1550,9 @@ namespace VR::VrBody
 			Pose pose;
 			Targets tg;
 			bool solved = false;
+			const bool self_anchored = si == 1 && anchored;
+			AnchorLog alg;
+			Skeleton skr; // the anchored arms' frame: the skeleton with the root's world as its reference
 			if (rec != 0 && state == 0)
 			{
 				if (st.record != rec)
@@ -1121,6 +1563,33 @@ namespace VR::VrBody
 				}
 				if (!ReadSkeleton(*bp, map, rec, &st, &sk, &why))
 					state = 4;
+				else if (self_anchored)
+				{
+					// Everything in the root bone's frame (the character's place and heading, none of the chest's sway): the
+					// cave multiplies by the root's world of the frame it draws.
+					AnchorTargets at;
+					skr = sk;
+					skr.chest = sk.root_w;
+					skr.scale = sk.root_scale;
+					if (sk.root < 0 || sk.root == map.chest)
+						state = 4;
+					else if (!MakeAnchorTargets(mapping, skr, map, self_snap, left_arm, dt, &st.anchor_yaw, &at, &alg))
+						state = 6;
+					else
+					{
+						const AnchorTuning atu;
+						const float cj[3] = {static_cast<float>(sk.chest.t[0]), static_cast<float>(sk.chest.t[1]), static_cast<float>(sk.chest.t[2])};
+						PointToChest(skr, cj, at.chest);
+						tg = at.tg;
+						const double protract = atu.protract_m * std::fabs(mapping.units_per_meter) / sk.scale;
+						solved = SolveAnchored(map, sk.locals, sk.parents, sk.n, at, tu, style, protract, &pose) && pose.count > 0;
+						if (!solved)
+							state = 5;
+						st.w = Weights{};
+						for (int a = 0; a < 2; a++)
+							st.w.arm[a] = pose.drawn[a] ? 1.0 : 0.0;
+					}
+				}
 				else
 				{
 					tg = MakeTargets(*bp, map, sk, in, left_arm);
@@ -1140,7 +1609,8 @@ namespace VR::VrBody
 			{
 				st.state = state;
 				static const char* const kState[] = {"posed", "nobody to pose", "not offline, no mapping or no local record",
-					"no VR hands", "skeleton not usable", "nothing to pose (no tracked part in reach)"};
+					"no VR hands", "skeleton not usable", "nothing to pose (no tracked part in reach)",
+					"no VR head (the anchored arms start from it)"};
 				Console.WriteLn("(VR) Body: %s %s%s%s (record %08X).", si == 0 ? "partner" : "self", kState[state], why ? ": " : "",
 					why ? why : "", rec);
 			}
@@ -1150,16 +1620,29 @@ namespace VR::VrBody
 			bs.record = rec;
 			bs.table = bp->tables + static_cast<u32>(si) * ProfileDB::kBodyTableBytes;
 			bs.count = 0;
-			bs.ref = static_cast<u8>(map.chest);
+			bs.ref = static_cast<u8>(self_anchored ? sk.root : map.chest);
 			const bool arms = st.w.arm[0] > 0.0 || st.w.arm[1] > 0.0;
-			bs.flags = SlotFlags(si, use_locals, arms);
+			// The anchored arms are draw-only, offline or not: cave V's world entries; never cave U's locals, so the game's own
+			// arms, held items and hit spheres stay its animation's.
+			bs.flags = self_anchored ? SlotFlags(si, false, arms) : SlotFlags(si, use_locals, arms);
 			// The held items go back on the hands (the game's own FUN_006313A0 with the record's item slots, as its update
 			// does: the item slot byte +0xC7C on the -X wrist, +0xC7D on the +X wrist).
 			bs.attach_offset[0] = 0xC7C;
 			bs.attach_bone[0] = static_cast<u8>(map.arm[1].wrist);
 			bs.attach_offset[1] = 0xC7D;
 			bs.attach_bone[1] = static_cast<u8>(map.arm[0].wrist);
-			for (int k = 0; k < pose.count; k++)
+			if (self_anchored)
+			{
+				for (int k = 0; k < pose.count; k++)
+				{
+					bs.bones[k] = static_cast<u8>(pose.bone[k]);
+					ToGame(pose.rel[k], tables[si][k]);
+					if (pose.keep[k])
+						bs.keep[pose.bone[k] / 32] |= 1u << (pose.bone[k] % 32);
+				}
+				bs.count = static_cast<u8>(pose.count);
+			}
+			for (int k = 0; k < pose.count && !self_anchored; k++)
 			{
 				if (!use_locals)
 				{
@@ -1172,9 +1655,9 @@ namespace VR::VrBody
 				else
 					bs.keep[1] |= 1u << (pose.bone[k] - 32);
 			}
-			if (!use_locals)
+			if (!use_locals && !self_anchored)
 				bs.count = static_cast<u8>(pose.count);
-			else
+			else if (!self_anchored)
 			{
 				// The locals, then the head's subtree as draw-time frames (over the game's own head look).
 				int n = 0;
@@ -1201,7 +1684,59 @@ namespace VR::VrBody
 				}
 				bs.count = static_cast<u8>(n);
 			}
-			if (log_now)
+			if (log_now && self_anchored)
+			{
+				// Per arm: the wrist's target (the controller's grip, moved to the wrist, as the eye sees it), the solve and the
+				// wrist bone's world in memory (what cave V wrote at the last draw); then where the shoulders, elbows and the
+				// drawn bones are against the eye.
+				std::string line;
+				double nearest = 1e9, top = 1e9;
+				for (int a = 0; a < 2; a++)
+				{
+					if (!pose.drawn[a])
+					{
+						line += fmt::format(" arm{} hidden;", a);
+						continue;
+					}
+					double wt[3], tt[3], tc[3], sw[3], ew[3];
+					ChestToWorld(skr, pose.wrist[a], wt);
+					for (int k = 0; k < 3; k++)
+						tc[k] = tg.hand_pos[a][k] - tg.hand_fwd[a][k] * tu.wrist_back_cm;
+					ChestToWorld(skr, tc, tt);
+					ChestToWorld(skr, pose.shoulder[a], sw);
+					ChestToWorld(skr, pose.elbow[a], ew);
+					const u32 wp = sk.ptr[map.arm[a].wrist], ep = sk.ptr[map.arm[a].fore];
+					const double mem[3] = {std::bit_cast<float>(memRead32(wp + 0x30)), std::bit_cast<float>(memRead32(wp + 0x34)),
+						std::bit_cast<float>(memRead32(wp + 0x38))};
+					const double emem[3] = {std::bit_cast<float>(memRead32(ep + 0x30)), std::bit_cast<float>(memRead32(ep + 0x34)),
+						std::bit_cast<float>(memRead32(ep + 0x38))};
+					line += fmt::format(" arm{} (wrist bone {}) weight 1.00: target ({:.1f}, {:.1f}, {:.1f}), solved ({:.1f}, {:.1f}, "
+										"{:.1f}) {:.1f} cm off{}, in memory ({:.1f}, {:.1f}, {:.1f}) {:.1f} cm off;",
+						a, map.arm[a].wrist, tt[0], tt[1], tt[2], wt[0], wt[1], wt[2], Dist3(wt, tt), pose.reach_clamped[a] ? " (out of reach)" : "",
+						mem[0], mem[1], mem[2], Dist3(mem, tt));
+					double so[3], eo[3], wo[3];
+					FromEye(alg, sw, so);
+					FromEye(alg, ew, eo);
+					FromEye(alg, wt, wo);
+					const double lf = Dist3(ew, wt) / skr.scale, lu = Dist3(sw, ew) / skr.scale;
+					line += fmt::format(" [anchor arm{}: shoulder ({:+.1f} up, {:+.1f} fwd, {:+.1f} right) elbow ({:+.1f}, {:+.1f}, {:+.1f}) in memory "
+										"{:.1f} cm off, wrist ({:+.1f}, {:+.1f}, {:+.1f}); forearm {:.2f} upper arm {:.2f} model units]",
+						a, so[0], so[1], so[2], eo[0], eo[1], eo[2], Dist3(emem, ew), wo[0], wo[1], wo[2], lf, lu);
+					// The drawn bones: Forearms the forearm (elbow to wrist), Arms the upper arm too.
+					nearest = std::min(nearest, SegDist(alg.eye, ew, wt));
+					if (style == SelfStyle::Arms)
+					{
+						nearest = std::min(nearest, SegDist(alg.eye, sw, ew));
+						top = std::min(top, alg.eye[1] - sw[1]);
+					}
+				}
+				const std::string shoulders = top < 1e8 ? fmt::format("{:.1f} cm under the eye", top) : std::string("none (Forearms)");
+				Console.WriteLn("(VR) Body: self record %08X, %d bones, scale %.3f, left arm %d, style %s, body scale %.2f, body yaw %+.1f deg off the "
+								"head%s:%s [anchor drawn bones: nearest %.1f cm from the eye; drawn shoulders %s]",
+					rec, pose.count, sk.scale, left_arm, style == SelfStyle::Arms ? "Arms" : "Forearms", s_cal.scale, alg.body_off_deg,
+					alg.hands_used ? " (toward the hands)" : "", line.c_str(), nearest, shoulders.c_str());
+			}
+			else if (log_now)
 			{
 				// The wrists: the solve's (chest frame) put in the world, against the VR targets; and what the cave wrote at
 				// the last draw (the wrist bone's world matrix now in memory).
@@ -1298,6 +1833,13 @@ namespace VR::VrBody
 			{9.26, 1.31, -2.03}};
 
 		double D3(const V& a, const V& b) { return Len(a - b); }
+		double SegDistV(const V& p, const V& a, const V& b)
+		{
+			const V ab = b - a;
+			const double l2 = Dot(ab, ab);
+			const double t = l2 > 1e-12 ? Clamp(Dot(p - a, ab) / l2, 0.0, 1.0) : 0.0;
+			return Len(p - (a + ab * t));
+		}
 	} // namespace
 
 	bool SelfTest()
@@ -1573,6 +2115,253 @@ namespace VR::VrBody
 			const double mid = cur.arm[0];
 			EaseWeights(&cur, one, 0.2, tu);
 			check(std::fabs(mid - 0.5) < 1e-9 && cur.arm[0] == 1.0, "the blend takes 0.25 s");
+		}
+
+
+		// --- Your own arms anchored to the headset (VrBodySelfStyle) ---
+		{
+			const AnchorTuning atu;
+			// The calibration: a seated eye over the floor scales the neck model; an unknown or a head-level origin does not.
+			check(std::fabs(CalibrateScale(1.2, atu) - 1.0) < 1e-12 && std::fabs(CalibrateScale(1.1, atu) - 0.65 / 0.75) < 1e-12 &&
+					  std::fabs(CalibrateScale(1.3, atu) - 0.85 / 0.75) < 1e-12,
+				"calibration: eye 1.1 / 1.2 / 1.3 m over the floor give a body scale 0.87 / 1 / 1.13");
+			check(CalibrateScale(std::numeric_limits<double>::quiet_NaN(), atu) == 1.0 && CalibrateScale(0.02, atu) == 1.0 &&
+					  CalibrateScale(1.75, atu) == 1.0 && CalibrateScale(0.95, atu) == atu.scale_min,
+				"calibration: no floor, a head-level origin or a standing eye leave 1; a low seat clamps to the minimum");
+
+			// The neck model: the shoulders under and behind the eye, level, the model's half width each side.
+			const double hw = (9.31 + 8.28) * 1.05 / 100.0;
+			const double eye[3] = {0.0, 1.2, 0.0}, fwd[3] = {0.0, 0.0, -1.0}, up[3] = {0.0, 1.0, 0.0};
+			const bool none[2] = {false, false};
+			const double nowhere[2][3] = {};
+			AnchorBody b;
+			double yaw = std::numeric_limits<double>::quiet_NaN();
+			bool ok = AnchorShoulders(eye, fwd, up, none, nowhere, 1.0, hw, 0.0, atu, &yaw, &b);
+			const double drop = atu.pivot_down_m + atu.shoulder_down_m, back = atu.pivot_back_m + atu.shoulder_back_m;
+			check(ok && std::fabs(b.shoulder[0][1] - (1.2 - drop)) < 1e-12 && std::fabs(b.shoulder[1][1] - (1.2 - drop)) < 1e-12 &&
+					  std::fabs(b.shoulder[0][2] - back) < 1e-12 && std::fabs(b.shoulder[0][0] + hw) < 1e-12 && std::fabs(b.shoulder[1][0] - hw) < 1e-12 &&
+					  drop > 0.2 && back > 0.08,
+				"the shoulders 21.5 cm under and 9 cm behind the eye, the model's half width each side (left at -X)");
+			// A nod or a turn about the neck's pivot (the head rotating about it) leaves the pivot and the shoulders put.
+			{
+				const V pivot = Ld(b.pivot);
+				bool same = true;
+				for (const double pitch : {-50.0, 30.0})
+					for (const double yaw_deg : {0.0, 35.0})
+					{
+						// The head's frame: yaw about +Y then pitch about its right; the eye = pivot + R (0, down, -back) undone.
+						const double cy = std::cos(yaw_deg * kDeg), sy = std::sin(yaw_deg * kDeg), cp = std::cos(pitch * kDeg),
+									 sp = std::sin(pitch * kDeg);
+						const V f{-sy * cp, sp, -cy * cp};
+						const V r{cy, 0.0, -sy};
+						const V u = Cross(r, f);
+						const V e = pivot + u * atu.pivot_down_m + f * atu.pivot_back_m;
+						double ev[3], fv[3], uv[3];
+						St(e, ev);
+						St(f, fv);
+						St(u, uv);
+						AnchorBody bn;
+						double yn = std::numeric_limits<double>::quiet_NaN();
+						same &= AnchorShoulders(ev, fv, uv, none, nowhere, 1.0, hw, 0.0, atu, &yn, &bn) && D3(Ld(bn.pivot), pivot) < 1e-9 &&
+								std::fabs(bn.shoulder[0][1] - b.shoulder[0][1]) < 1e-9 && std::fabs(yn - yaw_deg * kDeg) < 1e-9;
+					}
+				check(same, "the neck model: nodding 50 down or 30 up and turning 35 keep the pivot and the shoulders' height");
+			}
+			// The body turns between the head and the hands (70% of the way), at most 60 deg off the head, and eases.
+			{
+				const bool both[2] = {true, true};
+				const double ahead_left[2][3] = {{-0.5, 0.8, -0.2}, {-0.4, 0.8, -0.3}}; // the midpoint 45 deg left of ahead
+				AnchorBody bl;
+				double y1 = std::numeric_limits<double>::quiet_NaN();
+				AnchorShoulders(eye, fwd, up, both, ahead_left, 1.0, hw, 0.0, atu, &y1, &bl);
+				const double mx = -0.45 - bl.pivot[0], mz = -0.25 - bl.pivot[2];
+				const double want = atu.hands_share * std::atan2(-mx, -mz);
+				check(bl.hands_used && std::fabs(y1 - want) < 1e-9 && y1 > 0.0, "hands ahead to the left turn the body 70% of the way there");
+				// The head turned 90 left, the hands ahead: the body stays between, within 60 deg of the head.
+				const double fl[3] = {-1.0, 0.0, 0.0};
+				const double ahead[2][3] = {{-0.2, 0.8, -0.45}, {0.2, 0.8, -0.45}};
+				double y2 = std::numeric_limits<double>::quiet_NaN();
+				AnchorShoulders(eye, fl, up, both, ahead, 1.0, hw, 0.0, atu, &y2, &bl);
+				check(y2 > 10.0 * kDeg && y2 < 60.0 * kDeg && 90.0 * kDeg - y2 <= atu.max_body_yaw_deg * kDeg + 1e-9,
+					"the head 90 left with the hands ahead: the body between them, within 60 deg of the head");
+				// Easing: from 0 toward the hands' yaw, a step of 1 / 60 s goes 1 - exp(-8 / 60) of the way.
+				double y3 = 0.0;
+				AnchorShoulders(eye, fwd, up, both, ahead_left, 1.0, hw, 1.0 / 60.0, atu, &y3, &bl);
+				check(std::fabs(y3 - want * (1.0 - std::exp(-atu.yaw_rate_per_s / 60.0))) < 1e-9, "the body's yaw eases toward its target");
+				const double nan3[3] = {std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0};
+				check(!AnchorShoulders(nan3, fwd, up, both, ahead, 1.0, hw, 0.0, atu, &y3, &bl), "a NaN head refused");
+			}
+
+			// The hide plan: what is drawn and where everything else vanishes, on Kevin's 36 bones and the woman's 43.
+			const BoneMap m = DefaultMap();
+			HidePlan hp;
+			bool okp = SelfHidePlan(m, kKevinParents, 36, SelfStyle::Forearms, &hp);
+			const auto kinds = [&hp](HideKind k) {
+				u64 mask = 0;
+				for (int i = 0; i < hp.count; i++)
+					if (hp.kind[i] == k)
+						mask |= u64{1} << hp.bone[i];
+				return mask;
+			};
+			const auto bits = [](std::initializer_list<int> l) {
+				u64 mask = 0;
+				for (int b : l)
+					mask |= u64{1} << b;
+				return mask;
+			};
+			check(okp && hp.count == 24 && kinds(HideKind::Drawn) == bits({14, 15, 32, 33, 34, 35, 18, 19, 28, 29, 30, 31}) &&
+					  kinds(HideKind::AtElbow) == bits({13, 17}) && kinds(HideKind::AtChest) == bits({11, 12, 16, 20, 21, 22, 23, 24, 25, 26}) &&
+					  kinds(HideKind::AtShoulder) == 0,
+				"Forearms on Kevin: the forearms and hands drawn, the upper arms at their elbows, the chest, the clavicles and the head at the chest (24; the jaw 27 on its own joint)");
+			okp = SelfHidePlan(m, kKevinParents, 36, SelfStyle::Arms, &hp);
+			check(okp && hp.count == 24 && kinds(HideKind::Drawn) == bits({13, 14, 15, 32, 33, 34, 35, 17, 18, 19, 28, 29, 30, 31}) &&
+					  kinds(HideKind::AtShoulder) == bits({12, 16}) && kinds(HideKind::AtChest) == bits({11, 20, 21, 22, 23, 24, 25, 26}) &&
+					  kinds(HideKind::AtElbow) == 0,
+				"Arms on Kevin: the whole arms drawn, the clavicles at their shoulders, the chest and the head at the chest (24)");
+			okp = SelfHidePlan(m, kWomanParents, 43, SelfStyle::Forearms, &hp);
+			check(okp && hp.count == kMaxOut && (kinds(HideKind::Drawn) & bits({14, 18, 15, 19})) == bits({14, 18, 15, 19}) &&
+					  kinds(HideKind::AtElbow) == bits({13, 17}) && (kinds(HideKind::AtChest) & bits({12, 16, 20, 21})) == bits({12, 16, 20, 21}),
+				"the woman's 43 bones: the table full, only the head's last bones left to the cave's own collapse");
+			check(!SelfHidePlan(m, kKevinParents, 36, SelfStyle::GameShoulders, &hp) && !SelfHidePlan(m, kKevinParents, 18, SelfStyle::Forearms, &hp),
+				"no plan for GameShoulders or a model the map does not fit");
+
+			// The whole anchored solve, end to end from the headset, on Kevin's bind pose: the model's frame is VR space turned
+			// half round (+X left, +Z forward) in game units at Kevin's scale. Six seated poses at three eye heights.
+			Frame locals[36];
+			for (int bn = 0; bn < 36; bn++)
+				for (int k = 0; k < 3; k++)
+					locals[bn].t[k] = kKevinOffsets[bn][k];
+			const double units = 100.0 / 1.05;
+			const auto to_model = [units](const double v[3], double o[3]) {
+				o[0] = -v[0] * units;
+				o[1] = v[1] * units;
+				o[2] = -v[2] * units;
+			};
+			const auto dir_model = [](const double v[3], double o[3]) {
+				o[0] = -v[0];
+				o[1] = v[1];
+				o[2] = -v[2];
+			};
+			const double poses[6][2][3] = {{{-0.20, -0.32, -0.38}, {0.22, -0.30, -0.42}}, {{-0.18, -0.50, -0.25}, {0.18, -0.50, -0.25}},
+				{{-0.18, -0.20, -0.58}, {0.18, -0.20, -0.58}}, {{-0.22, -0.45, -0.30}, {0.25, 0.10, -0.30}},
+				{{-0.55, -0.28, -0.10}, {0.55, -0.28, -0.10}}, {{-0.20, -0.32, -0.38}, {0.22, -0.30, -0.42}}};
+			const Tuning tu;
+			double worst_err = 0.0, worst_len = 0.0, min_under = 1e9, min_near = 1e9;
+			bool all = true;
+			for (const double h : {1.1, 1.2, 1.3})
+				for (const SelfStyle style : {SelfStyle::Forearms, SelfStyle::Arms})
+					for (int pi = 0; pi < 6; pi++)
+					{
+						const double k = CalibrateScale(h, atu);
+						const double e[3] = {0.0, h, 0.0};
+						double hand_vr[2][3];
+						for (int s2 = 0; s2 < 2; s2++)
+							for (int q = 0; q < 3; q++)
+								hand_vr[s2][q] = poses[pi][s2][q] + e[q];
+						const bool both[2] = {true, true};
+						AnchorBody ab;
+						double yy = std::numeric_limits<double>::quiet_NaN();
+						all &= AnchorShoulders(e, fwd, up, both, hand_vr, k, hw, 0.0, atu, &yy, &ab);
+						AnchorTargets at;
+						for (int a = 0; a < 2; a++)
+						{
+							// Arm 0 (the model's +X) is the character's left: the VR left hand.
+							at.tg.hand[a] = true;
+							to_model(hand_vr[a], at.tg.hand_pos[a]);
+							const double cf[3] = {0.0, 0.0, -1.0}, cu[3] = {0.0, 1.0, 0.0};
+							dir_model(cf, at.tg.hand_fwd[a]);
+							dir_model(cu, at.tg.hand_up[a]);
+							to_model(ab.shoulder[a], at.shoulder[a]);
+						}
+						dir_model(ab.fwd, at.body_fwd);
+						Pose pz;
+						all &= SolveAnchored(m, locals, kKevinParents, 36, at, tu, style, atu.protract_m * units, &pz) && pz.drawn[0] && pz.drawn[1];
+						double em[3];
+						to_model(e, em);
+						for (int a = 0; a < 2; a++)
+						{
+							worst_err = std::max(worst_err, pz.wrist_err[a] / units * 100.0); // cm
+							const ArmMap& am = m.arm[a];
+							worst_len = std::max(worst_len, std::fabs(D3(Ld(pz.elbow[a]), Ld(pz.wrist[a])) - Len(Ld(locals[am.wrist].t))));
+							worst_len = std::max(worst_len, std::fabs(D3(Ld(pz.shoulder[a]), Ld(pz.elbow[a])) - Len(Ld(locals[am.fore].t))));
+							// The drawn bones' highest point and nearest approach to the eye (cm), less a 6 cm sleeve.
+							// The drawn shoulder (Arms): its sleeve's top under the eye. A raised hand may go over the eye, as yours does.
+							if (style == SelfStyle::Arms)
+								min_under = std::min(min_under, (em[1] - pz.shoulder[a][1]) / units * 100.0 - 6.0);
+							double near_e = SegDistV(Ld(em), Ld(pz.elbow[a]), Ld(pz.wrist[a]));
+							if (style == SelfStyle::Arms)
+								near_e = std::min(near_e, SegDistV(Ld(em), Ld(pz.shoulder[a]), Ld(pz.elbow[a])));
+							min_near = std::min(min_near, near_e / units * 100.0 - 6.0);
+						}
+						// Hidden bones have zero axes; only drawn ones are kept.
+						for (int i = 0; i < pz.count; i++)
+						{
+							double ax = 0.0;
+							for (int r = 0; r < 3; r++)
+								for (int c = 0; c < 3; c++)
+									ax += std::fabs(pz.rel[i].r[r][c]);
+							all &= pz.keep[i] ? std::fabs(ax - 0.0) > 1.0 : ax == 0.0;
+						}
+					}
+			check(all && worst_err < 0.5, "seated eye 1.1-1.3 m, six hand poses, both styles: every wrist on its controller (within 0.5 cm)");
+			check(all && worst_len < 1e-6, "the arms never stretch: the forearm and the upper arm keep their lengths");
+			check(all && min_under > 5.0 && min_near > 8.0,
+				"the eye never inside or above the drawn shoulders (their sleeve's top over 5 cm under it), every drawn bone's sleeve over 8 cm from it");
+			// Out of reach: the shoulder slides at most protract, then the arm stops short, straight, still its length.
+			{
+				AnchorTargets at;
+				at.tg.hand[0] = true;
+				const V sh = Ld(kKevinOffsets[12]) + Ld(kKevinOffsets[13]);
+				St(sh, at.shoulder[0]);
+				St(sh + V{0.0, 0.0, 51.0 + 4.0 + tu.wrist_back_cm}, at.tg.hand_pos[0]); // 4 units past the reach
+				Pose po;
+				const double protract = 8.0;
+				bool ok2 = SolveAnchored(m, locals, kKevinParents, 36, at, tu, SelfStyle::Forearms, protract, &po);
+				check(ok2 && po.drawn[0] && !po.drawn[1] && po.wrist_err[0] < 1e-6 &&
+						  std::fabs(D3(Ld(po.shoulder[0]), sh) - (55.0 - 0.999 * (Len(Ld(kKevinOffsets[14])) + Len(Ld(kKevinOffsets[15]))))) < 1e-6,
+					"a hand just out of reach: the shoulder slides exactly the shortfall toward it, the wrist on target");
+				St(sh + V{0.0, 0.0, 51.0 + 20.0 + tu.wrist_back_cm}, at.tg.hand_pos[0]);
+				ok2 = SolveAnchored(m, locals, kKevinParents, 36, at, tu, SelfStyle::Forearms, protract, &po);
+				check(ok2 && po.reach_clamped[0] && std::fabs(D3(Ld(po.shoulder[0]), sh) - protract) < 1e-9 && po.wrist_err[0] > 11.0 &&
+						  std::fabs(D3(Ld(po.elbow[0]), Ld(po.wrist[0])) - Len(Ld(kKevinOffsets[15]))) < 1e-9,
+					"20 units out: the shoulder slides its 8, the arm straight and short, the forearm its length");
+				// The untracked arm: every one of its bones hidden at the chest, nothing of it kept.
+				bool hidden = true;
+				for (int i = 0; i < po.count; i++)
+					if (po.bone[i] == 17 || po.bone[i] == 18 || po.bone[i] == 19 || po.bone[i] == 28)
+						hidden &= !po.keep[i] && Len(Ld(po.rel[i].t)) == 0.0;
+				check(hidden, "an untracked hand: its whole arm hidden at the chest's joint");
+				Targets nobody;
+				AnchorTargets an;
+				an.tg = nobody;
+				check(!SolveAnchored(m, locals, kKevinParents, 36, an, tu, SelfStyle::Forearms, protract, &po) &&
+						  !SolveAnchored(m, locals, kKevinParents, 36, at, tu, SelfStyle::GameShoulders, protract, &po),
+					"no hand tracked, or GameShoulders: nothing for the anchored draw");
+			}
+			// Forearms: an upper arm hidden at its elbow (the forearm's joint), the clavicles at the chest's own joint.
+			{
+				AnchorTargets at;
+				at.tg.hand[0] = at.tg.hand[1] = true;
+				const V sh0 = Ld(kKevinOffsets[12]) + Ld(kKevinOffsets[13]), sh1 = Ld(kKevinOffsets[16]) + Ld(kKevinOffsets[17]);
+				St(sh0, at.shoulder[0]);
+				St(sh1, at.shoulder[1]);
+				St(sh0 + V{8.0, -25.0, 30.0 + tu.wrist_back_cm}, at.tg.hand_pos[0]);
+				St(sh1 + V{-5.0, -10.0, 38.0 + tu.wrist_back_cm}, at.tg.hand_pos[1]);
+				Pose pf;
+				bool ok3 = SolveAnchored(m, locals, kKevinParents, 36, at, tu, SelfStyle::Forearms, 8.0, &pf);
+				int i13 = -1, i14 = -1, i12 = -1;
+				for (int i = 0; i < pf.count; i++)
+				{
+					i13 = pf.bone[i] == 13 ? i : i13;
+					i14 = pf.bone[i] == 14 ? i : i14;
+					i12 = pf.bone[i] == 12 ? i : i12;
+				}
+				check(ok3 && i13 >= 0 && i14 >= 0 && i12 >= 0 && !pf.keep[i13] && pf.keep[i14] && D3(Ld(pf.rel[i13].t), Ld(pf.rel[i14].t)) < 1e-12 &&
+						  Len(Ld(pf.rel[i12].t)) == 0.0 && D3(Ld(pf.rel[i14].t), Ld(pf.elbow[0])) < 1e-12,
+					"Forearms: the upper arm's vertices vanish at the elbow, the clavicle's at the chest's joint");
+				// The block for it: every entry a draw-time frame, the keep mask the drawn bones.
+				check(SlotFlags(1, false, true) == (kFlagSelf | kFlagCollapse), "the anchored slot: self and collapse, never cave U's locals");
+			}
 		}
 
 		// --- The block ---

@@ -1926,6 +1926,12 @@ const char* Pcsx2Config::VROptions::PhysicalMeleeModeNames[] = {
 	"Press",
 	nullptr};
 
+const char* Pcsx2Config::VROptions::VrBodySelfStyleNames[] = {
+	"Forearms",
+	"Arms",
+	"GameShoulders",
+	nullptr};
+
 const char* Pcsx2Config::VROptions::MenuPanelRoomModeNames[] = {
 	"Freeze",
 	"Dim",
@@ -1992,6 +1998,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(VrPresenceKey);
 	SettingsWrapEntry(VrBody);
 	SettingsWrapEntry(VrBodySelf);
+	SettingsWrapEnumEx(VrBodySelfStyle, "VrBodySelfStyle", VrBodySelfStyleNames);
 	SettingsWrapEntry(NearDepthMetres);
 	SettingsWrapEntry(RollParallax);
 	SettingsWrapEntry(FirstPersonAutoStereo);

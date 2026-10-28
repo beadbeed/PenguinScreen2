@@ -149,6 +149,12 @@ namespace VR::VrBody
 		int lcount = 0;
 		int lbone[kMaxLocals] = {};
 		Frame lrel[kMaxLocals];
+		// SolveAnchored only: which entries are drawn bones (the rest have zero axes: their vertices vanish at one point),
+		// and per arm the shoulder the IK started from (after any slide toward the hand) and the elbow (chest frame).
+		bool keep[kMaxOut] = {};
+		bool drawn[2] = {};
+		double shoulder[2][3] = {};
+		double elbow[2][3] = {};
 	};
 
 	// The solve for one character. locals[i]: bone i's local frame (the game's +0x40, the animation's); parents as
@@ -160,6 +166,91 @@ namespace VR::VrBody
 	void WantWeights(const BoneMap& m, const Frame* locals, const Targets& tg, const Tuning& tu, Weights* want);
 	// cur eased toward want at blend_per_s for dt seconds. Pure.
 	void EaseWeights(Weights* cur, const Weights& want, double dt, const Tuning& tu);
+
+	// --- Your own arms anchored to the headset ([VR] VrBodySelfStyle Forearms / Arms; research/2026-10-27-body-anchor.md) ---
+	//
+	// Measured offline (2026-10-27): the recentre puts the eye 155 cm over the character whatever the seated height, but the
+	// game's own skeleton has its head bone 6 cm IN FRONT of that eye and level with it, and the shoulders only 12-14 cm under
+	// it (one of them ahead of the eye in the gun stance): the upper arms' sleeves come up to 5-8 cm under the eye, so you
+	// look out of Kevin's neck. The anchored styles leave the game's skeleton alone and build your shoulders from your head
+	// (a neck model), turn the body between your head and your hands, solve each arm from there to the controller as the
+	// eye sees it and draw only the game's own forearms and hands (Forearms) or the whole arms (Arms). Draw-only: cave V at
+	// the draw, after the hit tests; the game's arms, its held items and its hurt spheres stay its animation's.
+	enum class SelfStyle : int
+	{
+		Forearms = 0,
+		Arms = 1,
+		GameShoulders = 2,
+	};
+	struct AnchorTuning
+	{
+		double pivot_down_m = 0.075, pivot_back_m = 0.08;      // the neck's pivot from the eye, in the head's frame
+		double shoulder_down_m = 0.14, shoulder_back_m = 0.01; // the shoulders' midpoint from the pivot, the body upright
+		double hands_share = 0.7;        // the body's yaw: the head's, this share of the way to the tracked hands' midpoint
+		double max_body_yaw_deg = 60.0;  // never further than this from the head's (the neck turns the rest)
+		double yaw_rate_per_s = 8.0;     // how fast it follows (1 / its time constant)
+		double protract_m = 0.08;        // a shoulder slides this far toward a hand out of reach; past that the arm stops short
+		double seat_m = 0.45, seated_eye_m = 1.20; // the calibration: an eye height over the floor against the nominal seated one
+		double scale_min = 0.85, scale_max = 1.15;
+	};
+	// The body's scale from the eye's height over the floor at the recentre: (eye - seat) / (seated_eye - seat), clamped;
+	// 1 when that height is unknown or no seated eye height (not finite, under 0.9 m or over 1.5 m). Pure.
+	double CalibrateScale(double eye_over_floor_m, const AnchorTuning& tu);
+	struct AnchorBody
+	{
+		double pivot[3] = {};
+		double fwd[3] = {0.0, 0.0, -1.0}; // the body's forward, level
+		double right[3] = {1.0, 0.0, 0.0};
+		double shoulder[2][3] = {};       // [0] the left shoulder joint, [1] the right
+		double yaw = 0.0;                 // the body's yaw (radians, counter-clockwise from -Z)
+		bool hands_used = false;          // the hands turned the body
+	};
+	// VR space (OpenXR: +X right, +Y up, -Z forward; metres). The eye's pose (its position, forward and up), the hands
+	// tracked and their grips, the calibrated scale, the shoulders' half width (the model's own), dt since the last call.
+	// The body's yaw goes hands_share of the way from the head's to the hands' midpoint (seen from the pivot, when that is
+	// 15 cm out and not behind), eased at yaw_rate_per_s, at most max_body_yaw_deg off the head's; yaw_state carries it
+	// between calls (NaN: none yet). Pure.
+	bool AnchorShoulders(const double head_pos[3], const double head_fwd[3], const double head_up[3], const bool hand[2],
+		const double hand_pos[2][3], double scale, double half_width_m, double dt, const AnchorTuning& tu, double* yaw_state,
+		AnchorBody* out);
+	// The bones cave V writes for your own anchored arms, in order: the drawn ones (per arm: the upper arm with Arms, the
+	// forearm, the wrist and every bone under it), then bones given zero axes at one point so their vertices vanish there:
+	// with Forearms each upper arm at its elbow; the clavicles at the chest's joint (Forearms) or at their shoulder (Arms);
+	// the chest itself and the neck's subtree (head, face, hair) at the chest's joint. At most kMaxOut (the head's last
+	// bones are left out first: each then falls on its own joint, every bone round it on one point); every other bone the
+	// cave's collapse takes to its own joint (the waist, the hips, the legs). The cave's reference bone must not be in it
+	// (the host uses the root). Pure.
+	enum class HideKind : u8
+	{
+		Drawn = 0,
+		AtChest = 1,
+		AtElbow = 2,
+		AtShoulder = 3,
+	};
+	struct HidePlan
+	{
+		int count = 0;
+		int bone[kMaxOut] = {};
+		HideKind kind[kMaxOut] = {};
+		int arm[kMaxOut] = {}; // the arm (map arm 0 / 1) a bone belongs to, -1 for none
+	};
+	bool SelfHidePlan(const BoneMap& m, const int* parents, int n, SelfStyle style, HidePlan* out);
+	// One character's anchored targets in one frame of its skeleton (the host uses the root bone's, which has none of the
+	// chest's animated sway; game units at the model's scale): the hands as Targets (the grips as the eye sees them), the
+	// anchored shoulder joints per arm, the body's forward and up, the chest's joint.
+	struct AnchorTargets
+	{
+		Targets tg;
+		double shoulder[2][3] = {};
+		double body_fwd[3] = {0.0, 0.0, 1.0};
+		double body_up[3] = {0.0, 1.0, 0.0};
+		double chest[3] = {}; // the chest's joint in this frame: where the hidden bones' vertices go
+	};
+	// Per tracked arm: the shoulder slid toward the wrist's target by up to protract (game units) when it is out of reach,
+	// then the two-bone IK (the reach clamped: the arm never stretches) and the hand on the controller, as SolveBody; the
+	// entries in SelfHidePlan's order, the untracked arm's bones all hidden at the chest. False with nothing drawn. Pure.
+	bool SolveAnchored(const BoneMap& m, const Frame* locals, const int* parents, int n, const AnchorTargets& at,
+		const Tuning& tu, SelfStyle style, double protract, Pose* out);
 
 	// The host block (body.block, 0x100 bytes) read by caves U and V: "VBD1", a stamp, the attach function and its first word, then two
 	// slots of 0x40 from +0x10: u32 record, u32 table, u8 count, u8 ref (the chest), u8 flags, u8 nloc, u32 keep mask lo and

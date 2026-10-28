@@ -1523,6 +1523,20 @@ struct Pcsx2Config
 		// With VrBody: the local character too, offline only, so in first person you see your own character's arms
 		// (the rest of the body stays hidden) instead of the hand models.
 		bool VrBodySelf = false;
+		// With VrBodySelf: how your own arms are drawn (tools/outbreak-vr/research/2026-10-27-body-anchor.md). Forearms (the
+		// default): the arms are anchored to the headset, not the game's skeleton (shoulders from a neck model under your
+		// eye, the body turned between your head and hands, the IK from there to the controllers, the reach clamped), and
+		// only the game's own forearms and hands are drawn. Arms: the same, the upper arms drawn too. GameShoulders: the
+		// arms reach from Kevin's own animated shoulders (the first version). The anchored styles are draw-only: the game's
+		// own arms, hit tests and held items stay its animation's. Ini only.
+		enum struct VrBodySelfStyleType : int
+		{
+			Forearms = 0,
+			Arms = 1,
+			GameShoulders = 2,
+		};
+		static const char* VrBodySelfStyleNames[];
+		VrBodySelfStyleType VrBodySelfStyle = VrBodySelfStyleType::Forearms;
 		// First-person near depth, in metres: how near true stereo depth reaches before it flattens onto that
 		// plane. 0 = the profile's stereo.firstPerson.nearest, below 0 = off (flatten at the convergence plane
 		// as before), above 0 = this value (clamped to 0.45-1.5 m).

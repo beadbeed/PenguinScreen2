@@ -366,7 +366,10 @@ namespace VR
 			snap.actions_active = true;
 			snap.generation = std::max<std::uint64_t>(snap.generation, 1);
 			if (t.head_pose.valid)
+			{
 				snap.head_pose = t.head_pose;
+				snap.head_floor_y = t.head_pose.position_xyz[1]; // the scripted head's y stands for its height over the floor
+			}
 
 			// The head's forward (-Z) flattened onto the floor, as SpatialControls::HeadAnchor takes it.
 			std::array<float, 3> origin = {0.f, 0.f, 0.f};
@@ -792,6 +795,11 @@ namespace VR
 			m_view_space = XR_NULL_HANDLE;
 			Console.Warning("(VR) VIEW space for the input snapshot failed; head_pose stays invalid.");
 		}
+		// The floor (STAGE), only to tell the head's height over it (VR body's seated calibration); a runtime without one is
+		// fine (head_floor_y stays NaN).
+		rsci.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+		if (XR_FAILED(xrCreateReferenceSpace(session, &rsci, &m_stage_space)))
+			m_stage_space = XR_NULL_HANDLE;
 
 		return true;
 	}
@@ -854,6 +862,12 @@ namespace VR
 			if (session_alive)
 				xrDestroySpace(m_view_space);
 			m_view_space = XR_NULL_HANDLE;
+		}
+		if (m_stage_space != XR_NULL_HANDLE)
+		{
+			if (session_alive)
+				xrDestroySpace(m_stage_space);
+			m_stage_space = XR_NULL_HANDLE;
 		}
 
 		for (XrAction* action : {&m_aim_pose, &m_grip_pose, &m_button_a, &m_button_b, &m_button_x, &m_button_y,
@@ -1042,6 +1056,10 @@ namespace VR
 			{
 				located = false;
 			}
+			XrSpaceLocation floor_location = {XR_TYPE_SPACE_LOCATION};
+			if (m_stage_space != XR_NULL_HANDLE && XR_SUCCEEDED(xrLocateSpace(m_view_space, m_stage_space, time, &floor_location)) &&
+				(floor_location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0)
+				snapshot.head_floor_y = floor_location.pose.position.y;
 		}
 
 		if (!located && !m_locate_warned)
