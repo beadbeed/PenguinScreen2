@@ -120,7 +120,15 @@ namespace VR::HandModel
 		// trigger and the shot feedback are not used. lit draws it brighter (the right hand is in the holster's reach).
 		bool holstered = false;
 		bool lit = false;
+		// [VR] NativeHands: the game itself draws this hand and its weapon (VrBody's posed wrist, the game's own attach), so the
+		// weapon's frame, muzzle and barrel for the laser and the gameplay are the game's: the wrist a fixed
+		// kNativeWristBackCm behind the grip point along the pointing frame's forward, the model as the game attaches it, no
+		// turn onto -Z (the barrel is where the game draws it). Never drawn by MeshRaster in this state.
+		bool native = false;
 	};
+	// The posed wrist behind the controller's grip point (VrBody's Tuning::wrist_back_cm 6, in the character's units; Kevin's
+	// scale 1.05 as the grip's), cm along the pointing frame's +Z.
+	static constexpr float kNativeWristBackCm = 6.0f * 1.05f;
 
 	// A holstered weapon's quad is at least this big, and twice that at most (a long gun's or a melee weapon's up to
 	// kQuadSizeLongM, as in the hand).
@@ -204,7 +212,9 @@ namespace VR::HandModel
 
 	// LaserFrom for the game model the right hand draws with [VR] GameWeaponModels: from gap_m past that model's muzzle
 	// (its weapon-type entry's muzzle, placed as the hand draws it), along -Z. False, with nothing written, when the hand
-	// would draw the placeholder for it (no model, no attach, or no muzzle in its entry): use LaserFrom then.
+	// would draw the placeholder for it (no model, no attach, or no muzzle in its entry): use LaserFrom then. With
+	// gun_hand.native the beam goes along the barrel as the game draws it (the model's -X), from where the game draws the
+	// muzzle, and it needs no model (a native weapon is the game's, not ours).
 	bool ModelLaserFrom(const HandState& gun_hand, float gap_m, float out_origin[3], float out_dir[3]);
 
 	// Where the game model of the weapon a right hand at pos / quat (the grip position and pointing frame, as HandState
@@ -213,8 +223,9 @@ namespace VR::HandModel
 	// both in the XR base space. A model point m (centimetres) is then out_origin + sum_k m[k] * 0.01 * out_axes[k]
 	// ([VR] PhysicalMelee maps this into the game to put the game's own hit test on the VR weapon). False, with nothing
 	// written, for an invalid attach or a pose that is not finite or usable. Pure: any thread.
+	// native: [VR] NativeHands' placement (HandState::native): the game's own, from the posed wrist.
 	bool ModelFrame(const GameAttach& attach, Held held, const float pos[3], const float quat[4], float out_origin[3],
-		float out_axes[3][3]);
+		float out_axes[3][3], bool native = false);
 
 	// Whether this hand image is drawn with the hand model and the game's weapon model ([VR] GameWeaponModels): h.mesh,
 	// and for a weapon in the right hand its model decoded and its attach known. A weapon that falls back to the

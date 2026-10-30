@@ -2000,6 +2000,7 @@ void Pcsx2Config::VROptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapEntry(VrBody);
 	SettingsWrapEntry(VrBodySelf);
 	SettingsWrapEnumEx(VrBodySelfStyle, "VrBodySelfStyle", VrBodySelfStyleNames);
+	SettingsWrapEntry(NativeHands);
 	SettingsWrapEntry(NearDepthMetres);
 	SettingsWrapEntry(RollParallax);
 	SettingsWrapEntry(FirstPersonAutoStereo);

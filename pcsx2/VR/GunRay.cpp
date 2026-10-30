@@ -11,6 +11,7 @@
 #include "VR/PhysicalMelee.h"
 #include "VR/SplitState.h"
 #include "VR/VRProfileDB.h"
+#include "VR/VrBody.h"
 
 #include "Config.h"
 #include "Memory.h"
@@ -578,6 +579,10 @@ namespace VR::GunRay
 		bool s_load_pending = false;         // a state was loaded: zero any block of ours it holds (late review m2)
 		bool s_refused_logged = false, s_obj_refused_logged = false;
 		float s_obj_muzzle[3] = {};
+		// The last shot ray the host built (game coordinates, after any NativeHands shift): the muzzle and the direction.
+		std::mutex s_last_ray_mutex;
+		float s_last_ray_o[3] = {}, s_last_ray_d[3] = {};
+		u64 s_last_ray_ms = 0;
 		std::string s_obj_verdict;
 
 		bool DefaultRead(u32 address, u8 width, u32* value)
@@ -889,6 +894,21 @@ namespace VR::GunRay
 		s_load_pending = true;
 	}
 
+
+	bool LastShotRay(float origin_g[3], float dir_g[3], u64 max_age_ms)
+	{
+		std::lock_guard<std::mutex> lock(s_last_ray_mutex);
+		const u64 now = CameraDriver::SteadyNowMs();
+		if (s_last_ray_ms == 0 || now < s_last_ray_ms || now - s_last_ray_ms > max_age_ms)
+			return false;
+		for (int k = 0; k < 3; k++)
+		{
+			origin_g[k] = s_last_ray_o[k];
+			dir_g[k] = s_last_ray_d[k];
+		}
+		return true;
+	}
+
 	bool GameFlashOnVrGun()
 	{
 		if (!s_obj_live.load(std::memory_order_relaxed))
@@ -996,7 +1016,9 @@ namespace VR::GunRay
 			for (int k = 0; k < 4; k++)
 				hs.quat[k] = quat[k];
 			hs.mesh = EmuConfig.VR.GameWeaponModels;
-			if (hs.mesh)
+			// [VR] NativeHands: the muzzle and the barrel are the game's own as it draws them (the posed wrist and its attach).
+			hs.native = EmuConfig.VR.NativeHands && VrBody::NativeHandsLive(1);
+			if (hs.mesh || hs.native)
 			{
 				const GameFeedback::WeaponView wv = GameFeedback::GetWeapon();
 				if (wv.valid && wv.item_id == item_id && wv.attach.valid)
@@ -1034,6 +1056,66 @@ namespace VR::GunRay
 					mp->gun_block);
 			}
 			bool mapped = (coop || blk_free) && ray && CameraDriver::GetMapping(&map) && RayToGame(from, dir, MapPoint, &map, og, dg);
+			// [VR] NativeHands: the game draws the weapon in the hand VrBody posed, so the shot reads THAT pose (the solved, clamped wrist
+			// plus the game's own attach entry, where the eye sees it): it leaves the barrel you see, along the barrel you see, and the
+			// hit is where the weapon points. Without it the shot started from the controller's own placement mapped without the eye's
+			// shift (eye_forward, 10 cm along the view: up to 7 cm sideways for a shot 45 degrees off the view) and a hand the solve
+			// clamped (a gun at the face) was drawn up to a few degrees off the ray. PCSX2_VR_NATIVE_NOSHIFT=1 keeps the old start.
+			if (mapped && !coop && hs.native)
+			{
+				static const bool s_noshift = [] {
+					const char* e = std::getenv("PCSX2_VR_NATIVE_NOSHIFT");
+					return e && e[0] == '1';
+				}();
+				VrBody::NativeWeapon nw;
+				if (!s_noshift && VrBody::NativeWeaponNow(&nw))
+				{
+					if (Log())
+					{
+						// The controller's own placement (mapped as before: no eye shift) against the resolved pose: what the old start missed.
+						static u64 s_cmp_ms = 0;
+						const u64 now_ms = CameraDriver::SteadyNowMs();
+						float sh[3] = {};
+						const bool have_sh = VrBody::NativeSeenShift(sh);
+						if (now_ms - s_cmp_ms >= 500 && have_sh)
+						{
+							s_cmp_ms = now_ms;
+							float dd = 0.0f, dot = 0.0f;
+							for (int k = 0; k < 3; k++)
+							{
+								const float e = (og[k] + sh[k]) - static_cast<float>(nw.muzzle[k]);
+								dd += e * e;
+								dot += dg[k] * static_cast<float>(nw.barrel[k]);
+							}
+							float d0 = 0.0f;
+							for (int k = 0; k < 3; k++)
+							{
+								const float e = og[k] - static_cast<float>(nw.muzzle[k]);
+								d0 += e * e;
+							}
+							Console.WriteLn("(VR) Gun ray: the resolved weapon pose against the controller's own placement: muzzle %.2f cm "
+											"(%.2f cm without the eye's shift), barrel %.2f deg.",
+								static_cast<double>(std::sqrt(dd)), static_cast<double>(std::sqrt(d0)),
+								static_cast<double>(std::acos(std::clamp(dot, -1.0f, 1.0f)) * 57.29578f));
+						}
+					}
+					for (int k = 0; k < 3; k++)
+					{
+						og[k] = static_cast<float>(nw.muzzle[k]);
+						dg[k] = static_cast<float>(nw.barrel[k]);
+					}
+				}
+			}
+			if (mapped)
+			{
+				std::lock_guard<std::mutex> lock(s_last_ray_mutex);
+				for (int k = 0; k < 3; k++)
+				{
+					s_last_ray_o[k] = og[k];
+					s_last_ray_d[k] = dg[k];
+				}
+				s_last_ray_ms = CameraDriver::SteadyNowMs();
+			}
 			// Late review m6: a VR muzzle beyond a wall. When the line from the character's chest (bone 11, where the
 			// game's own sight starts) to the VR muzzle crosses a face that stops the game's bullets (attribute 0x2: room
 			// walls, shut door walls and the moving faces, not furniture), the shot (cave I) starts on the chest's side of

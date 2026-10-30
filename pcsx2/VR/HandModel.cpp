@@ -1295,17 +1295,18 @@ namespace VR::HandModel
 			V3 T;
 		};
 
-		Placement PlaceModel(const GameAttach& at, Held held)
+		Placement PlaceModel(const GameAttach& at, Held held, bool native = false)
 		{
 			const M3 A = MulM3(RotZ(at.rot_rad[2]), MulM3(RotY(at.rot_rad[1]), RotX(at.rot_rad[0])));
 			const HandMesh::Pose pose = IsGun(held) ? HandMesh::Pose::Pistol : HandMesh::Pose::Grip;
 			const HandMesh::Anchors an = HandMesh::GetAnchors(kRight, pose);
-			const V3 wrist_cm = Mul(Load(an.wrist), 100.0f);
+			// NativeHands: the game's posed wrist, 6 cm (Kevin's 6.3) behind the grip point along the pointing frame's forward.
+			const V3 wrist_cm = native ? V3{0.0f, 0.0f, kNativeWristBackCm} : Mul(Load(an.wrist), 100.0f);
 			Placement p;
 			for (int k = 0; k < 3; k++)
 				p.L.c[k] = BoneToPointing(A.c[k]);
 			p.T = Add(BoneToPointing(Mul(Load(at.grip_cm), kGameHandScale)), wrist_cm);
-			if (IsGun(held))
+			if (IsGun(held) && !native)
 			{
 				// The barrel (the model's -X) onto -Z, turned about the grip position.
 				const V3 b = Normalize(Mul(p.L.c[0], -1.0f));
@@ -1329,7 +1330,7 @@ namespace VR::HandModel
 		// which HolsterPose hangs down) until its top end is within kHolsterTopCm of the hold point.
 		Placement PlaceFor(const HandState& h, const GameModels::Model& m)
 		{
-			Placement p = PlaceModel(h.attach, h.held);
+			Placement p = PlaceModel(h.attach, h.held, h.native);
 			if (h.holstered && h.held == Held::Melee)
 			{
 				float top = 1.0e9f;
@@ -1424,7 +1425,7 @@ namespace VR::HandModel
 		{
 			if (!h.attach.valid || !h.attach.has_muzzle || !IsGun(h.held))
 				return false;
-			const Placement p = PlaceModel(h.attach, h.held);
+			const Placement p = PlaceModel(h.attach, h.held, h.native);
 			*out = Add(p.L.Apply(Load(h.attach.muzzle_cm)), p.T);
 			return true;
 		}
@@ -1780,7 +1781,7 @@ namespace VR::HandModel
 	bool ModelLaserFrom(const HandState& gun_hand, float gap_m, float out_origin[3], float out_dir[3])
 	{
 		if (!gun_hand.valid || !gun_hand.gun || !Finite(gun_hand.pos, 3) || !Finite(gun_hand.quat, 4) ||
-			!std::isfinite(gap_m) || !DrawsMesh(kRight, gun_hand))
+			!std::isfinite(gap_m) || (!gun_hand.native && !DrawsMesh(kRight, gun_hand)))
 		{
 			return false;
 		}
@@ -1793,7 +1794,14 @@ namespace VR::HandModel
 			return false;
 		float q[4];
 		NormalizedQuat(gun_hand, q);
-		const V3 dir = Rotate(q, V3{0.0f, 0.0f, -1.0f});
+		V3 dir = Rotate(q, V3{0.0f, 0.0f, -1.0f});
+		if (gun_hand.native)
+		{
+			// The barrel as the game draws it: the model's -X through the game's attach (-Z for a pistol, a few degrees off for
+			// a long gun the game holds shouldered).
+			const Placement p = PlaceModel(gun_hand.attach, gun_hand.held, true);
+			dir = Normalize(Rotate(q, Mul(p.L.c[0], -1.0f)));
+		}
 		const V3 from = Add(Load(gun_hand.pos), Rotate(q, Mul(muzzle, 0.01f)));
 		Store(Add(from, Mul(dir, gap_m)), out_origin);
 		Store(dir, out_dir);
@@ -1801,7 +1809,7 @@ namespace VR::HandModel
 	}
 
 	bool ModelFrame(const GameAttach& attach, Held held, const float pos[3], const float quat[4], float out_origin[3],
-		float out_axes[3][3])
+		float out_axes[3][3], bool native)
 	{
 		if (!attach.valid || !Finite(pos, 3) || !Finite(quat, 4) || !Finite(attach.grip_cm, 3) || !Finite(attach.rot_rad, 3))
 			return false;
@@ -1813,7 +1821,7 @@ namespace VR::HandModel
 			return false;
 		float q[4];
 		NormalizedQuat(h, q);
-		const Placement p = PlaceModel(attach, held);
+		const Placement p = PlaceModel(attach, held, native);
 		Store(Add(Load(pos), Rotate(q, Mul(p.T, 0.01f))), out_origin);
 		for (int k = 0; k < 3; k++)
 			Store(Normalize(Rotate(q, p.L.c[k])), out_axes[k]);

@@ -261,6 +261,10 @@ namespace VR::VrBody
 	static constexpr u32 kSlotOffset = 0x10, kSlotBytes = 0x40;
 	static constexpr int kSlots = 2; // 0 the partner, 1 the local character (VrBodySelf)
 	static constexpr u8 kFlagAttach = 1, kFlagCollapse = 2, kFlagSelf = 4, kFlagLocals = 8;
+	// Slot flag 0x10 (NativeHands; cave W at 0xFD378 reads it, slot 1 only): the game draws this record's held weapon in the
+	// hand cave V posed. Cave W is the profile's site at 0x560C74 (the held-object pass FUN_00560B60): for the focus
+	// character it takes the old skip unless the block's slot 1 names the record and has this flag.
+	static constexpr u8 kFlagWeapon = 0x10;
 	// Flag kLocals (the normal way): the slot's first nloc entries are LOCAL matrices that cave U writes in the tick's
 	// world build (FUN_00346810, before the world matrices, the held items' attach and the hit tests; the animation
 	// writes every local again after it, so the host always reads the animation's own), and it stamps the slot's word
@@ -296,7 +300,65 @@ namespace VR::VrBody
 	bool MayClear(u32 crc_now, u32 crc_written, u32 block_word0);
 	// The slot's flags: si 0 the partner, 1 the local character (kSelf | kCollapse); with locals kFlagLocals, else at the
 	// draw (the partner's held items re-attached while an arm is posed). Pure.
-	u8 SlotFlags(int si, bool locals, bool arms);
+	// native_weapon (NativeHands, the local character's draw-only slot): the held items go back on the posed hands at the draw
+	// (cave V's attach, flag 1) and cave W lets the focus character's held object be drawn (kFlagWeapon).
+	u8 SlotFlags(int si, bool locals, bool arms, bool native_weapon = false);
+
+	// --- NativeHands: one set of hands (research/2026-10-30-native-hands.md) ---
+	//
+	// The host says per VR hand, each vsync, whether the game is drawing that hand (your own anchored arms: the slot was
+	// written, cave V and the focus character's draw site are in; the weapon too through cave W). The compositor then asks
+	// NativeHandsUpdate every present with its own gate (first person armed, no menu up): a hand is decided "native" only
+	// after the raw state has held for kNativeHoldMs, and goes back to the overlay hand THE SAME FRAME the raw state drops,
+	// so there is never a frame with no hand and a pose that flaps never flickers between the two. Pure step below.
+	static constexpr u64 kNativeHoldMs = 200;
+	struct NativeHold
+	{
+		bool on[2] = {false, false};
+		u64 since_ms[2] = {0, 0}; // when the raw state last turned live (0: not live)
+	};
+	// One hand's step. Returns whether the hand is native now. Pure.
+	bool NativeHoldStep(NativeHold* h, int hand, bool raw, u64 now_ms, u64 hold_ms);
+	// CPU thread (Poll): the raw state per VR hand (0 left, 1 right) as of steady time now_ms; weapon: the right hand's
+	// weapon is drawn by the game too (cave W in, the attach function known).
+	void NativeHandsPublish(const bool hand[2], bool weapon, u64 now_ms);
+	// Compositor (any thread, each present): the raw state if it was published within kNativeFreshMs and gate_ok, held;
+	// returns whether `hand` is native now and logs the changes ("(VR) NativeHands: ..."). `fresh_ms` is a test hook.
+	static constexpr u64 kNativeFreshMs = 150;
+	bool NativeHandsUpdate(u64 now_ms, bool gate_ok, bool out_hand[2], bool* out_weapon);
+	// The last decision for a hand (any thread; no update). PhysicalMelee asks it to leave its hit-stop off.
+	bool NativeHandsLive(int hand);
+	// The shift from GameFromVr to where the eye sees a VR point in the game: eye_forward along the view's level forward (game
+	// units), published by Poll with the anchored solve and read by the gun ray so the shot starts at the drawn muzzle. False
+	// when it is not fresh (over kNativeFreshMs old).
+	bool NativeSeenShift(float out_g[3]);
+	// The weapon as the game draws it in the posed hand (the resolved grip pose: the solved, clamped wrist plus the game's own
+	// attach entry), in the game's world (the eye's shift included: where it is drawn) and, for the laser, in VR space.
+	// Published by Poll, one vsync old at most; the gun ray, the melee shape and the laser read it, so the shot leaves the
+	// barrel you see and the hit is where the weapon is drawn. False unless the right hand is native and the pose fresh.
+	struct NativeWeapon
+	{
+		double origin[3] = {};  // the model's origin
+		double axes[3][3] = {}; // the model's axes (unit rows)
+		double muzzle[3] = {};  // the type's muzzle point
+		double barrel[3] = {};  // the barrel: the model's -X
+		bool vr_valid = false;
+		double vr_muzzle[3] = {}; // the same muzzle and barrel in VR space (metres), for the laser
+		double vr_barrel[3] = {};
+	};
+	bool NativeWeaponNow(NativeWeapon* out);
+	// The attach maths for the self-tests and the note: where the game puts a held weapon's model origin, its barrel and
+	// its muzzle, for a wrist frame and a weapon-type entry. wrist: the hand bone's frame (axes the game's rows: row 0 the
+	// bone's +X, fingers along -X for the -X wrist, row 2 +Z the thumb), grip in the bone's frame times scale, euler the
+	// entry's turn (radians, X then Y then Z as the game's row vectors), muzzle in the model's space. Pure (game units).
+	struct AttachedWeapon
+	{
+		double origin[3] = {};  // the model's origin in the world frame wrist is given in
+		double axes[3][3] = {}; // the model's X, Y, Z axes there (rows)
+		double muzzle[3] = {};  // the muzzle point
+		double barrel[3] = {};  // the barrel direction: the model's -X
+	};
+	AttachedWeapon AttachWeapon(const Frame& wrist, const double grip[3], double scale, const double euler[3], const double muzzle[3]);
 
 	// CPU thread, every vsync after VR presence's Poll: writes or clears the host block. Reads the bones; writes only the
 	// block, its matrix tables (both in free RAM) and nothing else.

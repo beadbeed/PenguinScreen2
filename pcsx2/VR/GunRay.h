@@ -111,6 +111,9 @@ namespace VR::GunRay
 	// True while cave O's block is armed and the game's own muzzle flash for the latest shot came from the VR gun
 	// (FlashEvidence): the hands then draw no flash of their own.
 	bool GameFlashOnVrGun();
+	// The last shot ray the host built, in game coordinates (the muzzle and the direction), if it is at most max_age_ms old.
+	// For the NativeHands logs and tests. Any thread.
+	bool LastShotRay(float origin_g[3], float dir_g[3], u64 max_age_ms);
 
 	// RayToGame and ShotFrame on scripted maps and rays. Returns the failed checks.
 	std::vector<std::string> SelfTest();

@@ -434,6 +434,10 @@ SLPM-65428:
       - { address: 0x0FC128, on: 0x27BD0030, off: 0x00000000, when: [{ address: 0x1B7B50, equals: 0x27BDFF00 }], offlineOnly: true, whenSetting: SpatialAudio }   # addiu sp,sp,48
       - { address: 0x3452E0, on: 0x00000000, off: 0x1060000B, when: [{ address: 0x345210, equals: 0x27BDFFE0 }] }   # body pass: the focus character returns before its draw
       - { address: 0x3450F8, on: 0x00000000, off: 0x10600014, when: [{ address: 0x345020, equals: 0x27BDFFE0 }] }   # first pass: the focus character returns before its draw
+      # NativeHands (research/2026-10-30-native-hands.md): the focus character's held object is drawn again, in the hand cave V posed, while the host block's slot 1 names this record
+      # with flag 0x10. Its `off` is the skip's word (the entry below patches the game's word first; this one then takes that over while its cave is in, and gives it back when the cave goes), and it comes BEFORE the skip so a disarm puts this one back first, then the skip's own restore puts the game's word back. A jump to cave W (0xFD378), whose
+      # words are part of cave V's range: not the focus -> the old flow; the focus and no flag -> the old skip; the focus and the flag -> the draw (0x560C98).
+      - { address: 0x560C74, on: 0x0803F4DE, off: 0x10620030, when: [{ address: 0x540004, equals: 3 }, { address: 0xFD000, equals: 0x27BDFFC0 }, { address: 0xFD3C0, equals: 0x3C0D0000 }], offlineOnly: true, whenSetting: NativeHands }   # held objects: j cave W over beq v1,v0,0x560C98
       - { address: 0x560C74, on: 0x10620030, off: 0x10620008, when: [{ address: 0x540004, equals: 3 }] }   # held objects: owner == focus -> next object
       # Co-op (private server only, coopOnly): the game sends your heading to partners in a type-2 heartbeat
       # (FUN_00633530 -> FUN_0064C620(p, 2): position, status, heading) only every 30 game frames (about once a
@@ -1553,6 +1557,26 @@ SLPM-65428:
       - { address: 0x0FD368, on: 0x8FBF0000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
       - { address: 0x0FD36C, on: 0x03E00008, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
       - { address: 0x0FD370, on: 0x27BD0020, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }
+      - { address: 0x0FD374, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # unused word (cave V's tail)
+      - { address: 0x0FD378, on: 0x14620010, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # W: bne v1,v0,normal (record +3 vs the focus byte; not the focus: the old flow)
+      - { address: 0x0FD37C, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # nop
+      - { address: 0x0FD380, on: 0x3C080010, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # lui t0,0x10
+      - { address: 0x0FD384, on: 0x8D09F300, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # lw t1,-0xD00(t0) (block magic)
+      - { address: 0x0FD388, on: 0x3C0A3144, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # lui t2,0x3144
+      - { address: 0x0FD38C, on: 0x354A4256, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # ori t2,t2,0x4256 ("VBD1")
+      - { address: 0x0FD390, on: 0x152A0008, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # bne t1,t2,skip
+      - { address: 0x0FD394, on: 0x8D0BF350, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # lw t3,-0xCB0(t0) (slot 1 record)
+      - { address: 0x0FD398, on: 0x15730006, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # bne t3,s3,skip (not this character)
+      - { address: 0x0FD39C, on: 0x910CF35A, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # lbu t4,-0xCA6(t0) (slot 1 flags)
+      - { address: 0x0FD3A0, on: 0x318C0010, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # andi t4,t4,0x10 (weapon native)
+      - { address: 0x0FD3A4, on: 0x11800003, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # beqz t4,skip
+      - { address: 0x0FD3A8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # nop
+      - { address: 0x0FD3AC, on: 0x08158326, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # j 0x560C98 (draw the held object)
+      - { address: 0x0FD3B0, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # nop
+      - { address: 0x0FD3B4, on: 0x0815834E, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # skip: j 0x560D38 (the next object, as before)
+      - { address: 0x0FD3B8, on: 0x00000000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # nop
+      - { address: 0x0FD3BC, on: 0x0815831F, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # normal: j 0x560C7C (the not-focus flow: the cull test)
+      - { address: 0x0FD3C0, on: 0x3C0D0000, off: 0x00000000, when: [{ address: 0x345210, equals: 0x27BDFFE0 }], whenSetting: VrBody }   # lui t0,0 (a harmless non-zero word: the cave's last)
     # The code caves the melee entries above write (nightly review M2, b2, d2). Each goes in all or nothing: its whole
     # range must read zero (or exactly these words) and holds exactly `words` silence entries; the body is written and
     # read back before any site that jumps into it (an entry whose `when` reads a word in the range) is patched. Sites
@@ -1566,7 +1590,7 @@ SLPM-65428:
       - { from: 0xFA000, to: 0xFA118, words: 70, counter: 0x48BF93 }    # P (MeleePower: the strike's damage and reaction class)
       - { from: 0xFEC00, to: 0xFEC94, words: 37, counter: 0x48BF93 }   # HandPickup (the Circle search at the hand)
       - { from: 0xFC000, to: 0xFC12C, words: 75, counter: 0x48BF93 }    # spatial audio (SpatialAudio)
-      - { from: 0xFD000, to: 0xFD374, words: 221, counter: 0x48BF93 }    # V (VrBody)
+      - { from: 0xFD000, to: 0xFD3C4, words: 241, counter: 0x48BF93 }    # V, U (VrBody) and W (NativeHands: the focus's held object drawn)
     lookAt:
       eye: 0x306338
       target: 0x306344
@@ -1874,7 +1898,7 @@ SLPM-65428:
   # its right, where the game puts the weapon), the eyes in the head bone's frame, and cave V's host block, matrix
   # tables (two of 0x600 from 0xFD400), the update site and the draw site (camera.silence, whenSetting VrBody). Free RAM: 0xFD000-0xFDFFF and
   # 0xFF300-0xFF3FF read zero in all 22 RAM dumps of File #1 we have.
-  body: { block: 0xFF300, tables: 0xFD400, hook: 0x345314, hookOn: 0x0C03F400, chest: 11, neck: 20, head: 21, arms: [[12, 13, 14, 15], [16, 17, 18, 19]], eye: [0, 7, 9] }
+  body: { block: 0xFF300, tables: 0xFD400, hook: 0x345314, hookOn: 0x0C03F400, selfSite: 0x3452E8, selfSiteOn: 0x0803F48A, weaponSite: 0x560C74, weaponSiteOn: 0x0803F4DE, chest: 11, neck: 20, head: 21, arms: [[12, 13, 14, 15], [16, 17, 18, 19]], eye: [0, 7, 9] }
 
   controls:
     - device: Gamepad
