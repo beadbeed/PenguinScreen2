@@ -859,6 +859,9 @@ namespace VR::ProfileDB
 		u32 tables = 0;   // the matrix tables (two of kTableBytes; the same)
 		u32 hook = 0;     // the draw site cave V is called from
 		u32 hook_on = 0;  // the word there while cave V is in
+		// NativeHands (optional; 0 = not available in this profile): the focus character's skip site (the word there while the self draw
+		// is in) and the held-object draw site (the word there while cave W lets the focus character's weapon draw).
+		u32 self_site = 0, self_site_on = 0, weapon_site = 0, weapon_site_on = 0;
 		u32 bones = 0x34;
 		u32 bone_table = 0x820;
 		u32 bone_count = 0x816;

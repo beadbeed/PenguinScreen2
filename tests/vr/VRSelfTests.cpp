@@ -1525,7 +1525,8 @@ int main(int argc, char* argv[])
 				sil.when_setting == "HandPickup" ||
 				sil.when_setting == "ScriptedShotsFirstPerson" ||
 				sil.when_setting == "SpatialAudio" || sil.when_setting == "FadeDim" ||
-				sil.when_setting == "VrBody" || sil.when_setting == "VrBodySelf" || sil.when_setting == "VrBodyLocals")
+				sil.when_setting == "VrBody" || sil.when_setting == "VrBodySelf" || sil.when_setting == "VrBodyLocals" ||
+				sil.when_setting == "NativeHands")
 			{
 				if (sil.keep_through_disarm)
 					return false;
@@ -1921,13 +1922,21 @@ int main(int argc, char* argv[])
 		if (bp.block != 0xFF300 || bp.tables != 0xFD400 || bp.hook != 0x345314 || bp.hook_on != 0x0C03F400 || bp.chest != 11 ||
 			bp.neck != 20 || bp.head != 21 || bp.arms[0][3] != 15 || bp.arms[1][0] != 16)
 			return false;
-		// The entries: three sites, the cave's 221 words in [0xFD000, 0xFD374), all VrBody but the self site.
+		// The entries: three sites, the cave's 241 words in [0xFD000, 0xFD3C4) (V and U to 0xFD374, W after), all VrBody but the self site;
+		// and NativeHands' site at 0x560C74 (whenSetting NativeHands, offline only, off = the skip's word).
 		MiniEE ee;
 		int words = 0;
-		bool draw_site = false, update_site = false, self_site = false;
+		bool draw_site = false, update_site = false, self_site = false, weapon_site = false;
 		u32 update_on = 0;
 		for (const VR::ProfileDB::CameraSilence& sil : p->camera->silence)
 		{
+			if (sil.when_setting == "NativeHands")
+			{
+				weapon_site = sil.ee_address == 0x560C74u && sil.value_on == 0x0803F4DEu && sil.value_off == 0x10620030u && sil.offline_only &&
+				              sil.when.size() == 3 && p->body->weapon_site == 0x560C74u && p->body->weapon_site_on == 0x0803F4DEu &&
+				              p->body->self_site == 0x3452E8u && p->body->self_site_on == 0x0803F48Au;
+				continue;
+			}
 			if (sil.when_setting != "VrBody" && sil.when_setting != "VrBodySelf" && sil.when_setting != "VrBodyLocals")
 				continue;
 			// Cave U's site alone is offlineOnly (and VrBodyLocals, never co-op live: night review C1).
@@ -1944,7 +1953,7 @@ int main(int argc, char* argv[])
 			}
 			else if (sil.ee_address == 0x3452E8u)
 				self_site = sil.value_off == 0x10000024u && sil.when.size() == 3 && sil.when_setting == "VrBodySelf";
-			else if (sil.ee_address >= 0xFD000u && sil.ee_address < 0xFD374u && sil.value_off == 0 && sil.when_setting == "VrBody")
+			else if (sil.ee_address >= 0xFD000u && sil.ee_address < 0xFD3C4u && sil.value_off == 0 && sil.when_setting == "VrBody")
 			{
 				ee.Store32(sil.ee_address, sil.value_on);
 				words++;
@@ -1953,8 +1962,17 @@ int main(int argc, char* argv[])
 				return false;
 		}
 		const u32 kU = 0x0FD290u, kSelf = 0x0FD228u;
-		if (!draw_site || !update_site || !self_site || words != 221 || update_on != (0x0C000000u | (kU >> 2)))
+		if (!draw_site || !update_site || !self_site || !weapon_site || words != 241 || update_on != (0x0C000000u | (kU >> 2)))
 			return false;
+		if (!VR::ProfileDB::IsSilenceSettingName("NativeHands") || p->camera->caves.empty())
+			return false;
+		{
+			bool cave_range = false;
+			for (const VR::ProfileDB::CameraCave& c : p->camera->caves)
+				cave_range |= c.from == 0xFD000u && c.to == 0xFD3C4u && c.words == 241u && c.usable;
+			if (!cave_range)
+				return false;
+		}
 		// A record, its model (36 bones, structs 0x190 apart), each bone's world and local matrices filled with numbers.
 		constexpr u32 kRec = 0x477EB0, kModel = 0x480000, kBones = 0x500000, kDraw = 0x341EB0, kAttach = 0x6313A0;
 		ee.Store32(kRec + 0x34, kModel);
@@ -2151,6 +2169,68 @@ int main(int argc, char* argv[])
 		s_calls.clear();
 		ee.r[31] = 0x00ABC0;
 		ok &= ee.Run(kSelf, 0xFD000, 0xFD374) == 0x34537C && s_calls.empty();
+		// Cave W (NativeHands, the held-object pass's site 0x560C74: v1 the owner's record +3, v0 the focus byte, s3 the record): the
+		// focus character's held object is drawn only while slot 1 names this record with flag 0x10; everyone else keeps the old flow.
+		{
+			constexpr u32 kW = 0xFD378u, kDrawHeld = 0x560C98u, kNext = 0x560D38u, kCull = 0x560C7Cu;
+			header(true);
+			VR::VrBody::BlockSlot ws;
+			ws.record = kRec;
+			ws.flags = static_cast<u8>(VR::VrBody::kFlagSelf | VR::VrBody::kFlagCollapse | VR::VrBody::kFlagAttach | VR::VrBody::kFlagWeapon);
+			write_slot(0, VR::VrBody::BlockSlot{});
+			write_slot(1, ws);
+			const auto run_w = [&](u32 v1, u32 v0, u32 s3) {
+				ee.r[3] = v1;
+				ee.r[2] = v0;
+				ee.r[19] = s3;
+				ee.r[29] = 0x01F00000;
+				ee.r[16] = 0x5555;
+				const u32 out = ee.Run(kW, 0xFD000, 0xFD3C4);
+				return out;
+			};
+			ok &= run_w(3, 3, kRec) == kDrawHeld;        // the focus, flag on: drawn
+			ok &= run_w(4, 3, kRec) == kCull;            // not the focus: the game's own flow (the cull test)
+			ok &= run_w(4, 3, 0x123450u) == kCull;       // whatever the record
+			ok &= run_w(3, 3, kRec + 0x10E0) == kNext;   // the focus, but slot 1 names another record: skipped
+			ws.flags = static_cast<u8>(VR::VrBody::kFlagSelf | VR::VrBody::kFlagCollapse | VR::VrBody::kFlagAttach);
+			write_slot(1, ws);
+			ok &= run_w(3, 3, kRec) == kNext;            // no flag 0x10 (NativeHands off, or the pose dropped out): skipped as before
+			ws.flags = static_cast<u8>(VR::VrBody::kFlagWeapon);
+			write_slot(0, ws);                           // the flag in slot 0 (the partner) means nothing
+			write_slot(1, VR::VrBody::BlockSlot{});
+			ok &= run_w(3, 3, kRec) == kNext;
+			ws.flags = static_cast<u8>(VR::VrBody::kFlagSelf | VR::VrBody::kFlagCollapse | VR::VrBody::kFlagAttach | VR::VrBody::kFlagWeapon);
+			write_slot(0, VR::VrBody::BlockSlot{});
+			write_slot(1, ws);
+			header(false);
+			ok &= run_w(3, 3, kRec) == kNext;            // no magic: skipped as before
+			ok &= run_w(4, 3, kRec) == kCull;
+			ok &= ee.r[29] == 0x01F00000 && ee.r[16] == 0x5555; // the cave left sp and s0 alone
+			// The anchored self slot: attach on both hands the host named, and the draw: cave V in SELF with the weapon flags.
+			header(true);
+			VR::VrBody::BlockSlot as;
+			as.record = kRec;
+			as.table = 0xFD400 + VR::ProfileDB::kBodyTableBytes;
+			as.count = 1;
+			as.ref = 0;
+			as.bones[0] = 19;
+			as.flags = VR::VrBody::SlotFlags(1, false, true, true);
+			as.keep[0] = 1u << 19;
+			as.attach_offset[0] = 0xC7C;
+			as.attach_bone[0] = 19;
+			as.attach_offset[1] = 0;
+			write_slot(0, VR::VrBody::BlockSlot{});
+			write_slot(1, as);
+			table(0xFD400 + VR::ProfileDB::kBodyTableBytes, 0, 900.0f);
+			s_calls.clear();
+			ee.r[16] = kRec;
+			ee.r[31] = 0x00ABC0;
+			ok &= ee.Run(kSelf, 0xFD000, 0xFD374) == 0x34537C;
+			// V's world write of bone 19, the attach on the posed wrist (the item slot byte 5, bone 19), then the draw; the left item's
+			// slot (offset 0) is not attached.
+			ok &= s_calls.size() == 3 && s_calls[0].pc == 0x190C50 && s_calls[0].a0 == bone(19) && s_calls[1].pc == kAttach &&
+			      s_calls[1].a1 == 5 && s_calls[1].a2 == 19 && s_calls[2].pc == kDraw;
+		}
 		// No magic: V only draws, U only calls the game.
 		header(false);
 		s_calls.clear();

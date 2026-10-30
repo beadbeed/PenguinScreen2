@@ -11,6 +11,7 @@
 #include "VR/SplitState.h"
 #include "VR/VRInput.h"
 #include "VR/VRProfileDB.h"
+#include "VR/VrBody.h"
 
 #include "Config.h"
 #include "Memory.h"
@@ -2206,8 +2207,21 @@ namespace VR::PhysicalMelee
 						if (two_hand)
 							XRInput::QueuePulse(VRInputSnapshot::LEFT, 0.8f * po.haptic_amp * hs, po.haptic_s);
 					}
+					// Not while the game draws the right hand (NativeHands): the held picture would part from the native hand.
 					if (hands.right && po.hit_stop_frames > 0)
-						StartHitStop(hands.right_pos, hands.right_quat, static_cast<float>(po.hit_stop_frames) / 90.0f);
+					{
+						if (VrBody::NativeHandsLive(1))
+						{
+							static bool s_said = false;
+							if (!s_said)
+							{
+								s_said = true;
+								Console.WriteLn("(VR) Melee: no hit-stop on the hand picture (the game draws the hand: NativeHands); the overlay path keeps it.");
+							}
+						}
+						else
+							StartHitStop(hands.right_pos, hands.right_quat, static_cast<float>(po.hit_stop_frames) / 90.0f);
+					}
 				}
 				else
 				{
@@ -3669,11 +3683,34 @@ namespace VR::PhysicalMelee
 		if ((usable || fist_usable) && record_steady && Overrides(mode) && mp->has_override && hand && (attach.valid || fist_usable))
 		{
 			CameraDriver::Mapping map;
+			// [VR] NativeHands: the weapon the game draws in the posed hand (the solved, clamped wrist plus its own attach entry,
+			// where the eye sees it: VrBody::NativeWeaponNow) is the strike's shape, so the hit happens where the weapon is drawn.
+			// The fists (no weapon, or a gun's butt) use the controller's own point moved by the eye's shift (the same one). PCSX2_VR_NATIVE_NOSHIFT=1:
+			// neither (a comparison).
+			const bool native_hit = EmuConfig.VR.NativeHands && VrBody::NativeHandsLive(1);
 			const bool frame = fist_usable ? FistFrame(pos, quat, fist == FistKind::Fist ? mp->fist_point : mp->whip_point, origin, axes) :
-			                                 HandModel::ModelFrame(attach, HandModel::Held::Melee, pos, quat, origin, axes);
+			                                 HandModel::ModelFrame(attach, HandModel::Held::Melee, pos, quat, origin, axes, native_hit);
 			if (CameraDriver::GetMapping(&map) && frame &&
 				GameMatrix(origin, axes, MapPoint, &map, m) && Read(reader, mp->counter, 1, &counter))
 			{
+				static const bool s_noshift = [] {
+					const char* e = std::getenv("PCSX2_VR_NATIVE_NOSHIFT");
+					return e && e[0] == '1';
+				}();
+				VrBody::NativeWeapon nw;
+				float shift[3];
+				if (native_hit && !s_noshift && !fist_usable && VrBody::NativeWeaponNow(&nw))
+				{
+					// The game's own drawn matrix: the model's axes (unit rows) and its origin.
+					for (int r = 0; r < 3; r++)
+						for (int c = 0; c < 3; c++)
+							m[4 * r + c] = static_cast<float>(nw.axes[r][c]);
+					for (int k = 0; k < 3; k++)
+						m[12 + k] = static_cast<float>(nw.origin[k]);
+				}
+				else if (native_hit && !s_noshift && VrBody::NativeSeenShift(shift))
+					for (int k = 0; k < 3; k++)
+						m[12 + k] += shift[k];
 				const u32 b = mp->block;
 				if (!s_block_armed || s_block_stale)
 				{

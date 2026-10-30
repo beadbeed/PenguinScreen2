@@ -33,6 +33,7 @@
 #include "VR/ItemReach.h"
 #include "VR/ZoneMarkers.h"
 #include "VR/VrPresence.h"
+#include "VR/VrBody.h"
 #include "Config.h"
 #include "VMManager.h"
 
@@ -552,6 +553,8 @@ namespace VR::XRCompositor
 			// Hand images drawn and uploaded (new), and hands shown again from their last image (kept), for the Hands line.
 			std::atomic<u32> stat_hand_new{0};
 			std::atomic<u32> stat_hand_kept{0};
+			// [VR] NativeHands: hand frames the overlay left out because the game draws the hand.
+			std::atomic<u32> stat_hand_native{0};
 
 			// Headset rate: SteadyNowMs at the top of every pacer loop and when its xrWaitFrame returns. An old value
 			// means the pacer is stuck in the runtime; the GS thread then pumps the session events (PacerStalled).
@@ -2368,12 +2371,15 @@ namespace VR::XRCompositor
 		// [VR] GameWeaponModels: the hand model's look, and for the weapon in the right hand (or in the holster) how the
 		// game attaches its model: the equipped weapon's own entry (GameFeedback's weapon read), else the scenario's item
 		// table's (the test hands).
-		void ApplyModelLook(HandModel::HandState& h, bool weapon)
+		void ApplyModelLook(HandModel::HandState& h, bool weapon, bool native = false)
 		{
 			h.mesh = EmuConfig.VR.GameWeaponModels;
 			h.scene = (h.mesh && EmuConfig.VR.WeaponSceneLighting) ? HandModel::GetSceneLight() : HandModel::SceneLight{};
 			h.attach = HandModel::GameAttach{};
-			if (!h.mesh || !weapon)
+			// [VR] NativeHands: the game draws this weapon; the laser starts at ITS muzzle (the attach is needed even without
+			// GameWeaponModels).
+			h.native = native && weapon;
+			if (!(h.mesh || h.native) || !weapon)
 				return;
 			const GameFeedback::WeaponView wv = GameFeedback::GetWeapon();
 			if (wv.valid && wv.item_id == h.item_id && wv.attach.valid)
@@ -2671,6 +2677,16 @@ namespace VR::XRCompositor
 				// recoil, flash or slide either. What it is comes with it (HandModel::HeldFor: the equipped item's kind).
 				const HandModel::WeaponHeld held_weapon = HandModel::GetWeaponHeld();
 				const bool gun = held_weapon.raised && CameraDriver::LookAtActive();
+				// [VR] NativeHands: a hand the game draws itself (your anchored arms, the weapon in the right one) is not built
+				// here. The gate: first person armed and no menu (the pointing hands stay the overlay's); the decision holds
+				// for 0.2 s (VrBody::NativeHandsUpdate), but a dropped pose brings the overlay hand back this very frame.
+				bool native_hand[kHandSlots] = {false, false};
+				if (EmuConfig.VR.NativeHands)
+				{
+					bool native_weapon = false;
+					VrBody::NativeHandsUpdate(CameraDriver::SteadyNowMs(), CameraDriver::LookAtActive() && !SpatialControls::MenuMode(),
+						native_hand, &native_weapon);
+				}
 				for (int i = 0; i < kHandSlots; i++)
 				{
 					const auto& src = snap.hands[i];
@@ -2694,9 +2710,15 @@ namespace VR::XRCompositor
 						d.held = held_weapon.held;
 						d.item_id = held_weapon.item_id;
 					}
-					// [VR] MeleePower's hit-stop: the right hand's picture held at a strike's contact for a few frames.
-					if (i == HandModel::kRight)
+					// [VR] MeleePower's hit-stop: the right hand's picture held at a strike's contact for a few frames. Not
+					// while the game draws the hand (NativeHands): the picture would part from the native hand.
+					if (i == HandModel::kRight && !native_hand[i])
 						PhysicalMelee::ApplyHitStop(d.pos, d.quat);
+					if (native_hand[i])
+					{
+						d = HandModel::HandState{}; // not built, not submitted
+						s.stat_hand_native.fetch_add(1, std::memory_order_relaxed);
+					}
 				}
 			}
 			// Shot feedback on a pistol or a long gun (fake hands too, for headset-free captures): recoil, a muzzle
@@ -3772,9 +3794,25 @@ namespace VR::XRCompositor
 					model_gun.pos[k] = hand_pos[k];
 				for (int k = 0; k < 4; k++)
 					model_gun.quat[k] = hand_quat[k];
-				ApplyModelLook(model_gun, true);
+				ApplyModelLook(model_gun, true, EmuConfig.VR.NativeHands && VrBody::NativeHandsLive(HandModel::kRight));
+				// [VR] NativeHands: the beam leaves the muzzle of the weapon the game draws (the solved wrist, the game's attach), along
+				// its barrel: the laser, the shot and the weapon you see are one line.
+				bool native_beam = false;
+				if (model_gun.native)
+				{
+					VrBody::NativeWeapon nw;
+					if (VrBody::NativeWeaponNow(&nw) && nw.vr_valid)
+					{
+						for (int k = 0; k < 3; k++)
+						{
+							beam_dir[k] = static_cast<float>(nw.vr_barrel[k]);
+							beam_from[k] = static_cast<float>(nw.vr_muzzle[k]) + beam_dir[k] * HudCards::kLaserMuzzleGapM;
+						}
+						native_beam = true;
+					}
+				}
 				laser_placed = laser_hand &&
-				               (HandModel::ModelLaserFrom(model_gun, HudCards::kLaserMuzzleGapM, beam_from, beam_dir) ||
+				               (native_beam || HandModel::ModelLaserFrom(model_gun, HudCards::kLaserMuzzleGapM, beam_from, beam_dir) ||
 				                   HandModel::LaserFrom(laser_weapon.held, laser_weapon.item_id, hand_pos, hand_quat,
 				                       HudCards::kLaserMuzzleGapM, beam_from, beam_dir)) &&
 				               HudCards::PlaceBeam(beam_from, beam_dir, HudCards::kLaserLengthM, eye, laser_pos, laser_quat);
@@ -7610,6 +7648,12 @@ namespace VR::XRCompositor
 			// Only the pacer places hands (legacy submits each frame for the display time it located the hands for).
 			const u32 hand_new = s.stat_hand_new.exchange(0, std::memory_order_relaxed);
 			const u32 hand_kept = s.stat_hand_kept.exchange(0, std::memory_order_relaxed);
+			const u32 hand_native = s.stat_hand_native.exchange(0, std::memory_order_relaxed);
+			if (hand_native > 0)
+			{
+				Console.WriteLn("(VR) NativeHands: %.1f overlay hand frames/s left out (the game draws those hands), overlay "
+								"images new %.1f/s kept %.1f/s.", hand_native / secs, hand_new / secs, hand_kept / secs);
+			}
 			// [VR] GameWeaponModels: what drawing the hand and weapon images with MeshRaster cost (GS thread).
 			const HandModel::MeshDrawStats mesh_draw = HandModel::TakeMeshDrawStats();
 			char mesh_cost[128] = "";
@@ -8342,7 +8386,7 @@ namespace VR::XRCompositor
 				for (int k = 0; k < 4; k++)
 					d.quat[k] = orient.orientation_xyzw[k];
 				// [VR] MeleePower's hit-stop, as BuildHandLayers holds it (the pacer must not move the image on).
-				if (i == HandModel::kRight)
+				if (i == HandModel::kRight && !VrBody::NativeHandsLive(HandModel::kRight))
 					PhysicalMelee::ApplyHitStop(d.pos, d.quat);
 				d.time = (snap.display_time != 0) ? snap.display_time : t;
 				d.valid = true;
@@ -10626,6 +10670,7 @@ namespace VR::XRCompositor
 		}
 		s.stat_hand_new.store(0, std::memory_order_relaxed);
 		s.stat_hand_kept.store(0, std::memory_order_relaxed);
+		s.stat_hand_native.store(0, std::memory_order_relaxed);
 		// Pure maths, so it runs even when the session below fails.
 		if (std::getenv("PCSX2_VR_HANDS_SELFTEST") != nullptr)
 		{

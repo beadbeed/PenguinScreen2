@@ -1528,7 +1528,8 @@ struct Pcsx2Config
 		// game state, never the game's traffic.
 		bool VrBody = false;
 		// With VrBody: the local character too, offline only, so in first person you see your own character's arms
-		// (the rest of the body stays hidden) instead of the hand models.
+		// (the rest of the body stays hidden). With NativeHands (below) these are the hands you see; without it the
+		// overlay hand models are drawn on top of them as well.
 		bool VrBodySelf = false;
 		// With VrBodySelf: how your own arms are drawn (tools/outbreak-vr/research/2026-10-27-body-anchor.md). Forearms (the
 		// default): the arms are anchored to the headset, not the game's skeleton (shoulders from a neck model under your
@@ -1544,6 +1545,14 @@ struct Pcsx2Config
 		};
 		static const char* VrBodySelfStyleNames[];
 		VrBodySelfStyleType VrBodySelfStyle = VrBodySelfStyleType::Forearms;
+		// With VrBody, VrBodySelf and an anchored VrBodySelfStyle (Forearms or Arms), offline: the game's own posed forearms
+		// and hands (and, drawn at the draw too, the weapon the game holds in the right one) ARE your hands: while the
+		// game is drawing them the overlay hand and weapon pictures are not built or submitted (the laser, the holster and
+		// sling markers and the menu pointer stay), and the picture-only hit-stop is off. Whenever the native pose drops
+		// out (a hand untracked, a menu, a cutscene, a grab) the overlay hands are back that frame; the native ones are
+		// trusted again only after 0.2 s of staying live, so the two never flicker. Ini only
+		// (tools/outbreak-vr/research/2026-10-30-native-hands.md).
+		bool NativeHands = true;
 		// First-person near depth, in metres: how near true stereo depth reaches before it flattens onto that
 		// plane. 0 = the profile's stereo.firstPerson.nearest, below 0 = off (flatten at the convergence plane
 		// as before), above 0 = this value (clamped to 0.45-1.5 m).

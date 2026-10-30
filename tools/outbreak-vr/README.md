@@ -671,6 +671,7 @@ target, the solve and the wrist bone the game built, and the head bone's forward
 elbows and wrists against the eye, the wrist cave V drew). `bodyanchor_test.py <dev install> [slot] [--style S]
 [--heights 1.1,1.2,1.3] [--quick] [--shots <dir>]` measures it offline (its install's own PINE slot; refuses while
 vrserver.exe runs).
+`nativehands_test.py <dev install> sweep|dropout|shots|melee|close [slot]` (NativeHands, `research/2026-10-30-native-hands.md`): the held weapon's drawn matrix against the controller as the hand moves, the overlay-hand fall-back and its 0.2 s hold, shots, a melee strike and a close zombie, from the emulog's `(VR) NativeHands ...` lines (`PCSX2_VR_NATIVE_LOG=1`) and PINE reads; its own ini and PINE slot, never the real install.
 
 Rules when testing: never change emulation speed; never pause, savestate or dump RAM while online
 (obsrv drops clients after ~30 s without packets and bans speed changes); do not run the virtual pad

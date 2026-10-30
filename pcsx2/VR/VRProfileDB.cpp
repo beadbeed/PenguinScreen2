@@ -3701,7 +3701,7 @@ static std::optional<VR::ProfileDB::PresenceParams> parsePresence(const std::str
 static std::optional<VR::ProfileDB::BodyParams> parseBody(const std::string_view serial, const ryml::ConstNodeRef& node)
 {
 	warnUnknownKeys(serial, node, "body",
-		{"block", "tables", "hook", "hookOn", "bones", "boneTable", "boneCount", "local", "boneIndex", "boneParent", "chest",
+		{"block", "tables", "hook", "hookOn", "selfSite", "selfSiteOn", "weaponSite", "weaponSiteOn", "bones", "boneTable", "boneCount", "local", "boneIndex", "boneParent", "chest",
 			"neck", "head", "arms", "eye", "notes"});
 	VR::ProfileDB::BodyParams bp;
 	bool ok = true;
@@ -3730,6 +3730,10 @@ static std::optional<VR::ProfileDB::BodyParams> parseBody(const std::string_view
 	read_hex("tables", bp.tables, true);
 	read_hex("hook", bp.hook, true);
 	read_hex("hookOn", bp.hook_on, true);
+	read_hex("selfSite", bp.self_site, false);
+	read_hex("selfSiteOn", bp.self_site_on, false);
+	read_hex("weaponSite", bp.weapon_site, false);
+	read_hex("weaponSiteOn", bp.weapon_site_on, false);
 	read_hex("bones", bp.bones, false);
 	read_hex("boneTable", bp.bone_table, false);
 	read_hex("boneCount", bp.bone_count, false);
@@ -5936,7 +5940,7 @@ bool VR::ProfileDB::IsSilenceSettingName(std::string_view name)
 	       name == "GunRayAim" || name == "GunObjectAim" ||
 	       name == "HandPickup" ||
 	       name == "ScriptedShotsFirstPerson" || name == "SpatialAudio" || name == "FadeDim" ||
-	       name == "VrBody" || name == "VrBodySelf" || name == "VrBodyLocals";
+	       name == "VrBody" || name == "VrBodySelf" || name == "VrBodyLocals" || name == "NativeHands";
 }
 
 bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
@@ -5979,6 +5983,10 @@ bool VR::ProfileDB::SilenceSettingOn(std::string_view name)
 	// Cave U's site (the bones' locals in the characters' update, before the hit tests): strictly offline, never co-op live.
 	if (name == "VrBodyLocals")
 		return EmuConfig.VR.VrBody;
+	// NativeHands' held-object draw (cave W): your own anchored arms are on, so the game is drawing the hands; strictly offline.
+	if (name == "NativeHands")
+		return EmuConfig.VR.VrBody && EmuConfig.VR.VrBodySelf && EmuConfig.VR.NativeHands &&
+		       EmuConfig.VR.VrBodySelfStyle != Pcsx2Config::VROptions::VrBodySelfStyleType::GameShoulders;
 	return false;
 }
 

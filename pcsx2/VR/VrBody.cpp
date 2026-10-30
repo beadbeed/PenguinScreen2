@@ -5,6 +5,10 @@
 #include "VR/NetGate.h"
 
 #include "VR/CameraDriver.h"
+#include "VR/GunRay.h"
+#include "VR/GameFeedback.h"
+#include "VR/HandModel.h"
+#include "VR/SpatialControls.h"
 #include "VR/VRInputState.h"
 #include "VR/VRProfileDB.h"
 #include "VR/VrPresence.h"
@@ -15,11 +19,13 @@
 #include "fmt/format.h"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <string>
 
 namespace VR::VrBody
@@ -879,12 +885,158 @@ namespace VR::VrBody
 		return offline && !eth_enabled && !drawtime;
 	}
 
-	u8 SlotFlags(int si, bool locals, bool arms)
+	u8 SlotFlags(int si, bool locals, bool arms, bool native_weapon)
 	{
 		const u8 self = (si == 1) ? static_cast<u8>(kFlagSelf | kFlagCollapse) : static_cast<u8>(0);
 		if (locals)
 			return static_cast<u8>(kFlagLocals | self);
+		if (si == 1 && native_weapon)
+			return static_cast<u8>(self | kFlagAttach | kFlagWeapon); // the held items on the posed hands, and drawn (cave W)
 		return (si == 1) ? self : static_cast<u8>(arms ? kFlagAttach : 0);
+	}
+
+	// --- NativeHands ---------------------------------------------------------------------------------------------------
+	namespace
+	{
+		constexpr double kSelfWristSwingDeg = 90.0; // your own anchored hand's wrist (the weapon follows it)
+	} // namespace
+
+	bool NativeHoldStep(NativeHold* h, int hand, bool raw, u64 now_ms, u64 hold_ms)
+	{
+		if (!h || hand < 0 || hand > 1)
+			return false;
+		if (!raw)
+		{
+			// The pose dropped out: the overlay hand is back this very frame.
+			h->on[hand] = false;
+			h->since_ms[hand] = 0;
+			return false;
+		}
+		if (h->since_ms[hand] == 0)
+			h->since_ms[hand] = now_ms ? now_ms : 1;
+		if (!h->on[hand] && now_ms >= h->since_ms[hand] && now_ms - h->since_ms[hand] >= hold_ms)
+			h->on[hand] = true;
+		return h->on[hand];
+	}
+
+	namespace
+	{
+		std::mutex s_native_mutex;
+		bool s_native_raw[2] = {false, false};
+		bool s_native_raw_weapon = false;
+		u64 s_native_raw_ms = 0;
+		NativeHold s_native_hold;
+		bool s_native_weapon_decided = false;
+		std::atomic<bool> s_native_live[2] = {false, false};
+	} // namespace
+
+	void NativeHandsPublish(const bool hand[2], bool weapon, u64 now_ms)
+	{
+		std::lock_guard<std::mutex> lock(s_native_mutex);
+		s_native_raw[0] = hand[0];
+		s_native_raw[1] = hand[1];
+		s_native_raw_weapon = weapon;
+		s_native_raw_ms = now_ms;
+	}
+
+	bool NativeHandsUpdate(u64 now_ms, bool gate_ok, bool out_hand[2], bool* out_weapon)
+	{
+		std::lock_guard<std::mutex> lock(s_native_mutex);
+		const bool fresh = s_native_raw_ms != 0 && now_ms >= s_native_raw_ms && now_ms - s_native_raw_ms <= kNativeFreshMs;
+		bool any = false;
+		for (int h = 0; h < 2; h++)
+		{
+			const bool was = s_native_hold.on[h];
+			const bool now = NativeHoldStep(&s_native_hold, h, fresh && gate_ok && s_native_raw[h], now_ms, kNativeHoldMs);
+			if (now != was)
+				Console.WriteLn("(VR) NativeHands: the %s hand is %s.", h == 0 ? "left" : "right",
+					now ? "the game's own (the overlay hand is no longer submitted)" : "the overlay hand again (the native pose dropped out)");
+			s_native_live[h].store(now, std::memory_order_relaxed);
+			if (out_hand)
+				out_hand[h] = now;
+			any |= now;
+		}
+		s_native_weapon_decided = s_native_hold.on[1] && s_native_raw_weapon;
+		if (out_weapon)
+			*out_weapon = s_native_weapon_decided;
+		return any;
+	}
+
+	namespace
+	{
+		float s_seen_shift[3] = {};
+		u64 s_seen_shift_ms = 0;
+	} // namespace
+
+	namespace
+	{
+		NativeWeapon s_native_weapon;
+		u64 s_native_weapon_ms = 0;
+	} // namespace
+
+	bool NativeWeaponNow(NativeWeapon* out)
+	{
+		std::lock_guard<std::mutex> lock(s_native_mutex);
+		const u64 now = CameraDriver::SteadyNowMs();
+		if (s_native_weapon_ms == 0 || now < s_native_weapon_ms || now - s_native_weapon_ms > kNativeFreshMs || !s_native_live[1].load())
+			return false;
+		if (out)
+			*out = s_native_weapon;
+		return true;
+	}
+
+	bool NativeSeenShift(float out_g[3])
+	{
+		std::lock_guard<std::mutex> lock(s_native_mutex);
+		const u64 now = CameraDriver::SteadyNowMs();
+		if (s_seen_shift_ms == 0 || now < s_seen_shift_ms || now - s_seen_shift_ms > kNativeFreshMs)
+			return false;
+		for (int k = 0; k < 3; k++)
+			out_g[k] = s_seen_shift[k];
+		return true;
+	}
+
+	bool NativeHandsLive(int hand)
+	{
+		return hand >= 0 && hand <= 1 && s_native_live[hand].load(std::memory_order_relaxed);
+	}
+
+	AttachedWeapon AttachWeapon(const Frame& wrist, const double grip[3], double scale, const double euler[3], const double muzzle[3])
+	{
+		// The game's row-vector rotations (FUN_0018FAD0 / FB70 / FBD0 style): X, then Y, then Z.
+		const auto rx = [](double a, double r[3][3]) {
+			const double c = std::cos(a), s = std::sin(a);
+			const double m[3][3] = {{1, 0, 0}, {0, c, s}, {0, -s, c}};
+			std::memcpy(r, m, sizeof(m));
+		};
+		const auto ry = [](double a, double r[3][3]) {
+			const double c = std::cos(a), s = std::sin(a);
+			const double m[3][3] = {{c, 0, -s}, {0, 1, 0}, {s, 0, c}};
+			std::memcpy(r, m, sizeof(m));
+		};
+		const auto rz = [](double a, double r[3][3]) {
+			const double c = std::cos(a), s = std::sin(a);
+			const double m[3][3] = {{c, s, 0}, {-s, c, 0}, {0, 0, 1}};
+			std::memcpy(r, m, sizeof(m));
+		};
+		double X[3][3], Y[3][3], Z[3][3], A[3][3], W[3][3];
+		rx(euler[0], X);
+		ry(euler[1], Y);
+		rz(euler[2], Z);
+		MulRR(X, Y, A);
+		MulRR(A, Z, A);
+		MulRR(A, wrist.r, W); // the model's axes in the world frame
+		AttachedWeapon out;
+		const V g = Ld(grip) * scale;
+		const V o = MulRow(g, wrist.r) + Ld(wrist.t);
+		St(o, out.origin);
+		for (int i = 0; i < 3; i++)
+			for (int j = 0; j < 3; j++)
+				out.axes[i][j] = W[i][j];
+		const V m = MulRow(MulRow(Ld(muzzle), A) + g, wrist.r) + Ld(wrist.t);
+		St(m, out.muzzle);
+		St(Row(W, 0) * -1.0, out.barrel);
+		return out;
 	}
 
 	void PackSlot(const BlockSlot& s, u32 w[16])
@@ -1385,6 +1537,10 @@ namespace VR::VrBody
 			}
 		};
 		const auto clear = [&]() {
+			// NativeHands: nothing is drawn by the game any more, the overlay hands are back at once.
+			const bool none[2] = {false, false};
+			NativeHandsPublish(none, false, CameraDriver::SteadyNowMs());
+			NativeHandsUpdate(CameraDriver::SteadyNowMs(), false, nullptr, nullptr);
 			if (s_written)
 				ClearBlock(s_written_block, s_written_tables, s_written_crc);
 			s_written = false;
@@ -1490,6 +1646,12 @@ namespace VR::VrBody
 		const Tuning tu;
 		BlockSlot slots[kSlots];
 		static float tables[kSlots][kMaxOut][16];
+		// NativeHands: per VR hand, whether the game draws the hand this vsync (set below for the local anchored slot).
+		const bool game_overlay_now = memRead32(0x540004) == 3 && memRead32(0x6313A0) == 0x27BDFF50u;
+		const bool native_sites = vr.NativeHands && anchored && game_overlay_now && bp->self_site != 0 && bp->weapon_site != 0 &&
+		                          memRead32(bp->self_site) == bp->self_site_on && memRead32(bp->weapon_site) == bp->weapon_site_on;
+		bool native_hand[2] = {false, false};
+		bool native_weapon_raw = false;
 		for (int si = 0; si < kSlots; si++)
 		{
 			SlotState& st = s_slot[si];
@@ -1577,12 +1739,23 @@ namespace VR::VrBody
 						state = 6;
 					else
 					{
+						{
+							// The eye's shift (NativeSeenShift): eye_forward along the view's level forward.
+							std::lock_guard<std::mutex> lock(s_native_mutex);
+							for (int k = 0; k < 3; k++)
+								s_seen_shift[k] = static_cast<float>(alg.view_fwd[k] * mapping.eye_forward);
+							s_seen_shift_ms = CameraDriver::SteadyNowMs();
+						}
 						const AnchorTuning atu;
 						const float cj[3] = {static_cast<float>(sk.chest.t[0]), static_cast<float>(sk.chest.t[1]), static_cast<float>(sk.chest.t[2])};
 						PointToChest(skr, cj, at.chest);
 						tg = at.tg;
 						const double protract = atu.protract_m * std::fabs(mapping.units_per_meter) / sk.scale;
-						solved = SolveAnchored(map, sk.locals, sk.parents, sk.n, at, tu, style, protract, &pose) && pose.count > 0;
+						// NativeHands: the weapon is the game's and follows this hand, so the wrist may flex further than the partner's
+						// (a gun held at the face needs about 81 deg; at 75 the drawn gun was 5.7 deg and 2.5 cm off the controller).
+						Tuning tu_self = tu;
+						tu_self.wrist_swing_deg = std::max(tu.wrist_swing_deg, kSelfWristSwingDeg);
+						solved = SolveAnchored(map, sk.locals, sk.parents, sk.n, at, tu_self, style, protract, &pose) && pose.count > 0;
 						if (!solved)
 							state = 5;
 						st.w = Weights{};
@@ -1624,13 +1797,35 @@ namespace VR::VrBody
 			const bool arms = st.w.arm[0] > 0.0 || st.w.arm[1] > 0.0;
 			// The anchored arms are draw-only, offline or not: cave V's world entries; never cave U's locals, so the game's own
 			// arms, held items and hit spheres stay its animation's.
-			bs.flags = self_anchored ? SlotFlags(si, false, arms) : SlotFlags(si, use_locals, arms);
+			// NativeHands: the right VR hand is the model's arm 1 (File #1: left_arm 0), where the game holds the weapon (bone 19).
+			const bool native = self_anchored && native_sites && left_arm == 0 && pose.drawn[1];
+			bs.flags = self_anchored ? SlotFlags(si, false, arms, native) : SlotFlags(si, use_locals, arms);
+			if (self_anchored && native_sites)
+			{
+				// The draw-time attach (flag 1) only for a hand the game draws: the item's matrix follows the posed wrist.
+				native_weapon_raw = native;
+				for (int vh = 0; vh < 2; vh++)
+					native_hand[vh] = pose.drawn[vh == 0 ? left_arm : 1 - left_arm];
+			}
 			// The held items go back on the hands (the game's own FUN_006313A0 with the record's item slots, as its update
 			// does: the item slot byte +0xC7C on the -X wrist, +0xC7D on the +X wrist).
 			bs.attach_offset[0] = 0xC7C;
 			bs.attach_bone[0] = static_cast<u8>(map.arm[1].wrist);
 			bs.attach_offset[1] = 0xC7D;
 			bs.attach_bone[1] = static_cast<u8>(map.arm[0].wrist);
+			if (self_anchored && !native)
+			{
+				// Draw-only without NativeHands: the game's held items stay its animation's (no attach).
+				bs.attach_offset[0] = 0;
+				bs.attach_offset[1] = 0;
+			}
+			else if (self_anchored)
+			{
+				if (!pose.drawn[1])
+					bs.attach_offset[0] = 0;
+				if (!pose.drawn[0])
+					bs.attach_offset[1] = 0;
+			}
 			if (self_anchored)
 			{
 				for (int k = 0; k < pose.count; k++)
@@ -1683,6 +1878,192 @@ namespace VR::VrBody
 					n++;
 				}
 				bs.count = static_cast<u8>(n);
+			}
+			// NativeHands: the weapon as the game will draw it this vsync (the solved wrist, the game's attach entry), published for the
+			// gameplay side (the gun ray, the melee shape) and the laser.
+			if (self_anchored && native)
+			{
+				bool published = false;
+				int wk = -1;
+				for (int k = 0; k < pose.count; k++)
+					if (pose.bone[k] == map.arm[1].wrist)
+						wk = k;
+				const u32 item = memRead8(rec + 0xC7C);
+				const u32 type = memRead16(rec + 0xCA8);
+				if (wk >= 0 && item != 0 && type < 0x100)
+				{
+					const u32 ent = 0x6E5940u + 0x44u * type;
+					const u32 var = memRead8(rec + 0xB99) & 1u;
+					double grd[3], mzd[3], eu[3];
+					for (int k = 0; k < 3; k++)
+					{
+						mzd[k] = std::bit_cast<float>(memRead32(ent + 0x38 + 4 * k));
+						grd[k] = std::bit_cast<float>(memRead32(ent + 0x10 + 12 * var + 4 * k));
+						eu[k] = static_cast<s16>(memRead16(ent + 0x28 + 8 * var + 2 * k)) * (2.0 * kPi / 65536.0);
+					}
+					Frame wf;
+					MulRR(pose.rel[wk].r, skr.chest.r, wf.r);
+					ChestToWorld(skr, pose.rel[wk].t, wf.t);
+					const AttachedWeapon aw = AttachWeapon(wf, grd, sk.scale, eu, mzd);
+					NativeWeapon nw;
+					for (int k = 0; k < 3; k++)
+					{
+						nw.origin[k] = aw.origin[k];
+						nw.muzzle[k] = aw.muzzle[k];
+						nw.barrel[k] = aw.barrel[k];
+						for (int j = 0; j < 3; j++)
+							nw.axes[k][j] = aw.axes[k][j];
+					}
+					published = Finite(Ld(nw.origin)) && Finite(Ld(nw.muzzle)) && Finite(Ld(nw.barrel));
+					// VR space for the laser: the drawn point is GameFromVr(v) + shift, so v = VrFromGame(g - shift).
+					float sh[3];
+					if (published && NativeSeenShift(sh))
+					{
+						const auto to_vr = [&](const double g[3], float v[3]) {
+							const float gf[3] = {static_cast<float>(g[0] - sh[0]), static_cast<float>(g[1] - sh[1]), static_cast<float>(g[2] - sh[2])};
+							return CameraDriver::VrFromGame(mapping, gf, v);
+						};
+						float v0[3], v1[3];
+						double ahead[3];
+						for (int k = 0; k < 3; k++)
+							ahead[k] = aw.muzzle[k] + aw.barrel[k] * 100.0;
+						if (to_vr(aw.muzzle, v0) && to_vr(ahead, v1))
+						{
+							const V d = Norm(V{static_cast<double>(v1[0] - v0[0]), static_cast<double>(v1[1] - v0[1]), static_cast<double>(v1[2] - v0[2])});
+							for (int k = 0; k < 3; k++)
+								nw.vr_muzzle[k] = v0[k];
+							St(d, nw.vr_barrel);
+							nw.vr_valid = true;
+						}
+					}
+				if (published)
+					{
+						std::lock_guard<std::mutex> lock(s_native_mutex);
+						s_native_weapon = nw;
+						s_native_weapon_ms = CameraDriver::SteadyNowMs();
+					}
+				}
+				if (!published)
+				{
+					std::lock_guard<std::mutex> lock(s_native_mutex);
+					s_native_weapon_ms = 0;
+				}
+			}
+			// NativeHands (PCSX2_VR_NATIVE_LOG=1, every 0.3 s): where the game DREW the held weapon (its object's matrix, read at
+			// this vsync, after the draw cave V attached it to the posed wrist) against the controller, the attach maths and the
+			// gun ray's muzzle (the gameplay side).
+			static const bool s_nat_env = [] {
+				const char* e = std::getenv("PCSX2_VR_NATIVE_LOG");
+				return e && e[0] == '1';
+			}();
+			static u64 s_nat_log_ms = 0;
+			if (s_nat_env && self_anchored && native && now - s_nat_log_ms >= 300)
+			{
+				s_nat_log_ms = now;
+				const u32 item = memRead8(rec + 0xC7C);
+				const u32 obj = item ? memRead32(0x3967EC + 60u * item) : 0u;
+				const u32 type = memRead16(rec + 0xCA8);
+				const u32 ent = 0x6E5940u + 0x44u * type;
+				if (obj && InRam(obj, 0x210) && type < 0x100 && sk.ptr[map.arm[1].wrist] != 0)
+				{
+					float M[16], W[16], mz[3], gr[3];
+					ReadF16(obj + 0x1C0, M);
+					ReadF16(sk.ptr[map.arm[1].wrist], W);
+					const u32 var = memRead8(rec + 0xB99) & 1u;
+					for (int k = 0; k < 3; k++)
+					{
+						mz[k] = std::bit_cast<float>(memRead32(ent + 0x38 + 4 * k));
+						gr[k] = std::bit_cast<float>(memRead32(ent + 0x10 + 12 * var + 4 * k));
+					}
+					double eu[3];
+					for (int k = 0; k < 3; k++)
+						eu[k] = static_cast<s16>(memRead16(ent + 0x28 + 8 * var + 2 * k)) * (2.0 * kPi / 65536.0);
+					const double grd[3] = {gr[0], gr[1], gr[2]}, mzd[3] = {mz[0], mz[1], mz[2]};
+					Frame wf;
+					double wsc = 1.0;
+					const bool wok = FromGameScaled(W, &wf, &wsc);
+					const AttachedWeapon aw = AttachWeapon(wf, grd, sk.scale, eu, mzd);
+					// What the game drew.
+					const V org{M[12], M[13], M[14]};
+					const V mrow0{M[0], M[1], M[2]}, mrow1{M[4], M[5], M[6]}, mrow2{M[8], M[9], M[10]};
+					const V drawn_muzzle = org + mrow0 * mz[0] + mrow1 * mz[1] + mrow2 * mz[2];
+					const V barrel = Norm(mrow0 * -1.0);
+					// The controller (right VR hand = arm 1), in the world.
+					double gp[3], p1[3], p2[3];
+					ChestToWorld(skr, tg.hand_pos[1], gp);
+					double fw[3], up[3];
+					for (int k = 0; k < 3; k++)
+					{
+						fw[k] = tg.hand_pos[1][k] + tg.hand_fwd[1][k] * 10.0;
+						up[k] = tg.hand_pos[1][k] + tg.hand_up[1][k] * 10.0;
+					}
+					ChestToWorld(skr, fw, p1);
+					ChestToWorld(skr, up, p2);
+					const V ctl_fwd = Norm(Ld(p1) - Ld(gp));
+					const auto ang = [](const V& a, const V& b) { return std::acos(Clamp(Dot(Norm(a), Norm(b)), -1.0, 1.0)) / kDeg; };
+					const double d_grip = Len(org - Ld(gp));
+					const double d_exp = wok ? Len(org - Ld(aw.origin)) : -1.0;
+					double a_exp = -1.0;
+					if (wok)
+					{
+						a_exp = 0.0;
+						for (int k = 0; k < 3; k++)
+							a_exp = std::max(a_exp, ang(Row(aw.axes, k), k == 0 ? mrow0 : (k == 1 ? mrow1 : mrow2)));
+					}
+					// The controller's own derivation (HandModel's native placement: the posed wrist 6 cm behind the grip, the game's
+					// attach), mapped into the game as the eye sees it, against what the game drew: the gameplay side's reading.
+					double d_ctl = -1.0, a_ctl = -1.0, d_ctl_mz = -1.0;
+					{
+						const GameFeedback::WeaponView wv = GameFeedback::GetWeapon();
+						const VRHandState& rh = self_snap.hands[VRInputSnapshot::RIGHT];
+						float sh[3];
+						static u64 s_why_ms = 0;
+						if (now - s_why_ms > 5000 && !(wv.valid && wv.attach.valid && rh.grip_pose.valid))
+						{
+							s_why_ms = now;
+							Console.WriteLn("(VR) NativeHands: no controller comparison (weapon view %d, attach %d, right grip %d).", wv.valid, wv.attach.valid,
+								rh.grip_pose.valid);
+						}
+						if (wv.valid && wv.attach.valid && rh.grip_pose.valid && NativeSeenShift(sh))
+						{
+							const VRPose& orient = rh.aim_pose.valid ? rh.aim_pose : rh.grip_pose;
+							float ov[3], ax[3][3];
+							const HandModel::WeaponHeld wh = HandModel::GetWeaponHeld();
+							if (HandModel::ModelFrame(wv.attach, wh.known ? wh.held : HandModel::Held::Pistol, rh.grip_pose.position_xyz.data(),
+									orient.orientation_xyzw.data(), ov, ax, true))
+							{
+								float g0[3], g1[3];
+								bool ok = CameraDriver::GameFromVr(mapping, ov, g0);
+								V axg[3];
+								for (int k = 0; ok && k < 3; k++)
+								{
+									const float pv[3] = {ov[0] + ax[k][0] * 0.01f, ov[1] + ax[k][1] * 0.01f, ov[2] + ax[k][2] * 0.01f};
+									ok = CameraDriver::GameFromVr(mapping, pv, g1);
+									axg[k] = Norm(V{g1[0] - g0[0], g1[1] - g0[1], g1[2] - g0[2]});
+								}
+								if (ok)
+								{
+									const V eo = V{g0[0] + sh[0], g0[1] + sh[1], g0[2] + sh[2]};
+									d_ctl = Len(org - eo);
+									a_ctl = std::max({ang(axg[0], mrow0), ang(axg[1], mrow1), ang(axg[2], mrow2)});
+									const V em = eo + axg[0] * mz[0] + axg[1] * mz[1] + axg[2] * mz[2];
+									d_ctl_mz = Len(drawn_muzzle - em);
+								}
+							}
+						}
+					}
+					float ro[3] = {}, rd[3] = {};
+					const bool ray = GunRay::LastShotRay(ro, rd, 600);
+					const V rov{ro[0], ro[1], ro[2]}, rdv{rd[0], rd[1], rd[2]};
+					Console.WriteLn("(VR) NativeHands weapon: item %u type %u object %08X; drawn origin (%.1f, %.1f, %.1f), %.1f cm from the controller "
+									"grip; vs the game's own attach maths on the posed wrist %.2f cm / %.2f deg; barrel %.2f deg off the controller's "
+									"forward; drawn muzzle (%.1f, %.1f, %.1f); vs the controller's own placement: origin %.2f cm, axes %.2f deg, "
+									"muzzle %.2f cm; gun ray (shot start) %s %.1f cm from the drawn muzzle, its direction "
+									"%.2f deg off the barrel.",
+						item, type, obj, org.x, org.y, org.z, d_grip, d_exp, a_exp, ang(barrel, ctl_fwd), drawn_muzzle.x, drawn_muzzle.y,
+						drawn_muzzle.z, d_ctl, a_ctl, d_ctl_mz, ray ? "" : "(none)", ray ? Len(rov - drawn_muzzle) : -1.0,
+						ray ? ang(rdv, barrel) : -1.0);
+				}
 			}
 			if (log_now && self_anchored)
 			{
@@ -1805,7 +2186,7 @@ namespace VR::VrBody
 				memWrite32(bp->block + kSlotOffset + kSlotBytes * static_cast<u32>(si) + 4u * static_cast<u32>(q), w[q]);
 		}
 		// The held items' attach: FUN_006313A0 (GAME overlay; the cave checks its first word before each call).
-		const bool game_overlay = memRead32(0x540004) == 3 && memRead32(0x6313A0) == 0x27BDFF50u;
+		const bool game_overlay = game_overlay_now;
 		memWrite32(bp->block + 0x08, game_overlay ? 0x6313A0u : 0u);
 		memWrite32(bp->block + 0x0C, game_overlay ? 0x27BDFF50u : 0u);
 		++s_stamp;
@@ -1815,6 +2196,10 @@ namespace VR::VrBody
 		s_written_block = bp->block;
 		s_written_tables = bp->tables;
 		s_written_crc = VMManager::GetDiscCRC();
+		NativeHandsPublish(native_hand, native_weapon_raw, CameraDriver::SteadyNowMs());
+		// The decision is made here too (the compositor asks again every present with the same gate; the state is shared), so
+		// the gameplay side (the gun ray, the melee shape, the hit-stop) and a headset-free run see it without a compositor.
+		NativeHandsUpdate(CameraDriver::SteadyNowMs(), CameraDriver::LookAtActive() && !SpatialControls::MenuMode(), nullptr, nullptr);
 	}
 	// --- Self-test -----------------------------------------------------------------------------------------------------
 	namespace
@@ -2390,6 +2775,176 @@ namespace VR::VrBody
 			check(kSlotOffset + kSlots * kSlotBytes <= 0x100 && 0x1C + kMaxOut <= 0x38 && kMaxOut * 64 <= static_cast<int>(ProfileDB::kBodyTableBytes) &&
 					  kMaxLocals < kMaxOut,
 				"the slots fit the block and the bones their table");
+		}
+
+		// --- NativeHands: the decision, its hold and the attach maths ---
+		{
+			// The step: native only after the raw state has held 200 ms; a drop is the overlay hand AT ONCE; a flap never gets there.
+			NativeHold h;
+			const bool a = NativeHoldStep(&h, 1, true, 1000, kNativeHoldMs);
+			const bool b = NativeHoldStep(&h, 1, true, 1100, kNativeHoldMs);
+			const bool c = NativeHoldStep(&h, 1, true, 1199, kNativeHoldMs);
+			const bool d = NativeHoldStep(&h, 1, true, 1200, kNativeHoldMs);
+			check(!a && !b && !c && d, "native hands: taken over after the raw state has held 200 ms (not at 199)");
+			check(NativeHoldStep(&h, 1, true, 5000, kNativeHoldMs), "native hands: stays native while the pose lives");
+			check(!NativeHoldStep(&h, 1, false, 5010, kNativeHoldMs) && !h.on[1], "native hands: a dropped pose is the overlay hand that same frame");
+			check(!NativeHoldStep(&h, 1, true, 5020, kNativeHoldMs) && !NativeHoldStep(&h, 1, true, 5219, kNativeHoldMs) &&
+					  NativeHoldStep(&h, 1, true, 5220, kNativeHoldMs),
+				"native hands: back again only after another 200 ms of staying live");
+			NativeHold flap;
+			bool ever = false;
+			for (u64 t = 0; t < 4000; t += 100) // live 100 ms, down 100 ms, ...: never 200 ms in a row
+				ever |= NativeHoldStep(&flap, 0, (t / 100) % 2 == 0, 10000 + t, kNativeHoldMs);
+			check(!ever, "native hands: a pose that flaps every 100 ms never takes over (no flicker)");
+			check(!NativeHoldStep(nullptr, 0, true, 1, 200) && !NativeHoldStep(&h, 2, true, 1, 200) && !NativeHoldStep(&h, -1, true, 1, 200),
+				"native hands: a bad hand or no state is never native");
+			// The per-hand states are independent: the left hand's live run does not start the right's clock.
+			NativeHold two;
+			NativeHoldStep(&two, 0, true, 100, 200);
+			check(!NativeHoldStep(&two, 1, true, 250, 200) && NativeHoldStep(&two, 0, true, 300, 200) && !two.on[1],
+				"native hands: each hand's hold is its own");
+			// Update: the raw published state, its age and the gate.
+			const u64 t0 = 1000000;
+			const bool live[2] = {true, true}, none[2] = {false, false};
+			bool out[2] = {};
+			bool wpn = false;
+			NativeHandsPublish(none, false, t0);
+			NativeHandsUpdate(t0, true, out, &wpn); // a clean start
+			NativeHandsPublish(live, true, t0 + 10);
+			NativeHandsUpdate(t0 + 10, true, out, &wpn);
+			check(!out[0] && !out[1] && !wpn && !NativeHandsLive(1), "native hands update: fresh, but not yet held");
+			NativeHandsPublish(live, true, t0 + 100);
+			NativeHandsUpdate(t0 + 100, true, out, &wpn);
+			NativeHandsPublish(live, true, t0 + 200);
+			NativeHandsUpdate(t0 + 200, true, out, &wpn);
+			NativeHandsPublish(live, true, t0 + 210);
+			NativeHandsUpdate(t0 + 210, true, out, &wpn);
+			check(out[0] && out[1] && wpn && NativeHandsLive(0) && NativeHandsLive(1), "native hands update: both hands and the weapon native after 0.2 s");
+			NativeHandsUpdate(t0 + 211, false, out, &wpn);
+			check(!out[0] && !out[1] && !wpn && !NativeHandsLive(1), "native hands update: a menu (the gate) or a cutscene gives the overlay hands back that frame");
+			NativeHandsPublish(live, true, t0 + 300);
+			NativeHandsUpdate(t0 + 300, true, out, &wpn);
+			NativeHandsUpdate(t0 + 520, true, out, &wpn); // the host's last word is 220 ms old: stale
+			check(!out[0] && !out[1], "native hands update: a host that stopped publishing (over 150 ms) is no native hand");
+			const bool right_only[2] = {false, true};
+			NativeHandsPublish(right_only, false, t0 + 600);
+			NativeHandsUpdate(t0 + 600, true, out, &wpn);
+			NativeHandsPublish(right_only, false, t0 + 810);
+			NativeHandsUpdate(t0 + 810, true, out, &wpn);
+			check(!out[0] && out[1] && !wpn, "native hands update: only the right hand tracked, and no weapon the game draws");
+			NativeHandsPublish(none, false, t0 + 900);
+			NativeHandsUpdate(t0 + 900, true, out, &wpn);
+			check(!out[0] && !out[1] && !NativeHandsLive(0) && !NativeHandsLive(1) && !NativeHandsLive(2), "native hands update: nothing live at the end");
+			// The slot's flags.
+			check(SlotFlags(1, false, true, true) == (kFlagSelf | kFlagCollapse | kFlagAttach | kFlagWeapon) &&
+					  SlotFlags(1, false, true, false) == (kFlagSelf | kFlagCollapse) &&
+					  SlotFlags(1, true, true, true) == (kFlagLocals | kFlagSelf | kFlagCollapse) && SlotFlags(0, false, true, true) == kFlagAttach &&
+					  SlotFlags(0, false, false, true) == 0,
+				"native hands: the weapon flag only on the local draw-only slot (never with locals, never for the partner)");
+			check((kFlagWeapon & (kFlagAttach | kFlagCollapse | kFlagSelf | kFlagLocals)) == 0, "the weapon flag is a free bit of the slot's flags byte");
+		}
+		{
+			// The attach maths, against File #1's own table (read live, 2026-10-30): the 45 Auto (type 7: grip (-13.45, -1.60, 2.13), no
+			// turn, muzzle (-9.5, 0, 5.09)), the shotgun (type 12: turn (-0.3, 10.6, -2.6) deg, a barrel 10.9 deg off the bone) and the
+			// spray (type 27, turn (101.8, -23.6, -77.7) deg), on a wrist frame turned and moved: the model's origin is (grip x scale)
+			// through the hand, the barrel the model's -X.
+			Frame wrist;
+			HeadFrame(0.7, -0.4, 0.2, wrist.r);
+			wrist.t[0] = 120.0;
+			wrist.t[1] = 80.0;
+			wrist.t[2] = -40.0;
+			const double g45[3] = {-13.45, -1.60, 2.13}, none3[3] = {0, 0, 0}, mz45[3] = {-9.50, 0.0, 5.09};
+			const AttachedWeapon w45 = AttachWeapon(wrist, g45, 1.05, none3, mz45);
+			const V want_o = MulRow(Ld(g45) * 1.05, wrist.r) + Ld(wrist.t);
+			check(D3(Ld(w45.origin), want_o) < 1e-9 && D3(Ld(w45.barrel), Row(wrist.r, 0) * -1.0) < 1e-9 &&
+					  D3(Ld(w45.muzzle), MulRow(Ld(mz45) + Ld(g45) * 1.05, wrist.r) + Ld(wrist.t)) < 1e-9,
+				"attach maths: the 45's origin is (grip x 1.05) through the hand, its barrel the bone's -X, its muzzle ahead of it");
+			const double e12[3] = {-0.3 * kDeg, 10.6 * kDeg, -2.6 * kDeg}, g12[3] = {-39.04, -1.19, 7.68}, mz12[3] = {-40.13, 0.0, 6.34};
+			const AttachedWeapon w12 = AttachWeapon(wrist, g12, 1.05, e12, mz12);
+			const double turn12 = std::acos(Clamp(Dot(Ld(w12.barrel), Row(wrist.r, 0) * -1.0), -1.0, 1.0)) / kDeg;
+			check(std::fabs(turn12 - 10.9) < 0.05, "attach maths: the shotgun's barrel is 10.9 deg off the bone (the 2026-10-14 table)");
+			// The axes stay a rotation: unit, perpendicular, right-handed.
+			const double e27[3] = {101.8 * kDeg, -23.6 * kDeg, -77.7 * kDeg}, g27[3] = {-7.91, -2.92, -2.17}, mz27[3] = {0.0, 10.1, 5.7};
+			const AttachedWeapon w27 = AttachWeapon(wrist, g27, 1.05, e27, mz27);
+			bool rot = true;
+			for (int i = 0; i < 3; i++)
+				for (int j = 0; j < 3; j++)
+					rot &= std::fabs(Dot(Row(w27.axes, i), Row(w27.axes, j)) - (i == j ? 1.0 : 0.0)) < 1e-9;
+			rot &= std::fabs(Dot(Cross(Row(w27.axes, 0), Row(w27.axes, 1)), Row(w27.axes, 2)) - 1.0) < 1e-9;
+			check(rot, "attach maths: the spray's axes (101.8, -23.6, -77.7) are a rotation");
+			// The same through HandModel's native placement (the laser's and the gameplay's reading), with a pointing frame that is the
+			// identity: bone X -> +Z, Y -> +X, Z -> +Y (the hand model's own layout), the wrist 6.3 cm behind the grip point. The two
+			// implementations (this one and HandModel::PlaceModel) must give the same origin, axes and muzzle.
+			Frame bone;
+			const double rows[3][3] = {{0, 0, 1}, {1, 0, 0}, {0, 1, 0}};
+			std::memcpy(bone.r, rows, sizeof(rows));
+			bone.t[2] = HandModel::kNativeWristBackCm;
+			struct Case
+			{
+				const double *g, *eu, *mz;
+				HandModel::Held held;
+			};
+			const Case cases[] = {{g45, none3, mz45, HandModel::Held::Pistol}, {g12, e12, mz12, HandModel::Held::LongGun},
+				{g27, e27, mz27, HandModel::Held::Melee}};
+			bool same = true, muz = true;
+			double worst_o = 0.0, worst_a = 0.0, worst_m = 0.0, worst_b = 0.0;
+			for (const Case& cs : cases)
+			{
+				HandModel::GameAttach at;
+				at.valid = true;
+				for (int k = 0; k < 3; k++)
+				{
+					at.grip_cm[k] = static_cast<float>(cs.g[k]);
+					at.rot_rad[k] = static_cast<float>(cs.eu[k]);
+					at.muzzle_cm[k] = static_cast<float>(cs.mz[k]);
+				}
+				at.has_muzzle = true;
+				const float pos[3] = {0, 0, 0}, quat[4] = {0, 0, 0, 1};
+				float org[3], ax[3][3];
+				const AttachedWeapon aw = AttachWeapon(bone, cs.g, 1.05, cs.eu, cs.mz);
+				same &= HandModel::ModelFrame(at, cs.held, pos, quat, org, ax, true);
+				const double o_cm[3] = {org[0] * 100.0, org[1] * 100.0, org[2] * 100.0};
+				worst_o = std::max(worst_o, D3(Ld(o_cm), Ld(aw.origin)));
+				for (int k = 0; k < 3; k++)
+					worst_a = std::max(worst_a, std::acos(Clamp(Dot(V{ax[k][0], ax[k][1], ax[k][2]}, Row(aw.axes, k)), -1.0, 1.0)) / kDeg);
+				if (cs.held != HandModel::Held::Melee)
+				{
+					HandModel::HandState hs;
+					hs.valid = true;
+					hs.gun = true;
+					hs.held = cs.held;
+					hs.native = true;
+					hs.attach = at;
+					float from[3], dir[3];
+					muz &= HandModel::ModelLaserFrom(hs, 0.0f, from, dir);
+					const double m_cm[3] = {from[0] * 100.0, from[1] * 100.0, from[2] * 100.0};
+					worst_m = std::max(worst_m, D3(Ld(m_cm), Ld(aw.muzzle)));
+					worst_b = std::max(worst_b, std::acos(Clamp(Dot(V{dir[0], dir[1], dir[2]}, Ld(aw.barrel)), -1.0, 1.0)) / kDeg);
+				}
+			}
+			char what[256];
+			std::snprintf(what, sizeof(what), "attach maths: VrBody's and HandModel's native placements agree (45, shotgun, spray: origin %.4f cm, axes %.3f deg, "
+											  "muzzle %.4f cm, barrel %.3f deg)", worst_o, worst_a, worst_m, worst_b);
+			check(same && muz && worst_o < 0.01 && worst_a < 0.05 && worst_m < 0.01 && worst_b < 0.05, what);
+			// What the overlay hand's own anchor did: the 45's origin against the native one, in the pointing frame.
+			HandModel::GameAttach a45;
+			a45.valid = true;
+			for (int k = 0; k < 3; k++)
+			{
+				a45.grip_cm[k] = static_cast<float>(g45[k]);
+				a45.muzzle_cm[k] = static_cast<float>(mz45[k]);
+			}
+			a45.has_muzzle = true;
+			float ov[3], oa[3][3], nv[3], na[3][3];
+			const float pos0[3] = {0, 0, 0}, quat0[4] = {0, 0, 0, 1};
+			if (HandModel::ModelFrame(a45, HandModel::Held::Pistol, pos0, quat0, ov, oa, false) &&
+				HandModel::ModelFrame(a45, HandModel::Held::Pistol, pos0, quat0, nv, na, true))
+			{
+				const double dd = 100.0 * std::sqrt((ov[0] - nv[0]) * (ov[0] - nv[0]) + (ov[1] - nv[1]) * (ov[1] - nv[1]) + (ov[2] - nv[2]) * (ov[2] - nv[2]));
+				Console.WriteLn("(VR) Body self-test: the 45's origin sits %.2f cm apart in the overlay hand's placement (the hand model's wrist anchor) and the "
+								"native one (the posed wrist 6.3 cm behind the grip point).", dd);
+				check(dd > 0.0 && dd < 30.0, "native hands: the overlay and native placements of the 45 differ, by less than a hand's length");
+			}
 		}
 
 		if (failed == 0)
