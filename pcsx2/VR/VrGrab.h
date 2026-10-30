@@ -49,6 +49,8 @@ namespace VR::VrGrab
 		float trigger_off = 0.35f;
 		float shot_margin_m = 0.06f;
 		float shot_range_m = 1.5f;
+		// The press is a candidate this long; the game's own shot (a round gone from the equipped gun) must land in it.
+		float shot_window_s = 0.25f;
 		// Escape progress: the breakout's presses run this long after each counted action; offline, the meter points it
 		// takes (the game counts 1 for a direction press and 2 for Circle or Cross, out of 30).
 		float burst_s = 0.5f;
@@ -98,6 +100,37 @@ namespace VR::VrGrab
 		std::array<float, 3> vel{};
 		float cooldown_s = 0.0f;
 		bool trigger_armed = false; // released below trigger_off since the last shot
+		// A candidate shot: the trigger's edge with the aim ray through a sphere, waiting for the game's own shot.
+		bool cand = false;
+		float cand_age_s = 0.0f;
+		int cand_sphere = -1;
+		bool cand_head = false;
+		float cand_dist = 0.0f;
+		u32 seen_serial = 0; // the last ShotEvidence::serial this hand saw
+	};
+
+	// The game's own shots as the CPU thread saw them (ShotWatch), for the input thread. gun: a gun is equipped (a melee
+	// weapon, a throwable or empty hands never fire a shot); hand: the hand that fires it (the aim hand); serial: counts
+	// every round gone from the equipped gun.
+	struct ShotEvidence
+	{
+		bool gun = false;
+		int hand = -1;
+		u32 serial = 0;
+	};
+
+	// The equipped weapon's round count, per vsync (pure). Fired when the same equipped record's count went down by 1 to
+	// kMaxShotStep rounds; another record (a weapon swap) or a count that rose (a reload) is a new baseline only.
+	struct ShotWatch
+	{
+		static constexpr u32 kMaxShotStep = 2;
+		bool baseline = false;
+		u32 eq = 0;
+		u16 ammo = 0;
+		u32 serial = 0;
+		bool gun = false;
+		// eq: the equipped record index (0 none); is_gun: it is a gun (ItemData); ammo: its count. Returns true on a shot.
+		bool Step(u32 eq_now, bool is_gun, u16 ammo_now);
 	};
 
 	struct State
@@ -108,7 +141,8 @@ namespace VR::VrGrab
 
 	// One input poll: at most one event (the first hand that counts). grabbed false (or an invalid target) counts nothing
 	// but keeps tracking, so a thrust already under way when the grab begins is measured from real positions.
-	Event Detect(const VRInputSnapshot& snapshot, const Target& target, const Params& p, bool grabbed, float dt, State& st);
+	Event Detect(const VRInputSnapshot& snapshot, const Target& target, const ShotEvidence& shot, const Params& p, bool grabbed, float dt,
+		State& st);
 
 	// The game's escape meter after points (bit 7 kept; the low 7 bits less points, never below 0, never raised; a
 	// decisive action empties them).

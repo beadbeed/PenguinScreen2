@@ -5,9 +5,13 @@
 #include "VR/GrabBreakout.h"
 #include "VR/CameraDriver.h"
 #include "VR/VRInput.h"
+#include "VR/GameFeedback.h"
+#include "VR/ItemData.h"
+#include "VR/VRProfileDB.h"
 
 #include "Config.h"
 #include "Memory.h"
+#include "VMManager.h"
 #include "common/Console.h"
 
 #include <algorithm>
@@ -32,6 +36,7 @@ namespace VR::VrGrab
 		constexpr u32 kESphereShapes = 0x1D8, kESphereCentres = 0x1DC, kESphereCount = 0x1E0;
 		constexpr u8 kLungeState = 2, kLungeSub = 6;     // the grab lunge (motion 413)
 		constexpr u32 kRStance = 0x08, kRSub = 0x09, kRPhase = 0x0A, kRPos = 0x38, kRHp = 0x544;
+		constexpr u32 kREquipped = 0xC7C;                // the equipped item's record index (feedback.weapon.equipped)
 		constexpr u32 kRGrabber = 0xB24;                 // the zombie holding this record
 		constexpr u32 kRMeter = 0xCDD;                   // the escape meter (s8: bit 7 the counter flag, low 7 the count)
 		constexpr u8 kGrabbed = 5;
@@ -107,8 +112,14 @@ namespace VR::VrGrab
 		std::atomic<int> s_pending_points{0};
 		std::atomic<bool> s_pending_decisive{false};
 		std::atomic<u8> s_pending_kind{0};
+		// The game's own shots (ShotWatch, CPU thread, every vsync) for the input thread's candidate shots.
+		std::atomic<bool> s_shot_gun{false};
+		std::atomic<u32> s_shot_serial{0};
 
 		// CPU thread only.
+		ShotWatch s_shot_watch;
+		GameFeedback::ItemTable s_item_table;
+		u32 s_item_table_crc = 0;
 		std::bitset<kEnemyCount> s_lunging;
 		bool s_was_grabbed = false;
 		u64 s_grab_start_ms = 0;
@@ -144,7 +155,21 @@ namespace VR::VrGrab
 
 	bool Decisive(Kind k) { return k == Kind::HardShove || k == Kind::HeadShot; }
 
-	Event Detect(const VRInputSnapshot& snapshot, const Target& target, const Params& p, bool grabbed, float dt, State& st)
+	bool ShotWatch::Step(u32 eq_now, bool is_gun, u16 ammo_now)
+	{
+		const bool same = baseline && eq == eq_now && is_gun;
+		const bool fired = same && ammo_now < ammo && static_cast<u32>(ammo - ammo_now) <= kMaxShotStep;
+		if (fired)
+			serial++;
+		baseline = eq_now != 0;
+		eq = eq_now;
+		ammo = ammo_now;
+		gun = is_gun && eq_now != 0;
+		return fired;
+	}
+
+	Event Detect(const VRInputSnapshot& snapshot, const Target& target, const ShotEvidence& shot, const Params& p, bool grabbed,
+		float dt, State& st)
 	{
 		Event ev;
 		dt = std::clamp(Finite(dt), 0.0f, 0.25f);
@@ -161,6 +186,15 @@ namespace VR::VrGrab
 				h.trigger_armed = true;
 			else if (trig >= p.trigger_on)
 				h.trigger_armed = false;
+			// The game's own shot since the last poll; a candidate waits shot_window_s for it.
+			const bool fired = shot.serial != h.seen_serial;
+			h.seen_serial = shot.serial;
+			if (h.cand)
+			{
+				h.cand_age_s += dt;
+				if (h.cand_age_s > p.shot_window_s || !grabbed)
+					h.cand = false;
+			}
 			if (!grabbed || !target.valid || target.count <= 0 || !h.have_pos || h.cooldown_s > 0.0f || ev.kind != Kind::None)
 				continue;
 
@@ -185,17 +219,20 @@ namespace VR::VrGrab
 					break;
 				}
 			}
-			// A shot: the trigger with the aim ray through a sphere at point-blank range (the head first).
-			if (ev.kind == Kind::None && trig_edge && hs.aim_pose.valid)
+			// A shot: the trigger with the aim ray through a sphere at point-blank range (the head first) is a candidate,
+			// only with a gun equipped and this hand the one that fires it; it counts when the game fires within
+			// shot_window_s (a round gone from the gun). The head sphere on the ray at the press makes it a headshot.
+			if (ev.kind == Kind::None && trig_edge && hs.aim_pose.valid && shot.gun && shot.hand == i)
 			{
 				const std::array<float, 3> o = {Finite(hs.aim_pose.position_xyz[0]), Finite(hs.aim_pose.position_xyz[1]),
 					Finite(hs.aim_pose.position_xyz[2])};
 				const std::array<float, 3> d = Rotate(hs.aim_pose.orientation_xyzw, {0.0f, 0.0f, -1.0f});
 				const float dl = Len(d);
+				bool found = false;
 				if (dl > 1.0e-4f)
 				{
 					const std::array<float, 3> du = {d[0] / dl, d[1] / dl, d[2] / dl};
-					for (int pass = 0; pass < 2 && ev.kind == Kind::None; ++pass)
+					for (int pass = 0; pass < 2 && !found; ++pass)
 					{
 						for (int s = 0; s < std::min(target.count, kMaxSpheres); ++s)
 						{
@@ -205,14 +242,24 @@ namespace VR::VrGrab
 							if (!RayPass(o, du, target.c[s], &along, &miss) || along > p.shot_range_m ||
 								miss > target.r[s] + p.shot_margin_m)
 								continue;
-							ev.kind = target.head[s] ? Kind::HeadShot : Kind::Shot;
-							ev.hand = i;
-							ev.sphere = s;
-							ev.dist = along;
+							h.cand = true;
+							h.cand_age_s = 0.0f;
+							h.cand_sphere = s;
+							h.cand_head = target.head[s];
+							h.cand_dist = along;
+							found = true;
 							break;
 						}
 					}
 				}
+			}
+			if (ev.kind == Kind::None && h.cand && fired && shot.gun && shot.hand == i && h.cand_age_s <= p.shot_window_s)
+			{
+				ev.kind = h.cand_head ? Kind::HeadShot : Kind::Shot;
+				ev.hand = i;
+				ev.sphere = h.cand_sphere;
+				ev.dist = h.cand_dist;
+				h.cand = false;
 			}
 			if (ev.kind != Kind::None)
 				h.cooldown_s = std::max(p.cooldown_s, 0.0f);
@@ -249,6 +296,8 @@ namespace VR::VrGrab
 		{
 			s_lunging.reset();
 			s_was_grabbed = false;
+			s_shot_watch = ShotWatch{};
+			s_shot_gun.store(false);
 			s_pending_points.store(0);
 			s_pending_decisive.store(false);
 			std::lock_guard<std::mutex> lock(s_target_mutex);
@@ -261,6 +310,30 @@ namespace VR::VrGrab
 			Console.WriteLn("(VR) VrGrab: on: a buzz when a zombie lunges to grab you; while grabbed, shove its head or "
 			                "chest, strike its head or shoot it point-blank to break free (presses on your own pad; %s).",
 				offline ? "offline, the game's own escape meter too" : "online, the presses only");
+		}
+
+		// The game's own shots: the equipped gun's round count in the local record (reads only). A melee weapon, a throwable
+		// or empty hands are not guns and never shoot.
+		{
+			const u32 crc = VMManager::GetDiscCRC();
+			if (s_item_table_crc != crc)
+			{
+				s_item_table_crc = crc;
+				const std::string serial = VMManager::GetDiscSerial();
+				const ProfileDB::Profile* prof = serial.empty() ? nullptr : ProfileDB::Lookup(serial, crc);
+				s_item_table = prof ? GameFeedback::ItemTableOf(*prof) : GameFeedback::ItemTable{};
+				s_item_table.slot_from_camera = true;
+			}
+			const u32 eq = memRead8(base + kREquipped);
+			GameFeedback::ItemRecord rec;
+			if (eq != 0)
+				rec = GameFeedback::ReadItemRecord(s_item_table, eq, nullptr);
+			const bool gun = rec.valid && ItemData::IsGun(ItemData::KindOf(rec.item_id));
+			if (s_shot_watch.Step(rec.valid ? eq : 0u, gun, rec.count))
+				Console.WriteLn("(VR) VrGrab: the game fired (item %u, rounds now %u).", static_cast<unsigned>(rec.item_id),
+					static_cast<unsigned>(rec.count));
+			s_shot_gun.store(s_shot_watch.gun);
+			s_shot_serial.store(s_shot_watch.serial);
 		}
 
 		// The telegraph (reads only).
@@ -441,7 +514,11 @@ namespace VR::VrGrab
 			if (s_target_ms != 0 && (now <= s_target_ms || now - s_target_ms <= 250))
 				t = s_target;
 		}
-		const Event ev = Detect(snapshot, t, p, grabbed, dt, st);
+		ShotEvidence shot;
+		shot.gun = s_shot_gun.load();
+		shot.hand = VRInputSnapshot::RIGHT; // the game's Circle is the right trigger
+		shot.serial = s_shot_serial.load();
+		const Event ev = Detect(snapshot, t, shot, p, grabbed, dt, st);
 		if (ev.kind == Kind::None)
 			return ev;
 		if (burst_s)
@@ -533,75 +610,154 @@ namespace VR::VrGrab
 		const std::array<float, 4> fwd = {0.0f, 0.0f, 0.0f, 1.0f}; // aim along -Z
 		const std::array<float, 4> back = {0.0f, 1.0f, 0.0f, 0.0f}; // aim along +Z
 		const float dt = 1.0f / 90.0f;
+		ShotEvidence sh; // a gun in the right hand, no shot yet
+		sh.gun = true;
+		sh.hand = VRInputSnapshot::RIGHT;
 		{
 			State st;
-			Event e = Detect(snap_at({0.0f, 1.15f, -0.15f}, {0.0f, 0.0f, -1.8f}, 0.0f, fwd), t, p, true, dt, st);
+			Event e = Detect(snap_at({0.0f, 1.15f, -0.15f}, {0.0f, 0.0f, -1.8f}, 0.0f, fwd), t, sh, p, true, dt, st);
 			check(e.kind == Kind::Shove && e.sphere == 0 && e.hand == VRInputSnapshot::RIGHT, "a thrust into the head is a shove");
-			e = Detect(snap_at({0.0f, 1.15f, -0.15f}, {0.0f, 0.0f, -1.8f}, 0.0f, fwd), t, p, true, dt, st);
+			e = Detect(snap_at({0.0f, 1.15f, -0.15f}, {0.0f, 0.0f, -1.8f}, 0.0f, fwd), t, sh, p, true, dt, st);
 			check(e.kind == Kind::None, "one per hand per cooldown");
 		}
 		{
 			State st;
-			const Event e = Detect(snap_at({0.0f, 0.85f, -0.10f}, {0.0f, 0.0f, -3.0f}, 0.0f, fwd), t, p, true, dt, st);
+			const Event e = Detect(snap_at({0.0f, 0.85f, -0.10f}, {0.0f, 0.0f, -3.0f}, 0.0f, fwd), t, sh, p, true, dt, st);
 			check(e.kind == Kind::HardShove && e.sphere == 1, "a hard thrust into the chest is a hard shove");
 		}
 		{
 			State st;
-			const Event e = Detect(snap_at({0.0f, 1.15f, -0.15f}, {0.0f, 0.0f, 1.8f}, 0.0f, fwd), t, p, true, dt, st);
+			const Event e = Detect(snap_at({0.0f, 1.15f, -0.15f}, {0.0f, 0.0f, 1.8f}, 0.0f, fwd), t, sh, p, true, dt, st);
 			check(e.kind == Kind::None, "pulling the hand back is no shove");
 		}
 		{
 			State st;
-			const Event e = Detect(snap_at({0.0f, 1.15f, -0.15f}, {0.0f, 0.0f, -0.8f}, 0.0f, fwd), t, p, true, dt, st);
+			const Event e = Detect(snap_at({0.0f, 1.15f, -0.15f}, {0.0f, 0.0f, -0.8f}, 0.0f, fwd), t, sh, p, true, dt, st);
 			check(e.kind == Kind::None, "a slow push is no shove");
 		}
 		{
 			State st;
-			const Event e = Detect(snap_at({0.6f, 1.15f, 0.30f}, {0.0f, 0.0f, -1.8f}, 0.0f, fwd), t, p, true, dt, st);
+			const Event e = Detect(snap_at({0.6f, 1.15f, 0.30f}, {0.0f, 0.0f, -1.8f}, 0.0f, fwd), t, sh, p, true, dt, st);
 			check(e.kind == Kind::None, "a thrust out of reach is no shove");
 		}
 		{
 			State st;
-			const Event e = Detect(snap_at({0.0f, 1.15f, -0.15f}, {0.0f, 0.0f, -1.8f}, 0.0f, fwd), t, p, false, dt, st);
+			const Event e = Detect(snap_at({0.0f, 1.15f, -0.15f}, {0.0f, 0.0f, -1.8f}, 0.0f, fwd), t, sh, p, false, dt, st);
 			check(e.kind == Kind::None, "nothing counts without the grab");
 			Target none;
-			const Event e2 = Detect(snap_at({0.0f, 1.15f, -0.15f}, {0.0f, 0.0f, -1.8f}, 0.0f, fwd), none, p, true, dt, st);
+			const Event e2 = Detect(snap_at({0.0f, 1.15f, -0.15f}, {0.0f, 0.0f, -1.8f}, 0.0f, fwd), none, sh, p, true, dt, st);
 			check(e2.kind == Kind::None, "nothing counts without a located zombie");
 		}
 		{
-			// The shot: the trigger's edge only, the ray through the head at point-blank range.
+			// The shot: the trigger's edge is a candidate; the game's own shot (the gun's round count) makes it a shot.
 			State st;
-			Event e = Detect(snap_at({0.0f, 1.2f, 0.20f}, {0.0f, 0.0f, 0.0f}, 0.0f, fwd), t, p, true, dt, st);
+			ShotEvidence fired = sh;
+			fired.serial = 1;
+			Event e = Detect(snap_at({0.0f, 1.2f, 0.20f}, {0.0f, 0.0f, 0.0f}, 0.0f, fwd), t, sh, p, true, dt, st);
 			check(e.kind == Kind::None, "the trigger released: nothing");
-			e = Detect(snap_at({0.0f, 1.2f, 0.20f}, {0.0f, 0.0f, 0.0f}, 1.0f, fwd), t, p, true, dt, st);
-			check(e.kind == Kind::HeadShot && e.sphere == 0, "the trigger with the ray through the head is a headshot");
+			e = Detect(snap_at({0.0f, 1.2f, 0.20f}, {0.0f, 0.0f, 0.0f}, 1.0f, fwd), t, sh, p, true, dt, st);
+			check(e.kind == Kind::None, "the trigger with no shot from the game: nothing (an empty clip, a lowered gun)");
+			e = Detect(snap_at({0.0f, 1.2f, 0.20f}, {0.0f, 0.0f, 0.0f}, 1.0f, fwd), t, fired, p, true, dt, st);
+			check(e.kind == Kind::HeadShot && e.sphere == 0 && e.hand == VRInputSnapshot::RIGHT,
+				"the game's shot a poll after the press, the ray through the head: a headshot");
 			for (int k = 0; k < 60; ++k)
-				e = Detect(snap_at({0.0f, 1.2f, 0.20f}, {0.0f, 0.0f, 0.0f}, 1.0f, fwd), t, p, true, dt, st);
+				e = Detect(snap_at({0.0f, 1.2f, 0.20f}, {0.0f, 0.0f, 0.0f}, 1.0f, fwd), t, fired, p, true, dt, st);
 			check(e.kind == Kind::None, "holding the trigger shoots once");
 		}
 		{
+			// The shot in the same poll as the press counts; no shot at all, however long the press, never does.
 			State st;
-			Detect(snap_at({0.0f, 0.85f, 0.20f}, {}, 0.0f, fwd), t, p, true, dt, st);
-			const Event e = Detect(snap_at({0.0f, 0.85f, 0.20f}, {}, 1.0f, fwd), t, p, true, dt, st);
-			check(e.kind == Kind::Shot && e.sphere == 1, "through the chest is a shot (progress, not decisive)");
+			ShotEvidence fired = sh;
+			fired.serial = 1;
+			Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 0.0f, fwd), t, sh, p, true, dt, st);
+			const Event e = Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 1.0f, fwd), t, fired, p, true, dt, st);
+			check(e.kind == Kind::HeadShot, "the shot in the press's own poll counts");
+			State st2;
+			Event e2;
+			Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 0.0f, fwd), t, sh, p, true, dt, st2);
+			for (int k = 0; k < 120; ++k)
+				e2 = Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 1.0f, fwd), t, sh, p, true, dt, st2);
+			check(e2.kind == Kind::None, "no shot evidence: no event at all");
+		}
+		{
+			// A melee weapon or empty hands (no gun): never a shot, even with a counter change.
+			State st;
+			ShotEvidence melee = sh;
+			melee.gun = false;
+			melee.serial = 1;
+			Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 0.0f, fwd), t, melee, p, true, dt, st);
+			const Event e = Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 1.0f, fwd), t, melee, p, true, dt, st);
+			check(e.kind == Kind::None, "a melee weapon or empty hands: no shot candidate");
+			ShotEvidence left = sh;
+			left.hand = VRInputSnapshot::LEFT;
+			left.serial = 1;
+			State st2;
+			Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 0.0f, fwd), t, left, p, true, dt, st2);
+			const Event e2 = Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 1.0f, fwd), t, left, p, true, dt, st2);
+			check(e2.kind == Kind::None, "the game's shot is the other hand's: no event for this hand's trigger");
+		}
+		{
+			// The shot lands inside the window (200 ms on) and outside it (300 ms on).
+			ShotEvidence fired = sh;
+			fired.serial = 1;
+			for (int late = 0; late < 2; ++late)
+			{
+				State st;
+				Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 0.0f, fwd), t, sh, p, true, dt, st);
+				Event e = Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 1.0f, fwd), t, sh, p, true, dt, st);
+				const int polls = late ? 27 : 18; // 300 ms / 200 ms at 90 Hz
+				for (int k = 0; k < polls; ++k)
+					e = Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 1.0f, fwd), t, sh, p, true, dt, st);
+				e = Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 1.0f, fwd), t, fired, p, true, dt, st);
+				check(late ? e.kind == Kind::None : e.kind == Kind::HeadShot,
+					late ? "the shot 300 ms after the press: no event" : "the shot 200 ms after the press: a headshot");
+			}
 		}
 		{
 			State st;
-			Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 0.0f, back), t, p, true, dt, st);
-			const Event e = Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 1.0f, back), t, p, true, dt, st);
+			ShotEvidence fired = sh;
+			fired.serial = 1;
+			Detect(snap_at({0.0f, 0.85f, 0.20f}, {}, 0.0f, fwd), t, sh, p, true, dt, st);
+			Detect(snap_at({0.0f, 0.85f, 0.20f}, {}, 1.0f, fwd), t, sh, p, true, dt, st);
+			const Event e = Detect(snap_at({0.0f, 0.85f, 0.20f}, {}, 1.0f, fwd), t, fired, p, true, dt, st);
+			check(e.kind == Kind::Shot && e.sphere == 1, "the shot through the chest is a shot (progress, not decisive)");
+		}
+		{
+			// The game's shot with the ray off the zombie: no candidate, no event; ShotWatch's rules.
+			State st;
+			ShotEvidence fired = sh;
+			fired.serial = 1;
+			Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 0.0f, back), t, sh, p, true, dt, st);
+			Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 1.0f, back), t, sh, p, true, dt, st);
+			const Event e = Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 1.0f, back), t, fired, p, true, dt, st);
+			check(e.kind == Kind::None, "a shot with the ray off the zombie: no event");
+			ShotWatch w;
+			check(!w.Step(3, true, 7) && !w.Step(3, true, 7) && w.Step(3, true, 6) && w.serial == 1 && w.gun,
+				"watch: a round gone from the equipped gun is a shot");
+			check(!w.Step(3, true, 7) && !w.Step(3, true, 7), "watch: a reload (the count rose) is no shot");
+			check(!w.Step(4, true, 3) && !w.Step(4, true, 3) && w.Step(4, true, 2) && w.serial == 2,
+				"watch: a swap to another record is a new baseline, then its next round is a shot");
+			check(!w.Step(5, false, 9) && !w.Step(5, false, 8) && !w.gun, "watch: a melee weapon never fires");
+			check(!w.Step(0, false, 0) && !w.gun && !w.Step(3, true, 5) && !w.Step(3, true, 5), "watch: nothing equipped, then a gun, baseline only");
+			check(!w.Step(3, true, 5) && w.Step(3, true, 4) && !w.Step(3, true, 0) , "watch: a drop of more than kMaxShotStep rounds is no shot");
+		}
+		{
+			State st;
+			Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 0.0f, back), t, sh, p, true, dt, st);
+			const Event e = Detect(snap_at({0.0f, 1.2f, 0.20f}, {}, 1.0f, back), t, sh, p, true, dt, st);
 			check(e.kind == Kind::None, "aimed away: no shot");
 		}
 		{
 			State st;
-			Detect(snap_at({0.0f, 1.2f, 2.5f}, {}, 0.0f, fwd), t, p, true, dt, st);
-			const Event e = Detect(snap_at({0.0f, 1.2f, 2.5f}, {}, 1.0f, fwd), t, p, true, dt, st);
+			Detect(snap_at({0.0f, 1.2f, 2.5f}, {}, 0.0f, fwd), t, sh, p, true, dt, st);
+			const Event e = Detect(snap_at({0.0f, 1.2f, 2.5f}, {}, 1.0f, fwd), t, sh, p, true, dt, st);
 			check(e.kind == Kind::None, "not point-blank: no shot");
 		}
 		{
 			// Velocity from positions when the runtime gives none (scripted input).
 			State st;
-			Detect(snap_at({0.0f, 1.15f, -0.12f}, {}, 0.0f, fwd), t, p, true, dt, st);
-			const Event e = Detect(snap_at({0.0f, 1.15f, -0.12f - 2.0f * dt}, {}, 0.0f, fwd), t, p, true, dt, st);
+			Detect(snap_at({0.0f, 1.15f, -0.12f}, {}, 0.0f, fwd), t, sh, p, true, dt, st);
+			const Event e = Detect(snap_at({0.0f, 1.15f, -0.12f - 2.0f * dt}, {}, 0.0f, fwd), t, sh, p, true, dt, st);
 			check(e.kind == Kind::Shove, "a shove measured from positions");
 		}
 		check(Decisive(Kind::HardShove) && Decisive(Kind::HeadShot) && !Decisive(Kind::Shove) && !Decisive(Kind::Shot),
